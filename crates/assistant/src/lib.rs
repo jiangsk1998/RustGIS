@@ -25,6 +25,7 @@ pub mod error;
 pub mod filebridge;
 pub use error::{Error, Recovery};
 pub mod framing;
+pub mod history;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod http;
 pub mod mcp;

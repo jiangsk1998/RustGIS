@@ -9,7 +9,7 @@ use crate::{acp, compact, skills, tools};
 use rustgis_engine::Session;
 
 /// Model requests per user message before the agent stops and reports back.
-pub const MAX_STEPS: u32 = 16;
+pub const MAX_STEPS: u32 = 40;
 
 /// What the main assistant is told about subagents, after RustGIS's own instructions.
 const DELEGATE_PROMPT: &str = "\n\nSubagents: hand multi-step work whose details needn't stay in this conversation (exploring a \
@@ -452,6 +452,21 @@ impl Agent {
         self.generation += 1;
     }
 
+    /// The conversation to save: its turns, its approvals and the map context it last sent.
+    pub fn snapshot(&self) -> (Vec<Turn>, Vec<String>, String) {
+        (self.turns.clone(), self.always.clone(), self.last_context.clone())
+    }
+
+    /// Puts a saved conversation back ([`crate::history::SavedChat`]), its transcript rebuilt
+    /// from the turns. Its notes and errors belonged to the earlier run and are not restored.
+    pub fn restore(&mut self, turns: Vec<Turn>, always: Vec<String>, last_context: String) {
+        self.clear();
+        self.transcript = crate::history::transcript(&turns);
+        self.turns = turns;
+        self.always = always;
+        self.last_context = last_context;
+    }
+
     /// The user's message. The map context goes with it when it changed since the model last saw it.
     pub fn ask(&mut self, text: &str, s: &Session) -> Step {
         self.guard(|a| a.ask_unguarded(text, s))
@@ -795,10 +810,7 @@ impl Agent {
         self.turns.push(Turn::Results(results));
         self.steps += 1;
         if self.steps >= self.max_steps {
-            self.transcript.push(Entry::Note(Note::with(
-                "Stopped after {steps} steps; say \"continue\" to go on.",
-                [("steps", self.max_steps.to_string())],
-            )));
+            self.transcript.push(Entry::Note(Note::with(provider::STEP_LIMIT_NOTE, [("steps", self.max_steps.to_string())])));
             return Step::Done;
         }
         self.send()

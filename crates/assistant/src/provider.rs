@@ -8,10 +8,11 @@
 
 use crate::Error;
 use rustgis_engine::data::secrets::{Secret, SecretError, SecretStore};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 /// A wire format.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Api {
     /// `POST {base}/chat/completions`.
     OpenAi,
@@ -550,7 +551,7 @@ pub struct ToolDef {
 }
 
 /// A call the model made.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -558,7 +559,7 @@ pub struct ToolCall {
 }
 
 /// What a call gave back.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
     pub id: String,
     pub name: String,
@@ -567,7 +568,7 @@ pub struct ToolResult {
 }
 
 /// One turn of the conversation, in no provider's format.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Turn {
     User(String),
     Assistant {
@@ -606,6 +607,9 @@ impl Note {
     }
 }
 
+/// The note that says the run reached [`crate::agent::MAX_STEPS`]: the interface offers to go on.
+pub const STEP_LIMIT_NOTE: &str = "Stopped after {steps} steps; say \"continue\" to go on.";
+
 /// Every [`Note`] template RustGIS writes (the interface's catalogs translate each).
 pub const NOTE_TEMPLATES: &[&str] = &[
     "The reply reached its length limit.",
@@ -620,7 +624,7 @@ pub const NOTE_TEMPLATES: &[&str] = &[
     "The provider returned HTTP {status}; trying again in {seconds} s.",
     "The connection failed; trying again in {seconds} s.",
     "The model sent an empty reply; ask again, or try another model.",
-    "Stopped after {steps} steps; say \"continue\" to go on.",
+    STEP_LIMIT_NOTE,
     "Stopped.",
 ];
 

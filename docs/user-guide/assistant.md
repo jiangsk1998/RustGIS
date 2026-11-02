@@ -22,7 +22,9 @@ an address on the internet, run a plugin, script, task or model, or replace the 
 for you: **Allow** or **Decline**. SQL queries also ask, because SQL can access files and the
 network. **Allow such actions for this conversation** remembers the exact command and all
 its parameters, not general access to a file or server. Plugin commands, user automation and
-project replacement ask every time.
+project replacement ask every time. **Approve actions automatically**, the checkbox under the
+message box, allows all of these without asking, handing tasks to agents on this computer
+included; it is off unless you turn it on and is kept for the next start.
 
 Enter sends, Shift+Enter starts a new line, and Up and Down recall earlier messages when the
 message box is empty or showing a recalled message. Drag the grip above it to resize it.
@@ -36,15 +38,15 @@ From the command line, `rustgis-cli ask` sends one request (see
 
 Click the model name or the gear to open the settings. The assistant works with:
 
-| Provider | Default model | Key |
-| --- | --- | --- |
-| Anthropic | `claude-opus-5-5` | [console.anthropic.com](https://console.anthropic.com/settings/keys), or `ANTHROPIC_API_KEY` |
-| OpenAI | `gpt-5.5` | [platform.openai.com](https://platform.openai.com/api-keys), or `OPENAI_API_KEY` |
-| ChatGPT (sign in) | the first model in your account’s current catalog | none: **Continue with ChatGPT** to use your ChatGPT plan (desktop app and command line) |
-| Google Gemini | `gemini-3.8-flash` | [aistudio.google.com](https://aistudio.google.com/apikey), or `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
-| OpenRouter | `openrouter/auto` | [openrouter.ai](https://openrouter.ai/keys), or `OPENROUTER_API_KEY` |
-| Ollama (local) | `qwen3` | none; the server from `OLLAMA_BASE_URL` (default `http://localhost:11434`) |
-| OpenAI-compatible | — | LM Studio, vLLM, llama.cpp…: `OPENAI_COMPATIBLE_BASE_URL` (default `http://localhost:1234/v1`), with an optional `OPENAI_COMPATIBLE_API_KEY` |
+| Provider          | Default model                                     | Key                                                                                                                                          |
+| ----------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Anthropic         | `claude-opus-5-5`                                 | [console.anthropic.com](https://console.anthropic.com/settings/keys), or `ANTHROPIC_API_KEY`                                                 |
+| OpenAI            | `gpt-5.5`                                         | [platform.openai.com](https://platform.openai.com/api-keys), or `OPENAI_API_KEY`                                                             |
+| ChatGPT (sign in) | the first model in your account’s current catalog | none: **Continue with ChatGPT** to use your ChatGPT plan (desktop app and command line)                                                      |
+| Google Gemini     | `gemini-3.8-flash`                                | [aistudio.google.com](https://aistudio.google.com/apikey), or `GEMINI_API_KEY` / `GOOGLE_API_KEY`                                            |
+| OpenRouter        | `openrouter/auto`                                 | [openrouter.ai](https://openrouter.ai/keys), or `OPENROUTER_API_KEY`                                                                         |
+| Ollama (local)    | `qwen3`                                           | none; the server from `OLLAMA_BASE_URL` (default `http://localhost:11434`)                                                                   |
+| OpenAI-compatible | —                                                 | LM Studio, vLLM, llama.cpp…: `OPENAI_COMPATIBLE_BASE_URL` (default `http://localhost:1234/v1`), with an optional `OPENAI_COMPATIBLE_API_KEY` |
 
 The ↻ button lists the provider's models. The provider and model you last chose in the settings
 are used at start. Until you choose one, `RUSTGIS_ASSISTANT_PROVIDER` and
@@ -133,14 +135,14 @@ Loaded instructions share the configured tool-output budget; oversized results a
 marked as truncated. Split long skills or raise that limit (up to its existing ceiling) when
 complete instructions do not fit. RustGIS comes with these:
 
-| Skill | For |
-| --- | --- |
-| `thematic-map` | Styling a layer by its data (graduated colours, categories, proportional symbols), labelling it and exporting the map |
-| `explore-data` | What's in a layer: fields, value ranges, top records, counts, filters and summary statistics |
-| `print-layout` | A page layout with a map frame, title, legend, north arrow and scale bar, exported to PDF or PNG |
-| `geoprocessing` | Running and chaining tools: buffer, clip, erase, dissolve, select by location, summarize within |
-| `add-data` | Adding files, web addresses, DuckDB SQL queries, STAC catalogs and Overture Maps |
-| `share-web-map` | Sharing the map or a layer as files that work without a server: a web map, a web layer, a style, an image |
+| Skill           | For                                                                                                                   |
+| --------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `thematic-map`  | Styling a layer by its data (graduated colours, categories, proportional symbols), labelling it and exporting the map |
+| `explore-data`  | What's in a layer: fields, value ranges, top records, counts, filters and summary statistics                          |
+| `print-layout`  | A page layout with a map frame, title, legend, north arrow and scale bar, exported to PDF or PNG                      |
+| `geoprocessing` | Running and chaining tools: buffer, clip, erase, dissolve, select by location, summarize within                       |
+| `add-data`      | Adding files, web addresses, DuckDB SQL queries, STAC catalogs and Overture Maps                                      |
+| `share-web-map` | Sharing the map or a layer as files that work without a server: a web map, a web layer, a style, an image             |
 
 On the desktop, the settings' **Skills** list shows every skill and where it comes from,
 with a switch to turn each one on or off:
@@ -318,14 +320,20 @@ OpenRouter accept that; a local Ollama server must allow the page's origin
 
 ## Retries and long conversations
 
-The assistant stops after 16 rounds of tool use per message, shared with subagents. Provider
-retries and conversation summaries are separate. Reply "continue" to go on.
+The assistant stops after 40 rounds of tool use per message, shared with subagents. Provider
+retries and conversation summaries are separate. The note it leaves then has a **Continue**
+button, which does the same as replying "continue".
 
 RustGIS first trims older tool results and reasoning when the conversation grows too large.
 If that is not enough, or the provider rejects the context length, it asks the same model to
 summarize earlier turns. **Compact** requests this explicitly while the assistant is idle;
 **New conversation** clears the chat and its remembered approvals and ends local-agent
 threads, without resetting the map.
+
+Conversations are saved as you go, in the app's preferences (the browser keeps them in local
+storage). The assistant reopens your last conversation at start, up to the 20 most recent; the
+history icon in its header lists them (hover for when each was last used) to switch back or
+delete one. Notes and errors are not replayed when a conversation is reopened.
 
 Live streaming text is available on the desktop. The browser currently buffers the complete
 response (up to the response limit, 64 MiB for SSE) before displaying it; it has no live streaming

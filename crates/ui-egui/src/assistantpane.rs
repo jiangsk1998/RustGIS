@@ -3,7 +3,8 @@
 //! thread on the desktop, through `Services::http` (the browser's fetch) on the web.
 
 use egui::{Align, Layout, RichText, Ui, vec2};
-use rustgis_assistant::{Agent, Config, Entry, HttpRequest, HttpResponse, PRESETS, Step, chatgpt, provider};
+use rustgis_assistant::provider::Turn;
+use rustgis_assistant::{Agent, Config, Entry, HttpRequest, HttpResponse, PRESETS, Step, chatgpt, history, provider};
 
 use crate::theme::{Tokens, regular, semibold};
 use crate::{RustGisApp, Slot, icons};
@@ -117,7 +118,27 @@ pub struct AssistantState {
     /// responsive.
     #[cfg(not(target_arch = "wasm32"))]
     external: Option<(rustgis_assistant::tools::ExternalStart, provider::ToolCall, crate::Slot<rustgis_engine::cmd::gp::ExternalOutput>)>,
+    /// The conversations saved across restarts, newest first (see [`rustgis_assistant::history`]).
+    chats: rustgis_assistant::history::Chats,
+    /// The conversation on screen: its id in `chats`, or one not saved yet.
+    chat_id: Option<String>,
+    /// How many turns of the conversation on screen were saved: more means a save is due.
+    saved_turns: usize,
+    /// The history window is open.
+    history_open: bool,
+    /// Where its button was when the window last opened: the list goes under it.
+    history_anchor: Option<egui::Rect>,
+    /// Why the last save of the conversations failed, for the history window.
+    history_error: Option<String>,
+    /// The user lets actions that need approval run without asking (off unless chosen).
+    auto_approve: bool,
 }
+
+/// The conversations saved, and the one on screen last.
+const CHATS_PREF: &str = "assistant_chats";
+const CHAT_CURRENT_PREF: &str = "assistant_chat_current";
+/// Whether actions needing approval run without asking.
+const AUTO_APPROVE_PREF: &str = "assistant_auto_approve";
 
 /// The settings fields typed into (saved when none has focus).
 const FIELDS: [&str; 3] = ["assistant_model", "assistant_url", "assistant_key"];
@@ -204,6 +225,7 @@ fn ensure_loaded(app: &mut RustGisApp, ctx: &egui::Context) {
     }
     let mut agent = Agent::new(cfg, &app.session);
     app.assistant.local_agents = pref(app, "assistant_local_agents").as_deref() == Some("on");
+    app.assistant.auto_approve = pref(app, AUTO_APPROVE_PREF).as_deref() == Some("on");
     #[cfg(not(target_arch = "wasm32"))]
     {
         app.assistant.agents_auto = pref(app, "assistant_agents_auto").as_deref() == Some("on");
@@ -218,6 +240,39 @@ fn ensure_loaded(app: &mut RustGisApp, ctx: &egui::Context) {
         agent.set_harnesses(rustgis_assistant::acp::installed().0.into_iter().map(|(spec, _)| spec).collect());
     }
     app.assistant.agent = Some(agent);
+    // The conversations saved before, and the one last on screen (a new, empty one included).
+    app.assistant.chats = match pref(app, CHATS_PREF) {
+        Some(json) => match history::Chats::parse(&json) {
+            Some(chats) => chats,
+            None => {
+                // Unreadable history isn't dropped without a word; the next save replaces it.
+                let why = tl!("Saved chat history couldn't be read, so the assistant started without it.").to_string();
+                app.session.notify(why.clone(), true);
+                app.assistant.history_error = Some(why);
+                history::Chats::default()
+            }
+        },
+        None => history::Chats::default(),
+    };
+    let current = pref(app, CHAT_CURRENT_PREF);
+    let saved = current.as_deref().and_then(|id| app.assistant.chats.get(id).cloned()).or_else(|| {
+        // The first opening resumes the most recent conversation; a new one the user started stays empty.
+        if current.is_none() { app.assistant.chats.chats.first().cloned() } else { None }
+    });
+    match saved {
+        Some(chat) => {
+            app.assistant.saved_turns = chat.turns.len();
+            app.assistant.chat_id = Some(chat.id.clone());
+            if let Some(agent) = app.assistant.agent.as_mut() {
+                agent.restore(chat.turns, chat.always, chat.last_context);
+            }
+        }
+        None => {
+            let id = current.unwrap_or_else(|| new_chat_id(app));
+            app.assistant.chat_id = Some(id);
+            app.assistant.saved_turns = 0;
+        }
+    }
 }
 
 /// An unconfigured provider opens its fields; a configured one restores the saved fold state.
@@ -546,6 +601,200 @@ fn end_threads(app: &mut RustGisApp) {
     let _ = app;
 }
 
+/// Now, in Unix milliseconds (a saved conversation's time).
+fn now_ms() -> i64 {
+    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// A new conversation's id: the time, then a suffix when two start in the same millisecond.
+fn new_chat_id(app: &RustGisApp) -> String {
+    let now = now_ms();
+    let mut id = now.to_string();
+    let mut n = 1;
+    while app.assistant.chats.get(&id).is_some() {
+        n += 1;
+        id = format!("{now}-{n}");
+    }
+    id
+}
+
+/// Saves the conversations; a failure is said in the history window and as a notice, not dropped.
+fn persist_chats(app: &mut RustGisApp) {
+    let json = match app.assistant.chats.to_json() {
+        Ok(json) => json,
+        Err(e) => {
+            app.session.notify(crate::i18n::fmt("Chat history couldn't be saved: {error}", &[("error", &e)]), true);
+            app.assistant.history_error = Some(e);
+            return;
+        }
+    };
+    save_pref(app, CHATS_PREF, &json);
+    app.assistant.history_error = None;
+}
+
+/// Saves the conversation on screen when its turns changed, at a point a restart can resume from:
+/// a reply still streaming, or a call whose result hasn't come, waits for the next safe point.
+fn save_chat(app: &mut RustGisApp) {
+    let Some(agent) = app.assistant.agent.as_ref() else { return };
+    let turns = agent.turns();
+    if turns.len() == app.assistant.saved_turns {
+        return;
+    }
+    if agent.busy() && !matches!(turns.last(), Some(Turn::User(_) | Turn::Results(_))) {
+        return;
+    }
+    let (turns, always, last_context) = agent.snapshot();
+    let len = turns.len();
+    let id = match app.assistant.chat_id.clone() {
+        Some(id) => id,
+        None => {
+            let id = new_chat_id(app);
+            app.assistant.chat_id = Some(id.clone());
+            id
+        }
+    };
+    let title = history::title(&turns).unwrap_or_else(|| tl!("New conversation").to_string());
+    app.assistant.chats.upsert(history::SavedChat { id: id.clone(), title, updated: now_ms(), turns, always, last_context });
+    app.assistant.saved_turns = len;
+    persist_chats(app);
+    save_pref(app, CHAT_CURRENT_PREF, &id);
+}
+
+/// Starts a new conversation, the one on screen saved first.
+fn start_new_chat(app: &mut RustGisApp) {
+    save_chat(app);
+    let id = new_chat_id(app);
+    app.assistant.chat_id = Some(id.clone());
+    app.assistant.saved_turns = 0;
+    if let Some(agent) = app.assistant.agent.as_mut() {
+        agent.clear();
+    }
+    app.assistant.inflight = None;
+    app.assistant.chunks = None;
+    app.assistant.retry = None;
+    end_threads(app);
+    save_pref(app, CHAT_CURRENT_PREF, &id);
+}
+
+/// Puts a saved conversation back on screen, the one on screen saved first.
+fn open_chat(app: &mut RustGisApp, id: &str) {
+    if app.assistant.agent.as_ref().is_none_or(Agent::busy) {
+        return;
+    }
+    let Some(chat) = app.assistant.chats.get(id).cloned() else { return };
+    if app.assistant.chat_id.as_deref() == Some(id) {
+        return;
+    }
+    save_chat(app);
+    app.assistant.chat_id = Some(chat.id.clone());
+    app.assistant.saved_turns = chat.turns.len();
+    if let Some(agent) = app.assistant.agent.as_mut() {
+        agent.restore(chat.turns, chat.always, chat.last_context);
+    }
+    app.assistant.inflight = None;
+    app.assistant.chunks = None;
+    app.assistant.retry = None;
+    end_threads(app);
+    save_pref(app, CHAT_CURRENT_PREF, &chat.id);
+}
+
+/// Deletes a saved conversation; deleting the one on screen starts a new one.
+fn delete_chat(app: &mut RustGisApp, id: &str) {
+    app.assistant.chats.chats.retain(|c| c.id != id);
+    if app.assistant.chat_id.as_deref() == Some(id) {
+        // Emptied first, so its turns aren't saved back under the deleted id.
+        if let Some(agent) = app.assistant.agent.as_mut() {
+            agent.clear();
+        }
+        app.assistant.chat_id = None;
+        app.assistant.saved_turns = 0;
+        app.assistant.inflight = None;
+        app.assistant.chunks = None;
+        app.assistant.retry = None;
+        end_threads(app);
+        let id = new_chat_id(app);
+        app.assistant.chat_id = Some(id.clone());
+        save_pref(app, CHAT_CURRENT_PREF, &id);
+    }
+    persist_chats(app);
+}
+
+/// How long ago a conversation was last used, for the history list.
+fn ago(updated: i64) -> String {
+    let secs = (now_ms() - updated).max(0) / 1000;
+    if secs < 60 {
+        tl!("just now").to_string()
+    } else if secs < 3_600 {
+        crate::i18n::fmt("{n} min ago", &[("n", &(secs / 60).to_string())])
+    } else if secs < 86_400 {
+        crate::i18n::fmt("{n} h ago", &[("n", &(secs / 3_600).to_string())])
+    } else {
+        crate::i18n::fmt("{n} d ago", &[("n", &(secs / 86_400).to_string())])
+    }
+}
+
+/// The conversations saved: switch to one, delete it, or read when they are from.
+fn history_window(app: &mut RustGisApp, ctx: &egui::Context, t: &Tokens) {
+    if !app.assistant.history_open {
+        return;
+    }
+    let busy = app.assistant.agent.as_ref().is_some_and(Agent::busy);
+    let current = app.assistant.chat_id.clone();
+    let rows: Vec<(String, String, i64)> = app.assistant.chats.chats.iter().map(|c| (c.id.clone(), c.title.clone(), c.updated)).collect();
+    let error = app.assistant.history_error.clone();
+    let mut open = true;
+    let mut pick = None;
+    let mut delete = None;
+    let mut window = egui::Window::new(tl!("Chat history"))
+        .id(egui::Id::unique("assistant_history"))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(380.0);
+    // Opened from its button: the list hangs under it. Afterwards it stays where it is dragged.
+    if let Some(anchor) = app.assistant.history_anchor.take() {
+        window = window.pivot(egui::Align2::RIGHT_TOP).current_pos(vec2(anchor.right(), anchor.bottom() + 4.0).to_pos2());
+    }
+    window.open(&mut open).show(ctx, |ui| {
+        if rows.is_empty() {
+            ui.label(RichText::new(tl!("No conversations yet.")).color(t.text_dim));
+        }
+        for (id, title, updated) in &rows {
+            ui.horizontal(|ui| {
+                let is_current = current.as_deref() == Some(id.as_str());
+                let text = if is_current { RichText::new(title).strong() } else { RichText::new(title) };
+                let w = (ui.available_width() - 30.0).max(0.0);
+                let asked = ui.allocate_ui(vec2(w, 20.0), |ui| ui.add(egui::Label::new(text).truncate().sense(egui::Sense::click()))).inner;
+                let asked = asked.on_hover_text(format!("{title}\n{}", ago(*updated)));
+                if !busy && !is_current && asked.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    pick = Some(id.clone());
+                }
+                let mut deleted = false;
+                ui.add_enabled_ui(!busy, |ui| {
+                    deleted = crate::widgets::icon_button(ui, "delete", tl!("Delete this conversation")).clicked();
+                });
+                if deleted {
+                    delete = Some(id.clone());
+                }
+            });
+        }
+        ui.separator();
+        ui.label(
+            RichText::new(crate::i18n::fmt("The {n} most recent conversations are kept.", &[("n", &history::MAX_CHATS.to_string())]))
+                .small()
+                .color(t.text_dim),
+        );
+        if let Some(e) = &error {
+            ui.label(RichText::new(crate::i18n::fmt("Chat history couldn't be saved: {error}", &[("error", e)])).small().color(t.red));
+        }
+    });
+    app.assistant.history_open = open;
+    if let Some(id) = delete {
+        delete_chat(app, &id);
+    } else if let Some(id) = pick {
+        open_chat(app, &id);
+    }
+}
+
 /// Carries out what the agent asked for.
 pub(crate) fn follow(app: &mut RustGisApp, step: Step, ctx: &egui::Context) {
     app.map.invalidate();
@@ -562,6 +811,28 @@ pub(crate) fn follow(app: &mut RustGisApp, step: Step, ctx: &egui::Context) {
         let slot = dispatch(app, req, login, Some(chunks.clone()), ctx);
         app.assistant.inflight = Some((generation, slot));
         app.assistant.chunks = Some((generation, chunks));
+        return;
+    }
+    // The user chose one switch for approvals: the action runs as if they had allowed it.
+    if let Step::Confirm = step
+        && app.assistant.auto_approve
+    {
+        decide_call(app, true, false, ctx);
+    }
+}
+
+/// Answers the action waiting for approval: `allow` runs it, a refusal stops it. A GeoLibre tool
+/// runs off the frame, so the window stays responsive while it works.
+fn decide_call(app: &mut RustGisApp, allow: bool, always: bool, ctx: &egui::Context) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if allow && waits_for_external(app) {
+        if let Some(step) = start_external(app, always, ctx) {
+            follow(app, step, ctx);
+        }
+        return;
+    }
+    if let Some(step) = with_agent(app, |a, s| a.decide(allow, always, s)) {
+        follow(app, step, ctx);
     }
 }
 
@@ -776,6 +1047,8 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
             );
         }
     }
+    // The conversation is saved once it is at a point a restart can resume from.
+    save_chat(app);
 }
 
 /// Starts a user request with the selected provider's current session configuration.
@@ -836,8 +1109,8 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             let model_label = egui::Label::new(RichText::new(format!("{} · {}", tl!(label), model)).small().color(t.text_dim))
                 .truncate()
                 .sense(egui::Sense::click());
-            // Room for the two buttons; a long model name is cut short.
-            let w = (ui.available_width() - 2.0 * (26.0 + ui.spacing().item_spacing.x)).max(0.0);
+            // Room for the buttons; a long model name is cut short.
+            let w = (ui.available_width() - 3.0 * (26.0 + ui.spacing().item_spacing.x)).max(0.0);
             if ui
                 .allocate_ui(vec2(w, 16.0), |ui| ui.add(model_label))
                 .inner
@@ -851,15 +1124,14 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 if crate::widgets::icon_button(ui, "settings", tl!("Assistant settings")).clicked() {
                     toggle_settings(app);
                 }
+                let history = crate::widgets::icon_button(ui, "history", tl!("Chat history"));
+                if history.clicked() {
+                    app.assistant.history_open = !app.assistant.history_open;
+                    app.assistant.history_anchor = Some(history.rect);
+                }
                 let has_chat = app.assistant.agent.as_ref().is_some_and(|a| !a.transcript.is_empty());
                 if has_chat && crate::widgets::icon_button(ui, "delete", tl!("New conversation")).clicked() {
-                    if let Some(a) = app.assistant.agent.as_mut() {
-                        a.clear();
-                    }
-                    app.assistant.inflight = None;
-                    end_threads(app);
-                    app.assistant.chunks = None;
-                    app.assistant.retry = None;
+                    start_new_chat(app);
                 }
                 let idle = app.assistant.agent.as_ref().is_some_and(|a| !a.busy());
                 if has_chat
@@ -901,6 +1173,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             transcript(app, ui, t, &ctx);
         });
     });
+    history_window(app, &ctx, t);
 }
 
 fn composer_panel(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx: &egui::Context) {
@@ -1621,18 +1894,7 @@ fn composer(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx: &egu
                     let deny = ui.button(tl!("Decline")).clicked();
                     if allow || deny {
                         let always = app.assistant.always;
-                        // A GeoLibre tool runs off the frame: the window stays responsive while it
-                        // works (a step on a large image takes minutes).
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if allow && waits_for_external(app) {
-                            if let Some(step) = start_external(app, always, ctx) {
-                                follow(app, step, ctx);
-                            }
-                            return;
-                        }
-                        if let Some(step) = with_agent(app, |a, s| a.decide(allow, always, s)) {
-                            follow(app, step, ctx);
-                        }
+                        decide_call(app, allow, always, ctx);
                     }
                 });
             },
@@ -1710,6 +1972,26 @@ fn composer(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx: &egu
             }
         });
     });
+    // One switch for approvals: with it on, actions run without asking (off unless chosen).
+    let mut just_on = false;
+    if ui
+        .checkbox(&mut app.assistant.auto_approve, tl!("Approve actions automatically"))
+        .on_hover_text(tl!("The assistant runs commands that change files, use the web and plugins, and start or follow up agents on this computer, without asking you."))
+        .changed()
+    {
+        save_pref(app, AUTO_APPROVE_PREF, if app.assistant.auto_approve { "on" } else { "off" });
+        just_on = app.assistant.auto_approve;
+    }
+    if app.assistant.auto_approve {
+        ui.label(RichText::new(tl!("Actions run without asking.")).small().color(t.red));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let external_running = app.assistant.external.is_some();
+    #[cfg(target_arch = "wasm32")]
+    let external_running = false;
+    if just_on && !external_running && app.assistant.agent.as_ref().is_some_and(|a| a.pending(&app.session).is_some()) {
+        decide_call(app, true, false, ctx);
+    }
     if submit && !busy {
         let text = app.assistant.input.clone();
         send(app, text, ctx);
@@ -1734,7 +2016,9 @@ fn transcript(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, ctx: &egui::Context
         }
         return;
     }
-    for e in &agent.transcript {
+    let mut go_on = false;
+    let last = agent.transcript.len().saturating_sub(1);
+    for (i, e) in agent.transcript.iter().enumerate() {
         match e {
             Entry::User(text) => {
                 ui.add_space(6.0);
@@ -1772,6 +2056,10 @@ fn transcript(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, ctx: &egui::Context
             Entry::Note(n) => {
                 let args: Vec<(&str, &str)> = n.args.iter().map(|(k, v)| (*k, v.as_str())).collect();
                 ui.label(RichText::new(crate::i18n::fmt(n.template, &args)).small().italics().color(t.text_dim));
+                // At the step limit, the note offers to go on without typing the word.
+                if i == last && n.template == provider::STEP_LIMIT_NOTE && ui.button(tl!("Continue")).clicked() {
+                    go_on = true;
+                }
             }
         }
     }
@@ -1786,6 +2074,9 @@ fn transcript(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, ctx: &egui::Context
             ui.spinner();
             ui.label(RichText::new(tl!("Thinking…")).small().color(t.text_dim));
         });
+    }
+    if go_on && !app.assistant.agent.as_ref().is_some_and(Agent::busy) {
+        send(app, "continue".to_string(), ctx);
     }
 }
 
@@ -1979,6 +2270,54 @@ mod tests {
             assert!(std::time::Instant::now() < end, "fake keychain timed out");
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+    }
+
+    /// Another run of the app over the same preferences.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn app_with(prefs: &KeyPrefs) -> RustGisApp {
+        let mut app = RustGisApp::with_sample();
+        let read = prefs.clone();
+        app.services.load_pref = Some(Box::new(move |key| read.lock().unwrap().get(key).cloned()));
+        let write = prefs.clone();
+        app.services.save_pref = Some(Box::new(move |key, value| {
+            write.lock().unwrap().insert(key.into(), value.into());
+        }));
+        ensure_loaded(&mut app, &egui::Context::default());
+        app
+    }
+
+    /// The conversation on screen comes back after a restart; a new empty one stays empty.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn assistant_conversations_survive_a_restart() {
+        let (mut app, prefs) = keys_app(None, None);
+        let step = {
+            let session = &app.session;
+            app.assistant.agent.as_mut().map(|a| {
+                a.config.key = "synthetic-key".into();
+                a.config.base_url = "https://example.test/v1".into();
+                a.config.model = "synthetic-model".into();
+                a.ask("Zoom to Tokyo", session)
+            })
+        };
+        assert!(matches!(step, Some(Step::Send(_))));
+        save_chat(&mut app);
+        let id = app.assistant.chat_id.clone().unwrap_or_default();
+        assert!(!id.is_empty());
+        assert!(prefs.lock().unwrap().get(CHATS_PREF).is_some_and(|json| json.contains("Zoom to Tokyo")));
+
+        let restarted = app_with(&prefs);
+        assert_eq!(restarted.assistant.chat_id.as_deref(), Some(id.as_str()));
+        let agent = restarted.assistant.agent.as_ref().expect("the assistant is loaded");
+        assert_eq!(agent.transcript.first(), Some(&Entry::User("Zoom to Tokyo".into())));
+        assert_eq!(agent.turns().len(), 1);
+
+        // A new conversation started before typing stays empty when it is reopened.
+        let mut app = restarted;
+        start_new_chat(&mut app);
+        let again = app_with(&prefs);
+        assert!(again.assistant.agent.as_ref().is_some_and(|a| a.transcript.is_empty()));
+        assert!(again.assistant.chats.get(&id).is_some(), "the earlier conversation is kept");
     }
 
     /// Only successful migrations clear legacy preferences; failures keep them usable and visible.

@@ -4286,3 +4286,109 @@ fn geolibre_download_callbacks_require_import_approval() {
         assert!(tools::gate(&s, &call).is_some(), "{key}");
     }
 }
+
+#[test]
+fn saved_conversation_round_trips_and_restores() {
+    use crate::history::{self, Chats, SavedChat};
+    let ctx = "{\"layers\":[\"Cities\"]}";
+    // As the model gets it: the map context, then the user's message.
+    let turns = vec![
+        Turn::User(format!("<map>\n{ctx}\n</map>\n\nZoom to Paris")),
+        Turn::Assistant {
+            text: "Moving.".into(),
+            calls: vec![ToolCall { id: "c1".into(), name: "run_command".into(), args: json!({"command":"map.goToXY"}) }],
+            native: Some((Api::Anthropic, json!({"content":[{"type":"text","text":"Moving."}]}))),
+        },
+        Turn::Results(vec![ToolResult { id: "c1".into(), name: "run_command".into(), content: "{\"ok\":true}".into(), error: false }]),
+        Turn::Assistant { text: "Done.".into(), calls: vec![], native: None },
+    ];
+    assert_eq!(history::title(&turns).as_deref(), Some("Zoom to Paris"));
+    let chat = SavedChat {
+        id: "1".into(),
+        title: history::title(&turns).unwrap_or_default(),
+        updated: 5,
+        turns: turns.clone(),
+        always: vec!["share.exportMap".into()],
+        last_context: ctx.into(),
+    };
+    let json = Chats { version: 1, chats: vec![chat.clone()] }.to_json().unwrap_or_default();
+    let parsed = Chats::parse(&json).expect("the saved history parses");
+    let saved = parsed.chats.first().expect("one conversation");
+    // Native replies go back to their provider unchanged after a restart.
+    assert_eq!(serde_json::to_value(&saved.turns).ok(), serde_json::to_value(&turns).ok());
+
+    let s = sample();
+    let mut a = Agent::new(cfg("openai"), &s);
+    let before = a.generation();
+    a.restore(saved.turns.clone(), saved.always.clone(), saved.last_context.clone());
+    assert!(a.generation() > before);
+    assert!(!a.busy());
+    // The transcript comes back from the turns: the user's own text, the calls and their results.
+    assert_eq!(a.transcript.first(), Some(&Entry::User("Zoom to Paris".into())));
+    assert!(matches!(a.transcript.get(1), Some(Entry::Assistant(t)) if t == "Moving."));
+    assert!(matches!(a.transcript.get(2), Some(Entry::Tool { name, result, error: false, .. })
+        if name == "run_command" && result == "{\"ok\":true}"));
+    assert_eq!(a.transcript.last(), Some(&Entry::Assistant("Done.".into())));
+    let (turns, always, last_context) = a.snapshot();
+    assert_eq!(serde_json::to_value(&turns).ok(), serde_json::to_value(&saved.turns).ok());
+    assert_eq!((always, last_context), (saved.always.clone(), saved.last_context.clone()));
+}
+
+#[test]
+fn a_call_without_its_result_restores_without_a_tool_line() {
+    use crate::history;
+    let turns = vec![Turn::Assistant {
+        text: "Looking.".into(),
+        calls: vec![ToolCall { id: "c1".into(), name: "list_layers".into(), args: json!({}) }],
+        native: None,
+    }];
+    let transcript = history::transcript(&turns);
+    assert_eq!(transcript, vec![Entry::Assistant("Looking.".into())]);
+}
+
+#[test]
+fn conversation_titles_come_after_the_summary_and_are_cut_short() {
+    use crate::compact;
+    use crate::history;
+    let mut turns = vec![
+        Turn::User("first message".into()),
+        Turn::Assistant { text: "an answer".into(), calls: vec![], native: None },
+        Turn::User("second message".into()),
+    ];
+    compact::apply(&mut turns, 2, "A summary of the start.");
+    assert_eq!(history::title(&turns).as_deref(), Some("second message"));
+    let long = "x".repeat(50);
+    assert_eq!(history::title(&[Turn::User(long)]).map(|t| t.chars().count()), Some(41));
+    assert_eq!(history::title(&[]), None);
+}
+
+#[test]
+fn saved_history_keeps_the_newest_conversations() {
+    use crate::history::{Chats, MAX_CHATS, SavedChat};
+    let mut chats = Chats::default();
+    for i in 0..25_i64 {
+        chats.upsert(SavedChat {
+            id: i.to_string(),
+            title: format!("chat {i}"),
+            updated: i,
+            turns: vec![],
+            always: vec![],
+            last_context: String::new(),
+        });
+    }
+    assert_eq!(chats.chats.len(), MAX_CHATS);
+    assert_eq!(chats.chats.first().map(|c| c.id.as_str()), Some("24"));
+    assert_eq!(chats.chats.last().map(|c| c.id.as_str()), Some("5"));
+    // The same id replaces its conversation instead of adding one.
+    chats.upsert(SavedChat {
+        id: "24".into(),
+        title: "renamed".into(),
+        updated: 30,
+        turns: vec![],
+        always: vec![],
+        last_context: String::new(),
+    });
+    assert_eq!(chats.chats.len(), MAX_CHATS);
+    assert_eq!(chats.chats.first().map(|c| c.title.as_str()), Some("renamed"));
+    assert!(Chats::parse("{").is_none(), "a damaged value is no history");
+}
