@@ -58,6 +58,7 @@ pub fn built_in() -> Vec<Skill> {
         include_str!("../skills/geoprocessing/SKILL.md"),
         include_str!("../skills/add-data/SKILL.md"),
         include_str!("../skills/share-web-map/SKILL.md"),
+        include_str!("../skills/tb-segmentation/SKILL.md"),
     ]
     .iter()
     .filter_map(|text| parse(text).ok())

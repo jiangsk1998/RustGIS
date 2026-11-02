@@ -135,14 +135,15 @@ Loaded instructions share the configured tool-output budget; oversized results a
 marked as truncated. Split long skills or raise that limit (up to its existing ceiling) when
 complete instructions do not fit. RustGIS comes with these:
 
-| Skill           | For                                                                                                                   |
-| --------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `thematic-map`  | Styling a layer by its data (graduated colours, categories, proportional symbols), labelling it and exporting the map |
-| `explore-data`  | What's in a layer: fields, value ranges, top records, counts, filters and summary statistics                          |
-| `print-layout`  | A page layout with a map frame, title, legend, north arrow and scale bar, exported to PDF or PNG                      |
-| `geoprocessing` | Running and chaining tools: buffer, clip, erase, dissolve, select by location, summarize within                       |
-| `add-data`      | Adding files, web addresses, DuckDB SQL queries, STAC catalogs and Overture Maps                                      |
-| `share-web-map` | Sharing the map or a layer as files that work without a server: a web map, a web layer, a style, an image             |
+| Skill             | For                                                                                                                                 |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `thematic-map`    | Styling a layer by its data (graduated colours, categories, proportional symbols), labelling it and exporting the map               |
+| `explore-data`    | What's in a layer: fields, value ranges, top records, counts, filters and summary statistics                                        |
+| `print-layout`    | A page layout with a map frame, title, legend, north arrow and scale bar, exported to PDF or PNG                                    |
+| `geoprocessing`   | Running and chaining tools: buffer, clip, erase, dissolve, select by location, summarize within                                     |
+| `add-data`        | Adding files, web addresses, DuckDB SQL queries, STAC catalogs and Overture Maps                                                    |
+| `share-web-map`   | Sharing the map or a layer as files that work without a server: a web map, a web layer, a style, an image                           |
+| `tb-segmentation` | Cutting land-class boundaries inside monitoring parcels from imagery: region growing, small-region merging, boundary regularisation |
 
 On the desktop, the settings' **Skills** list shows every skill and where it comes from,
 with a switch to turn each one on or off:
