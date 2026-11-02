@@ -347,11 +347,16 @@ pub fn add_raster(s: &mut Session, name: &str, mut layer: RasterLayer) -> CmdRes
         unique = format!("{name} ({i})");
     }
     let (w, h, n, overview) = layer.data.as_ref().map(|d| (d.width, d.height, d.band_count(), d.overview)).unwrap_or_default();
+    let rounded = layer.data.as_deref().and_then(rounded_count);
     let empty_before = s.map().layers.is_empty();
     let id = s.map_mut().add_raster(unique.clone(), layer);
     s.active_layer = Some(id);
     if let Some((fw, fh)) = overview {
         s.notify(format!("{unique}: showing a {w} × {h} overview of the {fw} × {fh} raster"), false);
+    }
+    if let Some(count) = rounded {
+        let held = "pixels are held as 32-bit floats, exact for whole numbers up to 16,777,216 and to about 7 significant digits";
+        s.notify(format!("{unique}: {count} rounded as the file was read: {held}, so an export writes the rounded values"), false);
     }
     if empty_before && let Some(e) = s.map().layer(id).map(|l| l.extent()) {
         s.zoom_to(&e);
@@ -369,6 +374,24 @@ pub fn add_raster(s: &mut Session, name: &str, mut layer: RasterLayer) -> CmdRes
         o.insert("overviewOf".into(), json!([fw, fh]));
     }
     Ok(v)
+}
+
+/// How many of a raster's values changed when read as 32-bit floats, as notices say it: "3 values
+/// were", and by band ("8 values (band 1: 3, band 2: 5) were") when it has more than one.
+/// `None` when none did.
+fn rounded_count(r: &Raster) -> Option<String> {
+    let total: u64 = r.rounded.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let by_band: Vec<String> = r.rounded.iter().enumerate().filter(|(_, n)| **n > 0).map(|(i, n)| format!("band {}: {n}", i + 1)).collect();
+    let (values, verb) = values_were(total);
+    Some(if r.band_count() > 1 { format!("{values} ({}) {verb}", by_band.join(", ")) } else { format!("{values} {verb}") })
+}
+
+/// "1 value" and "was", or "`n` values" and "were".
+fn values_were(n: u64) -> (String, &'static str) {
+    if n == 1 { ("1 value".into(), "was") } else { (format!("{n} values"), "were") }
 }
 
 /// The longitude/latitude box (west, south, east, north) a scan of `w` × `h` pixels is laid over:
@@ -788,10 +811,23 @@ fn export(s: &mut Session, p: &Value) -> CmdResult {
         let (_, bytes) = geotiff_bytes(s, p)?;
         rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
     }
-    let note = match r.overview {
+    let mut note = match r.overview {
         Some((fw, fh)) => format!(" (the {} × {} overview of the {fw} × {fh} raster)", r.width, r.height),
         None => String::new(),
     };
+    // Values changed when the file was read are written as they are held: those of the bands the
+    // writer writes, as it chooses them.
+    let bi = band(p, "band", &r)?.unwrap_or(0);
+    let bands = if cog.is_some() {
+        raster::cogwrite::written_bands(&r, bi).map_err(|e| e.to_string())?
+    } else {
+        raster::geotiff::written_bands(&r, bi)
+    };
+    let written: u64 = bands.iter().filter_map(|b| r.rounded.get(*b)).sum();
+    if written > 0 {
+        let (values, verb) = values_were(written);
+        note.push_str(&format!("; {values} in it {verb} rounded to 32-bit floats when {} was read", r.name));
+    }
     s.notify(format!("Exported {path}{note}"), false);
     let mut v = match r.overview {
         Some((fw, fh)) => json!({"path": path, "width": r.width, "height": r.height, "overviewOf": [fw, fh]}),

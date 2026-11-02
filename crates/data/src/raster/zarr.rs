@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value};
 
-use super::{ColorHint, Crs, GeoTransform, MAX_SAMPLES, Raster};
+use super::{ColorHint, Crs, Exact, GeoTransform, MAX_SAMPLES, Raster};
 use crate::{DataError, Result};
 
 /// The metadata files a store may have at its root: Zarr 3's `zarr.json`, Zarr 2's consolidated
@@ -145,6 +145,35 @@ impl DType {
             (Kind::Float, _) => f64::from_le_bytes(a),
         }
     }
+
+    /// A whole number's exact value from its bytes (exactly `size` of them): past 2^53,
+    /// [`DType::value`]'s `f64` has already rounded 64-bit ones. `None` for floats and booleans.
+    fn whole(self, b: &[u8]) -> Option<i128> {
+        if !matches!(self.kind, Kind::Int | Kind::UInt) {
+            return None;
+        }
+        let n = self.size.min(8);
+        let src = b.get(..n)?;
+        let mut a = [0u8; 8];
+        for (i, v) in src.iter().enumerate() {
+            if let Some(slot) = a.get_mut(if self.little { i } else { n - 1 - i }) {
+                *slot = *v;
+            }
+        }
+        let u = u64::from_le_bytes(a);
+        let shift = 64 - 8 * n as u32;
+        Some(if self.kind == Kind::Int { i128::from(((u << shift) as i64) >> shift) } else { i128::from(u) })
+    }
+
+    /// Whether `f32` holds the value in `b` (exactly `size` bytes) exactly; whole numbers are
+    /// compared as integers.
+    fn held_as_f32(self, b: &[u8]) -> bool {
+        if let Some(i) = self.whole(b) {
+            return i as f32 as i128 == i;
+        }
+        let v = self.value(b);
+        v.is_nan() || f64::from(v as f32) == v
+    }
 }
 
 /// A half-precision float's value.
@@ -219,6 +248,8 @@ pub struct Array {
     pub chunks: Vec<u64>,
     pub dtype: DType,
     pub fill: Option<f64>,
+    /// `fill` exactly as the metadata writes it (a whole number past 2^53 stays whole).
+    pub(crate) fill_exact: Option<Exact>,
     /// Fortran order (the first dimension varies fastest).
     pub fortran: bool,
     /// The encoding, in the order it was applied.
@@ -502,6 +533,7 @@ fn array_v2(path: &str, z: &Value, attrs: Option<&Value>) -> Option<Array> {
         chunks,
         dtype,
         fill: fill_of(z.get("fill_value")),
+        fill_exact: exact_fill(z.get("fill_value")),
         fortran: z.get("order").and_then(Value::as_str) == Some("F"),
         codecs,
         attrs,
@@ -602,6 +634,7 @@ fn array_v3(path: &str, z: &Value) -> Option<Array> {
         chunks,
         dtype,
         fill: fill_of(z.get("fill_value")),
+        fill_exact: exact_fill(z.get("fill_value")),
         fortran: false,
         codecs,
         attrs: z.get("attributes").and_then(Value::as_object).cloned().unwrap_or_default(),
@@ -1027,6 +1060,32 @@ fn values_1d(a: &Array, chunks: &HashMap<String, Vec<u8>>) -> Result<Vec<f64>> {
 }
 
 /// A number attribute (`scale_factor`, `_FillValue`).
+/// A JSON number exactly: a whole one as one.
+fn exact_number(n: &serde_json::Number) -> Option<Exact> {
+    n.as_i64()
+        .map(|i| Exact::Whole(i.into()))
+        .or_else(|| n.as_u64().map(|u| Exact::Whole(u.into())))
+        .or_else(|| n.as_f64().map(Exact::Float))
+}
+
+/// [`fill_of`], with a whole number kept exact.
+fn exact_fill(v: Option<&Value>) -> Option<Exact> {
+    match v? {
+        Value::Number(n) => exact_number(n),
+        other => fill_of(Some(other)).map(Exact::Float),
+    }
+}
+
+/// [`attr_f64`], with a whole number kept exact.
+fn attr_exact(a: &Array, k: &str) -> Option<Exact> {
+    match a.attrs.get(k)? {
+        Value::Number(n) => exact_number(n),
+        Value::Array(v) => v.first().and_then(Value::as_number).and_then(exact_number),
+        Value::String(s) => Exact::parse(s),
+        _ => None,
+    }
+}
+
 fn attr_f64(a: &Array, k: &str) -> Option<f64> {
     match a.attrs.get(k)? {
         Value::Number(n) => n.as_f64(),
@@ -1102,13 +1161,20 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
     // Values meaning "no data", before any scaling, as xarray reads them: the CF attributes, and a
     // Zarr 2 array's fill_value (xarray's _FillValue encoding). A Zarr 3 array's fill_value (0 by
     // default in zarr-python) only stands for chunks that were never written, and those cells stay
-    // empty here; real zeros are kept.
-    let v2_fill = if a.zarr_format == 2 { a.fill } else { None };
-    let mut missing: Vec<f64> = [v2_fill, attr_f64(a, "_FillValue"), attr_f64(a, "missing_value")].into_iter().flatten().collect();
+    // empty here; real zeros are kept. These become NaN before conversion, and the raster has no
+    // no-data value of its own: exactly these cells are no-data, and they are left out of the
+    // rounded count (the rule `Uncounted` gives the other readers).
+    // They are kept exactly as written, so a whole number past 2^53 matches only itself.
+    let v2_fill = if a.zarr_format == 2 { a.fill_exact } else { None };
+    let mut missing: Vec<Exact> = [v2_fill, attr_exact(a, "_FillValue"), attr_exact(a, "missing_value")].into_iter().flatten().collect();
     missing.dedup();
     let scale = attr_f64(a, "scale_factor").unwrap_or(1.0);
     let offset = attr_f64(a, "add_offset").unwrap_or(0.0);
     let mut found = 0usize;
+    // Values f32 doesn't hold exactly: stored ones (Int32 or Int64 past 16,777,216, Float64
+    // digits), or scaled ones whose f32 no longer gives back the stored value.
+    let scaled = scale != 1.0 || offset != 0.0;
+    let mut rounded = 0u64;
     for gy in 0..a.grid(plan.y) {
         for gx in 0..a.grid(plan.x) {
             let idx: Vec<u64> = (0..nd)
@@ -1150,8 +1216,33 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
                     }
                     let i = base + ly * strides[plan.y] + lx * strides[plan.x];
                     let at = usize::try_from(i).ok().and_then(|i| i.checked_mul(dt.size));
-                    let Some(v) = at.and_then(|at| vals.get(at..at + dt.size)).map(|b| dt.value(b)) else { continue };
-                    let out = if v.is_nan() || missing.contains(&v) { f32::NAN } else { (v * scale + offset) as f32 };
+                    let Some(b) = at.and_then(|at| vals.get(at..at + dt.size)) else { continue };
+                    let v = dt.value(b);
+                    // Whole numbers are compared exactly: past 2^53 `v` has already been rounded.
+                    let value = dt.whole(b).map_or(Exact::Float(v), Exact::Whole);
+                    let is_missing = missing.iter().any(|m| m.same(value));
+                    let out = if v.is_nan() || is_missing {
+                        f32::NAN
+                    } else {
+                        let x = v * scale + offset;
+                        let f = x as f32;
+                        // A packed whole number is held when unscaling its f32 gives it back exactly.
+                        // Float32 or narrower storage states no more precision than f32 holds, so
+                        // scaling it is counted only when it leaves f32's range (overflowing to
+                        // infinity, or a nonzero value to 0). A scaled Float64 (or anything scaled
+                        // by 0) is held when f32 holds the scaled value.
+                        let held = match dt.whole(b) {
+                            _ if !scaled => dt.held_as_f32(b),
+                            // A finite stored value scaled past f32's range (or f64's) is counted,
+                            // whatever its type; a stored infinity stays one.
+                            _ if v.is_finite() && f.is_infinite() => false,
+                            Some(i) if scale != 0.0 => ((f64::from(f) - offset) / scale).round() as i128 == i,
+                            None if dt.size <= 4 => !(f == 0.0 && x != 0.0),
+                            _ => f64::from(f) == x,
+                        };
+                        rounded += u64::from(!held);
+                        f
+                    };
                     if let Some(g) = grid.get_mut(row as usize * w + col as usize) {
                         *g = out;
                     }
@@ -1228,7 +1319,11 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
         (Kind::UInt, _) => "UInt32",
     };
     let data_type = if scale != 1.0 || offset != 0.0 { "Float32" } else { data_type };
-    Raster::new(name, w as u32, h as u32, vec![grid], transform, crs, None, ColorHint::Gray, data_type)
+    let mut r = Raster::new(name, w as u32, h as u32, vec![grid], transform, crs, None, ColorHint::Gray, data_type)?;
+    if rounded > 0 {
+        r.rounded = vec![rounded];
+    }
+    Ok(r)
 }
 
 // --- What a store holds --------------------------------------------------------------------------
@@ -1951,6 +2046,101 @@ mod tests {
             chunks.insert(format!("t/1.0.{cx}"), blosc_frame(&f32s(&v), 4));
         }
         (store, chunks)
+    }
+
+    /// The rounded count of a 2 × 2 variable of type `dtype` holding `values` (its bytes), with
+    /// `attrs` (scaling, a fill value) added to its attributes, on latitude and longitude.
+    fn two_by_two(dtype: &str, attrs: Value, values: Vec<u8>) -> Vec<u64> {
+        let arr = |shape: &str, dtype: &str| {
+            serde_json::from_str::<Value>(&format!(
+                r#"{{"shape":{shape},"chunks":{shape},"dtype":"{dtype}","compressor":null,"fill_value":null,"filters":null,"order":"C","zarr_format":2}}"#
+            ))
+            .unwrap()
+        };
+        let mut v_attrs = serde_json::json!({"_ARRAY_DIMENSIONS": ["lat","lon"]});
+        if let (Some(to), Some(from)) = (v_attrs.as_object_mut(), attrs.as_object()) {
+            to.extend(from.clone());
+        }
+        let meta = serde_json::json!({"metadata": {
+            ".zgroup": {"zarr_format": 2},
+            "v/.zarray": arr("[2,2]", dtype),
+            "v/.zattrs": v_attrs,
+            "lat/.zarray": arr("[2]", "<f8"),
+            "lat/.zattrs": {"_ARRAY_DIMENSIONS": ["lat"], "units": "degrees_north"},
+            "lon/.zarray": arr("[2]", "<f8"),
+            "lon/.zattrs": {"_ARRAY_DIMENSIONS": ["lon"], "units": "degrees_east"},
+        }, "zarr_consolidated_format": 1});
+        let store = parse_store(&[(".zmetadata".into(), meta.to_string().into_bytes())]).unwrap();
+        let f64s = |v: [f64; 2]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let chunks =
+            HashMap::from([("v/0.0".to_string(), values), ("lat/0".into(), f64s([10.0, 20.0])), ("lon/0".into(), f64s([30.0, 40.0]))]);
+        let p = plan(&store, &Selection { variable: "v".into(), index: vec![] }).unwrap();
+        assemble(&store, &p, &chunks, "v", None).unwrap().rounded
+    }
+
+    #[test]
+    fn whole_no_data_values_are_compared_exactly() {
+        for (file, samples, _, counted) in crate::raster::NODATA_WHOLE_CASES {
+            let bytes = samples.iter().flat_map(|x| x.to_le_bytes()).collect();
+            // As a JSON number, as zarr-python writes an integer fill value.
+            let n: i64 = file.parse().unwrap();
+            assert_eq!(two_by_two("<i8", serde_json::json!({"_FillValue": n}), bytes).iter().sum::<u64>(), *counted, "fill {file}");
+        }
+    }
+
+    #[test]
+    fn no_data_values_are_left_out_of_the_count_by_one_rule() {
+        for c in crate::raster::NODATA_CASES {
+            let attrs = c.file.map_or(serde_json::json!({}), |f| serde_json::json!({"_FillValue": f}));
+            let bytes = c.samples.iter().flat_map(|x| x.to_le_bytes()).collect();
+            assert_eq!(two_by_two("<f8", attrs, bytes).iter().sum::<u64>(), c.zarr, "fill {:?}", c.file);
+        }
+    }
+
+    #[test]
+    fn values_f32_cannot_hold_are_counted() {
+        // A 2 × 2 variable of type `dtype` holding `values`, scaled by `scale` and `offset`, on
+        // latitude and longitude.
+        let read_scaled = |dtype: &str, (scale, offset): (f64, f64), values: Vec<u8>| {
+            two_by_two(dtype, serde_json::json!({"scale_factor": scale, "add_offset": offset}), values)
+        };
+        let read = |dtype: &str, values: Vec<u8>| read_scaled(dtype, (1.0, 0.0), values);
+        let i64s = |v: [i64; 4]| v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        assert_eq!(read("<i8", i64s([16_777_217, 1 << 40, 3, -16_777_216])), vec![1]);
+        assert!(read("<i8", i64s([16_777_216, 1, 2, 3])).is_empty());
+        // Past 2^53 a fill value is matched exactly: i64::MIN + 1 isn't missing, and is counted.
+        let fill = serde_json::json!({"_FillValue": "-9223372036854775808"});
+        assert_eq!(two_by_two("<i8", fill, i64s([i64::MIN, i64::MIN + 1, 0, 1])), vec![1]);
+        // Past 2^53 too, where an f64 has already rounded 2^60 + 1 to 2^60.
+        assert_eq!(read("<i8", i64s([(1 << 60) + 1, 1 << 60, 0, 0])), vec![1]);
+        let u64s = |v: [u64; 4]| v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        assert_eq!(read("<u8", u64s([(1 << 60) + 1, 1 << 60, u64::MAX, 0])), vec![2]);
+        let f64s = |v: [f64; 4]| v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        assert_eq!(read("<f8", f64s([0.1, 1234567.891234, 0.5, f64::NAN])), vec![2]);
+        assert!(read("<f8", f64s([0.5, 2.0, -3.25, f64::NAN])).is_empty());
+        // Scaled, the value written counts: packed whole numbers are held while unscaling their
+        // f32 gives them back, a scaled float when f32 holds the scaled value. Halving 16777217
+        // doesn't help: 8388608.5 needs the same 25 bits, and comes back as 16777216.
+        let i32s = |v: [i32; 4]| v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        assert_eq!(read_scaled("<i4", (0.5, 0.0), i32s([16_777_217, 3, 5, 7])), vec![1]);
+        assert!(read_scaled("<i4", (0.01, 273.15), i32s([-32_768, 1, 2_315, 32_767])).is_empty());
+        assert_eq!(read_scaled("<i4", (1.0, 0.25), i32s([100_000_001, 1, 2, 3])), vec![1]);
+        assert_eq!(read_scaled("<f8", (0.1, 0.0), f64s([1.0, 5.0, 10.0, f64::NAN])), vec![1]);
+        // The same values stored as Float32 or Float16 hold no more than f32 does: none counted.
+        assert!(read_scaled("<f4", (0.1, 0.0), f32s(&[1.0, 1.5, 10.0, 0.123_456_7])).is_empty());
+        let f16s = |v: [u16; 4]| v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        assert!(read_scaled("<f2", (0.1, 273.15), f16s([0x3c00, 0x3e00, 0x4900, 0])).is_empty());
+        // Unless scaling leaves f32's range: 3e38 × 10 overflows and 1e-30 × 1e-20 vanishes, while
+        // an infinity stored as such stays one.
+        assert_eq!(read_scaled("<f4", (10.0, 0.0), f32s(&[3e38, 1.0, f32::INFINITY, 0.0])), vec![1]);
+        assert_eq!(read_scaled("<f4", (1e-20, 0.0), f32s(&[1e-30, 1.0, 0.0, 2.0])), vec![1]);
+        // Past f64's range too, for Float32 and Float64 storage alike.
+        assert_eq!(read_scaled("<f4", (1e300, 0.0), f32s(&[1e30, 0.0, f32::INFINITY, 0.0])), vec![1]);
+        assert_eq!(read_scaled("<f8", (1e10, 0.0), f64s([1e300, 0.0, f64::INFINITY, 0.5])), vec![1]);
+        // Scaled 64-bit whole numbers are compared exactly too, and a scale of 0 writes the offset.
+        assert_eq!(read_scaled("<i8", (2.0, 0.0), i64s([(1 << 60) + 1, 1 << 60, 3, 0])), vec![1]);
+        assert_eq!(read_scaled("<u8", (2.0, 0.0), u64s([(1 << 60) + 1, 1 << 60, 3, 0])), vec![1]);
+        assert!(read_scaled("<i4", (0.0, 5.0), i32s([1, 2, 16_777_217, 4])).is_empty());
     }
 
     #[test]

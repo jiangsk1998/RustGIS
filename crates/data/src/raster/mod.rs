@@ -1,6 +1,8 @@
 //! Rasters: bands of numbers on a georeferenced grid (elevation, imagery, classified land cover).
 //!
-//! Pixels are held as `f32` per band. Readers never panic on malformed input and refuse rasters
+//! Pixels are held as `f32` per band: whole numbers are exact up to ±16,777,216 and decimals to
+//! about 7 significant digits. Readers count the values that change on the way in
+//! ([`Raster::rounded`]). Readers never panic on malformed input and refuse rasters
 //! larger than [`MAX_SAMPLES`]; cloud-optimised GeoTIFFs fall back to their largest overview that
 //! fits.
 
@@ -206,6 +208,128 @@ impl BandStats {
     }
 }
 
+/// The no-data value the readers leave out of [`Raster::rounded`], by one rule for every reader:
+///
+/// - The value is the file's when it is finite, else the sidecar's (`.aux.xml`) when that is
+///   finite, else none: the value [`Raster::new`] and [`Raster::apply_pam`] go on to mask with.
+/// - A sample whose value in the file is exactly that value isn't counted, even when its `f32`
+///   overflows (a Float64 no-data of −1.8e308).
+/// - Any other sample `is_valid` masks is counted, as it went from a value to no-data: one that
+///   rounds onto the no-data value (an Int32 ID 16777217 with no-data 16777216), or one `f32`
+///   holds exactly that the no-data value rounds onto (−2^63 with no-data −2^63 + 1).
+/// - Any other sample is counted when it changed, an overflow to infinity included.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Uncounted {
+    exact: Option<Exact>,
+    masked: Option<f32>,
+}
+
+/// A value exactly as a file states it: a whole number as one (an `f64` rounds those past 2^53),
+/// anything else as an `f64`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Exact {
+    Whole(i128),
+    Float(f64),
+}
+
+impl Exact {
+    /// A number as text: whole when it is written as one.
+    pub(crate) fn parse(text: &str) -> Option<Exact> {
+        let text = text.trim();
+        text.parse::<i128>().map(Exact::Whole).ok().or_else(|| text.parse::<f64>().ok().map(Exact::Float))
+    }
+
+    /// The value as an `f64` (rounded, for a whole number past 2^53).
+    pub(crate) fn wide(self) -> f64 {
+        match self {
+            Exact::Whole(w) => w as f64,
+            Exact::Float(x) => x,
+        }
+    }
+
+    /// Whether two values are the same number.
+    pub(crate) fn same(self, other: Exact) -> bool {
+        match (self, other) {
+            (Exact::Whole(a), Exact::Whole(b)) => a == b,
+            (Exact::Float(a), Exact::Float(b)) => a == b,
+            // Only an integral float within i128's range (the cast saturates past it) can be one.
+            (Exact::Whole(w), Exact::Float(x)) | (Exact::Float(x), Exact::Whole(w)) => {
+                x.fract() == 0.0 && x.abs() < 2f64.powi(127) && x as i128 == w
+            }
+        }
+    }
+}
+
+impl Uncounted {
+    /// The value from the file's own no-data value and the sidecar's.
+    pub(crate) fn new(file: Option<Exact>, sidecar: Option<f64>) -> Uncounted {
+        let exact = file.filter(|v| v.wide().is_finite()).or(sidecar.filter(|v| v.is_finite()).map(Exact::Float));
+        Uncounted { exact, masked: exact.map(|d| d.wide() as f32).filter(|d| d.is_finite()) }
+    }
+
+    /// Whether a sample read as `f` is held, when the no-data value decides it: `Some(true)` for
+    /// the no-data value itself; `Some(false)` for any other sample [`Raster::is_valid`] masks as
+    /// no-data, exact in `f32` or not, as it went from a value to no-data; `None` otherwise (the
+    /// reader's own test decides). `value` gives the sample's value in the file; it is asked for
+    /// only when `f` matches the value's `f32` (or both are infinite, for a value past `f32`'s
+    /// range).
+    pub(crate) fn decides(self, f: f32, value: impl FnOnce() -> Option<Exact>) -> Option<bool> {
+        let is = |v: Option<Exact>| self.exact.zip(v).is_some_and(|(a, b)| a.same(b));
+        match self.masked {
+            Some(m) if f == m => Some(is(value())),
+            None if self.exact.is_some() && f.is_infinite() && is(value()) => Some(true),
+            _ => None,
+        }
+    }
+}
+
+/// Cases of [`Uncounted`]'s rule that every reader's tests read (a no-data value that isn't finite,
+/// one past `f32`'s range, a sidecar's, a sample rounding onto it), so the readers agree.
+#[cfg(test)]
+pub(crate) struct NodataCase {
+    /// The file's own no-data value, as it writes it (a GeoTIFF tag, an ASCII grid header, a
+    /// Zarr `_FillValue`).
+    pub file: Option<&'static str>,
+    /// The sidecar's (`.aux.xml`; Zarr stores have none).
+    pub sidecar: Option<f64>,
+    /// The samples of a 2 × 2 Float64 band.
+    pub samples: [f64; 4],
+    /// How many a GeoTIFF or ASCII grid counts as rounded.
+    pub counted: u64,
+    /// How many a Zarr store counts: it has no sidecar.
+    pub zarr: u64,
+}
+
+#[cfg(test)]
+pub(crate) const NODATA_CASES: &[NodataCase] = &[
+    // No no-data value: too many digits and an overflow to infinity are both counted.
+    NodataCase { file: None, sidecar: None, samples: [0.123_456_789_012_345, 1.0, -1e39, 2.0], counted: 2, zarr: 2 },
+    // A NaN or infinite file value is ignored and the sidecar's is used: 0.1 isn't counted, but
+    // 0.1000000001, a value that rounds onto it and so becomes no-data, is. Zarr, with no
+    // sidecar, counts all three.
+    NodataCase { file: Some("nan"), sidecar: Some(0.1), samples: [0.1, 0.100_000_000_1, 0.123_456_789_012_345, 2.0], counted: 2, zarr: 3 },
+    NodataCase { file: Some("inf"), sidecar: Some(0.1), samples: [0.1, 0.100_000_000_1, 0.123_456_789_012_345, 2.0], counted: 2, zarr: 3 },
+    // Past f32's range: the no-data value itself isn't counted, another overflow is.
+    NodataCase { file: Some("-1.7976931348623157e308"), sidecar: None, samples: [f64::MIN, -1e39, 0.5, 2.0], counted: 1, zarr: 1 },
+    NodataCase { file: Some("-1e39"), sidecar: None, samples: [-1e39, -2e39, 0.5, 2.0], counted: 1, zarr: 1 },
+    // A finite file value wins over the sidecar's; 1.00000001 and the ID 16777217 round onto it
+    // and become no-data, so they are counted, while the no-data value itself isn't.
+    NodataCase { file: Some("1"), sidecar: Some(0.1), samples: [1.000_000_01, 0.123_456_789_012_345, 0.5, 2.0], counted: 2, zarr: 2 },
+    NodataCase { file: Some("16777216"), sidecar: None, samples: [16_777_217.0, 16_777_216.0, 0.5, 2.0], counted: 1, zarr: 1 },
+];
+
+/// Cases of [`Uncounted`]'s rule for 64-bit whole numbers past 2^53, which an `f64` rounds: the
+/// file's no-data value as it writes it, four Int64 samples, how many a GeoTIFF or ASCII grid
+/// counts, and how many a Zarr store (which masks exact matches only) counts.
+#[cfg(test)]
+pub(crate) const NODATA_WHOLE_CASES: &[(&str, [i64; 4], u64, u64)] = &[
+    // −2^63 + 1 is the no-data value, written and stored exactly, so it isn't counted. −2^63, which
+    // f32 holds, shares its f32: a GeoTIFF or grid masks it as no-data and counts it; Zarr keeps it.
+    ("-9223372036854775807", [i64::MIN + 1, i64::MIN + 1, i64::MIN, 1], 1, 0),
+    // −2^63 is the no-data value; −2^63 + 1 rounds onto it and is counted everywhere.
+    ("-9223372036854775808", [i64::MIN, i64::MIN + 1, 0, 1], 1, 1),
+];
+
 /// One band of pixels, row by row.
 #[derive(Clone)]
 pub struct Band {
@@ -261,6 +385,10 @@ pub struct Raster {
     /// `false` for a scan (a TIFF with no GeoTIFF tags, a PNG, a JPEG): `transform` is then only
     /// a stand-in until the picture is placed or georeferenced, and says nothing about the ground.
     pub georeferenced: bool,
+    /// How many values of each band changed when read as `f32` (Int32 IDs past 16,777,216, Float64
+    /// values with more digits than `f32` holds), by band; empty when none did. NaN and no-data
+    /// values aren't counted.
+    pub rounded: Vec<u64>,
     transformer: Transformer,
     extent: Extent,
 }
@@ -321,6 +449,7 @@ impl Raster {
             source: None,
             overview: None,
             georeferenced: true,
+            rounded: Vec::new(),
             transformer,
             extent: Extent::EMPTY,
         };
@@ -528,12 +657,16 @@ pub fn read_path(path: &Path) -> Result<Raster> {
     }
     let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("raster").to_string();
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    // The `.aux.xml` sidecar, read first: a no-data value it gives (for a file that has none) keeps
+    // those pixels out of the rounded count as they are read.
+    let pam = pam::read(path);
+    let sidecar_nodata = pam.as_ref().and_then(pam::Pam::nodata);
     let mut r = match ext.as_str() {
         "tif" | "tiff" => {
             #[cfg(not(target_arch = "wasm32"))]
-            let r = geotiff::read_file(path, &name)?;
+            let r = geotiff::read_file_with_nodata(path, &name, sidecar_nodata)?;
             #[cfg(target_arch = "wasm32")]
-            let r = geotiff::read(std::io::BufReader::new(std::fs::File::open(path)?), &name)?;
+            let r = geotiff::read_with_nodata(std::io::BufReader::new(std::fs::File::open(path)?), &name, sidecar_nodata)?;
             r
         }
         "png" | "jpg" | "jpeg" => read_scan(&name, std::io::BufReader::new(std::fs::File::open(path)?))?,
@@ -542,7 +675,7 @@ pub fn read_path(path: &Path) -> Result<Raster> {
                 return Err(DataError::Format("the ASCII grid is too large to open".into()));
             }
             let text = std::fs::read_to_string(path)?;
-            ascii::read(&text, &name, sidecar_crs(path))?
+            ascii::read_with_nodata(&text, &name, sidecar_crs(path), sidecar_nodata)?
         }
         #[cfg(not(target_arch = "wasm32"))]
         _ if gdal::is_gdal_raster_name(&path.to_string_lossy()) => {
@@ -551,8 +684,8 @@ pub fn read_path(path: &Path) -> Result<Raster> {
         }
         other => return Err(DataError::Unsupported(format!(".{other}"))),
     };
-    if let Some(p) = pam::read(path) {
-        r.apply_pam(&p);
+    if let Some(p) = &pam {
+        r.apply_pam(p);
     }
     r.source = Some(path.display().to_string());
     Ok(r)

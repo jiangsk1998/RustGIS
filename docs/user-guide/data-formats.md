@@ -415,6 +415,11 @@ databases](data.md#sql-queries-and-duckdb-databases).
 | Zarr | a store's folder (`.zarr`, desktop) or web address (desktop and browser), format 2 (consolidated) or 3 | Home › Add › Add Data › Zarr… (`layer.addZarr`), Add Data on a local folder, or a `?zarr=` link | A variable's latitude/longitude (or y/x) map at the steps picked of its other dimensions (time, level), read chunk by chunk in pure Rust (blosc, zlib, gzip, zstd, LZ4; sharded arrays too). See [Zarr stores](data.md#zarr-stores). |
 | Rasters GDAL reads | `.img`, `.hgt`, `.dem`, `.dt0`–`.dt2`, `.nc`, `.nc4`, `.hdf`, `.hdf5`, `.h5`, `.he5`, `.bil`, `.bsq`, `.bip`, `.envi`, `.grd`, `.rst`, `.sdat`, `.kea`, `.ers`, `.ntf`, `.nitf`, `.ecw`, `.sid`, `.gsb`, `.bt`, `.rsw` | Add Data (desktop, with [GDAL](https://gdal.org): `gdal_translate`, `gdalinfo` and `gdalwarp`; the installed build must include the driver) | Converted once to a cached cloud-optimised GeoTIFF. NetCDF/HDF variables are subdatasets: the first is added, the others named in a notice; `"layer"` picks one. Without a declared coordinate system, longitude/latitude-like coordinates use WGS 84 (0–360° longitudes are moved to −180–180°); otherwise give `"crs"`. JPEG 2000 is listed separately above. |
 
+Pixels are held as 32-bit floats: whole numbers are exact up to ±16,777,216 and decimals to about 7
+significant digits. A file with values past that (Int32 or UInt32 IDs above 16,777,216, Int64,
+Float64 with more digits, long decimals in an ASCII grid) opens with a notice counting the values that
+were rounded, and Export Raster, which writes the rounded values, says so again.
+
 ## Tiles and web services
 
 | Format | Extensions or source | How to add it | Notes |

@@ -11186,6 +11186,33 @@ fn exports_say_what_import_said_about_positions() {
 }
 
 #[test]
+fn rounded_raster_values_are_said_on_import_and_export() {
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-rounded-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let grid = |name: &str, values: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("ncols 2\nnrows 2\nxllcorner 10\nyllcorner 40\ncellsize 1\n{values}")).unwrap();
+        path
+    };
+    let mut s = Session::new(Project::default());
+    for (path, rounded) in
+        [(grid("ids.asc", "16777217 100000001\n1234567.891 7"), true), (grid("clean.asc", "16777216 12.3\n123.4567 7"), false)]
+    {
+        let mark = s.notice_mark();
+        let id = s.run("layer.addData", &json!({"path": path})).unwrap()["layer"].as_u64().unwrap();
+        let said = |s: &Session, mark, text: &str| s.notices_since(mark).iter().any(|n| n.text.contains(text));
+        assert_eq!(said(&s, mark, "3 values were rounded as the file was read"), rounded, "{:?}", s.notices_since(mark));
+        let mark = s.notice_mark();
+        let out = dir.join(format!("out-{id}.tif"));
+        s.run("share.exportRaster", &json!({"layer": id, "path": out})).unwrap();
+        assert_eq!(said(&s, mark, "3 values in it were rounded to 32-bit floats"), rounded, "{:?}", s.notices_since(mark));
+        // The exported file holds the values as they were held: 16777217 is 16777216.
+        assert_eq!(rustgis_data::raster::read_path(&out).unwrap().value(0, 0, 0), Some(16_777_216.0));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn layers_export_to_geopackage_geoparquet_shapefile_and_kmz() {
     let dir = std::env::temp_dir().join(format!("rustgis-engine-export-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

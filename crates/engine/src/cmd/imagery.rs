@@ -238,7 +238,9 @@ fn georeference(s: &mut Session, p: &Value) -> CmdResult {
         }
         GeoTransform { origin_x: bx, origin_y: by, pixel_width: ax, pixel_height: ay }
     };
-    let out = rebuild(&r, gt, Crs::LonLat, r.bands.iter().map(|b| b.data.clone()).collect())?;
+    let mut out = rebuild(&r, gt, Crs::LonLat, r.bands.iter().map(|b| b.data.clone()).collect())?;
+    // The same pixels, so the same values rounded when the file was read.
+    out.rounded = r.rounded.clone();
     let e = out.extent();
     let v = replace(s, &layer, out)?;
     Ok(json!({"layer": v["layer"], "extent": [e.min_x, e.min_y, e.max_x, e.max_y]}))

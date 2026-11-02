@@ -14,7 +14,7 @@ use tiff::tags::Tag;
 
 use super::cog::Sparse;
 use super::crs::CustomCrs;
-use super::{ColorHint, Crs, GeoTransform, MAX_SAMPLES, Raster};
+use super::{ColorHint, Crs, Exact, GeoTransform, MAX_SAMPLES, Raster, Uncounted};
 use crate::{DataError, Result};
 
 fn err(e: impl std::fmt::Display) -> DataError {
@@ -33,6 +33,8 @@ struct Geo {
     unknown_epsg: Option<u32>,
     geographic_model: bool,
     nodata: Option<f64>,
+    /// The no-data value exactly as the tag writes it (a whole number past 2^53 stays whole).
+    nodata_exact: Option<Exact>,
     /// Why the file's own projection couldn't be read, if it has one.
     custom_error: Option<String>,
     /// `false` for a TIFF with no GeoTIFF tags at all: `transform` is then a stand-in.
@@ -120,13 +122,24 @@ fn geo_tags<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Geo> {
     } else {
         transform
     };
-    let nodata = dec
+    let nodata_exact = dec
         .find_tag(Tag::GdalNodata)
         .ok()
         .flatten()
         .and_then(|v| v.into_string().ok())
-        .and_then(|s| s.trim_matches(|c: char| c == '\0' || c.is_whitespace()).parse::<f64>().ok());
-    Ok(Geo { transform, affine, crs, unknown_epsg: code.filter(|_| crs.is_none()), geographic_model, nodata, custom_error, referenced })
+        .and_then(|s| Exact::parse(s.trim_matches(|c: char| c == '\0' || c.is_whitespace())));
+    let nodata = nodata_exact.map(Exact::wide);
+    Ok(Geo {
+        transform,
+        affine,
+        crs,
+        unknown_epsg: code.filter(|_| crs.is_none()),
+        geographic_model,
+        nodata,
+        nodata_exact,
+        custom_error,
+        referenced,
+    })
 }
 
 /// A cloud-optimised GeoTIFF's coordinate system, georeferencing and no-data value, from its first
@@ -444,6 +457,67 @@ fn to_f32(buf: DecodingResult) -> (Vec<f32>, &'static str) {
     }
 }
 
+/// How many samples were decoded.
+fn sample_count(buf: &DecodingResult) -> usize {
+    match buf {
+        DecodingResult::U8(v) => v.len(),
+        DecodingResult::I8(v) => v.len(),
+        DecodingResult::U16(v) => v.len(),
+        DecodingResult::I16(v) => v.len(),
+        DecodingResult::U32(v) => v.len(),
+        DecodingResult::I32(v) => v.len(),
+        DecodingResult::U64(v) => v.len(),
+        DecodingResult::I64(v) => v.len(),
+        DecodingResult::F16(v) => v.len(),
+        DecodingResult::F32(v) => v.len(),
+        DecodingResult::F64(v) => v.len(),
+    }
+}
+
+/// Whether some values of this pixel type can't be held exactly as `f32`: 32- and 64-bit whole
+/// numbers and 64-bit floats.
+fn can_round(buf: &DecodingResult) -> bool {
+    matches!(
+        buf,
+        DecodingResult::U32(_) | DecodingResult::I32(_) | DecodingResult::U64(_) | DecodingResult::I64(_) | DecodingResult::F64(_)
+    )
+}
+
+/// The samples of `buf` that `f32` doesn't hold (see [`held_exactly`]), a bit each: `None` for a type
+/// that holds every value, or when none changed.
+fn rounded_bits(buf: &DecodingResult, nodata: Uncounted) -> Option<Vec<u64>> {
+    if !can_round(buf) {
+        return None;
+    }
+    let n = sample_count(buf);
+    let mut bits: Option<Vec<u64>> = None;
+    for j in 0..n {
+        if !held_exactly(buf, j, nodata)
+            && let Some(w) = bits.get_or_insert_with(|| vec![0u64; n.div_ceil(64)]).get_mut(j / 64)
+        {
+            *w |= 1 << (j % 64);
+        }
+    }
+    bits
+}
+
+/// Whether `f32` holds sample `j` of `buf` exactly, as [`to_f32`] converts it: whole numbers past
+/// ±16,777,216 and 64-bit floats with more precision than `f32` are rounded. NaN, a missing sample
+/// and no-data samples (by [`Uncounted`]'s rule) count as held.
+fn held_exactly(buf: &DecodingResult, j: usize, nodata: Uncounted) -> bool {
+    let held = |nan: bool, f: f32, exact: bool, value: Exact| nan || nodata.decides(f, || Some(value)).unwrap_or(exact);
+    // Whole numbers are compared in i128, which holds every u64 and i64 and the f32 just past them.
+    let whole = |f: f32, i: i128| held(false, f, f as i128 == i, Exact::Whole(i));
+    match buf {
+        DecodingResult::U32(v) => v.get(j).is_none_or(|&x| whole(x as f32, i128::from(x))),
+        DecodingResult::I32(v) => v.get(j).is_none_or(|&x| whole(x as f32, i128::from(x))),
+        DecodingResult::U64(v) => v.get(j).is_none_or(|&x| whole(x as f32, i128::from(x))),
+        DecodingResult::I64(v) => v.get(j).is_none_or(|&x| whole(x as f32, i128::from(x))),
+        DecodingResult::F64(v) => v.get(j).is_none_or(|&x| held(x.is_nan(), x as f32, f64::from(x as f32) == x, Exact::Float(x))),
+        _ => true,
+    }
+}
+
 /// Whether the current image is LZW-compressed.
 fn lzw<R: Read + Seek>(dec: &mut Decoder<R>) -> bool {
     dec.find_tag_unsigned::<u16>(Tag::Compression).ok().flatten() == Some(5)
@@ -681,8 +755,20 @@ impl Chunks {
     }
 
     /// Copies every `k`-th pixel each way of chunk `c` of `plane` (decoded as `values`) into
-    /// `bands`, each `ow` pixels wide.
-    fn place(&self, bands: &mut [Vec<f32>], values: &[f32], plane: usize, c: u32, k: u32, ow: usize) {
+    /// `bands`, each `ow` pixels wide, counting in `rounded` (by band) the pixels copied whose bit
+    /// is set in `changed` (from [`rounded_bits`]).
+    #[allow(clippy::too_many_arguments)]
+    fn place(
+        &self,
+        bands: &mut [Vec<f32>],
+        values: &[f32],
+        changed: Option<&[u64]>,
+        rounded: &mut [u64],
+        plane: usize,
+        c: u32,
+        k: u32,
+        ow: usize,
+    ) {
         let c = c % self.per_plane.max(1);
         let (x0, y0) = ((c % self.across) * self.cw, (c / self.across) * self.ch);
         let rows = self.ch.min(self.h.saturating_sub(y0));
@@ -709,6 +795,13 @@ impl Chunks {
                     let band = if self.planar { plane } else { b };
                     if let (Some(v), Some(slot)) = (values.get(src + b), bands.get_mut(band).and_then(|v| v.get_mut(dst))) {
                         *slot = *v;
+                        let at = src + b;
+                        if let Some(bits) = changed
+                            && bits.get(at / 64).is_some_and(|w| w >> (at % 64) & 1 == 1)
+                            && let Some(n) = rounded.get_mut(band)
+                        {
+                            *n += 1;
+                        }
                     }
                 }
                 x += k;
@@ -734,8 +827,9 @@ fn decimate<R: Read + Seek>(
     nbands: usize,
     planar: bool,
     k: u32,
+    nodata: Uncounted,
     open: Option<(Opener<'_>, usize, Limits)>,
-) -> Result<(Vec<Vec<f32>>, &'static str)> {
+) -> Result<(Vec<Vec<f32>>, &'static str, Vec<u64>)> {
     let k = k.max(1);
     let (ow, oh) = (w.div_ceil(k) as usize, h.div_ceil(k) as usize);
     let mut bands = vec![vec![f32::NAN; ow * oh]; nbands];
@@ -746,18 +840,21 @@ fn decimate<R: Read + Seek>(
     {
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(16);
         if threads > 1 {
-            return decimate_parallel(chunks, bands, k, ow, threads, open, image, limits);
+            return decimate_parallel(chunks, bands, k, ow, nodata, threads, open, image, limits);
         }
     }
     let _ = open;
     let mut data_type = "Float32";
+    let mut rounded = vec![0u64; nbands];
     for i in 0..chunks.count() {
         let Some((plane, index)) = chunks.wanted(i, k) else { continue };
-        let (values, dt) = to_f32(read_chunk(dec, index)?);
+        let buf = read_chunk(dec, index)?;
+        let changed = rounded_bits(&buf, nodata);
+        let (values, dt) = to_f32(buf);
         data_type = dt;
-        chunks.place(&mut bands, &values, plane, index, k, ow);
+        chunks.place(&mut bands, &values, changed.as_deref(), &mut rounded, plane, index, k, ow);
     }
-    Ok((bands, data_type))
+    Ok((bands, data_type, rounded))
 }
 
 /// [`decimate`] on `threads` threads, each with its own decoder taking the next chunk in turn.
@@ -768,17 +865,19 @@ fn decimate_parallel(
     bands: Vec<Vec<f32>>,
     k: u32,
     ow: usize,
+    nodata: Uncounted,
     threads: usize,
     open: Opener<'_>,
     image: usize,
     limits: Limits,
-) -> Result<(Vec<Vec<f32>>, &'static str)> {
+) -> Result<(Vec<Vec<f32>>, &'static str, Vec<u64>)> {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     let next = AtomicU64::new(0);
     let failed = AtomicBool::new(false);
     let failure: Mutex<Option<DataError>> = Mutex::new(None);
-    let out = Mutex::new((bands, "Float32"));
+    let rounded = vec![0u64; bands.len()];
+    let out = Mutex::new((bands, "Float32", rounded));
     let fail = |e: DataError| {
         failed.store(true, Ordering::Relaxed);
         if let Ok(mut f) = failure.lock() {
@@ -799,10 +898,12 @@ fn decimate_parallel(
             let Some((plane, index)) = chunks.wanted(i, k) else { continue };
             match read_chunk(&mut dec, index) {
                 Ok(buf) => {
+                    let changed = rounded_bits(&buf, nodata);
                     let (values, dt) = to_f32(buf);
                     if let Ok(mut o) = out.lock() {
-                        o.1 = dt;
-                        chunks.place(&mut o.0, &values, plane, index, k, ow);
+                        let (bands, data_type, rounded) = &mut *o;
+                        *data_type = dt;
+                        chunks.place(bands, &values, changed.as_deref(), rounded, plane, index, k, ow);
                     }
                 }
                 Err(e) => return fail(e),
@@ -827,7 +928,12 @@ fn decimate_parallel(
 /// fits, when the file has overviews; otherwise an overview is made as the image is read, a strip
 /// or tile at a time (a regular, not cloud-optimised, file).
 pub fn read<R: Read + Seek>(r: R, name: &str) -> Result<Raster> {
-    read_limited(reader(r).map_err(err)?, name, MAX_SAMPLES, None)
+    read_with_nodata(r, name, None)
+}
+
+/// [`read`], with the no-data value a sidecar gives (see [`read_limited_with_nodata`]).
+pub(super) fn read_with_nodata<R: Read + Seek>(r: R, name: &str, sidecar_nodata: Option<f64>) -> Result<Raster> {
+    read_limited_with_nodata(reader(r).map_err(err)?, name, MAX_SAMPLES, None, sidecar_nodata)
 }
 
 /// What reading a GeoTIFF from the parts of it read so far came to.
@@ -859,14 +965,32 @@ fn read_sparse_limited(parts: &Sparse, name: &str, max: usize) -> Result<Partial
 /// [`read`] from a file, decoding its strips or tiles on several threads.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_file(path: &std::path::Path, name: &str) -> Result<Raster> {
+    read_file_with_nodata(path, name, None)
+}
+
+/// [`read_file`], with the no-data value a sidecar gives (see [`read_limited_with_nodata`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn read_file_with_nodata(path: &std::path::Path, name: &str, sidecar_nodata: Option<f64>) -> Result<Raster> {
     let path = path.to_path_buf();
     let open = move || -> std::io::Result<Reader<'static>> { reader(std::io::BufReader::new(std::fs::File::open(&path)?)) };
-    read_limited(open().map_err(err)?, name, MAX_SAMPLES, Some(&open))
+    read_limited_with_nodata(open().map_err(err)?, name, MAX_SAMPLES, Some(&open), sidecar_nodata)
 }
 
 /// [`read`], holding at most `max` samples (the tests' small limit exercises the overviews), with
 /// `open` making more readers of the same file for decoding it on several threads.
 pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<Opener<'_>>) -> Result<Raster> {
+    read_limited_with_nodata(r, name, max, open, None)
+}
+
+/// [`read_limited`], with the no-data value a sidecar gives (`.aux.xml`, applied after reading by
+/// [`Raster::apply_pam`]): when the file has none of its own, its pixels aren't counted as rounded.
+pub(super) fn read_limited_with_nodata(
+    r: Reader<'_>,
+    name: &str,
+    max: usize,
+    open: Option<Opener<'_>>,
+    sidecar_nodata: Option<f64>,
+) -> Result<Raster> {
     let palette = !r.patches.is_empty();
     let limits = {
         let mut l = Limits::default();
@@ -878,6 +1002,8 @@ pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<O
     let mut dec = Decoder::new(r).map_err(err)?.with_limits(limits.clone());
     let (full_w, full_h) = dec.dimensions().map_err(err)?;
     let geo = geo_tags(&mut dec)?;
+    // The no-data value whose pixels aren't counted as rounded.
+    let uncounted = Uncounted::new(geo.nodata_exact, sidecar_nodata);
     // The bands' descriptions GDAL keeps in the file (an `.aux.xml` sidecar's are applied after).
     let described = dec
         .find_tag(Tag::Unknown(42112))
@@ -1010,7 +1136,19 @@ pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<O
             Err(e) => return Err(err(e)),
         }
     };
-    let (mut bands, data_type) = if let Some(buf) = whole {
+    let (mut bands, data_type, rounded) = if let Some(buf) = whole {
+        // Values f32 doesn't hold, counted by band (in their own pass: most types can't have any).
+        let mut rounded = vec![0u64; nbands];
+        if can_round(&buf) {
+            for j in 0..n.saturating_mul(nbands) {
+                if !held_exactly(&buf, j, uncounted) {
+                    let band = if planar { j / n.max(1) } else { j % nbands };
+                    if let Some(c) = rounded.get_mut(band) {
+                        *c += 1;
+                    }
+                }
+            }
+        }
         let (values, dt) = to_f32(buf);
         if values.len() < n.saturating_mul(nbands) {
             return Err(err("couldn't read every band"));
@@ -1032,13 +1170,14 @@ pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<O
             drop(values);
             bands
         };
-        (bands, dt)
+        (bands, dt, rounded)
     } else {
         let (iw, ih) = if decimate_by > 1 { (full_w, full_h) } else { (w, h) };
         let open = open.map(|o| (o, image, limits));
         // Already one vector per band.
-        decimate(&mut dec, iw, ih, nbands, planar, decimate_by, open)?
+        decimate(&mut dec, iw, ih, nbands, planar, decimate_by, uncounted, open)?
     };
+    let rounded = if rounded.iter().any(|n| *n > 0) { rounded } else { Vec::new() };
 
     if ycbcr {
         ycbcr_to_rgb(&mut bands);
@@ -1048,6 +1187,7 @@ pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<O
         let mut r = Raster::new(name, w, h, bands, super::unreferenced(w, h), Crs::LonLat, geo.nodata, color, data_type)?;
         r.georeferenced = false;
         r.overview = overview;
+        r.rounded = rounded;
         if let Some(p) = &described {
             r.apply_pam(p);
         }
@@ -1097,6 +1237,7 @@ pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<O
     };
     let mut r = Raster::new(name, w, h, bands, transform, crs, geo.nodata, color, data_type)?;
     r.overview = overview;
+    r.rounded = rounded;
     if let Some(p) = &described {
         r.apply_pam(p);
     }
@@ -1161,6 +1302,21 @@ pub(super) fn fits_bytes(r: &Raster, b: usize) -> bool {
     nodata_ok && (whole_bytes || s.count == 0)
 }
 
+/// The bands [`write`] writes of `r` given `band`: an RGB raster's colour bands (with a fourth as
+/// alpha when they are bytes and it is too, or when the raster says it is alpha), otherwise `band`
+/// alone.
+pub fn written_bands(r: &Raster, band: usize) -> Vec<usize> {
+    if !(matches!(r.color, ColorHint::Rgb { .. }) && r.bands.len() >= 3) {
+        return vec![band];
+    }
+    let alpha = if (0..3).all(|b| fits_bytes(r, b)) {
+        r.bands.len() >= 4 && fits_bytes(r, 3)
+    } else {
+        r.bands.len() >= 4 && matches!(r.color, ColorHint::Rgb { alpha: true })
+    };
+    (0..if alpha { 4 } else { 3 }).collect()
+}
+
 /// Writes a raster as a Deflate-compressed GeoTIFF: a colour raster's colour bands (RGB(A) bytes
 /// when they are 8-bit, else 32-bit floats, alpha kept), so it reads back in colour; otherwise
 /// `band` (0-based) as 32-bit floats. `band` is for rasters that aren't colour ones: a colour
@@ -1207,7 +1363,7 @@ pub fn write(r: &Raster, band: usize) -> Result<Vec<u8>> {
         }};
     }
     if rgb && let (Some(red), Some(green), Some(blue)) = (bytes(0), bytes(1), bytes(2)) {
-        let alpha = if r.bands.len() >= 4 { bytes(3) } else { None };
+        let alpha = if written_bands(r, band).contains(&3) { bytes(3) } else { None };
         let n = (w as usize) * (h as usize);
         if let Some(a) = alpha {
             let mut data = Vec::with_capacity(n * 4);
@@ -1231,7 +1387,7 @@ pub fn write(r: &Raster, band: usize) -> Result<Vec<u8>> {
         // their alpha band when they have one.
         let n = (w as usize) * (h as usize);
         let at = |b: &crate::raster::Band, i: usize| b.data.get(i).copied().unwrap_or(f32::NAN);
-        match r.bands.get(3).filter(|_| matches!(r.color, ColorHint::Rgb { alpha: true })) {
+        match r.bands.get(3).filter(|_| written_bands(r, band).contains(&3)) {
             Some(alpha) => {
                 let mut data = Vec::with_capacity(n * 4);
                 for i in 0..n {
@@ -2400,5 +2556,123 @@ mod tests {
         let bytes = write(&raster_vn2000, 0).unwrap();
         let back = read(std::io::Cursor::new(&bytes), "vn").unwrap();
         assert_eq!(back.crs, Crs::Epsg(5897));
+    }
+
+    /// A longitude/latitude GeoTIFF of `w` × `h` pixels of colour type `C`, a row to a strip, with
+    /// GDAL's no-data tag when `nodata` is given.
+    fn typed<C: tiff::encoder::colortype::ColorType>(w: u32, h: u32, data: &[C::Inner], nodata: Option<&str>) -> Vec<u8>
+    where
+        [C::Inner]: tiff::encoder::TiffValue,
+    {
+        let mut out = std::io::Cursor::new(Vec::new());
+        {
+            let mut enc = tiff::encoder::TiffEncoder::new(&mut out).unwrap();
+            let mut img = enc.new_image::<C>(w, h).unwrap();
+            img.rows_per_strip(1).unwrap();
+            let e = img.encoder();
+            e.write_tag(Tag::ModelPixelScaleTag, &[0.1f64, 0.1, 0.0][..]).unwrap();
+            e.write_tag(Tag::ModelTiepointTag, &[0.0f64, 0.0, 0.0, 10.0, 46.0, 0.0][..]).unwrap();
+            e.write_tag(Tag::GeoKeyDirectoryTag, &[1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326][..]).unwrap();
+            if let Some(nd) = nodata {
+                e.write_tag(Tag::GdalNodata, nd).unwrap();
+            }
+            img.write_data(data).unwrap();
+        }
+        out.into_inner()
+    }
+
+    #[test]
+    fn values_f32_cannot_hold_are_counted() {
+        use tiff::encoder::colortype::{Gray64Float, GrayI32, GrayI64, RGB32};
+        // Int32 past 16,777,216: 16777217 and 100000001 change, 16777216 itself doesn't.
+        let ids = read(std::io::Cursor::new(typed::<GrayI32>(2, 2, &[16_777_217, 16_777_216, 100_000_001, 7], None)), "ids").unwrap();
+        assert_eq!((ids.data_type.as_str(), ids.rounded.as_slice()), ("Int32", &[2u64][..]));
+        assert_eq!(ids.bands[0].data[2], 100_000_000.0);
+        let clean = read(std::io::Cursor::new(typed::<GrayI32>(2, 2, &[16_777_216, -16_777_216, 12_345, 7], None)), "c").unwrap();
+        assert!(clean.rounded.is_empty());
+        // Float64 with more digits than f32 keeps; NaN and the no-data value (past f32's range)
+        // aren't counted.
+        let f = [0.123_456_789_012_345, f64::MIN, 0.5, f64::NAN];
+        let r = read(std::io::Cursor::new(typed::<Gray64Float>(2, 2, &f, Some("-1.7976931348623157e+308"))), "f").unwrap();
+        assert_eq!(r.rounded, vec![1]);
+        let exact = read(std::io::Cursor::new(typed::<Gray64Float>(2, 2, &[0.5, 2.0, -3.25, 1e6], None)), "e").unwrap();
+        assert!(exact.rounded.is_empty());
+        // Int64 past 2^53: only the no-data value itself is left out, not one an f64 can't tell from it.
+        let ids = typed::<GrayI64>(2, 2, &[i64::MIN, i64::MIN + 1, 0, 1], Some("-9223372036854775808"));
+        assert_eq!(read(std::io::Cursor::new(ids), "ids").unwrap().rounded, vec![1]);
+        // A value that rounds onto the no-data value becomes no-data, so it is counted; the no-data
+        // value itself isn't.
+        let onto = read(std::io::Cursor::new(typed::<Gray64Float>(2, 2, &[1.000_000_01, 1.0, 0.5, 2.0], Some("1"))), "o").unwrap();
+        assert_eq!(onto.rounded, vec![1]);
+        // A no-data value only a sidecar gives isn't counted: 0.1 isn't, as no-data, but the f32
+        // nearest it, a value read exactly that the sidecar's value now masks, is, and so is
+        // 0.123456789012345.
+        // A directory of its own, removed even when an assertion fails, so no sidecar is left over.
+        let dir = tempfile::tempdir().unwrap();
+        let tif = dir.path().join("s.tif");
+        let px = [0.1, f64::from(0.1f32), 0.123_456_789_012_345, 2.0];
+        std::fs::write(&tif, typed::<Gray64Float>(2, 2, &px, None)).unwrap();
+        assert_eq!(crate::raster::read_path(&tif).unwrap().rounded, vec![2]);
+        let xml = r#"<PAMDataset><PAMRasterBand band="1"><NoDataValue>0.1</NoDataValue></PAMRasterBand></PAMDataset>"#;
+        std::fs::write(dir.path().join("s.tif.aux.xml"), xml).unwrap();
+        let side = crate::raster::read_path(&tif).unwrap();
+        assert_eq!((side.nodata, side.rounded.as_slice()), (Some(0.1), &[2u64][..]));
+        // The same with a NaN no-data tag, which leaves the sidecar's value in force.
+        std::fs::write(&tif, typed::<Gray64Float>(2, 2, &px, Some("nan"))).unwrap();
+        let nan = crate::raster::read_path(&tif).unwrap();
+        assert_eq!((nan.nodata, nan.rounded.as_slice()), (Some(0.1), &[2u64][..]));
+        // 64-bit whole numbers are compared as integers: 2^60 + 1 changes, 2^60 doesn't.
+        let big = read(std::io::Cursor::new(typed::<GrayI64>(2, 1, &[(1 << 60) + 1, 1 << 60], None)), "i64").unwrap();
+        assert_eq!(big.rounded, vec![1]);
+        // Interleaved bands are counted apart.
+        let rgb = read(std::io::Cursor::new(typed::<RGB32>(2, 1, &[1, 20_000_001, 3, 4, 5, 6], None)), "rgb").unwrap();
+        assert_eq!(rgb.rounded, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn a_reduced_read_counts_only_the_pixels_it_keeps() {
+        use tiff::encoder::colortype::GrayI32;
+        // Read at every second pixel, (0, 0), (2, 0), (0, 2) and (2, 2) are kept: only one of
+        // them is past 16,777,216, though four of the file's pixels are.
+        let big = 50_000_001;
+        #[rustfmt::skip]
+        let px = [big, big, 0, 0,
+                  big, 0, 0, 0,
+                  0, 0, 0, 0,
+                  0, 0, 0, big];
+        let r = read_limited(reader(std::io::Cursor::new(typed::<GrayI32>(4, 4, &px, None))).unwrap(), "ids", 4, None).unwrap();
+        assert_eq!((r.width, r.overview), (2, Some((4, 4))));
+        assert_eq!(r.rounded, vec![1]);
+    }
+
+    #[test]
+    fn chunks_decoded_on_several_threads_count_rounded_values() {
+        use tiff::encoder::colortype::GrayI32;
+        // 64 one-row strips (enough for several threads), read at every eighth pixel: the 64 kept
+        // pixels, all past 16,777,216, are counted once each, as one thread counts them.
+        let bytes = typed::<GrayI32>(64, 64, &[50_000_001; 64 * 64], None);
+        let many = read_threaded(&bytes, 100).unwrap();
+        let one = read_limited(reader(std::io::Cursor::new(&bytes)).unwrap(), "one", 100, None).unwrap();
+        assert_eq!((many.width, many.overview), (8, Some((64, 64))));
+        assert_eq!((many.rounded.as_slice(), one.rounded.as_slice()), (&[64u64][..], &[64u64][..]));
+    }
+
+    #[test]
+    fn no_data_samples_are_left_out_of_the_count_by_one_rule() {
+        use tiff::encoder::colortype::Gray64Float;
+        for c in crate::raster::NODATA_CASES {
+            let tif = typed::<Gray64Float>(2, 2, &c.samples, c.file);
+            let r = read_with_nodata(std::io::Cursor::new(tif), "c", c.sidecar).unwrap();
+            assert_eq!(r.rounded.iter().sum::<u64>(), c.counted, "file {:?}, sidecar {:?}", c.file, c.sidecar);
+        }
+    }
+
+    #[test]
+    fn whole_no_data_values_are_compared_exactly() {
+        use tiff::encoder::colortype::GrayI64;
+        for (file, samples, counted, _) in crate::raster::NODATA_WHOLE_CASES {
+            let tif = typed::<GrayI64>(2, 2, samples, Some(file));
+            assert_eq!(read(std::io::Cursor::new(tif), "c").unwrap().rounded.iter().sum::<u64>(), *counted, "no-data {file}");
+        }
     }
 }
