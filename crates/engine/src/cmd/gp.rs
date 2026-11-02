@@ -5,6 +5,7 @@ use rustgis_data::Dataset;
 use serde_json::{Value, json};
 
 use super::{need_layers, ps};
+use crate::project_log::now_ms;
 use crate::{CmdResult, CommandSpec as C, GpRecord, Session};
 
 pub fn commands() -> Vec<C> {
@@ -735,10 +736,6 @@ impl Inputs for MapInputs<'_> {
             embedded: rl.embedded.as_deref().map(|b| (rl.file_name.as_deref().unwrap_or("raster.tif"), b.as_slice())),
         })
     }
-}
-
-fn now_ms() -> u64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 fn run(s: &mut Session, p: &Value) -> CmdResult {

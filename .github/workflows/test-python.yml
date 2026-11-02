@@ -64,7 +64,9 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          extras="test,geopandas"
+          # pyogrio, which geopandas needs, has no Windows ARM64 wheel and won't build without GDAL.
+          extras="test"
+          if [ "$RUNNER_OS $RUNNER_ARCH" != "Windows ARM64" ]; then extras="$extras,geopandas"; fi
           if [ "${RUSTGIS_TEST_QT:-}" = "1" ]; then extras="$extras,qt"; fi
           python -m pip install "./apps/rustgis-python[$extras]" --config-settings="build-args=--features test-stores"
       - name: Test

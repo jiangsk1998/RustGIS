@@ -764,12 +764,12 @@ pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
 }
 
 /// Parameters without a built-in tool's output layer name, which stays in the session, so a task
-/// (or a model, or a notebook) from a file may set it: only `gp.run`'s `{"tool", "params"}` shape,
-/// only `params.output`, only for the tools in `rustgis_analysis::TOOLS`, which name their output
-/// layer and never a file through it (see `out_name` there), not GeoLibre or plugin tools, which may
-/// write theirs as files, and only a plain name, with no `/`, `\`, `.` or `:`. Anything else stays
-/// a place.
-fn layer_name_left_out<'a>(command: &str, params: &'a Value) -> std::borrow::Cow<'a, Value> {
+/// (or a model, or a notebook) from a file, or a plugin without `files`, may set it: only
+/// `gp.run`'s `{"tool", "params"}` shape, only `params.output`, only for the tools in
+/// `rustgis_analysis::TOOLS`, which name their output layer and never a file through it (see
+/// `out_name` there), not GeoLibre or plugin tools, which may write theirs as files, and only a
+/// plain name, with no `/`, `\`, `.` or `:`. Anything else stays a place.
+pub(crate) fn layer_name_left_out<'a>(command: &str, params: &'a Value) -> std::borrow::Cow<'a, Value> {
     use std::borrow::Cow;
     // Resolved as gp.run resolves it (by id or name, a built-in tool first), then held to the
     // built-in list, so the two can't drift: an external tool of a built-in's name isn't let in.
@@ -1091,6 +1091,7 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
         k if super::sharing::KINDS.iter().any(|x| x.0 == k) => {
             let (name, bytes, _) = super::sharing::share_bytes(s, k, p)?;
             super::sharing::note_label_classes(s, k, p);
+            super::sharing::note_export(s, k, p, &name);
             (name, bytes)
         }
         k => return Err(format!("unknown item '{k}'")),

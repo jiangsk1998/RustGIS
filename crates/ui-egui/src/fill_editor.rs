@@ -272,7 +272,9 @@ pub(crate) fn fills_editor(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tok
                 ui.horizontal(|ui| {
                     let c = f.color.unwrap_or(base.fill);
                     let mut cc = c32(c);
-                    if crate::widgets::color_button(ui, &mut cc).changed() {
+                    let resp = crate::widgets::color_button(ui, &mut cc);
+                    if resp.changed() {
+                        crate::widgets::one_step_per_press(app, &resp);
                         set(app, FillLayer { color: Some(rgba(cc)), ..f });
                     }
                     let mut from_symbol = f.color.is_none();
@@ -281,19 +283,27 @@ pub(crate) fn fills_editor(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tok
                     }
                 });
                 ui.end_row();
-                let number = |ui: &mut Ui, label: &str, v: f32, range: std::ops::RangeInclusive<f32>, suffix: &str| -> Option<f32> {
-                    let input_label = ui.label(tl!(label));
-                    let mut x = v;
-                    let r = ui.add(egui::DragValue::new(&mut x).range(range).speed(0.1).suffix(suffix)).labelled_by(input_label.id);
-                    ui.end_row();
-                    (r.changed() && x != v).then_some(x)
-                };
+                // A number changed, its command run straight after (one step to undo a drag).
+                let number =
+                    |app: &mut RustGisApp, ui: &mut Ui, label: &str, v: f32, range: std::ops::RangeInclusive<f32>, suffix: &str| {
+                        let input_label = ui.label(tl!(label));
+                        let mut x = v;
+                        let resp = ui.add(egui::DragValue::new(&mut x).range(range).speed(0.1).suffix(suffix)).labelled_by(input_label.id);
+                        ui.end_row();
+                        let changed = resp.changed() && x != v;
+                        if changed {
+                            crate::widgets::one_step_per_press(app, &resp);
+                        }
+                        changed.then_some(x)
+                    };
                 // A gradient's or shapeburst's second colour, and its stops between (set by command).
                 if let FillPattern::Gradient { color2, stops, .. } | FillPattern::Shapeburst { color2, stops, .. } = f.pattern {
                     let input_label = ui.label(tl!("Second color"));
                     ui.horizontal(|ui| {
                         let mut cc = c32(color2);
-                        if crate::widgets::color_button(ui, &mut cc).labelled_by(input_label.id).changed() {
+                        let resp = crate::widgets::color_button(ui, &mut cc).labelled_by(input_label.id);
+                        if resp.changed() {
+                            crate::widgets::one_step_per_press(app, &resp);
                             let mut pattern = f.pattern;
                             if let FillPattern::Gradient { color2, .. } | FillPattern::Shapeburst { color2, .. } = &mut pattern {
                                 *color2 = rgba(cc);
@@ -333,7 +343,7 @@ pub(crate) fn fills_editor(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tok
                             .on_hover_text(tl!("Straight across, in rings from its first point, or round its first point"))
                             .labelled_by(input_label.id);
                         ui.end_row();
-                        if let Some(a) = number(ui, "Angle", angle, 0.0..=360.0, "°") {
+                        if let Some(a) = number(app, ui, "Angle", angle, 0.0..=360.0, "°") {
                             set(app, with(shape, spread, a));
                         }
                         let input_label = ui.label(tl!("Spread"));
@@ -366,11 +376,11 @@ pub(crate) fn fills_editor(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tok
                         }
                         ui.end_row();
                         if let Some(d) = distance
-                            && let Some(d) = number(ui, "Distance", d, 0.0..=MAX_BURST_DISTANCE, " pt")
+                            && let Some(d) = number(app, ui, "Distance", d, 0.0..=MAX_BURST_DISTANCE, " pt")
                         {
                             set(app, with(Some(d), blur, ignore_rings));
                         }
-                        if let Some(b) = number(ui, "Blur", f32::from(blur), 0.0..=f32::from(MAX_BURST_BLUR), " px") {
+                        if let Some(b) = number(app, ui, "Blur", f32::from(blur), 0.0..=f32::from(MAX_BURST_BLUR), " px") {
                             set(app, with(distance, b.round() as u8, ignore_rings));
                         }
                         ui.label("");
@@ -385,16 +395,16 @@ pub(crate) fn fills_editor(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tok
                             pattern: FillPattern::Hatch { angle, spacing, width, offset },
                             ..f
                         };
-                        if let Some(a) = number(ui, "Angle", angle, 0.0..=360.0, "°") {
+                        if let Some(a) = number(app, ui, "Angle", angle, 0.0..=360.0, "°") {
                             set(app, hatch(a, spacing, width, offset));
                         }
-                        if let Some(s) = number(ui, "Spacing", spacing, PATTERN_SPACING, " pt") {
+                        if let Some(s) = number(app, ui, "Spacing", spacing, PATTERN_SPACING, " pt") {
                             set(app, hatch(angle, s, width, offset));
                         }
-                        if let Some(w) = number(ui, "Line width", width, 0.0..=MAX_HATCH_WIDTH, " pt") {
+                        if let Some(w) = number(app, ui, "Line width", width, 0.0..=MAX_HATCH_WIDTH, " pt") {
                             set(app, hatch(angle, spacing, w, offset));
                         }
-                        if let Some(o) = number(ui, "Offset", offset, -MAX_PATTERN_OFFSET..=MAX_PATTERN_OFFSET, " pt") {
+                        if let Some(o) = number(app, ui, "Offset", offset, -MAX_PATTERN_OFFSET..=MAX_PATTERN_OFFSET, " pt") {
                             set(app, hatch(angle, spacing, width, o));
                         }
                     }
@@ -416,16 +426,16 @@ pub(crate) fn fills_editor(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tok
                             .response
                             .labelled_by(input_label.id);
                         ui.end_row();
-                        if let Some(s) = number(ui, "Size", size, 0.0..=MAX_DOT_SIZE, " pt") {
+                        if let Some(s) = number(app, ui, "Size", size, 0.0..=MAX_DOT_SIZE, " pt") {
                             set(app, dots(marker, s, spacing, displacement));
                         }
-                        if let Some(s) = number(ui, "Spacing across", spacing[0], PATTERN_SPACING, " pt") {
+                        if let Some(s) = number(app, ui, "Spacing across", spacing[0], PATTERN_SPACING, " pt") {
                             set(app, dots(marker, size, [s, spacing[1]], displacement));
                         }
-                        if let Some(s) = number(ui, "Spacing down", spacing[1], PATTERN_SPACING, " pt") {
+                        if let Some(s) = number(app, ui, "Spacing down", spacing[1], PATTERN_SPACING, " pt") {
                             set(app, dots(marker, size, [spacing[0], s], displacement));
                         }
-                        if let Some(d) = number(ui, "Rows shifted", displacement[0], 0.0..=(spacing[0] - 0.01).max(0.0), " pt") {
+                        if let Some(d) = number(app, ui, "Rows shifted", displacement[0], 0.0..=(spacing[0] - 0.01).max(0.0), " pt") {
                             set(app, dots(marker, size, spacing, [d, displacement[1]]));
                         }
                     }

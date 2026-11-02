@@ -229,6 +229,17 @@ pub const RULES: &[(&str, Rule)] = &[
     ("join", Rule::Join),
 ];
 
+impl Rule {
+    /// Whether this rule can combine values of the given field type.
+    pub fn fits(self, ty: FieldType) -> bool {
+        match self {
+            Self::Sum | Self::Mean => ty.is_numeric(),
+            Self::Min | Self::Max => ty.is_numeric() || ty == FieldType::Text,
+            _ => true,
+        }
+    }
+}
+
 /// A merge rule for one join field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Merge {
@@ -328,12 +339,7 @@ pub fn parse_merge(join: &Dataset, v: Option<&Json>) -> Result<Vec<Merge>, Strin
             )
         })?;
         let ty = join.fields.get(field).map(|f| f.ty).unwrap_or(FieldType::Text);
-        let fits = match rule {
-            Rule::Sum | Rule::Mean => ty.is_numeric(),
-            Rule::Min | Rule::Max => ty.is_numeric() || ty == FieldType::Text,
-            _ => true,
-        };
-        if !fits {
+        if !rule.fits(ty) {
             let needs = if matches!(rule, Rule::Min | Rule::Max) { "a numeric or text field" } else { "a numeric field" };
             return Err(format!("merge rule '{rule_name}' needs {needs} ('{name}' is not)"));
         }

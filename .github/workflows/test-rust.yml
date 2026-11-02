@@ -34,6 +34,9 @@ jobs:
       # Line tables, not full debug info: backtraces keep their files and lines, and the test
       # builds compile, link and cache faster (Windows is slow to write the debug info).
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # At the dev profile's opt-level 1, safe code in rustgis-render corrupts the heap on Windows
+      # ARM64, and only at that level: a compiler bug, it seems (#1222).
+      CARGO_PROFILE_DEV_OPT_LEVEL: ${{ matrix.os == 'windows-11-arm' && '2' || '1' }}
     strategy:
       fail-fast: false
       matrix:

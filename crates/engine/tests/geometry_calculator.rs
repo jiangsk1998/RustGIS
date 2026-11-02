@@ -28,7 +28,7 @@ fn selected_units_overwrite_and_undo() {
     p["overwrite"] = json!(true);
     assert_eq!(s.run("edit.calculateGeometry", &p).unwrap()["rows"], 1);
     let value = s.map().layer(id).unwrap().dataset.value(1, 0).as_f64().unwrap();
-    assert!((222.0..223.0).contains(&value));
+    assert!((222.6..222.7).contains(&value), "{value}"); // the ellipsoid: the sphere gives 222.39
     assert_eq!(s.map().layer(id).unwrap().dataset.value(0, 0).as_f64(), Some(99.0));
     s.run("edit.undo", &json!({})).unwrap();
     assert_eq!(s.map().layer(id).unwrap().dataset.value(1, 0).as_f64(), Some(99.0));
@@ -50,6 +50,22 @@ fn selected_units_overwrite_and_undo() {
 }
 
 #[test]
+fn areas_are_on_the_wgs84_ellipsoid() {
+    // An equator 1° × 1° box measured by GeographicLib itself (pyproj.Geod / Polygon.Compute on
+    // WGS 84); the attribute table's Calculate Geometry values are checked against those (#939).
+    let ring = vec![Coord::new(0.0, 0.0), Coord::new(1.0, 0.0), Coord::new(1.0, 1.0), Coord::new(0.0, 1.0)];
+    let (mut s, id) = session(GeometryType::Polygon, vec![Some(Geometry::Polygon(vec![vec![ring]]))]);
+    s.run("edit.calculateGeometry", &json!({"layer":id,"field":"result","overwrite":true,"property":"area","unit":"m2","scope":"all"}))
+        .unwrap();
+    let actual = s.map().layer(id).unwrap().dataset.value(0, 0).as_f64().unwrap();
+    assert!((actual - 12_308_778_361.469).abs() < 0.001, "{actual}");
+    s.run("edit.calculateGeometry", &json!({"layer":id,"field":"result","overwrite":true,"property":"perimeter","unit":"m","scope":"all"}))
+        .unwrap();
+    let actual = s.map().layer(id).unwrap().dataset.value(0, 0).as_f64().unwrap();
+    assert!((actual - 443_770.917).abs() < 0.001, "{actual}");
+}
+
+#[test]
 fn polygon_holes_multipart_and_area_units() {
     let ring = |x: f64, size: f64| {
         vec![Coord::new(x, 0.0), Coord::new(x + size, 0.0), Coord::new(x + size, size), Coord::new(x, size), Coord::new(x, 0.0)]
@@ -57,8 +73,9 @@ fn polygon_holes_multipart_and_area_units() {
     let outer = ring(0.0, 0.01);
     let hole = ring(0.002, 0.002);
     let part = ring(0.02, 0.005);
-    let expected = rustgis_engine::geom::geodesic_ring_area_m2(&outer) - rustgis_engine::geom::geodesic_ring_area_m2(&hole)
-        + rustgis_engine::geom::geodesic_ring_area_m2(&part);
+    let expected = rustgis_engine::geom::wgs84_ring_perimeter_area_m2(&outer).1
+        - rustgis_engine::geom::wgs84_ring_perimeter_area_m2(&hole).1
+        + rustgis_engine::geom::wgs84_ring_perimeter_area_m2(&part).1;
     let (mut s, id) = session(GeometryType::Polygon, vec![Some(Geometry::Polygon(vec![vec![outer, hole], vec![part]]))]);
     for (unit, divisor) in [("m2", 1.0), ("km2", 1e6), ("ha", 1e4), ("ac", 4046.8564224)] {
         s.run("edit.calculateGeometry", &json!({"layer":id,"field":"result","overwrite":true,"property":"area","unit":unit,"scope":"all"}))

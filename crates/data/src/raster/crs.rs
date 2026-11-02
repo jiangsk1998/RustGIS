@@ -327,6 +327,27 @@ impl Crs {
         }
     }
 
+    /// Whether converting to WGS 84 leaves out a datum shift, so positions in longitude/latitude
+    /// may be off by up to a few hundred metres: a custom system with an ellipsoid (`+ellps`, `+a`
+    /// or `+R`) but no `+towgs84`, `+datum` or `+nadgrids`. That is what reading a WKT datum with
+    /// no known shift writes, as `+a`/`+rf` even on WGS 84's axes (SVY21's), and the reading says
+    /// so. `+ellps=WGS84` and `+ellps=GRS80` alone need no shift (GRS 80 datums the reader knows
+    /// get a null one), nor does a Mercator on Web Mercator's sphere of radius 6378137 m. Written
+    /// back in the same system, positions come back exact.
+    pub fn lacks_datum_shift(self) -> bool {
+        let Some(def) = self.custom_def() else { return false };
+        let keys: Vec<&str> = def.proj4.split_whitespace().collect();
+        let has = |prefix: &str| keys.iter().any(|k| k.starts_with(prefix));
+        let shifted = has("+towgs84=") || has("+datum=") || has("+nadgrids=");
+        // Web Mercator's sphere, of WGS 84's major axis, is a projection's, not a datum's: in a
+        // Mercator only, as a datum on that sphere elsewhere is unknown (and reading it says so).
+        let axis = |key: &str| keys.iter().find_map(|k| k.strip_prefix(key)?.parse::<f64>().ok()).is_some_and(|v| v == 6_378_137.0);
+        let sphere = keys.contains(&"+proj=merc") && (axis("+R=") || (axis("+a=") && axis("+b=")));
+        let wgs84 = keys.contains(&"+ellps=WGS84") || keys.contains(&"+ellps=GRS80") || sphere;
+        let ellipsoid = has("+ellps=") || has("+a=") || has("+R=");
+        ellipsoid && !wgs84 && !shifted
+    }
+
     /// A transformer between this system and WGS 84 longitude/latitude.
     pub fn transformer(self) -> Result<Transformer, String> {
         Ok(Transformer {

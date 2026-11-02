@@ -14,7 +14,8 @@
 #
 #   Release - builds the Windows installers, zip and MSIX, macOS DMGs, Linux
 #             tarballs, .deb/.rpm packages and AppImages, installs them where
-#             it can, and writes SHA256SUMS; its publish job is skipped
+#             it can, builds the static web-app zip, and writes SHA256SUMS;
+#             its publish job is skipped
 #
 # Deliberately not included: Deploy web.rustgis.app publishes on every push to
 # `main`, so it is continuously covered, and dispatching it here would publish

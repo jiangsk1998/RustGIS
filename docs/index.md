@@ -36,9 +36,10 @@ Map operations are commands you can script from the command line, Python or the 
 
 -   **Cartography and 3D**
 
-    Graduated colours, curved line labels, stacked line symbols, publication layouts and map
-    series; a 3D globe, projection presets and supported EPSG/ESRI systems, terrain and
-    extrusions, and maps of the Moon, Mars and other worlds.
+    Graduated colours, symbols by expression, curved line labels, stacked line symbols and
+    polygon fills, publication layouts and map series; a 3D globe, projection presets and
+    supported EPSG/ESRI systems, terrain and extrusions, and maps of the Moon, Mars and other
+    worlds.
     [Cartography](user-guide/cartography.md) · [Maps](user-guide/maps.md) · [Layouts](user-guide/layouts.md)
 
 -   **Analysis**

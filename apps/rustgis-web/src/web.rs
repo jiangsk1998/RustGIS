@@ -471,6 +471,14 @@ async fn read_together(files: Vec<web_sys::File>, mark: &str, inbox: &Inbox, not
     let mut read = Vec::new();
     for file in files {
         let name = file.name();
+        let shortcut = mark == rustgis_ui_egui::SHORTCUT_PICK || (mark.is_empty() && name.to_ascii_lowercase().ends_with(".rgisshortcuts"));
+        if shortcut && file.size() > rustgis_ui_egui::SHORTCUT_FILE_MAX_BYTES as f64 {
+            notes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((rustgis_ui_egui::tl!("Shortcut file exceeds the size limit.").into(), true));
+            continue;
+        }
         if let Some(bytes) = crate::parts::read_file(file, notes.clone()).await {
             read.push((name, bytes));
         }
@@ -936,6 +944,7 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
             // So does a file picked for a tool's file parameter, which goes to the Tools pane.
             let tool_exts = purpose.strip_prefix(rustgis_ui_egui::TOOL_FILE_PURPOSE);
             let mark = match (purpose, tool_exts) {
+                ("shortcuts", _) => rustgis_ui_egui::SHORTCUT_PICK,
                 ("text", _) => rustgis_ui_egui::DELIMITED_PICK,
                 ("shapefile", _) => rustgis_ui_egui::SHAPEFILE_PICK,
                 (_, Some(_)) => rustgis_ui_egui::TOOL_FILE_PICK,
@@ -944,6 +953,8 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
             let dialog = if let Some(exts) = tool_exts {
                 let exts: Vec<&str> = exts.split(',').filter(|e| !e.is_empty()).collect();
                 if exts.is_empty() { rfd::AsyncFileDialog::new() } else { rfd::AsyncFileDialog::new().add_filter(exts.join(", "), &exts) }
+            } else if purpose == "shortcuts" {
+                rfd::AsyncFileDialog::new().add_filter(rustgis_ui_egui::tl!("Keyboard shortcuts"), &["json", "rgisshortcuts"])
             } else if purpose == "shapefile" {
                 rfd::AsyncFileDialog::new().add_filter("Shapefile", &["shp", "dbf", "shx", "prj", "cpg", "zip"])
             } else if purpose == "project" {

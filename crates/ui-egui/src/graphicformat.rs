@@ -147,7 +147,8 @@ pub fn show(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) {
     if settled.size {
         save(app, json!({"fontSize": size}));
     }
-    if settled.color {
+    if let Some(resp) = &settled.color {
+        crate::widgets::one_step_per_press(app, resp);
         save(app, json!({"fill": crate::theme::rgba(color).hex8()}));
     }
     if settled.bold {

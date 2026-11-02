@@ -78,6 +78,7 @@ fn add_layer(s: &mut Session, p: &Value) -> CmdResult {
         let info = src.info();
         let mut ds = rustgis_data::Dataset::new(name.clone(), info.geometry_type, info.fields.clone());
         ds.crs = src.crs();
+        ds.zm_dropped = info.zm_dropped;
         let path = path.to_string_lossy().into_owned();
         ds.source = Some(path.clone());
         let n = editable.features.len();

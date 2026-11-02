@@ -1,0 +1,83 @@
+# Fuzz targets for RustGIS's file readers (see README.md). This crate is not a member of the
+# workspace: `cargo build`, `cargo xtask ci`, the wasm build and `cargo deny` never see it. It needs
+# nightly Rust and cargo-fuzz, which only the fuzz workflow installs.
+[package]
+name = "rustgis-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace, so the main one doesn't adopt it.
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rustgis-data = { path = "../crates/data" }
+rustgis-engine = { path = "../crates/engine" }
+rustgis-tiles = { path = "../crates/tiles" }
+serde_json = "1"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "read_layers"
+path = "fuzz_targets/read_layers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sniff"
+path = "fuzz_targets/sniff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "geotiff"
+path = "fuzz_targets/geotiff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wkt"
+path = "fuzz_targets/wkt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wkb"
+path = "fuzz_targets/wkb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mvt"
+path = "fuzz_targets/mvt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "project"
+path = "fuzz_targets/project.rs"
+test = false
+doc = false
+bench = false
+
+# Writes the seed corpus: `cargo run --release --bin seeds` (see README.md).
+[[bin]]
+name = "seeds"
+path = "src/bin/seeds.rs"
+test = false
+doc = false
+bench = false

@@ -4,7 +4,7 @@
 //! Conforms to RustGIS zero-panic architecture: bounded allocations, typed error handling,
 //! preservation of target ordering, schema preservation, and deterministic collision handling.
 
-use rustgis_data::{Dataset, Field, Value};
+use rustgis_data::{Dataset, Field, FieldType, Value};
 use std::collections::HashMap;
 use std::fmt::Write;
 
@@ -68,6 +68,15 @@ impl JoinKey {
         }
     }
 
+    /// Extracts a [`JoinKey`] for the given comparison: under [`KeyComparison::NumberAsText`] a
+    /// whole number is written out in full (`47157000100`, `-5`), so it equals the same digits as text.
+    pub(crate) fn from_value_compared(v: &Value, comparison: KeyComparison) -> Option<Self> {
+        match (comparison, Self::from_value(v)?) {
+            (KeyComparison::NumberAsText, JoinKey::Int(i)) => Some(JoinKey::Text(i.to_string())),
+            (_, key) => Some(key),
+        }
+    }
+
     /// User-friendly display representation of the key for error messages.
     pub fn display(&self) -> String {
         match self {
@@ -79,15 +88,31 @@ impl JoinKey {
     }
 }
 
-/// Validates that target key and source key fields have compatible data types.
-pub fn validate_key_compatibility(target_field: &Field, source_field: &Field) -> Result<(), String> {
+/// How the values of two compatible key fields are compared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyComparison {
+    /// Same type, or both numeric: values compared as they are.
+    Exact,
+    /// A Text key against an Integer key (an all-digit id typed as a number in one file and as
+    /// text in the other): the numbers are written out in full and compared with the text exactly,
+    /// so leading zeros stay meaningful (`"01001"` does not match `1001`). This follows the values,
+    /// not the side they come from: a whole number on either side (also a whole `Float` that a
+    /// SQLite-backed Integer column can hold) is compared as its text.
+    NumberAsText,
+}
+
+/// How the values of the target and source key fields are compared, or why they can't be.
+pub(crate) fn key_comparison(target_field: &Field, source_field: &Field) -> Result<KeyComparison, String> {
     let t_ty = target_field.ty;
     let s_ty = source_field.ty;
     if t_ty == s_ty || (t_ty.is_numeric() && s_ty.is_numeric()) {
-        Ok(())
+        Ok(KeyComparison::Exact)
+    } else if matches!((t_ty, s_ty), (FieldType::Text, FieldType::Integer) | (FieldType::Integer, FieldType::Text)) {
+        Ok(KeyComparison::NumberAsText)
     } else {
         Err(format!(
-            "key field type mismatch: target field '{}' is {}, but source field '{}' is {}",
+            "key field type mismatch: target field '{}' is {}, but source field '{}' is {}; \
+             convert one key to the other's type with Add Field and Calculate Field",
             target_field.name,
             t_ty.label(),
             source_field.name,
@@ -112,14 +137,21 @@ pub struct JoinFieldOptions<'a> {
     pub output_name: String,
 }
 
-/// Result metadata from a successful Join Field execution.
+/// Result metadata from a successful Join Field execution. Only `join_field` builds one, so
+/// it is `non_exhaustive`: a new count can be added without breaking callers.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct JoinFieldReport {
     pub matched_records: usize,
     pub unmatched_records: usize,
     pub total_records: usize,
     pub transferred_fields: usize,
     pub duplicate_keys: usize,
+    /// Unmatched target records whose key equals a source key once leading zeros are dropped
+    /// (`"01001"` against `1001`): compared as written, they don't match.
+    pub leading_zero_mismatches: usize,
+    /// The first such pair as written, target key then source key (`"01001"`, `1001`).
+    pub leading_zero_example: Option<(String, String)>,
 }
 
 impl JoinFieldReport {
@@ -133,6 +165,31 @@ impl JoinFieldReport {
         }
         msg
     }
+
+    /// A warning when records were left unmatched only by leading zeros, or `None`.
+    pub fn leading_zero_notice(&self) -> Option<String> {
+        let (target_key, source_key) = self.leading_zero_example.as_ref().filter(|_| self.leading_zero_mismatches > 0)?;
+        Some(format!(
+            "Warning: {} record(s) left unmatched because one key has leading zeros the other lacks \
+             (first: target key {target_key}, source key {source_key}); keys are compared as written, \
+             so give both the same digits, e.g. as text with the zeros kept",
+            self.leading_zero_mismatches
+        ))
+    }
+}
+
+/// An all-digit text key with leading zeros, without them (`"01001"` → `"1001"`, `"00"` → `"0"`).
+fn without_leading_zeros(s: &str) -> Option<&str> {
+    if s.len() < 2 || !s.starts_with('0') || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let rest = s.trim_start_matches('0');
+    Some(if rest.is_empty() { "0" } else { rest })
+}
+
+/// A key value as the user wrote it: text quoted, numbers bare.
+fn written(v: &Value) -> String {
+    JoinKey::from_value(v).map(|k| k.display()).unwrap_or_default()
 }
 
 /// Executes a non-spatial attribute join from `source` onto `target`.
@@ -156,7 +213,7 @@ pub fn join_field(target: &Dataset, source: &Dataset, opts: &JoinFieldOptions<'_
     let source_key_field = source.fields.get(source_key_idx).ok_or_else(|| "source key field missing".to_string())?;
 
     // 2. Validate key type compatibility
-    validate_key_compatibility(target_key_field, source_key_field)?;
+    let comparison = key_comparison(target_key_field, source_key_field)?;
 
     // 3. Resolve which source fields to transfer
     let transfer_indices: Vec<usize> = match opts.fields_to_transfer {
@@ -214,7 +271,7 @@ pub fn join_field(target: &Dataset, source: &Dataset, opts: &JoinFieldOptions<'_
 
     for (s_idx, s_feat) in source.features.iter().enumerate() {
         let val = s_feat.attrs.get(source_key_idx).unwrap_or(&Value::Null);
-        let Some(key) = JoinKey::from_value(val) else {
+        let Some(key) = JoinKey::from_value_compared(val, comparison) else {
             // Null or non-finite keys in source cannot match
             continue;
         };
@@ -238,6 +295,22 @@ pub fn join_field(target: &Dataset, source: &Dataset, opts: &JoinFieldOptions<'_
         }
     }
 
+    // Source text keys with leading zeros, by their digits without them: a target number that
+    // lost its zeros (`1001` for `"01001"`) doesn't match, and the report says so.
+    let mut zero_padded_sources: HashMap<String, usize> = HashMap::new();
+    if comparison == KeyComparison::NumberAsText {
+        for (s_idx, s_feat) in source.features.iter().enumerate() {
+            if let Some(Value::Text(text)) = s_feat.attrs.get(source_key_idx)
+                && let Some(digits) = without_leading_zeros(text)
+            {
+                zero_padded_sources.entry(digits.to_string()).or_insert(s_idx);
+            }
+        }
+    }
+    let source_key_value = |s_idx: usize| source.features.get(s_idx).and_then(|f| f.attrs.get(source_key_idx)).unwrap_or(&Value::Null);
+    let mut leading_zero_mismatches = 0usize;
+    let mut leading_zero_example = None;
+
     // 6. Join records into target
     let target_len = target.features.len();
     let mut matched_records = 0usize;
@@ -260,7 +333,22 @@ pub fn join_field(target: &Dataset, source: &Dataset, opts: &JoinFieldOptions<'_
         new_attrs.reserve(transfer_indices.len());
 
         let t_val = t_feat.attrs.get(target_key_idx).unwrap_or(&Value::Null);
-        let matching_s_idx = JoinKey::from_value(t_val).and_then(|k| source_index.get(&k).copied());
+        let t_key = JoinKey::from_value_compared(t_val, comparison);
+        let matching_s_idx = t_key.as_ref().and_then(|k| source_index.get(k).copied());
+        if matching_s_idx.is_none()
+            && comparison == KeyComparison::NumberAsText
+            && let Some(JoinKey::Text(text)) = &t_key
+        {
+            // A target text key with leading zeros against a source key without them, or a target
+            // key without them against a source text key with them.
+            let near = without_leading_zeros(text)
+                .and_then(|digits| source_index.get(&JoinKey::Text(digits.to_string())).copied())
+                .or_else(|| zero_padded_sources.get(text).copied());
+            if let Some(s_idx) = near {
+                leading_zero_mismatches += 1;
+                leading_zero_example.get_or_insert_with(|| (written(t_val), written(source_key_value(s_idx))));
+            }
+        }
 
         if let Some(s_idx) = matching_s_idx {
             matched_records += 1;
@@ -287,6 +375,8 @@ pub fn join_field(target: &Dataset, source: &Dataset, opts: &JoinFieldOptions<'_
         total_records: target_len,
         transferred_fields: transfer_indices.len(),
         duplicate_keys: duplicate_count,
+        leading_zero_mismatches,
+        leading_zero_example,
     };
 
     Ok((out, report))
@@ -538,7 +628,7 @@ mod tests {
     #[test]
     fn test_incompatible_key_types_error() {
         let target = make_table("target", vec![("key", FieldType::Text)], vec![]);
-        let source = make_table("source", vec![("key", FieldType::Integer)], vec![]);
+        let source = make_table("source", vec![("key", FieldType::Boolean)], vec![]);
         let opts = JoinFieldOptions {
             target_field: "key",
             join_field: "key",
@@ -549,6 +639,300 @@ mod tests {
         };
         let err = join_field(&target, &source, &opts).unwrap_err();
         assert!(err.contains("key field type mismatch"));
+        assert!(err.contains("Add Field and Calculate Field"), "{err}");
+    }
+
+    fn key_opts(duplicate_strategy: DuplicateStrategy) -> JoinFieldOptions<'static> {
+        JoinFieldOptions {
+            target_field: "GEOID",
+            join_field: "GEOID",
+            fields_to_transfer: None,
+            prefix: "",
+            duplicate_strategy,
+            output_name: "out".into(),
+        }
+    }
+
+    #[test]
+    fn test_text_key_matches_integer_key_both_ways() {
+        // TIGER tracts store GEOID as text; the Census Gazetteer CSV reads it as a number.
+        let tracts = make_table(
+            "tracts",
+            vec![("GEOID", FieldType::Text)],
+            vec![vec![Value::Text("47157000100".into())], vec![Value::Text("47157000200".into())]],
+        );
+        let gazetteer = make_table(
+            "gazetteer",
+            vec![("GEOID", FieldType::Integer), ("ALAND", FieldType::Integer)],
+            vec![vec![Value::Int(47157000200), Value::Int(2)], vec![Value::Int(47157000100), Value::Int(1)]],
+        );
+        let (out, rep) = join_field(&tracts, &gazetteer, &key_opts(DuplicateStrategy::First)).unwrap();
+        assert_eq!(rep.matched_records, 2);
+        assert_eq!(out.features[0].attrs[1], Value::Int(1));
+        assert_eq!(out.features[1].attrs[1], Value::Int(2));
+        // The key fields keep their own types.
+        assert_eq!(out.fields[0].ty, FieldType::Text);
+
+        let (out, rep) = join_field(&gazetteer, &tracts, &key_opts(DuplicateStrategy::First)).unwrap();
+        assert_eq!(rep.matched_records, 2);
+        assert_eq!(out.fields[0].ty, FieldType::Integer);
+        assert_eq!(out.features[0].attrs[0], Value::Int(47157000200));
+    }
+
+    #[test]
+    fn test_number_as_text_is_exact() {
+        let target = make_table(
+            "target",
+            vec![("GEOID", FieldType::Text)],
+            vec![
+                vec![Value::Text("01001".into())],
+                vec![Value::Text("1001".into())],
+                vec![Value::Text("-5".into())],
+                vec![Value::Text(" 7".into())],
+                vec![Value::Text("7.0".into())],
+                vec![Value::Null],
+            ],
+        );
+        let source = make_table(
+            "source",
+            vec![("GEOID", FieldType::Integer), ("tag", FieldType::Text)],
+            vec![
+                vec![Value::Int(1001), Value::Text("county".into())],
+                vec![Value::Int(-5), Value::Text("negative".into())],
+                vec![Value::Int(7), Value::Text("seven".into())],
+                vec![Value::Null, Value::Text("null".into())],
+            ],
+        );
+        let (out, rep) = join_field(&target, &source, &key_opts(DuplicateStrategy::First)).unwrap();
+        let tags: Vec<&Value> = out.features.iter().map(|f| &f.attrs[1]).collect();
+        // Leading zeros stay meaningful, text isn't trimmed or parsed, and nulls never match.
+        assert_eq!(
+            tags,
+            [&Value::Null, &Value::Text("county".into()), &Value::Text("negative".into()), &Value::Null, &Value::Null, &Value::Null]
+        );
+        assert_eq!(rep.matched_records, 2);
+        // Only "01001" is a leading-zero miss; " 7" and "7.0" aren't digits, and nulls aren't keys.
+        assert_eq!(rep.leading_zero_mismatches, 1);
+        assert_eq!(rep.leading_zero_example, Some(("\"01001\"".into(), "1001".into())));
+        let notice = rep.leading_zero_notice().unwrap();
+        assert!(notice.contains("1 record(s) left unmatched"), "{notice}");
+        assert!(notice.contains("target key \"01001\", source key 1001"), "{notice}");
+    }
+
+    #[test]
+    fn test_leading_zero_misses_are_reported_both_ways() {
+        // Target numbers that lost their zeros against source text that kept them.
+        let target = make_table(
+            "target",
+            vec![("GEOID", FieldType::Integer)],
+            vec![vec![Value::Int(1001)], vec![Value::Int(7)], vec![Value::Int(0)], vec![Value::Int(42)], vec![Value::Int(5)]],
+        );
+        let source = make_table(
+            "source",
+            vec![("GEOID", FieldType::Text), ("tag", FieldType::Text)],
+            vec![
+                vec![Value::Text("01001".into()), Value::Text("county".into())],
+                vec![Value::Text("007".into()), Value::Text("seven".into())],
+                vec![Value::Text("00".into()), Value::Text("zero".into())],
+                vec![Value::Text("42".into()), Value::Text("answer".into())],
+                vec![Value::Text("0x5".into()), Value::Text("hex".into())],
+            ],
+        );
+        let (out, rep) = join_field(&target, &source, &key_opts(DuplicateStrategy::First)).unwrap();
+        assert_eq!(out.features.iter().filter(|f| f.attrs[1] != Value::Null).count(), 1, "only 42 matches");
+        assert_eq!((rep.matched_records, rep.leading_zero_mismatches), (1, 3));
+        assert_eq!(rep.leading_zero_example, Some(("1001".into(), "\"01001\"".into())));
+        assert!(rep.leading_zero_notice().unwrap().contains("3 record(s) left unmatched"));
+
+        // The same tables the other way round: target text with zeros against source numbers.
+        let (_, rep) = join_field(&source, &target, &key_opts(DuplicateStrategy::First)).unwrap();
+        assert_eq!((rep.matched_records, rep.leading_zero_mismatches), (1, 3));
+        assert_eq!(rep.leading_zero_example, Some(("\"01001\"".into(), "1001".into())));
+    }
+
+    #[test]
+    fn test_no_leading_zero_notice_without_a_miss() {
+        // Every key matches, or misses with no near match: no notice.
+        let target = make_table(
+            "target",
+            vec![("GEOID", FieldType::Text)],
+            vec![vec![Value::Text("0100".into())], vec![Value::Text("0200".into())]],
+        );
+        let source = make_table(
+            "source",
+            vec![("GEOID", FieldType::Integer), ("tag", FieldType::Text)],
+            vec![vec![Value::Int(100), Value::Text("hundred".into())], vec![Value::Int(300), Value::Text("other".into())]],
+        );
+        let (_, rep) = join_field(&target, &source, &key_opts(DuplicateStrategy::First)).unwrap();
+        assert_eq!((rep.matched_records, rep.leading_zero_mismatches), (0, 1), "premise: \"0100\" is a miss, \"0200\" isn't near");
+        let clean =
+            make_table("clean", vec![("GEOID", FieldType::Text)], vec![vec![Value::Text("100".into())], vec![Value::Text("200".into())]]);
+        let (_, rep) = join_field(&clean, &source, &key_opts(DuplicateStrategy::First)).unwrap();
+        assert_eq!((rep.matched_records, rep.leading_zero_mismatches, &rep.leading_zero_example), (1, 0, &None));
+        assert_eq!(rep.leading_zero_notice(), None);
+        // Same-type text keys are compared exactly, as before, and aren't second-guessed.
+        let text_source = make_table("ts", vec![("GEOID", FieldType::Text)], vec![vec![Value::Text("100".into())]]);
+        let (_, rep) = join_field(&target, &text_source, &key_opts(DuplicateStrategy::First)).unwrap();
+        assert_eq!((rep.matched_records, rep.leading_zero_mismatches), (0, 0));
+    }
+
+    #[test]
+    fn test_without_leading_zeros() {
+        assert_eq!(without_leading_zeros("01001"), Some("1001"));
+        assert_eq!(without_leading_zeros("00"), Some("0"));
+        assert_eq!(without_leading_zeros("000120"), Some("120"));
+        for s in ["", "0", "1001", "10", "0x5", "0 1", "-01", "01.0", "０1"] {
+            assert_eq!(without_leading_zeros(s), None, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn test_number_as_text_duplicate_keys() {
+        let target = make_table("target", vec![("GEOID", FieldType::Text)], vec![vec![Value::Text("42".into())]]);
+        let source = make_table(
+            "source",
+            vec![("GEOID", FieldType::Integer), ("tag", FieldType::Text)],
+            vec![vec![Value::Int(42), Value::Text("first".into())], vec![Value::Int(42), Value::Text("last".into())]],
+        );
+        let (out, rep) = join_field(&target, &source, &key_opts(DuplicateStrategy::Last)).unwrap();
+        assert_eq!(out.features[0].attrs[1], Value::Text("last".into()));
+        assert_eq!(rep.duplicate_keys, 1);
+        let err = join_field(&target, &source, &key_opts(DuplicateStrategy::Error)).unwrap_err();
+        assert!(err.contains("duplicate key \"42\""), "{err}");
+    }
+
+    #[test]
+    fn test_text_key_against_double_key_is_refused() {
+        let target = make_table("target", vec![("GEOID", FieldType::Text)], vec![]);
+        let source = make_table("source", vec![("GEOID", FieldType::Double)], vec![]);
+        let err = join_field(&target, &source, &key_opts(DuplicateStrategy::First)).unwrap_err();
+        assert!(err.contains("key field type mismatch"), "{err}");
+    }
+
+    #[test]
+    fn test_key_type_compatibility_matrix() {
+        use FieldType::*;
+        use KeyComparison::*;
+        let types = [Integer, Double, Text, Boolean];
+        for t in types {
+            for s in types {
+                let expected = match (t, s) {
+                    _ if t == s => Some(Exact),
+                    (Integer, Double) | (Double, Integer) => Some(Exact),
+                    (Text, Integer) | (Integer, Text) => Some(NumberAsText),
+                    _ => None,
+                };
+                let (a, b) = (Field::new("a", t), Field::new("b", s));
+                let got = key_comparison(&a, &b);
+                assert_eq!(got.as_ref().ok().copied(), expected, "{t:?} against {s:?}: {got:?}");
+                if let Err(e) = got {
+                    assert!(e.contains(t.label()) && e.contains(s.label()) && e.contains("Add Field and Calculate Field"), "{e}");
+                }
+            }
+        }
+    }
+
+    /// Joins one text key against one integer key, both ways round, and says whether they matched.
+    fn text_matches_int(text: &str, int: i64) -> bool {
+        let text_table = make_table(
+            "t",
+            vec![("GEOID", FieldType::Text), ("tag", FieldType::Text)],
+            vec![vec![Value::Text(text.into()), Value::Text("text side".into())]],
+        );
+        let int_table = make_table(
+            "i",
+            vec![("GEOID", FieldType::Integer), ("tag", FieldType::Text)],
+            vec![vec![Value::Int(int), Value::Text("int side".into())]],
+        );
+        let (_, a) = join_field(&text_table, &int_table, &key_opts(DuplicateStrategy::First)).unwrap();
+        let (_, b) = join_field(&int_table, &text_table, &key_opts(DuplicateStrategy::First)).unwrap();
+        assert_eq!(a.matched_records, b.matched_records, "{text:?} against {int} differs by direction");
+        a.matched_records == 1
+    }
+
+    #[test]
+    fn test_number_as_text_round_trips_every_magnitude() {
+        let mut values = vec![0, 1, -1, 9, 10, 99, 100, 1001, 47157000100, i64::MAX, i64::MIN, i64::MAX - 1, i64::MIN + 1];
+        let mut p = 1i64;
+        while let Some(next) = p.checked_mul(10) {
+            values.extend([p - 1, p, p + 1, -p]);
+            p = next;
+        }
+        for n in values {
+            assert!(text_matches_int(&n.to_string(), n), "{n}");
+            // Spellings of the same number that are not the same text never match.
+            for other in [format!("0{n}"), format!("+{n}"), format!(" {n}"), format!("{n} "), format!("{n}.0")] {
+                assert!(!text_matches_int(&other, n), "{other:?} matched {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_number_as_text_rejects_look_alikes() {
+        for (text, n) in [
+            ("-0", 0),
+            ("00", 0),
+            ("4_2", 42),
+            ("42e0", 42),
+            ("0x2A", 42),
+            ("4,2", 42),
+            ("４２", 42), // full-width digits
+            ("٤٢", 42),   // Arabic-Indic digits
+            ("42\u{200b}", 42),
+            ("", 0),
+            ("9223372036854775808", i64::MIN), // past i64::MAX, not a wrap-around
+        ] {
+            assert!(!text_matches_int(text, n), "{text:?} matched {n}");
+        }
+    }
+
+    #[test]
+    fn test_number_as_text_compares_values_not_declared_types() {
+        // Rows can hold values that disagree with their field's type (a hostile or hand-built
+        // file): the comparison follows the value, and nothing panics.
+        let target = make_table(
+            "target",
+            vec![("GEOID", FieldType::Integer)],
+            vec![
+                vec![Value::Float(42.0)],
+                vec![Value::Float(42.5)],
+                vec![Value::Float(f64::NAN)],
+                vec![Value::Text("7".into())],
+                vec![Value::Bool(true)],
+            ],
+        );
+        let source = make_table(
+            "source",
+            vec![("GEOID", FieldType::Text), ("tag", FieldType::Text)],
+            vec![
+                vec![Value::Text("42".into()), Value::Text("forty-two".into())],
+                vec![Value::Text("42.5".into()), Value::Text("fraction".into())],
+                vec![Value::Text("NaN".into()), Value::Text("nan".into())],
+                vec![Value::Int(7), Value::Text("seven".into())],
+                vec![Value::Text("true".into()), Value::Text("bool".into())],
+            ],
+        );
+        let (out, rep) = join_field(&target, &source, &key_opts(DuplicateStrategy::Error)).unwrap();
+        let tags: Vec<&Value> = out.features.iter().map(|f| &f.attrs[1]).collect();
+        assert_eq!(tags, [&Value::Text("forty-two".into()), &Value::Null, &Value::Null, &Value::Text("seven".into()), &Value::Null]);
+        assert_eq!((rep.matched_records, rep.duplicate_keys), (2, 0));
+    }
+
+    #[test]
+    fn test_exact_comparison_is_unchanged_for_same_type_keys() {
+        // Text against text stays exact: no number parsing sneaks in.
+        let target =
+            make_table("target", vec![("GEOID", FieldType::Text)], vec![vec![Value::Text("042".into())], vec![Value::Text("42".into())]]);
+        let source = make_table(
+            "source",
+            vec![("GEOID", FieldType::Text), ("tag", FieldType::Text)],
+            vec![vec![Value::Text("42".into()), Value::Text("hit".into())]],
+        );
+        let (out, _) = join_field(&target, &source, &key_opts(DuplicateStrategy::First)).unwrap();
+        assert_eq!(out.features[0].attrs[1], Value::Null);
+        assert_eq!(out.features[1].attrs[1], Value::Text("hit".into()));
+        assert_eq!(JoinKey::from_value_compared(&Value::Int(5), KeyComparison::Exact), Some(JoinKey::Int(5)));
+        assert_eq!(JoinKey::from_value_compared(&Value::Null, KeyComparison::NumberAsText), None);
     }
 
     #[test]

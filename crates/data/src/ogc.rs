@@ -617,6 +617,28 @@ fn resolve(from: &str, href: &str) -> Option<String> {
     Some(format!("{dir}{href}"))
 }
 
+/// The words in the notes on OGC API collections left out as 3D content, by which
+/// `service.add` finds why a layer isn't listed.
+pub const LEFT_OUT_3D: &str = "which RustGIS doesn't draw";
+
+/// What an OGC API collection's items link, in the document at `from`, offers when it is 3D
+/// content, not features: 3D Tiles (its type, or an address ending in `/3dtiles`) or quantized
+/// mesh terrain (an address ending in `/quantized-mesh`; its type is only `application/json`).
+/// A relative address is judged resolved, so a bare `3dtiles` counts.
+fn items_3d(from: &str, link: &serde_json::Value) -> Option<&'static str> {
+    let kind = link.get("type").and_then(|t| t.as_str()).unwrap_or_default().to_ascii_lowercase();
+    let href = link.get("href").and_then(|h| h.as_str()).unwrap_or_default();
+    let href = resolve(from, href).unwrap_or_else(|| href.to_string());
+    let path = href.split(['?', '#']).next().unwrap_or_default().trim_end_matches('/').to_ascii_lowercase();
+    if kind.contains("3dtiles") || path.ends_with("/3dtiles") {
+        Some("3D Tiles")
+    } else if kind.contains("quantized-mesh") || path.ends_with("/quantized-mesh") {
+        Some("quantized mesh terrain")
+    } else {
+        None
+    }
+}
+
 fn with_query(url: &str, q: &str) -> String {
     let (base, frag) = url.split_once('#').map(|(b, f)| (b, Some(f))).unwrap_or((url, None));
     let sep = if base.contains('?') { if base.ends_with('?') || base.ends_with('&') { "" } else { "&" } } else { "?" };
@@ -2335,6 +2357,9 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
     let root = base(url).trim_end_matches('/').to_string();
     let mut unreadable = 0;
     let mut tiled = 0;
+    // Collections whose items are 3D content, not features, by what it is and whether their tiles
+    // are listed.
+    let mut three_d: Vec<((&str, bool), Vec<&str>)> = Vec::new();
     for c in collections.iter().take(MAX_LAYERS) {
         let Some(id) = c.get("id").and_then(|i| i.as_str()) else { continue };
         let links = c.get("links").and_then(|l| l.as_array()).cloned().unwrap_or_default();
@@ -2385,15 +2410,31 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
         if map.is_some() || vector.is_some() {
             tiled += 1;
         }
-        let link = links
+        let json_items: Vec<&serde_json::Value> = links
             .iter()
             .filter(|l| l.get("rel").and_then(|r| r.as_str()) == Some("items"))
-            .find(|l| l.get("type").and_then(|t| t.as_str()).is_none_or(|t| t.contains("json")));
-        // A collection with tiles and no items link has no features to offer.
-        if link.is_none() && (map.is_some() || vector.is_some()) {
+            .filter(|l| {
+                items_3d(url, l).is_some() || l.get("type").and_then(|t| t.as_str()).is_none_or(|t| t.to_ascii_lowercase().contains("json"))
+            })
+            .collect();
+        let link = json_items.iter().copied().find(|l| items_3d(url, l).is_none());
+        let tiles = map.is_some() || vector.is_some();
+        // Items that are only 3D content (PDOK links 3D Tiles and quantized meshes as items, for
+        // 3D viewers) aren't offered, and the notes say so: the collection is left out, or listed
+        // by its tiles alone.
+        if let (None, Some(what)) = (link, json_items.first().and_then(|l| items_3d(url, l))) {
+            match three_d.iter_mut().find(|(k, _)| *k == (what, tiles)) {
+                Some((_, ids)) => ids.push(id),
+                None => three_d.push(((what, tiles), vec![id])),
+            }
             continue;
         }
-        let declared_geojson = link.and_then(|l| l.get("type").and_then(|t| t.as_str())).is_some_and(|t| t.contains("geo+json"));
+        // A collection with tiles and no items link has no features to offer.
+        if link.is_none() && tiles {
+            continue;
+        }
+        let declared_geojson =
+            link.and_then(|l| l.get("type").and_then(|t| t.as_str())).is_some_and(|t| t.to_ascii_lowercase().contains("geo+json"));
         // Without an items link: the standard path under the collections address. A relative
         // link is resolved against the document's address.
         let items = match link.and_then(|l| l.get("href").and_then(|h| h.as_str())) {
@@ -2423,6 +2464,20 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
     }
     if unreadable > 0 {
         service.notes.push(format!("{unreadable} collections link to their items with an address RustGIS doesn't fetch and are left out"));
+    }
+    for ((what, tiles), ids) in &three_d {
+        let mut named = ids.iter().take(20).map(|i| format!("'{i}'")).collect::<Vec<_>>().join(", ");
+        if ids.len() > 20 {
+            named.push_str(&format!(", and {} more", ids.len() - 20));
+        }
+        let one = ids.len() == 1;
+        let (noun, verb) = if one { ("collection", "offers") } else { ("collections", "offer") };
+        service.notes.push(match (tiles, one) {
+            (false, true) => format!("{noun} {named} {verb} {what}, {LEFT_OUT_3D}, so it is left out"),
+            (false, false) => format!("{noun} {named} {verb} {what}, {LEFT_OUT_3D}, so they are left out"),
+            (true, true) => format!("{noun} {named} also {verb} {what}, {LEFT_OUT_3D}; its tiles are listed"),
+            (true, false) => format!("{noun} {named} also {verb} {what}, {LEFT_OUT_3D}; their tiles are listed"),
+        });
     }
     if collections.len() > MAX_LAYERS {
         service.notes.push(format!("only the first {MAX_LAYERS} collections are listed"));
@@ -3196,6 +3251,10 @@ fn swap_geometry(g: &mut serde_json::Value, depth: usize) {
     if depth > 8 {
         return;
     }
+    // A box written in the old order would be wrong after the turn; it is optional, so it goes.
+    if let Some(o) = g.as_object_mut() {
+        o.remove("bbox");
+    }
     if let Some(c) = g.get_mut("coordinates") {
         swap_positions(c, 0);
     }
@@ -3207,7 +3266,8 @@ fn swap_geometry(g: &mut serde_json::Value, depth: usize) {
 }
 
 /// A service's GeoJSON answer with latitude-first coordinates turned round to longitude first, and
-/// its `crs` dropped; `None` when it is left as it came.
+/// its `crs` and boxes (`bbox`, on the answer, its features and geometries) dropped; `None` when it
+/// is left as it came.
 ///
 /// The data decide, not the `crs` name: GeoServer names longitude-first answers
 /// `urn:ogc:def:crs:EPSG::4326`, and deegree's one latitude-first answer has no `crs` at all
@@ -3222,12 +3282,16 @@ pub fn fix_axes(bytes: &[u8], bounds: Option<[f64; 4]>) -> Option<Vec<u8>> {
         return None;
     }
     let mut v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    if let Some(o) = v.as_object_mut() {
-        o.remove("crs");
-    }
+    // A GeoJSON answer is one object; anything else (a list of features) is left as it came.
+    let o = v.as_object_mut()?;
+    o.remove("crs");
+    o.remove("bbox");
     match v.get("type").and_then(|t| t.as_str()) {
         Some("FeatureCollection") => {
             for f in v.get_mut("features").and_then(|f| f.as_array_mut()).into_iter().flatten() {
+                if let Some(obj) = f.as_object_mut() {
+                    obj.remove("bbox");
+                }
                 if let Some(g) = f.get_mut("geometry") {
                     swap_geometry(g, 0);
                 }
@@ -3483,6 +3547,63 @@ mod tests {
         assert!(s.notes.iter().any(|n| n.contains("1 collections")));
     }
 
+    /// OGC API collections whose items are 3D Tiles or quantized mesh terrain, for 3D viewers, as
+    /// PDOK's 3D Basisvoorziening links them (#1267): left out, by name in the notes, and a
+    /// collection that also links GeoJSON items is offered those.
+    #[test]
+    fn collections_of_3d_items_are_left_out() {
+        let json = r#"{"collections": [
+            {"id": "gebouwen", "itemType": "feature", "links": [{"rel": "items", "type": "application/json+3dtiles", "href": "https://x.org/collections/gebouwen/3dtiles?f=json"}]},
+            {"id": "terreinen", "itemType": "feature", "links": [{"rel": "items", "type": "application/json+3dtiles", "href": "https://x.org/collections/terreinen/3dtiles?f=json"}]},
+            {"id": "relative", "links": [{"rel": "items", "href": "3dtiles"}]},
+            {"id": "tiled", "links": [{"rel": "items", "type": "application/json+3dtiles", "href": "https://x.org/collections/tiled/3dtiles"}, {"rel": "http://www.opengis.net/def/rel/ogc/1.0/tilesets-map", "href": "https://x.org/collections/tiled/map/tiles"}]},
+            {"id": "bin", "links": [{"rel": "items", "type": "application/octet-stream", "href": "https://x.org/collections/bin/3dtiles"}]},
+            {"id": "dtm", "itemType": "feature", "links": [{"rel": "items", "type": "application/json", "href": "https://x.org/collections/dtm/quantized-mesh?f=json"}]},
+            {"id": "both", "links": [{"rel": "items", "href": "https://x.org/collections/both/3dtiles/"}, {"rel": "items", "type": "application/geo+JSON", "href": "https://x.org/collections/both/items?f=json"}]},
+            {"id": "plain", "links": [{"rel": "items", "type": "application/geo+json", "href": "https://x.org/collections/plain/items?f=json"}]}
+        ]}"#;
+        let s = parse("https://x.org/collections", json.as_bytes()).unwrap();
+        let offered: Vec<_> =
+            s.layers.iter().filter(|l| matches!(l.offer, Offer::Features { .. })).map(|l| (l.name.as_str(), &l.offer)).collect();
+        assert_eq!(offered.len(), 2, "{offered:?}");
+        assert!(
+            matches!(offered[0], ("both", Offer::Features { url }) if url == "https://x.org/collections/both/items?f=json&limit=10000"),
+            "{offered:?}"
+        );
+        assert_eq!(offered[1].0, "plain");
+        assert!(
+            s.notes.contains(
+                &"collections 'gebouwen', 'terreinen', 'relative', 'bin' offer 3D Tiles, which RustGIS doesn't draw, so they are left out"
+                    .to_string()
+            ),
+            "{:?}",
+            s.notes
+        );
+        assert!(
+            s.notes.contains(&"collection 'dtm' offers quantized mesh terrain, which RustGIS doesn't draw, so it is left out".to_string()),
+            "{:?}",
+            s.notes
+        );
+        // A collection with tiles too is listed by them, and the note says its 3D items aren't.
+        assert!(s.layers.iter().any(|l| l.name == "tiled (map tiles)"));
+        assert!(
+            s.notes.contains(&"collection 'tiled' also offers 3D Tiles, which RustGIS doesn't draw; its tiles are listed".to_string()),
+            "{:?}",
+            s.notes
+        );
+        assert!(!s.incomplete);
+        // Past 20 names, the note says how many more.
+        let many: Vec<String> =
+            (0..23).map(|i| format!(r#"{{"id": "c{i}", "links": [{{"rel": "items", "href": "https://x.org/c{i}/3dtiles"}}]}}"#)).collect();
+        let s = parse("https://x.org/collections", format!(r#"{{"collections": [{}]}}"#, many.join(",")).as_bytes()).unwrap();
+        assert!(s.notes.iter().any(|n| n.contains("'c19', and 3 more offer 3D Tiles")), "{:?}", s.notes);
+        // Without them, no note on 3D content.
+        let plain = r#"{"collections": [{"id": "plain", "links": [{"rel": "items", "type": "application/geo+json", "href": "https://x.org/collections/plain/items?f=json"}]}]}"#;
+        let s = parse("https://x.org/collections", plain.as_bytes()).unwrap();
+        assert_eq!(s.layers.len(), 1);
+        assert!(!s.notes.iter().any(|n| n.contains(LEFT_OUT_3D)), "{:?}", s.notes);
+    }
+
     #[test]
     fn features_asked_for_over_an_area() {
         let piaui = [-45.99, -10.93, -40.37, -2.74];
@@ -3581,10 +3702,24 @@ mod tests {
         let named = br#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[53.55,9.99]}}],"crs":{"type":"name","properties":{"name":"urn:ogc:def:crs:EPSG::4326"}}}"#;
         let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(named, hamburg).unwrap()).unwrap();
         assert!(fixed.get("crs").is_none());
+        // Boxes in the latitude-first order are dropped with it: the answer's, a feature's and a
+        // geometry's, within a collection too.
+        let boxed = br#"{"type":"FeatureCollection","bbox":[53.55,9.99,53.6,10.1],"features":[{"type":"Feature","bbox":[53.55,9.99,53.6,10.1],"properties":{"bbox":"kept"},"geometry":{"type":"GeometryCollection","bbox":[53.55,9.99,53.6,10.1],"geometries":[{"type":"LineString","bbox":[53.55,9.99,53.6,10.1],"coordinates":[[53.55,9.99],[53.6,10.1]]}]}}]}"#;
+        let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(boxed, hamburg).unwrap()).unwrap();
+        for at in ["", "/features/0", "/features/0/geometry", "/features/0/geometry/geometries/0"] {
+            assert!(fixed.pointer(at).unwrap().get("bbox").is_none(), "{at}");
+        }
+        assert_eq!(fixed.pointer("/features/0/properties/bbox").unwrap(), "kept");
+        assert_eq!(
+            fixed.pointer("/features/0/geometry/geometries/0/coordinates").unwrap(),
+            &serde_json::json!([[9.99, 53.55], [10.1, 53.6]])
+        );
         // A lone feature and a bare geometry.
-        let feature = br#"{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[53.55,9.99]}}"#;
+        let feature =
+            br#"{"type":"Feature","bbox":[53.55,9.99,53.55,9.99],"properties":{},"geometry":{"type":"Point","coordinates":[53.55,9.99]}}"#;
         let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(feature, hamburg).unwrap()).unwrap();
         assert_eq!(fixed.pointer("/geometry/coordinates").unwrap(), &serde_json::json!([9.99, 53.55]));
+        assert!(fixed.get("bbox").is_none());
         let geometry = br#"{"type":"Point","coordinates":[53.55,9.99,12.5]}"#;
         let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(geometry, hamburg).unwrap()).unwrap();
         assert_eq!(fixed.pointer("/coordinates").unwrap(), &serde_json::json!([9.99, 53.55, 12.5]));
@@ -3607,6 +3742,9 @@ mod tests {
         // Nothing to judge from: no features, not JSON.
         assert!(fix_axes(br#"{"type":"FeatureCollection","features":[]}"#, hamburg).is_none());
         assert!(fix_axes(b"urn:ogc:def:crs:EPSG::4326 not json", hamburg).is_none());
+        // A list of features isn't a GeoJSON answer: judged, but left as it came.
+        let listed = br#"[{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[53.55,9.99]}}]"#;
+        assert!(fix_axes(listed, hamburg).is_none());
         // Positions under arrays nested deeper than a GeoJSON answer goes aren't read.
         let deep = format!("{}{{\"type\":\"Point\",\"coordinates\":[53.55,9.99]}}{}", "[".repeat(20), "]".repeat(20));
         assert!(fix_axes(deep.as_bytes(), hamburg).is_none());

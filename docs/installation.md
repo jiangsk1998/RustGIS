@@ -22,10 +22,10 @@ builds of the desktop app and `rustgis-cli`. The same files, grouped by platform
 
 | Platform | File |
 | --- | --- |
-| Windows x64 (installer, no admin rights) | `RustGIS-<version>-windows-x86_64-setup.exe` |
-| Windows x64 (installer for all users) | `RustGIS-<version>-windows-x86_64.msi` |
-| Windows x64 (no install) | `RustGIS-<version>-windows-x86_64-portable.zip` (unzip and run `rustgis.exe`) |
-| Windows x64 (Microsoft Store package) | `RustGIS-<version>-windows-x86_64.msix` |
+| Windows x64 / arm64 (installer, no admin rights) | `RustGIS-<version>-windows-x86_64-setup.exe` / `RustGIS-<version>-windows-aarch64-setup.exe` |
+| Windows x64 / arm64 (installer for all users) | `RustGIS-<version>-windows-x86_64.msi` / `RustGIS-<version>-windows-aarch64.msi` |
+| Windows x64 / arm64 (no install) | `RustGIS-<version>-windows-x86_64-portable.zip` / `RustGIS-<version>-windows-aarch64-portable.zip` (unzip and run `rustgis.exe`) |
+| Windows x64 / arm64 (Microsoft Store package) | `RustGIS-<version>-windows-x86_64.msix` / `RustGIS-<version>-windows-aarch64.msix` |
 | macOS Apple Silicon | `RustGIS-<version>-macos-aarch64.dmg` |
 | macOS Intel | `RustGIS-<version>-macos-x86_64.dmg` |
 | Linux x64 / arm64 (Debian, Ubuntu) | `rustgis_<version>_amd64.deb` / `rustgis_<version>_arm64.deb` |
@@ -43,7 +43,8 @@ only the parts that changed, with the `.zsync` file published beside each AppIma
 
 On Windows, `setup.exe` installs for your account in `%LOCALAPPDATA%\Programs\RustGIS` and needs
 no admin rights; the `.msi` installs for every user in `Program Files` and suits managed
-deployment (`msiexec /i RustGIS-<version>-windows-x86_64.msi /qn`). Both add a Start menu
+deployment (`msiexec /i RustGIS-<version>-windows-<arch>.msi /qn`, where `<arch>` is `x86_64` or
+`aarch64`). Both add a Start menu
 entry, open `.rgis` projects, list RustGIS under **Open with** for `.geojson`, and
 uninstall from **Settings › Apps**.
 
@@ -63,7 +64,7 @@ RustGIS is also published to these package managers, which keep it up to date:
 
 | Platform | Command |
 | --- | --- |
-| Windows ([winget](https://learn.microsoft.com/windows/package-manager/)) | `winget install OpenGeos.RustGIS` |
+| Windows x64 ([winget](https://learn.microsoft.com/windows/package-manager/)) | `winget install OpenGeos.RustGIS` (x64 only for now: on ARM64, use the ARM64 setup.exe or .msi above) |
 | macOS ([Homebrew](https://brew.sh)) | `brew install --cask opengeos/rustgis/rustgis` |
 | macOS and Linux, command-line tool only (Homebrew) | `brew install opengeos/rustgis/rustgis-cli` |
 | Arch Linux ([AUR](https://aur.archlinux.org/packages/rustgis-bin)) | `yay -S rustgis-bin` (or any AUR helper) |
@@ -77,7 +78,8 @@ managers shortly after it is published (winget after Microsoft's review).
 ## From source
 
 RustGIS builds from source with a recent stable Rust toolchain (1.90 or later), a C compiler (for
-the bundled SQLite and the Zstandard decoder) and `curl` (to download the sample data).
+the C code some dependencies bundle; see [Architecture](architecture.md#pure-rust)) and `curl`
+(to download the sample data).
 
 ```sh
 git clone https://github.com/opengeos/RustGIS.git
@@ -205,6 +207,20 @@ cargo xtask web-pwa ../../dist/web   # add the service worker (offline start), a
 
 The service worker is left out of `trunk serve`, so a development build is never served from a
 stale cache.
+
+### Self-host the static build
+
+Download `RustGIS-<version>-web.zip` from the
+[GitHub release](https://github.com/opengeos/RustGIS/releases) and unzip it into a directory of
+its own (or the document root, if the server serves nothing else). Serve it over HTTP, rather
+than opening `index.html` as a local file. For a local preview, run `python3 -m http.server 8080`
+from the extracted directory and open `http://localhost:8080/`. Browsers do not let a page opened
+as a local file start the app, so it shows these steps instead.
+
+The archive uses relative URLs, so it can be hosted at the root or under a path such as
+`https://example.com/rustgis/` (with the trailing slash). Use HTTPS, or `localhost` for local
+use, to install the app and start it offline. The ZIP includes the service worker and contains
+no analytics tag.
 
 ### Self-host the web app with Docker
 

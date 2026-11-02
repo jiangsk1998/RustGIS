@@ -1559,6 +1559,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     if reading && listed {
         (cw, ch) = (cw.max(fw * 0.3), ch.max(fh * 0.25));
         warnings.push("the legend's classes aren't known yet (a layer still reading): it has a fixed size to fit by hand".into());
+    } else if crate::render::layout::tile_legends_pending(s.map(), render_scale, &[]) {
+        // Not waited for: a slow legend server would hold the command up.
+        (cw, ch) = (cw.max(fw * 0.3), ch.max(fh * 0.25));
+        warnings.push("a WMS or WMTS layer's legend picture is still loading: the legend has a fixed size to fit by hand".into());
     }
     let (sw, sh, nh) = ((fw * 0.3).max(25.0), if sheet { 8.0 * k } else { 6.0 }, pitch(small_pt) + 0.5);
     let pad = 2.0;
@@ -2552,9 +2556,14 @@ fn legend_exclude(s: &Session, l: &Layout, frame: u32, p: &Value) -> Result<Opti
     let mut out: Vec<String> = Vec::new();
     for n in names {
         let n = n.as_str().ok_or("exclude is a list of layer names")?;
-        let layer = map.layer_by_name(n.trim()).ok_or_else(|| format!("no layer '{n}' in map '{map_name}'"))?;
-        if !out.iter().any(|o| o.eq_ignore_ascii_case(&layer.name)) {
-            out.push(layer.name.clone());
+        // A layer of the map's, or a WMS or WMTS layer's (whose legend is its service's picture).
+        let name = map
+            .layer_by_name(n.trim())
+            .map(|l| &l.name)
+            .or_else(|| map.tiles.iter().find(|t| t.name.eq_ignore_ascii_case(n.trim())).map(|t| &t.name))
+            .ok_or_else(|| format!("no layer '{n}' in map '{map_name}'"))?;
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(name)) {
+            out.push(name.clone());
         }
     }
     Ok(Some(out))

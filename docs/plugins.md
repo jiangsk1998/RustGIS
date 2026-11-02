@@ -434,11 +434,16 @@ Inside a request, `host::call(op, params)` sends one of these to RustGIS:
 | `map.addTiles` `{url, kind?, name?, attribution?, maxZoom?, overlay?, replace?, blend?, …}` | adds a tile layer (`edit` and `network`); accepts the built-in command's parameters |
 | any command id (`layer.zoomTo`, `select.byAttributes`, `layer.symbology`…) | what the command returns, within the plugin's permissions |
 
-In the web app a command can't wait for a download, so where `layer.addUrl` has to download a
-file whole it answers `{"pending": true, "url": …}` there: RustGIS downloads the data off the
-frame and adds the layer when it lands, as **Home › Add › Add Data › From URL** does. A PMTiles
-archive, a cloud-optimised GeoTIFF or a FlatGeobuf or GeoParquet read in place is added at once,
-as elsewhere.
+In the apps a plugin's command (from the ribbon, command search or a panel's widget; not its
+panel's state command) doesn't wait for a download, so where `layer.addUrl` has to
+download a file whole it answers `{"pending": true, "url": …}`: RustGIS downloads the data off the
+frame, saying so in the status bar, and adds the layer when it lands (its own undo step), as
+**Home › Add › Add Data › From URL** does. On the desktop that goes for reading a GeoTIFF's,
+FlatGeobuf's or GeoParquet's header too; in the web app a PMTiles archive, a cloud-optimised
+GeoTIFF or a FlatGeobuf or GeoParquet whose header was fetched already is added at once. Up to 16
+downloads wait at a time: a request past 16 fails, and if the command then fails too, none of its
+downloads start. Run by
+`rustgis-cli`, a script or a task, the command waits and answers what was added.
 
 `rustgis-cli commands` lists every command id and its parameters.
 

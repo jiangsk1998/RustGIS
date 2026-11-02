@@ -71,6 +71,50 @@ replace the first one's copy; it says so as it starts. Nor does RustGIS autosave
 folder can't lock files (some network or synced folders), where it can't tell a second copy apart.
 The browser app doesn't autosave yet; it warns before you leave a page with unsaved changes.
 
+### Session log
+
+RustGIS keeps a **log** of the commands run in the session: what was done, when, with what, and
+whether it worked. It is an audit trail of the session, for reviewing work or recalling what was
+run; it runs nothing again (History's Copy as code and recorded tasks do that). Every
+front end goes into it alike: the app, scripts, the AI Assistant, the command line, Python and MCP.
+
+- **What goes in:** each command that changes the project, and each that names a file, folder,
+  address or connection, reads included (an export, a download, a save, opening a file), plus
+  undo and redo, with the step they took back or brought back. Reading and looking around within
+  the project (listing layers, describing a tool, reading features, moving the view) is left
+  out. A command run by another (a script's lines, a model's steps) is inside its parent's
+  entry. A plugin can't empty the log or turn it off, and reading it (`project.log`) takes the
+  file permission, since it names the files and addresses the user's commands used.
+- **Each entry:** `at` (when it started, in milliseconds since 1970, UTC; for a plugin's command
+  that waited for its downloads, when its last run started), `command`, `params`, `ok`, `error`
+  when it failed, and `millis`, how long it took.
+- **For the session only:** the log is kept in memory, across the projects opened or made in the
+  session, until RustGIS closes or the log is cleared. A saved project, its recovery copy, a
+  package or a template carries none of it, so sharing a project shares no log. Reading, writing
+  out, clearing or switching the log doesn't change the project and is no undo step; undoing a
+  command doesn't take its entry back. Steps that undo takes back as one (a held arrow key
+  nudging an element) are one entry, with the last one's parameters. Each copy of RustGIS (the
+  desktop app, a browser tab, a Python program) keeps its own.
+- **No secrets:** the parameters lose passwords, keys and tokens as History's Copy as code does, and
+  so does an error's text; a document given as text (a map, a project) or a file's contents in
+  base64 (any text made only of base64's characters, so a long path with no dot too), past 200
+  characters, is kept as its size only (a shorter one is kept, its secrets taken
+  out as any other text's), and an SQL `CREATE SECRET`'s options as `(…)`. A secret written
+  as plain words, with no name or address form (a password typed into a note), isn't recognised:
+  look at an exported log before sharing it. Each entry's parameters are clipped to about 4 KB of
+  JSON (a long text is cut, a list keeps its first 100 items), its error to 500 characters and a
+  `…`, and the log keeps its last 10,000 entries, the oldest dropped first. Plugins' commands take
+  at most 1,000 of those places: past that, a plugin's new entry pushes out an older plugin entry,
+  not one of the user's.
+
+From scripts: `project.log {"since"?, "until"?, "command"?, "failed"?, "limit"?}` lists entries,
+newest last (`command` is an id, or the start of one ending in a dot, `layer.`; `limit` is a whole
+number, 100 by default and at most 1,000, with `count` saying how many match), and
+`project.exportLog {"path": "log.csv"}` writes it out as CSV (one row an entry, the parameters as a
+JSON column) or JSON Lines (`.jsonl` or `.ndjson`), as the path's extension says; any other
+extension (a `.json`, a project) is refused, whatever `format` is given. `project.clearLog` empties
+it (leaving its own entry) and `project.logCommands {"on": false}` stops it (what is there stays).
+
 ### GeoLibre projects
 
 **Open** on desktop or **Project › New › GeoLibre Project…** opens a `.geolibre` or legacy
@@ -165,7 +209,16 @@ Each layer keeps its look:
 Projects and styles from QGIS 1 and 2 read too: their legend gives the layers' order, and the
 older names of the same settings are read.
 
-QGIS expressions carry over where they are SQL: fields compared with values, `LIKE`, `IN`,
+A symbol's data-defined size, fill and outline colours, outline width and marker angle carry over
+as the layer's [symbol expressions](cartography.md#symbols-by-expression), sizes turned from the
+symbol's unit (millimetres, points, pixels, inches; map units at the reference scale) into points, where RustGIS's [expression language](expressions.md) reads them. A marker of several layers
+scales them all with the size one of its layers takes; a marker drawn as marks (several layers,
+or one shifted or turned) leaves its colours and outline widths by expression out, noted, and so
+does a line of several strokes. They apply to every feature, so a layer whose classes set different
+ones (or one with a class switched off) leaves them out, noted. One using a
+function or variable it lacks, or a field the layer hasn't, is noted and left out.
+
+QGIS filter expressions carry over where they are SQL: fields compared with values, `LIKE`, `IN`,
 `IS NULL`, joined by `AND`, `OR` and `NOT`. What RustGIS doesn't draw as QGIS does is drawn as
 near as it can, or left out, and said: the import's notes list, layer by layer, what was
 approximated (gradient and shapeburst fills' offsets left out and colour ramps other than gradients drawn from their first colour to their last, SVG, raster and random fills and dense brushes as a tint of their colour, SVG markers as circles,
@@ -221,6 +274,46 @@ reserve some shortcuts. In Command Search, right-click a command and choose **Ke
 to open it in the editor. If saved preferences are unreadable or exceed the supported limits, the
 original value is preserved and edits apply only to the current session. **Reset All** explicitly
 replaces the saved shortcuts with the defaults.
+
+Use **Import…** and **Export…** in the editor to back up shortcuts or share them between desktop,
+macOS and browser sessions. Export writes `rustgis-shortcuts.json`, containing only differences
+from the current defaults. `Mod` means Ctrl, or ⌘ on macOS, so the same file works across platforms.
+Import merges with your current shortcuts: review the counts of bindings, conflicts and unknown
+commands, then choose **Import** or **Cancel**. The file wins on conflicting keys; unrelated
+bindings stay unchanged. Unknown command ids are retained and become usable when their plugin is
+installed. Import only files you trust: pressing an imported key runs its command with the supplied
+parameters, which can include file writes or preference changes. Inspect shared JSON before importing.
+Invalid files are rejected without changing shortcuts. Files are limited to 100,100
+bytes (including version metadata) and 1,000 records. Merged preference data must fit 100,000 bytes. If saved preferences
+are unreadable, use **Reset All** before importing so they are not silently overwritten.
+
+The version 1 file format is:
+
+```json
+{
+  "rustgis_shortcuts": 1,
+  "bindings": [
+    { "keys": "D", "command": "tool.set", "params": { "tool": "select" } },
+    { "keys": "T", "command": "select.zoomTo" },
+    { "keys": "Mod+T", "command": "table.open", "remove": true }
+  ]
+}
+```
+
+Conflicts count distinct keys whose final imported assignment replaces a different current binding.
+Unknown-command counts cover distinct unknown command IDs among retained imported assignments, excluding
+removals and overwritten records.
+Records apply in file order; the last assignment to a key wins. A removal removes only the named
+command and parameters at that key, so a different user binding is preserved.
+
+Scripts and UI automation can use these UI-layer commands (the AI Assistant still refuses `ui.*`):
+
+| Command | Parameters and result |
+| --- | --- |
+| `ui.shortcuts.set` | `keys`, `command`, optional `params`; replaces the key's binding. With `remove: true`, removes only that command and parameters at the key. |
+| `ui.shortcuts.reset` | `keys` restores that key's default; no parameters resets all shortcuts. |
+| `ui.shortcuts.export` | No parameters opens Save/download; `path` writes a desktop file; `text: true` returns the document as `text` without a file dialog. |
+| `ui.shortcuts.import` | No parameters opens a file picker. `text`, base64 `data`, or desktop `path` validates and opens the preview, returning `bindings`, `conflicts`, `unknown_commands`. Pass the same document with `confirm: true` to merge and save it. |
 
 See the [keyboard shortcut reference](index.md#keyboard-shortcuts) for project, map and editing
 shortcuts, macOS bindings and text-field undo behavior. **Help › Shortcuts** lists the active
@@ -319,7 +412,10 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
   raster's edge, or across a line (a cross section), with gain, loss and a chart.
 - **Infographics** (Home tab) summarise what's in view: counts, totals and top categories.
 - **Offline**: Download Map takes the data in view into an offline area; open it to edit, then
-  Sync sends changed, new and deleted features back and refreshes it. **Feature Cache** prepares
+  Sync sends changed, new and deleted features back and refreshes it. A feature changed in the
+  map since the last sync and also edited or deleted offline takes the offline version, with a
+  warning naming it (Undo reverts the whole sync, restoring the map's version); an offline edit
+  to a feature since deleted from the map is dropped, with a warning too. **Feature Cache** prepares
   every layer's geometry for the current projection (Fill, Empty, Cancel, Auto Cache).
 - **Settings › Customize** chooses the ribbon's tabs and the Quick Access Toolbar's extra
   buttons. Settings and Help always remain visible. **Help** opens the user guide and the

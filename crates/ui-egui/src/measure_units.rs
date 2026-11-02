@@ -18,13 +18,13 @@ fn whole_or_small(value: f64) -> String {
 }
 
 /// Format a distance supplied in metres, using feet/miles or the metric formatter.
-/// Positive sub-foot values that would round to zero retain significant digits.
+/// Sub-foot values whose magnitude would round to zero retain significant digits.
 pub fn distance(m: f64, imperial: bool) -> String {
     if !imperial || !m.is_finite() {
         return geom::format_distance(m);
     }
     let ft = m / geom::METRES_PER_FOOT;
-    if ft.round() < 5280.0 {
+    if ft.abs().round() < 5280.0 {
         crate::i18n::fmt("{distance} ft", &[("distance", &whole_or_small(ft))])
     } else {
         crate::i18n::fmt("{distance} mi", &[("distance", &format!("{:.1}", m / geom::METRES_PER_MILE))])
@@ -41,14 +41,14 @@ pub fn elevation(m: f64, imperial: bool) -> String {
 }
 
 /// Format square metres as square feet, acres or square miles, or use metric units.
-/// Positive sub-square-foot values that would round to zero retain significant digits.
+/// Sub-square-foot values whose magnitude would round to zero retain significant digits.
 pub fn area(m2: f64, imperial: bool) -> String {
     if !imperial || !m2.is_finite() {
         return geom::format_area(m2);
     }
-    if m2 < geom::SQUARE_METRES_PER_ACRE {
+    if m2.abs() < geom::SQUARE_METRES_PER_ACRE {
         crate::i18n::fmt("{area} ft²", &[("area", &whole_or_small(m2 / geom::SQUARE_METRES_PER_SQUARE_FOOT))])
-    } else if m2 < geom::SQUARE_METRES_PER_SQUARE_MILE {
+    } else if m2.abs() < geom::SQUARE_METRES_PER_SQUARE_MILE {
         crate::i18n::fmt("{area} acres", &[("area", &format!("{:.1}", m2 / geom::SQUARE_METRES_PER_ACRE))])
     } else {
         crate::i18n::fmt("{area} mi²", &[("area", &format!("{:.1}", m2 / geom::SQUARE_METRES_PER_SQUARE_MILE))])
@@ -82,6 +82,16 @@ mod tests {
         assert_eq!(distance(0.0, true), "0 ft");
         assert_eq!(area(0.0, true), "0 ft²");
         assert_eq!(distance(geom::METRES_PER_FOOT, true), "1 ft");
+        assert_eq!(distance(-0.1 * geom::METRES_PER_FOOT, true), "-0.10 ft");
         assert_eq!(area(geom::SQUARE_METRES_PER_SQUARE_FOOT, true), "1 ft²");
+        assert_eq!(area(-0.1 * geom::SQUARE_METRES_PER_SQUARE_FOOT, true), "-0.10 ft²");
+        assert_eq!(distance(-geom::METRES_PER_FOOT, true), "-1 ft");
+        assert_eq!(distance(-5280.0 * geom::METRES_PER_FOOT, true), "-1.0 mi");
+        assert_eq!(distance(-20_000.0, true), "-12.4 mi");
+        assert_eq!(area(-geom::SQUARE_METRES_PER_SQUARE_FOOT, true), "-1 ft²");
+        assert_eq!(area(-geom::SQUARE_METRES_PER_ACRE, true), "-1.0 acres");
+        assert_eq!(area(-10.0 * geom::SQUARE_METRES_PER_ACRE, true), "-10.0 acres");
+        assert_eq!(area(-geom::SQUARE_METRES_PER_SQUARE_MILE, true), "-1.0 mi²");
+        assert_eq!(area(-10_000_000.0, true), "-3.9 mi²");
     }
 }

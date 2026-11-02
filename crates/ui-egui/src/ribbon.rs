@@ -4109,14 +4109,18 @@ fn drawing_group(app: &mut RustGisApp, ui: &mut Ui, layer: &rustgis_engine::map:
         col(ui, |ui| {
             let mut c = crate::theme::c32(layer.renderer.base_symbol().fill);
             ui.horizontal(|ui| {
-                if crate::widgets::color_button(ui, &mut c).changed() {
+                let resp = crate::widgets::color_button(ui, &mut c);
+                if resp.changed() {
+                    crate::widgets::one_step_per_press(app, &resp);
                     let _ = app.run("layer.color", json!({"color": crate::theme::rgba(c).hex8()}));
                 }
                 ui.label(egui::RichText::new(tl!("Color")).size(11.5));
             });
             let mut w = layer.renderer.base_symbol().stroke_width;
             ui.horizontal(|ui| {
-                if ui.add(egui::DragValue::new(&mut w).range(0.0..=10.0).speed(0.05).suffix(" pt")).changed() {
+                let resp = ui.add(egui::DragValue::new(&mut w).range(0.0..=10.0).speed(0.05).suffix(" pt"));
+                if resp.changed() {
+                    crate::widgets::one_step_per_press(app, &resp);
                     let _ = app.run("layer.outline", json!({"width": w}));
                 }
                 ui.label(egui::RichText::new(tl!("Outline")).size(11.5));
@@ -4124,7 +4128,9 @@ fn drawing_group(app: &mut RustGisApp, ui: &mut Ui, layer: &rustgis_engine::map:
             if layer.geometry_type() == GeometryType::Point {
                 let mut s = layer.renderer.base_symbol().size;
                 ui.horizontal(|ui| {
-                    if ui.add(egui::DragValue::new(&mut s).range(1.0..=60.0).speed(0.1).suffix(" pt")).changed() {
+                    let resp = ui.add(egui::DragValue::new(&mut s).range(1.0..=60.0).speed(0.1).suffix(" pt"));
+                    if resp.changed() {
+                        crate::widgets::one_step_per_press(app, &resp);
                         let _ = app.run("layer.marker", json!({"size": s}));
                     }
                     ui.label(egui::RichText::new(tl!("Size")).size(11.5));
@@ -4198,7 +4204,9 @@ fn raster_style_groups(app: &mut RustGisApp, ui: &mut Ui) {
             let mut x = app.session.map().swipe.map_or(0.5, |(_, x)| x);
             ui.vertical(|ui| {
                 ui.add_space(14.0);
-                if ui.add(egui::Slider::new(&mut x, 0.0..=1.0).show_value(false)).on_hover_text(tl!("Swipe")).changed() {
+                let resp = ui.add(egui::Slider::new(&mut x, 0.0..=1.0).show_value(false)).on_hover_text(tl!("Swipe"));
+                if resp.changed() {
+                    crate::widgets::one_step_per_press(app, &resp);
                     let _ = app.run("layer.swipe", json!({"position": x}));
                 }
             });
@@ -4820,6 +4828,93 @@ mod tests {
         assert!(!has(&h, "Closest") && has(&h, "View Unplaced"), "the map's settings need no layer");
         assert!(!has(&tab_harness(cities(), style_tab), "Closest"), "Style keeps no label groups");
         assert!(!has(&tab_harness(cities(), view_tab), "View Unplaced"), "View keeps no label groups");
+    }
+
+    /// The Drawing group for the selected layer (Cities), as the Style tab draws it.
+    fn drawing_harness() -> egui_kittest::Harness<'static, RustGisApp> {
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 800.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                if let Some(layer) = app.session.active_layer.and_then(|id| app.session.map().layer(id)).cloned() {
+                    ui.horizontal(|ui| drawing_group(app, ui, &layer));
+                }
+            },
+            cities(),
+        );
+        h.run();
+        h
+    }
+
+    /// Drags a number of the harness from `at` by 16, 32 and 48 points, calling `each` between.
+    fn drag_by(h: &mut egui_kittest::Harness<'static, RustGisApp>, at: egui::Pos2, mut each: impl FnMut(&RustGisApp)) {
+        h.hover_at(at);
+        h.drag_at(at);
+        h.step();
+        for dx in [16.0, 32.0, 48.0] {
+            h.hover_at(at + vec2(dx, 0.0));
+            h.step();
+            each(h.state());
+        }
+        h.drop_at(at + vec2(48.0, 0.0));
+        h.run();
+    }
+
+    /// A drag of the point size runs `layer.marker` as it goes (the map follows it), and is one
+    /// undo step; the next drag is a step of its own (#1194).
+    #[test]
+    fn ribbon_marker_size_drag_is_one_undo_step() {
+        let mut h = drawing_harness();
+        let id = h.state().session.active_layer.unwrap();
+        let size = |app: &RustGisApp| app.session.map().layer(id).unwrap().renderer.base_symbol().size;
+        let before = size(h.state());
+        let undo = h.state().session.undo_depth();
+        // Outline, then Size.
+        let at = h.query_all_by_role(egui::accesskit::Role::SpinButton).nth(1).unwrap().rect().center();
+        let mut seen = Vec::new();
+        drag_by(&mut h, at, |app| {
+            seen.push(size(app));
+            assert_eq!(app.session.undo_depth(), undo + 1, "one step however many frames");
+        });
+        assert!(seen.windows(2).all(|w| w[1] > w[0]) && seen[0] > before, "the map follows the drag: {seen:?}");
+        let first = size(h.state());
+        drag_by(&mut h, at, |_| {});
+        let second = size(h.state());
+        assert!(second > first);
+        assert_eq!(h.state().session.undo_depth(), undo + 2, "a second drag is a step of its own");
+        h.state_mut().run("edit.undo", json!(null)).unwrap();
+        assert_eq!(size(h.state()), first);
+        h.state_mut().run("edit.undo", json!(null)).unwrap();
+        assert_eq!(size(h.state()), before);
+        h.state_mut().run("edit.redo", json!(null)).unwrap();
+        assert_eq!(size(h.state()), first);
+    }
+
+    /// A drag in the colour picker is one undo step back to the colour from before it (#1194).
+    #[test]
+    fn ribbon_colour_drag_is_one_undo_step() {
+        let mut h = drawing_harness();
+        let id = h.state().session.active_layer.unwrap();
+        let color = |app: &RustGisApp| app.session.map().layer(id).unwrap().renderer.base_symbol().fill;
+        let before = color(h.state());
+        let undo = h.state().session.undo_depth();
+        h.get_by_role(egui::accesskit::Role::ColorWell).click();
+        h.run();
+        // Outline and Size precede the picker's R/G/B/A numbers.
+        let at = h.query_all_by_role(egui::accesskit::Role::SpinButton).nth(2).unwrap().rect().center();
+        drag_by(&mut h, at, |app| {
+            assert_ne!(color(app), before, "the map follows the picker");
+            assert_eq!(app.session.undo_depth(), undo + 1, "one step however many frames");
+        });
+        let after = color(h.state());
+        h.state_mut().run("edit.undo", json!(null)).unwrap();
+        assert_eq!(color(h.state()), before);
+        h.state_mut().run("edit.redo", json!(null)).unwrap();
+        assert_eq!(color(h.state()), after);
     }
 
     /// Isolates the label controls; the interrupted-gesture test below checks full-frame wiring.

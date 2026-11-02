@@ -31,7 +31,149 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"tool": "explore"|"select"|"selectPolygon"|"selectLasso"|"selectRadius"|"zoomIn"|"measure"|"measureArea"|"createPoint"|"createLine"|"createPolygon"|"editVertices"|"graphicPoint"|"graphicText"|"graphicLine"|"graphicCurve"|"graphicFreehand"|"graphicPolygon"|"graphicLasso"|"graphicRectangle"|"graphicCircle"|"graphicEllipse"|"graphicPicture"}"#),
         C::new("info.project", "Project Info", "Project", info).view().params(r#"{"nameFilter"?: string, "includeFields"?: bool}"#),
         C::new("info.commands", "List Commands", "Help", list).view(),
+        // The session log (#797): read, written out, emptied, turned on or off. It sits outside
+        // the project, so none of these changes the project or takes an undo step.
+        C::new("project.log", "Session Log", "Project", log).view().params(
+            r#"{"since"?: milliseconds since 1970 (UTC), "until"?: milliseconds, "command"?: "a command id, or the start of one (layer.)", "failed"?: bool (true: only those that failed; false: only those that succeeded), "limit"?: entries, a whole number (default 100, the newest; 1 to 1000)} → {"entries": [{"at", "command", "params", "ok", "error"?, "millis"}], "count": matching, "total": in the log, "on": bool}"#,
+        ),
+        C::new("project.exportLog", "Export Session Log", "Project", export_log)
+            .view()
+            .params(r#"{"path": ".csv, .jsonl or .ndjson file", "format"?: "csv"|"jsonl" (for a path with no extension; one given must match the extension)}"#),
+        C::new("project.clearLog", "Clear Session Log", "Project", clear_log).view(),
+        C::new("project.logCommands", "Log Commands", "Project", log_commands).view().params(r#"{"on"?: bool (default: turn it the other way)}"#),
     ]
+}
+
+/// `project.log`: the log's entries that match, newest last.
+fn log(s: &mut Session, p: &Value) -> CmdResult {
+    // Milliseconds as a whole number or not (1.7e12), never below 0.
+    let num = |k: &str| -> Result<Option<u64>, String> {
+        match p.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_f64()
+                .filter(|n| n.is_finite() && *n >= 0.0)
+                .map(|n| Some(n as u64))
+                .ok_or_else(|| format!("{k} must be a number, 0 or more")),
+        }
+    };
+    let (since, until) = (num("since")?, num("until")?);
+    let command = match p.get("command") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_str().ok_or("command must be a command id, or the start of one")?.trim()).filter(|c| !c.is_empty()),
+    };
+    let failed = match p.get("failed") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_bool().ok_or("failed must be true or false")?),
+    };
+    // At most a thousand (some 4 MB at the most), so one answer can't fill an assistant's
+    // context or a script's memory; `count` still says how many match.
+    let limit = match p.get("limit") {
+        None | Some(Value::Null) => 100,
+        Some(v) => match v.as_f64().filter(|n| n.is_finite() && *n >= 1.0 && n.fract() == 0.0) {
+            Some(n) => n.min(1_000.0) as usize,
+            None => return Err("limit must be a whole number, 1 or more".into()),
+        },
+    };
+    let keep = |e: &crate::project_log::LogEntry| {
+        since.is_none_or(|t| e.at >= t)
+            && until.is_none_or(|t| e.at <= t)
+            && command.is_none_or(|c| e.command == c || (c.ends_with('.') && e.command.starts_with(c)))
+            && failed.is_none_or(|f| e.ok != f)
+    };
+    let (shown, count, total) = s.log.select(keep, limit);
+    Ok(json!({"entries": shown, "count": count, "total": total, "on": s.log.on()}))
+}
+
+/// A CSV cell: quoted, and kept from being read as a formula where it starts as one does (`=`,
+/// `+`, `-`, `@`, or a tab or carriage return before them), as spreadsheets would.
+fn csv_cell(t: &str) -> String {
+    let lead = if t.starts_with(['=', '+', '-', '@', '\t', '\r']) { "'" } else { "" };
+    format!("\"{lead}{}\"", t.replace('"', "\"\""))
+}
+
+/// `project.exportLog`: the log written out, as CSV (one row an entry, the parameters as a JSON
+/// column) or JSON Lines (one entry a line).
+fn export_log(s: &mut Session, p: &Value) -> CmdResult {
+    let path = PathBuf::from(ps(p, "path").ok_or("path is required")?);
+    let kind = |f: &str| match f {
+        "csv" => Some("csv"),
+        "jsonl" | "ndjson" => Some("jsonl"),
+        _ => None,
+    };
+    // The path's extension, when it has one, is the format's whatever `format` says: the log
+    // never goes over a project, a JSON document or any other kind of file.
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    let by_ext =
+        match ext.as_deref() {
+            None => None,
+            Some(e) => Some(kind(e).ok_or_else(|| {
+                format!("the log is written to a .csv or .jsonl file, not a .{e} one (JSON Lines isn't one JSON document)")
+            })?),
+        };
+    let asked = ps(p, "format").map(str::to_ascii_lowercase);
+    let format = match (asked.as_deref(), by_ext) {
+        (Some(f), by_ext) => {
+            let f = kind(f).ok_or("format is csv or jsonl")?;
+            if by_ext.is_some_and(|e| e != f) {
+                return Err(format!("format {f} doesn't match the path's .{}", ext.as_deref().unwrap_or_default()));
+            }
+            f
+        }
+        (None, Some(e)) => e,
+        (None, None) => return Err("give a .csv or .jsonl path, or a format (csv or jsonl)".into()),
+    };
+    // Written entry by entry, so a long log isn't held as text first; a failure part way leaves
+    // an existing file as it was.
+    let n = s.log.len();
+    rustgis_data::io::write_atomic_with(&path, |w| {
+        use std::io::Write;
+        if format == "csv" {
+            w.write_all(b"time_utc,at,command,ok,millis,error,params\n")?;
+        }
+        s.log.entries().try_for_each(|e| write_entry(w, e, format))
+    })
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    s.notify(format!("Exported the session log ({n} entries) to {}", path.display()), false);
+    Ok(json!({"path": path.display().to_string(), "entries": n, "format": format}))
+}
+
+/// Entry `e` as a CSV row or a JSON line, written to `w`.
+fn write_entry(w: &mut dyn std::io::Write, e: &crate::project_log::LogEntry, format: &str) -> std::io::Result<()> {
+    if format == "csv" {
+        let (date, time) = rustgis_map::graphics::civil(e.at / 1000);
+        writeln!(
+            w,
+            "{date} {time}:{:02},{},{},{},{},{},{}",
+            (e.at / 1000) % 60,
+            e.at,
+            csv_cell(&e.command),
+            e.ok,
+            e.millis,
+            csv_cell(e.error.as_deref().unwrap_or("")),
+            csv_cell(&e.params.to_string())
+        )
+    } else {
+        serde_json::to_writer(&mut *w, e).map_err(std::io::Error::other)?;
+        w.write_all(b"\n")
+    }
+}
+
+/// `project.clearLog`: empties the log, which then holds this command's own entry, so a cleared
+/// log says it was cleared.
+fn clear_log(s: &mut Session, _: &Value) -> CmdResult {
+    let n = s.log.clear();
+    Ok(json!({"cleared": n}))
+}
+
+/// `project.logCommands`: turns the log on or off; off, nothing more goes in (what is there stays).
+fn log_commands(s: &mut Session, p: &Value) -> CmdResult {
+    let on = match p.get("on") {
+        None | Some(Value::Null) => !s.log.on(),
+        Some(v) => v.as_bool().ok_or("on must be true or false")?,
+    };
+    s.log.set_on(on);
+    Ok(json!({"on": on}))
 }
 
 /// Replaces the project, clearing history and per-project state.

@@ -251,6 +251,23 @@ fn check_fields(l: &mut rustgis_map::Layer, name: &str, report: &mut Report) {
     if let Some(f) = field.filter(|f| l.dataset.field_index(f).is_none()) {
         report.approximated(name, format!("classes by the field {f}, which the layer hasn't: every feature draws as the rest"));
     }
+    // The symbol's data-defined settings: an expression that doesn't read here (a QGIS function
+    // or variable RustGIS lacks, a field the layer hasn't) is left out.
+    let by = &mut l.symbol_by;
+    for (what, slot) in [
+        ("size", &mut by.size),
+        ("fill colour", &mut by.fill),
+        ("outline colour", &mut by.stroke),
+        ("outline width", &mut by.stroke_width),
+        ("angle", &mut by.angle),
+    ] {
+        if let Some(text) = slot.as_deref()
+            && let Err(e) = rustgis_data::query::parse(text, &l.dataset)
+        {
+            report.skipped(name, format!("its data-defined symbol {what} `{text}` ({e})"));
+            *slot = None;
+        }
+    }
 }
 
 /// Gives what a QGIS web layer was added as the layer's visibility, opacity and blending mode.

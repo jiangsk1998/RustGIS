@@ -11,6 +11,7 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
 | [Cartography](cartography.md) | Symbology, labeling, layer effects and graphics |
 | [Editing](editing.md) | Creating and modifying features, data design, the clipboard and pop-ups |
 | [Analysis](analysis.md) | Selection and SQL queries, geoprocessing, the GeoLibre tools, guided workflows, imagery, data cubes and time series |
+| [Expressions](expressions.md) | The expression language of queries, filters and Calculate Field: grammar, operators, functions |
 | [Layouts and Reports](layouts.md) | Page layouts, map series, reports, presentations and notebooks |
 | [Sharing](sharing.md) | Exports, packages and open-format web maps, layers, styles and scenes |
 | [Workspace](workspace.md) | Linked views, the Browser view, animation, profiles, offline areas, customizing the ribbon |

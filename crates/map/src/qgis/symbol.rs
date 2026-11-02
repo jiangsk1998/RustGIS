@@ -8,6 +8,7 @@ use roxmltree::Node;
 use super::{Report, color, data_defined_on, has_effect, points, prop, props, signed_points};
 use crate::Rgba;
 use crate::fills::{FillLayer, FillPattern, GradientPoint, GradientShape, Spread, Stop, Stops};
+use crate::symbol_by::SymbolBy;
 use crate::symbology::{
     Dash, Glyph, LineCap, LineJoin, LineMark, LineMarkers, LineStroke, MAX_DASH_STEPS, MAX_STROKES, Marker, MarkerRotation, Placements,
     Symbol,
@@ -28,6 +29,8 @@ pub(super) struct Converted {
     pub strokes: Vec<LineStroke>,
     /// A marker symbol turned by a field (its data-defined angle).
     pub rotation: Option<MarkerRotation>,
+    /// Its data-defined size, colours, outline width and angle, as expressions.
+    pub by: SymbolBy,
     /// A fill symbol's stacked fills, bottom first: empty when its one fill is a colour (the
     /// symbol's own), as before patterns were read.
     pub fills: Vec<FillLayer>,
@@ -68,11 +71,19 @@ pub(super) fn read(sym: Node, reference: Option<f64>, turned: bool, layer: &str,
         .take(64)
         .map(|l| (l, settings(l, unit)))
         .collect();
-    // A marker symbol's angle from a field turns the layer's markers; other data-defined settings
-    // are noted.
+    // A marker symbol's angle from a field turns the layer's markers; its size, colours, outline
+    // width and other angles become expressions; other data-defined settings are noted.
     let is_marker = !matches!(sym.attribute("type"), Some("fill") | Some("line"));
     let mut rotation = None;
-    for node in std::iter::once(sym).chain(layers.iter().map(|(l, _)| *l)) {
+    let mut by = SymbolBy::default();
+    // The size (in points) of the layer whose size expression was taken.
+    let mut sized_layer: Option<f32> = None;
+    // How many of its layers are sized by expression.
+    let mut sized_layers = 0;
+    // A marker of several layers draws as marks scaled with its size: the top layer's is read first.
+    let marks = is_marker && layers.len() > 1;
+    let order: Vec<&(Node, Props)> = if marks { layers.iter().rev().collect() } else { layers.iter().collect() };
+    for (node, p) in std::iter::once((sym, None)).chain(order.into_iter().map(|(l, p)| (*l, Some(p.as_slice())))) {
         let active = active_properties(node);
         // A layout `active_properties` doesn't read (QGIS 2's `dd_properties`) is still noted.
         if active.is_empty() && data_defined_on(node) {
@@ -82,9 +93,26 @@ pub(super) fn read(sym: Node, reference: Option<f64>, turned: bool, layer: &str,
             match field_angle(property).filter(|_| is_marker && name == "angle") {
                 Some(r) if rotation.as_ref().is_none_or(|had| *had == r) => rotation = Some(r),
                 Some(_) => report.approximated(layer, "marker layers turned by different fields, all turned by the first"),
+                // A lower layer's size: the marks scale with the top one's.
+                None if marks && name == "size" && by.size.is_some() => sized_layers += usize::from(p.is_some()),
+                None if by_expression(sym.attribute("type"), name, property, p, reference, &mut by, layer, report) => {
+                    // (A size on the symbol itself scales the whole symbol: nothing to turn.)
+                    if name == "size" && p.is_some() {
+                        sized_layers += 1;
+                        sized_layer = p.and_then(|p| size(p, "size", reference, layer, report)).or(Some(2.0 * 96.0 / 25.4));
+                    }
+                    if !(marks && name == "size") && layers.len() > 1 {
+                        report.approximated(layer, "data-defined settings of one symbol layer, applied to the whole symbol");
+                    }
+                }
                 None => report.skipped(layer, "data-defined symbol settings (from fields or expressions)"),
             }
         }
+    }
+    // Each layer sized by expression scales as QGIS scales them together; a layer of a fixed size
+    // scales with the rest.
+    if marks && by.size.is_some() && sized_layers < layers.len() {
+        report.approximated(layer, "the layers of a marker sized by expression, all scaled with its size");
     }
     for (l, _) in &layers {
         if has_effect(*l) {
@@ -97,6 +125,38 @@ pub(super) fn read(sym: Node, reference: Option<f64>, turned: bool, layer: &str,
         _ => marker(&layers, reference, turned && rotation.is_none(), layer, report),
     };
     out.rotation = rotation;
+    let drawn_as_marks = is_marker && !out.strokes.is_empty();
+    // Marks keep their own colours and outlines.
+    if drawn_as_marks && (by.fill.is_some() || by.stroke.is_some() || by.stroke_width.is_some()) {
+        report.skipped(layer, "data-defined colours and outline widths of a marker drawn as marks");
+        (by.fill, by.stroke, by.stroke_width) = (None, None, None);
+    }
+    // A line of stacked strokes draws each with its own colour and width.
+    if sym.attribute("type") == Some("line") && out.stacked() && (by.stroke.is_some() || by.stroke_width.is_some()) {
+        report.skipped(layer, "data-defined colours and widths of a line of several strokes");
+        (by.stroke, by.stroke_width) = (None, None);
+    }
+    // Marks scale with the symbol's size, its largest layer's: the expression, taken from one
+    // layer, is turned into the size it gives that one, so every mark scales as that layer does.
+    if let (true, Some(text), Some(own)) = (drawn_as_marks, by.size.as_ref(), sized_layer.map(|s| s.clamp(0.0, 200.0)))
+        && own > 0.0
+        && out.symbol.size > 0.0
+        && (out.symbol.size / own - 1.0).abs() > 1e-6
+    {
+        let k = (f64::from(out.symbol.size / own)).clamp(1e-3, 1e3);
+        let scaled = format!("({text}) * {}", (k * 1e6).round() / 1e6);
+        if scaled.len() <= rustgis_data::query::MAX_LEN {
+            by.size = Some(scaled);
+        } else {
+            report.skipped(layer, "a data-defined marker size too long to read");
+            by.size = None;
+        }
+    }
+    // (An expression's colour is drawn as it is: the symbol's opacity doesn't fade it.)
+    if alpha < 1.0 && (by.fill.is_some() || by.stroke.is_some()) {
+        report.approximated(layer, "data-defined colours of a see-through symbol, drawn opaque");
+    }
+    out.by = by;
     out.symbol.fill = fade(out.symbol.fill);
     out.symbol.stroke = fade(out.symbol.stroke);
     for s in &mut out.strokes {
@@ -371,7 +431,7 @@ fn fill(layers: &[(Node, Props)], reference: Option<f64>, layer: &str, report: &
     }
     let symbol =
         Symbol { fill: fill.unwrap_or(none), stroke: stroke.unwrap_or(none), stroke_width: width, size: 0.0, marker: Marker::Circle };
-    Converted { symbol, strokes: Vec::new(), rotation: None, fills: stack }
+    Converted { symbol, strokes: Vec::new(), rotation: None, by: SymbolBy::default(), fills: stack }
 }
 
 /// A gradient fill's (or a shapeburst fill's, `burst`) first colour and the rest of it: its two
@@ -537,7 +597,7 @@ fn line(layers: &[(Node, Props)], reference: Option<f64>, layer: &str, report: &
         }
         None => hidden(),
     };
-    Converted { symbol, strokes, rotation: None, fills: Vec::new() }
+    Converted { symbol, strokes, rotation: None, by: SymbolBy::default(), fills: Vec::new() }
 }
 
 /// A marker line (`hash` false) or hashed line as strokes of markers or hash marks along the line:
@@ -793,7 +853,7 @@ fn marker(layers: &[(Node, Props)], reference: Option<f64>, still: bool, layer: 
         && marks.len() <= 1
         && marks.iter().all(|m| m.offset == 0.0 && m.markers.is_some_and(|k| k.offset_along == 0.0 && k.angle == 0.0));
     let strokes = if alone { Vec::new() } else { marks.into_iter().map(LineStroke::clamped).collect() };
-    Converted { symbol, strokes, rotation: None, fills: Vec::new() }
+    Converted { symbol, strokes, rotation: None, by: SymbolBy::default(), fills: Vec::new() }
 }
 
 /// A point marker layer's offset (`offset`, "x,y" in its unit: right and down) in points, its
@@ -837,6 +897,61 @@ fn active_properties<'a, 'i>(node: Node<'a, 'i>) -> Vec<(&'a str, Node<'a, 'i>)>
         }
     }
     out
+}
+
+/// A data-defined property's expression: a field's (`type` 2) quoted, or the expression's own
+/// (`type` 3); `None` for a fixed value or text too long to read.
+fn property_text(property: Node) -> Option<String> {
+    let named = |name: &str| {
+        property.children().find(|c| c.has_tag_name("Option") && c.attribute("name") == Some(name)).and_then(|o| o.attribute("value"))
+    };
+    let text = match named("type").map(str::trim) {
+        Some("2") => format!("\"{}\"", named("field")?.trim().replace('"', "\"\"")),
+        Some("3") => named("expression")?.trim().to_string(),
+        _ => return None,
+    };
+    Some(text).filter(|t| !t.is_empty() && t != "\"\"" && t.len() <= rustgis_data::query::MAX_LEN - 32)
+}
+
+/// Takes the data-defined property `name` of a symbol layer (its settings `p`) of a `kind`
+/// symbol into `by` when RustGIS draws it by expression: a marker's size and angle, the fill and
+/// outline colours and the outline's (a line's) width, sizes turned from the layer's unit into
+/// points. False for one it doesn't. A second symbol layer's for the same keeps the first's (noted).
+#[allow(clippy::too_many_arguments)]
+fn by_expression(
+    kind: Option<&str>,
+    name: &str,
+    property: Node,
+    p: Option<&[(String, String)]>,
+    reference: Option<f64>,
+    by: &mut SymbolBy,
+    layer: &str,
+    report: &mut Report,
+) -> bool {
+    let (marker, fill, line) = (!matches!(kind, Some("fill" | "line")), kind == Some("fill"), kind == Some("line"));
+    let sized = |key: &str, text: String, report: &mut Report| {
+        let unit = p.and_then(|p| prop(p, &format!("{key}_unit")).or(prop(p, SYMBOL_UNIT)));
+        let k = super::in_points(1.0, unit, reference, layer, report);
+        if (k - 1.0).abs() < 1e-9 || !k.is_finite() { text } else { format!("({text}) * {}", (k * 1e6).round() / 1e6) }
+    };
+    let Some(text) = property_text(property) else { return false };
+    let (slot, text) = match name {
+        "size" if marker => (&mut by.size, sized("size", text, report)),
+        "fillColor" if marker || fill => (&mut by.fill, text),
+        "outlineColor" => (&mut by.stroke, text),
+        "outlineWidth" if line => (&mut by.stroke_width, sized("line_width", text, report)),
+        "outlineWidth" => (&mut by.stroke_width, sized("outline_width", text, report)),
+        "angle" if marker => (&mut by.angle, text),
+        _ => return false,
+    };
+    match slot {
+        Some(had) if *had != text => {
+            report.approximated(layer, "symbol layers with different data-defined settings, drawn with the first's")
+        }
+        Some(_) => {}
+        None => *slot = Some(text),
+    }
+    true
 }
 
 /// A data-defined angle that is a field's value (a field property, or the expression `"field"`,

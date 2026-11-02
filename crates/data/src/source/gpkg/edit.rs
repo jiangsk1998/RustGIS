@@ -1379,6 +1379,8 @@ mod tests {
         let original = header_blob(&body, &line(1.0).extent(), 4326);
         conn.execute("UPDATE roads SET geom = ?1 WHERE fid = 1", [&original]).unwrap();
         let table = EditTable::open(&path, "roads").unwrap();
+        // Reading drops that Z, and says so (the optional Z found in the first rows).
+        assert!(table.info().zm_dropped);
         for g in [None, Some(line(6.0))] {
             assert!(
                 table

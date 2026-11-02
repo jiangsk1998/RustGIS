@@ -14,6 +14,7 @@ use tiny_skia::{
 };
 
 use crate::cache::{self, Payload, State, Want};
+use crate::dem;
 use crate::mvt::GeomKind;
 use crate::source::{Resolve, Resolved, Spec, resolve};
 use crate::sprite::{self, Load, Sprite};
@@ -60,6 +61,11 @@ pub(crate) struct Item {
     pub(crate) clip: Extent,
 }
 
+/// What of a resolved style was left out, as a drawing's error: the style still draws.
+fn left_out(r: &Resolved) -> Option<String> {
+    (!r.left_out.is_empty()).then(|| r.left_out.join("; "))
+}
+
 /// Draws `spec` into `pm` at `opacity`. Labels are collected when `labels` is set.
 pub fn draw(pm: &mut Pixmap, spec: &Spec, opacity: f32, frame: &Frame, labels: bool) -> Drawn {
     let mut out = Drawn::default();
@@ -75,6 +81,8 @@ pub fn draw(pm: &mut Pixmap, spec: &Spec, opacity: f32, frame: &Frame, labels: b
         }
     };
     out.attribution = r.attribution.clone();
+    out.error = left_out(&r);
+    out.pending |= r.waiting;
     if !(frame.m_per_px.is_finite() && frame.m_per_px > 0.0) || opacity <= 0.0 {
         return out;
     }
@@ -127,6 +135,8 @@ pub(crate) fn draw_layers(
     let zoom = template::style_zoom(frame.m_per_px * f64::from(frame.ppp));
     let mut items: HashMap<String, Vec<Item>> = HashMap::new();
     let mut boxes: Boxes = HashMap::new();
+    // An elevation source's heights, read once for its layers, by source and resampling.
+    let mut grids: HashMap<(String, bool), dem::Grid> = HashMap::new();
     // The sprite, fetched the first time a layer needs it.
     let mut sprite_state: Option<Option<Arc<Sprite>>> = None;
     let mut sprite = |pending: &mut bool| -> Option<Arc<Sprite>> {
@@ -161,13 +171,28 @@ pub(crate) fn draw_layers(
             continue;
         }
         let Some(src_id) = layer.source.as_deref() else { continue };
+        // A colour ramp it can't draw needs no heights read.
+        if layer.kind == LayerKind::ColorRelief && layer.color_relief_ramp(zoom).is_none() {
+            continue;
+        }
         if !items.contains_key(src_id) {
             let Some(src) = r.style.sources.iter().find(|s| s.0 == src_id).map(|s| &s.1) else { continue };
-            let list = tiles_for(src, view, frame, zoom, &mut out.pending);
+            // Hillshade reads the heights a pixel past the view's edges: those tiles too.
+            let pad = 2.0 * frame.m_per_px;
+            let reach = Extent::new(view.min_x - pad, view.min_y - pad, view.max_x + pad, view.max_y + pad);
+            let list = tiles_for(src, if matches!(src, Source::RasterDem { .. }) { &reach } else { view }, frame, zoom, &mut out.pending);
             items.insert(src_id.to_string(), list);
         }
         let Some(list) = items.get(src_id) else { continue };
         match layer.kind {
+            LayerKind::Hillshade | LayerKind::ColorRelief => {
+                let Some(t) = target.as_deref_mut() else { continue };
+                let Some(Source::RasterDem { encoding, .. }) = r.style.source(src_id) else { continue };
+                let nearest = layer.resampling_nearest(zoom);
+                let grid =
+                    grids.entry((src_id.to_string(), nearest)).or_insert_with(|| dem::Grid::read(list, *encoding, frame, (w, h), nearest));
+                dem::draw(t, layer, grid, zoom);
+            }
             LayerKind::Raster => {
                 let Some(t) = target.as_deref_mut() else { continue };
                 let o = layer.raster_opacity(zoom);
@@ -281,6 +306,8 @@ fn place_as(
         }
     };
     out.attribution = r.attribution.clone();
+    out.error = left_out(&r);
+    out.pending |= r.waiting;
     if !(frame.m_per_px.is_finite() && frame.m_per_px > 0.0) || opacity <= 0.0 {
         return Some(out);
     }
@@ -475,7 +502,7 @@ fn tiles_for(src: &Source, view: &Extent, frame: &Frame, zoom: f32, pending: &mu
 /// for those not here yet.
 pub(crate) fn tiles_in(src: &Source, view: &Extent, reach: Option<&Extent>, frame: &Frame, zoom: f32, pending: &mut bool) -> Vec<Item> {
     let (tiles, min_z, max_z, want, z) = match src {
-        Source::Raster { tiles, tile_size, min_zoom, max_zoom, .. } => {
+        Source::Raster { tiles, tile_size, min_zoom, max_zoom, .. } | Source::RasterDem { tiles, tile_size, min_zoom, max_zoom, .. } => {
             let z = template::zoom_for(frame.m_per_px * f64::from(frame.ppp), *tile_size, *max_zoom);
             (tiles, *min_zoom, *max_zoom, Want::Image, z)
         }

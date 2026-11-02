@@ -1693,6 +1693,36 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, moves: [bool; 2], reord
         })
         .response
         .on_hover_text(tl!("How the layer's colours combine with the tile layers and basemap beneath."));
+        // A layer its service draws on request: one picture of the view, or tiles (#1162).
+        if tile.on_request() {
+            let shown = if tile.single_image {
+                tl!("Single image").to_string()
+            } else if tile.sized_tiles() {
+                crate::i18n::fmt("Tiles of {size} px", &[("size", &tile.tile_size.to_string())])
+            } else {
+                tl!("Tiles").to_string()
+            };
+            ui.menu_button(crate::i18n::fmt("Draw as: {how}", &[("how", &shown)]), |ui| {
+                if ui.radio(tile.single_image, tl!("Single image")).on_hover_text(tl!("One picture of the view: symbols and labels aren't cut at tile edges, and the service is asked once a view. Drawn in tiles on the globe, on a tilted map, or in a projection the service doesn't offer.")).clicked() {
+                    action = Some(("map.setTiles", json!({"index": i, "singleImage": true})));
+                    ui.close();
+                }
+                if tile.sized_tiles() {
+                    for side in [256u32, 512, 1024] {
+                        let label = crate::i18n::fmt("Tiles of {size} px", &[("size", &side.to_string())]);
+                        if ui.radio(!tile.single_image && tile.tile_size == side, label).clicked() {
+                            action = Some(("map.setTiles", json!({"index": i, "singleImage": false, "tileSize": side})));
+                            ui.close();
+                        }
+                    }
+                } else if ui.radio(!tile.single_image, tl!("Tiles")).clicked() {
+                    action = Some(("map.setTiles", json!({"index": i, "singleImage": false})));
+                    ui.close();
+                }
+            })
+            .response
+            .on_hover_text(tl!("Whether the service is asked for one picture of the view or for tiles."));
+        }
         ui.separator();
         if ui.add_enabled(reorder && moves[0], egui::Button::new(tl!("Move up"))).clicked() {
             action = Some(("map.setTiles", json!({"index": i, "move": "up"})));
@@ -2889,6 +2919,7 @@ impl GpForm {
         let Some(spec) = self.tool.and_then(rustgis_engine::analysis::tool) else { return };
         for p in spec.params {
             let text = match (p.kind, given.get(p.name)) {
+                (ParamKind::Fields { .. } | ParamKind::FieldStatistics { .. }, Some(v)) => v.to_string(),
                 (_, None | Some(Value::Null)) => continue,
                 (ParamKind::RasterLayers | ParamKind::VectorLayers, Some(Value::Array(a))) => {
                     a.iter().map(|x| x.as_str().map_or_else(|| x.to_string(), str::to_string)).collect::<Vec<_>>().join(";")
@@ -3119,11 +3150,13 @@ pub(crate) fn takes_layer(kind: ParamKind, l: &rustgis_engine::map::Layer) -> bo
 }
 
 /// Whether a tool's parameter of `kind` takes field `i` of `d`: a numeric one for a
-/// `NumericField`, one holding coordinates for a `CoordinateField`, any for a `Field`. False for
-/// a kind that isn't a field's.
+/// `NumericField`, one holding coordinates for a `CoordinateField`, one without a `,` or `;` for
+/// `FieldNames` (runners split the text list at commas, some at semicolons too, so such a name
+/// can't be one entry), any for a `Field`. False for a kind that isn't a field's.
 pub(crate) fn takes_field(kind: ParamKind, d: &rustgis_engine::data::Dataset, i: usize) -> bool {
     match kind {
-        ParamKind::Field => true,
+        ParamKind::Field | ParamKind::Fields { .. } => true,
+        ParamKind::FieldNames => d.fields.get(i).is_some_and(|f| !f.name.contains([',', ';'])),
         ParamKind::NumericField => d.fields.get(i).is_some_and(|f| f.ty.is_numeric()),
         ParamKind::CoordinateField => rustgis_engine::analysis::holds_coordinates(d, i),
         _ => false,
@@ -3135,6 +3168,71 @@ pub(crate) fn first_layer(spec: &rustgis_engine::analysis::ToolSpec) -> Option<&
     spec.params
         .iter()
         .find(|p| matches!(p.kind, ParamKind::Layer | ParamKind::PolygonLayer | ParamKind::PointLayer | ParamKind::VectorLayer))
+}
+
+/// The most specific `<input>_…` prefix wins; otherwise use the first attribute input.
+pub(crate) fn layer_for_param<'a>(
+    spec: &'a rustgis_engine::analysis::ToolSpec,
+    param_name: &str,
+) -> Option<&'a rustgis_engine::analysis::ParamSpec> {
+    spec.params
+        .iter()
+        .filter(|p| {
+            matches!(p.kind, ParamKind::Layer | ParamKind::PolygonLayer | ParamKind::PointLayer | ParamKind::VectorLayer)
+                && param_name.strip_prefix(p.name).is_some_and(|rest| rest.starts_with('_'))
+        })
+        .max_by_key(|p| p.name.len())
+        .or_else(|| first_layer(spec))
+}
+
+/// Editable field names with suggestions: manifests may describe new columns, not just inputs.
+/// A list appends names without replacing its earlier entries; manually typed syntax is retained.
+/// `hint` shows in the empty box (the default a run uses).
+pub(crate) fn field_suggestions<'a>(
+    ui: &mut Ui,
+    id: egui::Id,
+    value: &mut String,
+    label: &str,
+    hint: &str,
+    fields: impl Iterator<Item = &'a str>,
+    multiple: bool,
+) -> egui::Response {
+    let mut picked = None;
+    let mut response = ui
+        .horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                egui::ComboBox::from_id_salt(id)
+                    .selected_text(tl!("Fields"))
+                    .width(70.0)
+                    .show_ui(ui, |ui| {
+                        for field in fields {
+                            if ui.selectable_label(false, field).clicked() {
+                                picked = Some(field);
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(tl!("Choose a field"));
+                ui.add(egui::TextEdit::singleline(&mut *value).hint_text(hint).desired_width(f32::INFINITY)).on_hover_text(label)
+            })
+            .inner
+        })
+        .inner;
+    if let Some(field) = picked {
+        if !multiple || value.trim().is_empty() {
+            value.clear();
+            value.push_str(field);
+            response.mark_changed();
+        } else if !value.split([',', ';']).any(|part| part.trim() == field) {
+            let separator = if value.contains(';') { ';' } else { ',' };
+            if !value.trim_end().ends_with([',', ';']) {
+                value.push(separator);
+            }
+            value.push_str(field);
+            response.mark_changed();
+        }
+    }
+    response
 }
 
 /// The layer or table of name `name`, as a tool finds its input: a layer by its name, else a
@@ -3332,13 +3430,22 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         app.session.map().layers.iter().filter(|l| takes_layer(kind, l)).map(|l| l.name.clone()).collect()
     };
     let plugin_tool = spec.id.starts_with(rustgis_engine::plugins::PREFIX);
+    #[cfg(not(target_arch = "wasm32"))]
     let first_layer = first_layer(spec).map(|p| p.name);
     // The file parameter whose Browse was pressed: picked once the form is drawn.
     let mut browse_for = None;
     // A parameter that doesn't apply to the options picked (Spatial Join's search distance with
     // Intersects) is hidden, and left out of the run.
     let applies = |app: &RustGisApp, name: &str| {
-        let value = |n: &str| app.gp.values.get(n).cloned().unwrap_or_default();
+        let value = |n: &str| {
+            let text = app.gp.values.get(n).cloned().unwrap_or_default();
+            if spec.params.iter().any(|p| p.name == n && crate::fieldlists::input(p.kind).is_some()) {
+                let value = crate::fieldlists::form_value(&text);
+                value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string())
+            } else {
+                text
+            }
+        };
         rustgis_engine::analysis::param_applies(spec.id, name, &value)
     };
     for p in spec.params {
@@ -3350,6 +3457,23 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             label.on_hover_text(p.help);
         }
         let mut cur = app.gp.values.get(p.name).cloned().unwrap_or_default();
+        if let Some(input) = crate::fieldlists::input(p.kind) {
+            let name = app.gp.values.get(input).map(String::as_str).unwrap_or_default();
+            let dataset = match app.gp.tables.get(input) {
+                Some(id) => app.session.project.table(*id).map(|t| &t.dataset),
+                None => input_dataset(&app.session, name),
+            };
+            let value = crate::fieldlists::form_value(&cur);
+            if let Some(value) = ui
+                .push_id(("gp_list", p.name), |ui| crate::fieldlists::show(ui, p.kind, &value, dataset.map(|d| d.fields.as_slice())))
+                .inner
+                .value
+            {
+                app.gp.values.insert(p.name, value.to_string());
+            }
+            ui.add_space(4.0);
+            continue;
+        }
         let options: Option<Vec<String>> = match p.kind {
             // Layers by their names, then tables: the value is the name shown, and a table
             // picked is kept by its id beside it.
@@ -3379,9 +3503,10 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 continue;
             }
             ParamKind::PolygonLayer | ParamKind::PointLayer => Some(layer_names(p.kind)),
-            ParamKind::Field | ParamKind::NumericField | ParamKind::CoordinateField => {
-                let lname = first_layer.and_then(|n| app.gp.values.get(n)).cloned().unwrap_or_default();
-                let table = first_layer.and_then(|n| app.gp.tables.get(n)).copied();
+            ParamKind::Field | ParamKind::FieldNames | ParamKind::NumericField | ParamKind::CoordinateField => {
+                let target_param = layer_for_param(spec, p.name).map(|p| p.name);
+                let lname = target_param.and_then(|n| app.gp.values.get(n)).cloned().unwrap_or_default();
+                let table = target_param.and_then(|n| app.gp.tables.get(n)).copied();
                 // The table picked; else the layer or table of that name, as the tool finds it.
                 let ds = match table {
                     Some(id) => app.session.project.table(id).map(|t| &t.dataset),
@@ -3409,6 +3534,23 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                         v
                     }
                 };
+                if spec.id.starts_with("geolibre:") || p.kind == ParamKind::FieldNames {
+                    if field_suggestions(
+                        ui,
+                        egui::Id::unique(("gp", p.name)),
+                        &mut cur,
+                        tl!(p.label),
+                        "",
+                        v.iter().map(String::as_str),
+                        p.kind == ParamKind::FieldNames,
+                    )
+                    .changed()
+                    {
+                        app.gp.values.insert(p.name, cur);
+                    }
+                    ui.add_space(4.0);
+                    continue;
+                }
                 // A field picked for another layer, which this one doesn't have: unset.
                 if ds.is_some() && !cur.is_empty() && !v.iter().any(|f| f.eq_ignore_ascii_case(&cur)) {
                     app.gp.values.remove(p.name);
@@ -3570,6 +3712,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                             let bytes = app.gp.files.get(p.name).map(|(_, b)| b.as_slice()).unwrap_or_default();
                             json!({"name": v, "data": base64::engine::general_purpose::STANDARD.encode(bytes)})
                         }
+                        (ParamKind::Fields { .. } | ParamKind::FieldStatistics { .. }, _) => crate::fieldlists::form_value(v),
                         (ParamKind::Bool, _) => json!(v == "true"),
                         _ => json!(v),
                     };
@@ -3965,7 +4108,9 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 ui.horizontal(|ui| {
                     let input_label = ui.label(tl!("Classes"));
                     let mut k = asked;
-                    if ui.add(egui::DragValue::new(&mut k).range(1..=12)).labelled_by(input_label.id).changed() {
+                    let resp = ui.add(egui::DragValue::new(&mut k).range(1..=12)).labelled_by(input_label.id);
+                    if resp.changed() {
+                        crate::widgets::one_step_per_press(app, &resp);
                         let _ = app.run(
                             "layer.symbology",
                             json!({"type": "graduated", "field": field, "method": format!("{method:?}"), "classes": k, "ramp": ramp.name()}),
@@ -3994,6 +4139,10 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     if l.has_geometry(GeometryType::Polygon) && !l.graphics {
         ui.add_space(8.0);
         crate::fill_editor::fills_editor(app, ui, &l, t);
+    }
+    if !l.graphics {
+        ui.add_space(8.0);
+        symbol_by_editor(app, ui, &l, t);
     }
     ui.add_space(10.0);
     ui.separator();
@@ -4464,28 +4613,36 @@ fn symbol_editor(app: &mut RustGisApp, ui: &mut Ui, s: Symbol, g: GeometryType, 
             if g != GeometryType::Polyline {
                 ui.label(tl!("Color"));
                 let mut c = c32(s.fill);
-                if crate::widgets::color_button(ui, &mut c).changed() {
+                let resp = crate::widgets::color_button(ui, &mut c);
+                if resp.changed() {
+                    crate::widgets::one_step_per_press(app, &resp);
                     let _ = app.run("layer.color", json!({"color": rgba(c).hex8()}));
                 }
                 ui.end_row();
             }
             ui.label(tl!(if g == GeometryType::Polyline { "Line color" } else { "Outline color" }));
             let mut c = c32(s.stroke);
-            if crate::widgets::color_button(ui, &mut c).changed() {
+            let resp = crate::widgets::color_button(ui, &mut c);
+            if resp.changed() {
+                crate::widgets::one_step_per_press(app, &resp);
                 let key = if g == GeometryType::Polyline { "layer.color" } else { "layer.outline" };
                 let _ = app.run(key, json!({"color": rgba(c).hex()}));
             }
             ui.end_row();
             let input_label = ui.label(tl!(if g == GeometryType::Polyline { "Line width" } else { "Outline width" }));
             let mut w = s.stroke_width;
-            if ui.add(egui::DragValue::new(&mut w).range(0.0..=12.0).speed(0.05).suffix(" pt")).labelled_by(input_label.id).changed() {
+            let resp = ui.add(egui::DragValue::new(&mut w).range(0.0..=12.0).speed(0.05).suffix(" pt")).labelled_by(input_label.id);
+            if resp.changed() {
+                crate::widgets::one_step_per_press(app, &resp);
                 let _ = app.run("layer.outline", json!({"width": w}));
             }
             ui.end_row();
             if g == GeometryType::Point {
                 let input_label = ui.label(tl!("Size"));
                 let mut sz = s.size;
-                if ui.add(egui::DragValue::new(&mut sz).range(1.0..=60.0).speed(0.1).suffix(" pt")).labelled_by(input_label.id).changed() {
+                let resp = ui.add(egui::DragValue::new(&mut sz).range(1.0..=60.0).speed(0.1).suffix(" pt")).labelled_by(input_label.id);
+                if resp.changed() {
+                    crate::widgets::one_step_per_press(app, &resp);
                     let _ = app.run("layer.marker", json!({"size": sz}));
                 }
                 ui.end_row();
@@ -4757,11 +4914,10 @@ fn marker_rows(
     }
     let input_label = ui.label(if m.mark == LineMark::Hash { tl!("Length") } else { tl!("Size") });
     let mut size = m.size;
-    if ui
-        .add(egui::DragValue::new(&mut size).range(0.0..=MAX_LINE_MARKER_SIZE).speed(0.1).suffix(" pt"))
-        .labelled_by(input_label.id)
-        .changed()
-    {
+    let resp =
+        ui.add(egui::DragValue::new(&mut size).range(0.0..=MAX_LINE_MARKER_SIZE).speed(0.1).suffix(" pt")).labelled_by(input_label.id);
+    if resp.changed() {
+        crate::widgets::one_step_per_press(app, &resp);
         set(app, with(LineMarkers { size, ..m }));
     }
     ui.end_row();
@@ -4770,8 +4926,9 @@ fn marker_rows(
         let input_label = ui.label(tl!("Offset right"));
         let mut along = m.offset_along;
         let drag = egui::DragValue::new(&mut along).range(-MAX_STROKE_OFFSET..=MAX_STROKE_OFFSET).speed(0.05).suffix(" pt");
-        if ui.add(drag).on_hover_text(tl!("Shifts the mark right of the point (left when negative)")).labelled_by(input_label.id).changed()
-        {
+        let resp = ui.add(drag).on_hover_text(tl!("Shifts the mark right of the point (left when negative)")).labelled_by(input_label.id);
+        if resp.changed() {
+            crate::widgets::one_step_per_press(app, &resp);
             set(app, with(LineMarkers { offset_along: along, ..m }));
         }
         ui.end_row();
@@ -4796,7 +4953,9 @@ fn marker_rows(
             let input_label = ui.label(tl!("Interval"));
             let mut interval = m.interval;
             let drag = egui::DragValue::new(&mut interval).range(MIN_MARKER_INTERVAL..=MAX_MARKER_INTERVAL).speed(0.2).suffix(" pt");
-            if ui.add(drag).on_hover_text(tl!("The distance between two marks along the line")).labelled_by(input_label.id).changed() {
+            let resp = ui.add(drag).on_hover_text(tl!("The distance between two marks along the line")).labelled_by(input_label.id);
+            if resp.changed() {
+                crate::widgets::one_step_per_press(app, &resp);
                 set(app, with(LineMarkers { interval, ..m }));
             }
             ui.end_row();
@@ -4807,7 +4966,9 @@ fn marker_rows(
         let mut angle = m.angle;
         let drag = egui::DragValue::new(&mut angle).range(0.0..=359.9).speed(1.0).suffix("°");
         let tip = if m.mark == LineMark::Hash { tl!("0° crosses the line square") } else { tl!("Turned further, clockwise") };
-        if ui.add(drag).on_hover_text(tip).changed() {
+        let resp = ui.add(drag).on_hover_text(tip);
+        if resp.changed() {
+            crate::widgets::one_step_per_press(app, &resp);
             set(app, with(LineMarkers { angle, ..m }));
         }
         let mut rotate = m.rotate;
@@ -4882,6 +5043,110 @@ fn marker_rotation_row(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                 .changed()
             {
                 let _ = app.run("layer.markerRotation", json!({"field": r.field, "counterclockwise": ccw}));
+            }
+        }
+    });
+}
+
+/// The By Expression section: the symbol's size, colors, outline width and (on points) angle per
+/// feature, each from an expression (`layer.symbolBy`). An expression applies when its box loses
+/// focus; one that doesn't read shows why as it is typed, and stays in its box unapplied until
+/// it is fixed or Escape drops it.
+fn symbol_by_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::map::Layer, t: &Tokens) {
+    let g = l.geometry_type();
+    let by = &l.symbol_by;
+    let mut rows: Vec<(&str, &str, &Option<String>)> = Vec::new();
+    match g {
+        GeometryType::Point => rows.extend([
+            ("size", tl!("Size"), &by.size),
+            ("fill", tl!("Fill"), &by.fill),
+            ("stroke", tl!("Outline"), &by.stroke),
+            ("strokeWidth", tl!("Outline width"), &by.stroke_width),
+            ("angle", tl!("Angle"), &by.angle),
+        ]),
+        GeometryType::Polyline => rows.extend([("stroke", tl!("Color"), &by.stroke), ("strokeWidth", tl!("Width"), &by.stroke_width)]),
+        _ => rows.extend([
+            ("fill", tl!("Fill"), &by.fill),
+            ("stroke", tl!("Outline"), &by.stroke),
+            ("strokeWidth", tl!("Outline width"), &by.stroke_width),
+        ]),
+    }
+    // A layer's id is its map's: a draft left on one map's layer isn't another's.
+    let scope = crate::labelpane::layer_key(app, l);
+    egui::Frame::NONE.fill(t.pane_header).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(egui::RichText::new(tl!("By Expression")).font(semibold(12.5)));
+        ui.label(
+            egui::RichText::new(tl!(
+                "Set per feature from an expression, e.g. \"pop\" / 1e5 or CASE WHEN … END; colors as '#RRGGBB'. Empty: the symbol's own."
+            ))
+            .small()
+            .weak(),
+        );
+        for (key, label, cur) in rows {
+            let cur = cur.clone().unwrap_or_default();
+            let id = egui::Id::unique(("symbol_by", scope, key));
+            let (typing, failed) = (id.with("typing"), id.with("failed"));
+            let focused = ui.memory(|m| m.has_focus(id));
+            // Each kept with the expression it was typed over: one set meanwhile (by undo or a
+            // command) drops it. Typing left over from a box that stopped being drawn while
+            // focused is dropped too.
+            let over = |d: &mut egui::util::IdTypeMap, key: egui::Id| {
+                let v = d.get_temp::<(String, String)>(key);
+                if v.as_ref().is_some_and(|(was, _)| *was != cur) {
+                    d.remove::<(String, String)>(key);
+                }
+                v.filter(|(was, _)| *was == cur).map(|(_, text)| text)
+            };
+            if !focused {
+                ui.data_mut(|d| d.remove::<(String, String)>(typing));
+            }
+            // Text that didn't read, kept until it is changed or dropped.
+            let kept = ui.data_mut(|d| over(d, failed));
+            let mut buf = match focused {
+                true => ui.data_mut(|d| over(d, typing)).or_else(|| kept.clone()).unwrap_or_else(|| cur.clone()),
+                false => kept.clone().unwrap_or_else(|| cur.clone()),
+            };
+            let r = ui
+                .horizontal(|ui| {
+                    let input_label = ui
+                        .allocate_ui_with_layout(egui::vec2(96.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.set_min_width(96.0);
+                            ui.label(label)
+                        })
+                        .inner;
+                    ui.add(
+                        egui::TextEdit::singleline(&mut buf)
+                            .id(id)
+                            .hint_text(tl!("None"))
+                            .char_limit(rustgis_engine::data::query::MAX_LEN)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY),
+                    )
+                    .labelled_by(input_label.id)
+                })
+                .inner;
+            // Checked here, as Calculate Field checks it, only while it differs from what is set.
+            let text = buf.trim();
+            let error =
+                (text != cur.trim() && !text.is_empty()).then(|| rustgis_engine::data::query::parse(text, &l.dataset).err()).flatten();
+            if r.lost_focus() {
+                ui.data_mut(|d| d.remove::<(String, String)>(typing));
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    ui.data_mut(|d| d.remove::<(String, String)>(failed));
+                } else if error.is_some() {
+                    ui.data_mut(|d| d.insert_temp(failed, (cur.clone(), buf.clone())));
+                } else {
+                    ui.data_mut(|d| d.remove::<(String, String)>(failed));
+                    if text != cur.trim() {
+                        let _ = app.run("layer.symbolBy", json!({ key: text }));
+                    }
+                }
+            } else if r.has_focus() {
+                ui.data_mut(|d| d.insert_temp(typing, (cur.clone(), buf.clone())));
+            }
+            if let Some(e) = error.filter(|_| focused || r.lost_focus() || kept.is_some()) {
+                ui.label(egui::RichText::new(crate::i18n::fmt("Invalid: {error}", &[("error", &e)])).small().color(t.red));
             }
         }
     });
@@ -5119,7 +5384,9 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                 ui.label(tl!("Color"));
                 ui.horizontal(|ui| {
                     let mut cc = c32(c);
-                    if crate::widgets::color_button(ui, &mut cc).changed() {
+                    let resp = crate::widgets::color_button(ui, &mut cc);
+                    if resp.changed() {
+                        crate::widgets::one_step_per_press(app, &resp);
                         set(app, LineStroke { color: Some(rgba(cc)), ..st });
                     }
                     let mut from_symbol = st.color.is_none();
@@ -5132,7 +5399,9 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                 ui.horizontal(|ui| {
                     let mut ww = w;
                     let drag = egui::DragValue::new(&mut ww).range(0.0..=MAX_STROKE_WIDTH).speed(0.05).suffix(" pt");
-                    if ui.add_enabled(st.width.is_some(), drag).on_hover_text(tl!("Width")).changed() {
+                    let resp = ui.add_enabled(st.width.is_some(), drag).on_hover_text(tl!("Width"));
+                    if resp.changed() {
+                        crate::widgets::one_step_per_press(app, &resp);
                         set(app, LineStroke { width: Some(ww), ..st });
                     }
                     let mut from_symbol = st.width.is_none();
@@ -5149,7 +5418,9 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                 } else {
                     tl!("Shifts the stroke sideways: positive to the right of the line's direction, negative to the left")
                 };
-                if ui.add(drag).on_hover_text(tip).changed() {
+                let resp = ui.add(drag).on_hover_text(tip);
+                if resp.changed() {
+                    crate::widgets::one_step_per_press(app, &resp);
                     set(app, LineStroke { offset: off, ..st });
                 }
                 ui.end_row();
@@ -5237,11 +5508,11 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                     ui.label(tl!("Level"));
                     ui.horizontal(|ui| {
                         let mut lv = st.level_at(i);
-                        if ui
+                        let resp = ui
                             .add_enabled(st.level.is_some(), egui::DragValue::new(&mut lv).range(0..=255).speed(0.1))
-                            .on_hover_text(tl!("Level"))
-                            .changed()
-                        {
+                            .on_hover_text(tl!("Level"));
+                        if resp.changed() {
+                            crate::widgets::one_step_per_press(app, &resp);
                             set(app, LineStroke { level: Some(lv), ..st });
                         }
                         let mut auto = st.level.is_none();
@@ -5700,7 +5971,9 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
             ui.horizontal(|ui| {
                 let input_label = ui.label(tl!("Classes"));
                 let mut kk = k;
-                if ui.add(egui::DragValue::new(&mut kk).range(1..=32)).labelled_by(input_label.id).changed() {
+                let resp = ui.add(egui::DragValue::new(&mut kk).range(1..=32)).labelled_by(input_label.id);
+                if resp.changed() {
+                    crate::widgets::one_step_per_press(app, &resp);
                     let _ = app.run("raster.symbology", json!({"type": "classify", "method": format!("{m:?}"), "classes": kk, "ramp": r}));
                 }
             });
@@ -6042,6 +6315,62 @@ pub(crate) fn layout_menu(app: &mut RustGisApp, ui: &mut Ui, n: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn field_source_uses_the_longest_input_prefix() {
+        use rustgis_engine::analysis::{ParamSpec, ToolSpec};
+        const fn layer(name: &'static str) -> ParamSpec {
+            ParamSpec { name, label: name, kind: ParamKind::VectorLayer, required: true, default: "", help: "" }
+        }
+        const PARAMS: &[ParamSpec] = &[layer("input"), layer("input_points"), layer("denominator")];
+        let spec = ToolSpec {
+            id: "field_sources",
+            name: "",
+            toolbox: "",
+            summary: "",
+            params: PARAMS,
+            run: rustgis_engine::analysis::external_placeholder,
+        };
+        assert_eq!(layer_for_param(&spec, "input_points_weight_field").map(|p| p.name), Some("input_points"));
+        assert_eq!(layer_for_param(&spec, "denominator_weight_field").map(|p| p.name), Some("denominator"));
+        assert_eq!(layer_for_param(&spec, "denominators_field").map(|p| p.name), Some("input"), "prefix needs an underscore boundary");
+        assert_eq!(layer_for_param(&spec, "weight_field").map(|p| p.name), Some("input"));
+    }
+
+    /// A `FieldNames` list is split at `,` (and by some runners at `;`), so a name holding either
+    /// isn't offered for it; a single field takes any name.
+    #[test]
+    fn field_name_lists_leave_out_names_holding_a_separator() {
+        let opts = rustgis_engine::data::io::CsvOptions { delimiter: Some(b'\t'), ..Default::default() };
+        let (d, _) = rustgis_engine::data::io::read_csv_with("last,first\ta;b\tname\nx\ty\tz\n", "t", &opts).unwrap();
+        let names = |kind| (0..d.fields.len()).filter(|&i| takes_field(kind, &d, i)).map(|i| d.fields[i].name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names(ParamKind::FieldNames), ["name"]);
+        assert_eq!(names(ParamKind::Field), ["last,first", "a;b", "name"]);
+    }
+
+    #[test]
+    fn field_suggestions_append_without_erasing_typed_names() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(400.0, 150.0)).build_ui_state(
+            |ui, value: &mut String| {
+                field_suggestions(ui, egui::Id::unique("fields"), value, "Fields", "", ["name", "population"].into_iter(), true);
+            },
+            String::from("new_column"),
+        );
+        h.run_steps(3);
+        assert_eq!(h.state(), "new_column", "a name absent from the input is not cleared");
+        h.get_by_role(egui::accesskit::Role::ComboBox).click();
+        h.run_steps(3);
+        h.get_by_label("population").click();
+        h.run_steps(3);
+        assert_eq!(h.state(), "new_column,population", "append without replacing earlier names");
+        h.get_by_role(egui::accesskit::Role::TextInput).focus();
+        h.run_steps(2);
+        h.key_press(egui::Key::End);
+        h.event(egui::Event::Text(",typed_column".into()));
+        h.run_steps(3);
+        assert_eq!(h.state(), "new_column,population,typed_column");
+    }
 
     /// A run opened again from the History pane (#539) fills its tool's form as the form would
     /// have it: a standalone table, given by its id, by its name and picked by its id; numbers

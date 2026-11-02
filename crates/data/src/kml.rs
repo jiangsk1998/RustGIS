@@ -8,6 +8,7 @@
 //! The file is hostile: no DTD is read (so no entity expansion), the node count is capped, nesting
 //! is bounded, and a malformed placemark is skipped and counted.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use roxmltree::{Node, ParsingOptions};
@@ -169,6 +170,8 @@ struct Row {
     folder: String,
     style: Option<String>,
     data: Vec<(String, String)>,
+    /// Its geometry's coordinates had altitudes, which are dropped.
+    zm: bool,
 }
 
 struct Reader {
@@ -230,14 +233,21 @@ fn style_of(n: &Node) -> Style {
 }
 
 /// Coordinates: `lon,lat[,alt]` tuples separated by white space; malformed ones are dropped.
-fn coords(s: &str) -> Vec<Coord> {
+/// `zm` is set when a tuple kept had an altitude other than 0 (KML's default), which is dropped.
+fn coords(s: &str, zm: &Cell<bool>) -> Vec<Coord> {
     s.split_whitespace()
         .filter_map(|t| {
             let mut it = t.split(',');
             let x = it.next()?.trim().parse::<f64>().ok()?;
             let y = it.next()?.trim().parse::<f64>().ok()?;
             // Longitude/latitude, as KML always is.
-            ((-180.0..=180.0).contains(&x) && (-90.0..=90.0).contains(&y)).then(|| Coord::new(x, y))
+            if !((-180.0..=180.0).contains(&x) && (-90.0..=90.0).contains(&y)) {
+                return None;
+            }
+            if it.next().and_then(|z| z.trim().parse::<f64>().ok()).is_some_and(|z| z != 0.0) {
+                zm.set(true);
+            }
+            Some(Coord::new(x, y))
         })
         .collect()
 }
@@ -248,31 +258,58 @@ struct Parts {
     points: Vec<Coord>,
     lines: Vec<Vec<Coord>>,
     polygons: Vec<Vec<Vec<Coord>>>,
+    /// An altitude other than 0 was dropped from the points, lines or polygons.
+    zm: [Cell<bool>; 3],
 }
 
+/// Adds a geometry element's parts to `out` (MultiGeometry flattened, to `MAX_DEPTH`), marking
+/// altitudes dropped.
 fn geometry(n: &Node, out: &mut Parts, depth: usize) {
     if depth > MAX_DEPTH {
         return;
     }
     match local(n) {
-        "Point" => out.points.extend(child_text(n, "coordinates").map(|c| coords(&c)).unwrap_or_default().into_iter().take(1)),
+        // Altitudes count only for the parts kept.
+        "Point" => {
+            // The first tuple that reads is the point; only its altitude counts.
+            let first = child_text(n, "coordinates").and_then(|c| {
+                c.split_whitespace().find_map(|t| {
+                    let alt = Cell::new(false);
+                    coords(t, &alt).into_iter().next().map(|p| (p, alt.get()))
+                })
+            });
+            if let Some((p, alt)) = first {
+                out.zm[0].set(out.zm[0].get() || alt);
+                out.points.push(p);
+            }
+        }
         "LineString" | "LinearRing" => {
-            let c = child_text(n, "coordinates").map(|c| coords(&c)).unwrap_or_default();
+            let alt = Cell::new(false);
+            let c = child_text(n, "coordinates").map(|c| coords(&c, &alt)).unwrap_or_default();
             if c.len() >= 2 {
+                out.zm[1].set(out.zm[1].get() || alt.get());
                 out.lines.push(c);
             }
         }
         "Polygon" => {
-            let ring =
-                |b: Node| child(&b, "LinearRing").and_then(|r| child_text(&r, "coordinates")).map(|c| coords(&c)).filter(|c| c.len() >= 3);
-            if let Some(outer) = child(n, "outerBoundaryIs").and_then(ring) {
+            let ring = |b: Node| {
+                let alt = Cell::new(false);
+                let r = child(&b, "LinearRing").and_then(|r| child_text(&r, "coordinates")).map(|c| coords(&c, &alt));
+                r.filter(|c| c.len() >= 3).map(|c| (c, alt.get()))
+            };
+            if let Some((outer, mut alt)) = child(n, "outerBoundaryIs").and_then(ring) {
                 let mut rings = vec![outer];
-                rings.extend(n.children().filter(|c| c.is_element() && local(c) == "innerBoundaryIs").filter_map(ring));
+                for (r, a) in n.children().filter(|c| c.is_element() && local(c) == "innerBoundaryIs").filter_map(ring) {
+                    alt |= a;
+                    rings.push(r);
+                }
+                out.zm[2].set(out.zm[2].get() || alt);
                 out.polygons.push(rings);
             }
         }
         // A track: gx:coord elements of "lon lat alt".
         "Track" => {
+            let mut alt = false;
             let c: Vec<Coord> = n
                 .children()
                 .filter(|c| c.is_element() && local(c) == "coord")
@@ -281,10 +318,16 @@ fn geometry(n: &Node, out: &mut Parts, depth: usize) {
                     let mut it = t.split_whitespace();
                     let x = it.next()?.parse::<f64>().ok()?;
                     let y = it.next()?.parse::<f64>().ok()?;
-                    (x.is_finite() && y.is_finite()).then(|| Coord::new(x, y))
+                    // A track keeps any finite point, as it did before; only a kept point's altitude counts.
+                    if !(x.is_finite() && y.is_finite()) {
+                        return None;
+                    }
+                    alt |= it.next().and_then(|z| z.parse::<f64>().ok()).is_some_and(|z| z != 0.0);
+                    Some(Coord::new(x, y))
                 })
                 .collect();
             if c.len() >= 2 {
+                out.zm[1].set(out.zm[1].get() || alt);
                 out.lines.push(c);
             }
         }
@@ -411,7 +454,7 @@ impl Reader {
         // A placemark mixing kinds (a MultiGeometry of a point and a line) gives one feature per
         // kind, each in its layer.
         let mut any = false;
-        let mut push = |geometry: Geometry, rows: &mut Vec<Row>| {
+        let mut push = |geometry: Geometry, zm: &Cell<bool>, rows: &mut Vec<Row>| {
             any = true;
             rows.push(Row {
                 geometry,
@@ -420,18 +463,19 @@ impl Reader {
                 folder: folder.clone(),
                 style: style.clone(),
                 data: data.clone(),
+                zm: zm.get(),
             });
         };
         match parts.points.as_slice() {
             [] => {}
-            [p] => push(Geometry::Point(*p), &mut self.rows),
-            _ => push(Geometry::MultiPoint(parts.points), &mut self.rows),
+            [p] => push(Geometry::Point(*p), &parts.zm[0], &mut self.rows),
+            _ => push(Geometry::MultiPoint(parts.points), &parts.zm[0], &mut self.rows),
         }
         if !parts.lines.is_empty() {
-            push(Geometry::Line(parts.lines), &mut self.rows);
+            push(Geometry::Line(parts.lines), &parts.zm[1], &mut self.rows);
         }
         if !parts.polygons.is_empty() {
-            push(Geometry::Polygon(parts.polygons), &mut self.rows);
+            push(Geometry::Polygon(parts.polygons), &parts.zm[2], &mut self.rows);
         }
         if !any {
             self.skipped += 1;
@@ -456,6 +500,7 @@ impl Reader {
             let title = if present.len() == 1 { name.to_string() } else { format!("{name} {label}") };
             let mut ds = Dataset::new(title, *kind, fields.clone());
             let mut used: Vec<String> = Vec::new();
+            let mut zm_rows = 0usize;
             for r in self.rows.iter().filter(|r| r.geometry.kind() == *kind) {
                 let mut attrs = vec![
                     r.name.clone().map(Value::Text).unwrap_or_default(),
@@ -472,6 +517,7 @@ impl Reader {
                     used.push(s.clone());
                 }
                 ds.push_next(Some(r.geometry.clone()), attrs);
+                zm_rows += usize::from(r.zm);
             }
             // Extended data is typed; names, descriptions, folders and style ids stay text.
             crate::io::type_text_columns(&mut ds, &["name", "description", "folder", "style"]);
@@ -485,6 +531,10 @@ impl Reader {
                 if self.dropped_keys > 0 {
                     report.messages.push(format!("{name}: extended data past {MAX_KEYS} distinct names was left out"));
                 }
+            }
+            if zm_rows > 0 {
+                ds.zm_dropped = true;
+                report.messages.push(format!("{}: {}", ds.name, crate::zm_note(Some(zm_rows as u64))));
             }
             let styles = used.into_iter().filter_map(|id| self.styles.get(&id).map(|s| (id, *s))).collect();
             out.push(Layer { dataset: ds, report, styles });
@@ -541,6 +591,11 @@ mod tests {
         assert_eq!(pin.icon, Some([0, 0, 255, 255]));
         assert_eq!(pin.scale, Some(1.5));
         assert_eq!(pts.report.skipped, 1);
+        // Altitudes other than 0 (the start's 30 m, the track's) are dropped and said; the polygons
+        // have none.
+        assert!(layers[0].dataset.zm_dropped && layers[1].dataset.zm_dropped && !layers[2].dataset.zm_dropped);
+        let said = format!("trip lines: {}", crate::zm_note(Some(1)));
+        assert!(layers[1].report.messages.contains(&said), "{:?}", layers[1].report.messages);
         // The ground overlay has no box: it can't be laid out.
         let (overlays, undrawn) = ground_overlays("t.kml", DOC.as_bytes()).unwrap();
         assert_eq!((overlays.len(), undrawn), (0, 1));

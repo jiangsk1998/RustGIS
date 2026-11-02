@@ -23,6 +23,7 @@ use parquet::file::reader::{FileReader, RowGroupReader, SerializedFileReader};
 use parquet::file::statistics::Statistics;
 use parquet::schema::types::ColumnDescPtr;
 use rustgis_geom::Extent;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -47,6 +48,8 @@ pub struct ParquetSource {
     remote: Option<Arc<Remote>>,
     /// Every row group meeting a read's extent is read (a catalog's index), never a sample of them.
     exact: bool,
+    /// The most rows read from one row group: `MAX_GROUP_ROWS`, lowered by tests.
+    group_rows: usize,
 }
 
 impl ParquetSource {
@@ -128,6 +131,8 @@ fn remote_reader(file: &Arc<Remote>) -> Result<Arc<RemoteFile>> {
 }
 
 impl ParquetSource {
+    /// Opens a GeoParquet from its `geo` metadata: geometry column, types, bbox and coordinate
+    /// system, noting Z or M values (which reading drops).
     fn new(reader: Arc<dyn FileReader>, name: &str, remote: Option<Arc<Remote>>) -> Result<Self> {
         let md = reader.metadata();
         let schema = md.file_metadata().schema_descr();
@@ -173,16 +178,44 @@ impl ParquetSource {
 
         let mut fields = Vec::new();
         let mut field_cols = Vec::new();
+        // Dates and times, read as the whole numbers they're stored as.
+        let mut as_numbers = Vec::new();
         for i in 0..schema.num_columns() {
             if i == geom_col || covering.is_some_and(|c| c.contains(&i)) {
                 continue;
             }
             let Some(name) = top(i) else { continue };
-            if let Some(ty) = field_type(&schema.column(i)) {
+            let c = schema.column(i);
+            if let Some(ty) = field_type(&c) {
+                if let Some(unit) = time_unit(&c) {
+                    as_numbers.push((name.clone(), unit));
+                }
                 fields.push(Field::new(name, ty));
                 field_cols.push(i);
             }
         }
+        // Top-level columns not read: those holding a leaf that is neither a field, the geometry
+        // nor its covering's box (whose struct may also hold zmin and zmax, bounds of the geometry).
+        let read: HashSet<usize> = field_cols.iter().chain([&geom_col]).chain(covering.iter().flatten()).copied().collect();
+        let box_root = covering.and_then(|[x, ..]| schema.column(x).path().parts().first().cloned());
+        let unread: HashSet<String> = (0..schema.num_columns())
+            .filter(|i| !read.contains(i))
+            .filter_map(|i| match schema.column(i).path().parts() {
+                [r, bound] if Some(r) == box_root.as_ref() && matches!(bound.as_str(), "zmin" | "zmax") => None,
+                parts => parts.first().cloned(),
+            })
+            .collect();
+        let geometries = geo.as_ref().and_then(|g| g.get("columns")).and_then(|c| c.as_object());
+        let left_out: Vec<(String, String)> = schema
+            .root_schema()
+            .get_fields()
+            .iter()
+            .filter(|t| unread.contains(t.name()))
+            .map(|t| {
+                let kind = if geometries.is_some_and(|g| g.contains_key(t.name())) { "geometry" } else { column_kind(t) };
+                (t.name().to_string(), kind.to_string())
+            })
+            .collect();
         let geometry_type = col_meta
             .and_then(|c| c.get("geometry_types"))
             .and_then(|t| t.as_array())
@@ -200,8 +233,20 @@ impl ParquetSource {
             Some(e) => reproject.extent_to_lonlat(&e),
             None => covering.map(|c| reproject.extent_to_lonlat(&groups_extent(md, c))).unwrap_or(Extent::EMPTY),
         };
+        // Types such as "Point Z" (every geometry has Z or M values when every type does), or a bbox
+        // with Z bounds. Without types (any geometry), the first rows are looked at below.
+        let types: Vec<&str> = col_meta
+            .and_then(|c| c.get("geometry_types"))
+            .and_then(|t| t.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .collect();
+        let has_zm = |v: &&str| v.ends_with(" Z") || v.ends_with(" M") || v.ends_with(" ZM");
+        let all_zm = !types.is_empty() && types.iter().all(has_zm);
+        let zm = types.iter().any(has_zm) || col_meta.and_then(|c| c.get("bbox")).and_then(|b| b.as_array()).is_some_and(|b| b.len() == 6);
         let count = u64::try_from(md.file_metadata().num_rows()).ok();
-        let info = SourceInfo {
+        let mut info = SourceInfo {
             name: name.to_string(),
             format: "GeoParquet",
             geometry_type,
@@ -211,12 +256,82 @@ impl ParquetSource {
             crs: reproject.label(),
             indexed: covering.is_some(),
             notes,
+            zm_dropped: false,
         };
-        let mut src = ParquetSource { info, reader, geom_col, field_cols, covering, reproject, remote, exact: false };
+        info.note_columns(
+            &left_out,
+            ["of a type RustGIS has no field for was left out", "of types RustGIS has no field for were left out"],
+        );
+        info.note_columns(&as_numbers, ["of dates or times was read as whole numbers", "of dates or times were read as whole numbers"]);
+        // An empty file loses nothing.
+        if zm && count != Some(0) {
+            info.drop_zm(if all_zm { count } else { None });
+        }
+        let untyped = types.is_empty() && !zm;
+        let mut src =
+            ParquetSource { info, reader, geom_col, field_cols, covering, reproject, remote, exact: false, group_rows: MAX_GROUP_ROWS };
+        if untyped {
+            match src.peek_zm() {
+                Some(true) => src.info.drop_zm(None),
+                Some(false) => {}
+                None => src.info.notes.push("couldn't tell whether it has Z or M values, which RustGIS doesn't keep".into()),
+            }
+        }
         if src.info.geometry_type == GeometryType::None {
             src.info.geometry_type = super::peek_kind(&src);
         }
         Ok(src)
+    }
+
+    /// Whether any of the first 16 geometries has Z or M values; `None` when they can't be read
+    /// here (a remote file's first row group not fetched yet).
+    fn peek_zm(&self) -> Option<bool> {
+        let md = self.reader.metadata();
+        if md.num_row_groups() == 0 {
+            return Some(false);
+        }
+        if let Some(file) = &self.remote
+            && !want_chunks(file, md, &[0], &[self.geom_col]).ok()?
+        {
+            return None;
+        }
+        let rows = usize::try_from(md.row_group(0).num_rows()).unwrap_or(0).min(16);
+        let rg = self.reader.get_row_group(0).ok()?;
+        let geoms = read_bytes(rg.as_ref(), self.geom_col, &vec![true; rows]).ok()?;
+        Some(geoms.iter().filter_map(|b| b.as_deref()).any(wkb::has_zm))
+    }
+}
+
+impl ParquetSource {
+    /// A source that reads at most `rows` of a row group, for tests of the cap.
+    #[cfg(test)]
+    pub(crate) fn with_group_rows(mut self, rows: usize) -> Self {
+        self.group_rows = rows;
+        self
+    }
+
+    /// The rows of row group `g` read. Row counts come from the file: bounded by what the
+    /// geometry column chunk holds, and by a cap, so a crafted count can't size a huge allocation.
+    fn rows_in(&self, md: &ParquetMetaData, g: usize) -> usize {
+        let rg = md.row_group(g);
+        let rows = usize::try_from(rg.num_rows()).unwrap_or(0);
+        let values = rg.columns().get(self.geom_col).and_then(|c| usize::try_from(c.num_values()).ok()).unwrap_or(0);
+        rows.min(values).min(self.group_rows)
+    }
+
+    /// Which rows of row group `g` have a bounding box meeting the native extent `e`, read from
+    /// the covering columns `c` alone. A row without a box is kept, for its geometry to decide.
+    fn covered_rows(&self, md: &ParquetMetaData, g: usize, e: &Extent, c: [usize; 4]) -> Result<Vec<bool>> {
+        let rg = self.reader.get_row_group(g).map_err(err)?;
+        let n = self.rows_in(md, g);
+        let cols: Vec<Vec<Option<f64>>> = c.iter().map(|&i| read_f64(rg.as_ref(), i, n)).collect::<Result<_>>()?;
+        let v = |k: usize, r: usize| cols.get(k).and_then(|c| c.get(r).copied().flatten()).unwrap_or(f64::NAN);
+        Ok((0..n)
+            .map(|r| {
+                let be = Extent::new(v(0, r), v(1, r), v(2, r), v(3, r));
+                be.is_empty() || be.intersects(e)
+            })
+            .collect())
     }
 }
 
@@ -229,14 +344,7 @@ impl FeatureSource for ParquetSource {
         let limit = clamp_limit(req.limit);
         let md = self.reader.metadata();
         let native = req.extent.map(|e| self.reproject.extent_from_lonlat(&e));
-        // Row counts come from the file: bounded by what the geometry column chunk holds, and by a
-        // cap, so a crafted count can't size a huge allocation.
-        let rows_in = |g: usize| {
-            let rg = md.row_group(g);
-            let rows = usize::try_from(rg.num_rows()).unwrap_or(0);
-            let values = rg.columns().get(self.geom_col).and_then(|c| usize::try_from(c.num_values()).ok()).unwrap_or(0);
-            rows.min(values).min(MAX_GROUP_ROWS)
-        };
+        let rows_in = |g: usize| self.rows_in(md, g);
         // Row groups whose bounding box meets the extent.
         let mut groups: Vec<usize> = (0..md.num_row_groups())
             .filter(|&g| match (native, self.covering) {
@@ -287,20 +395,7 @@ impl FeatureSource for ParquetSource {
         for &g in &groups {
             keep.push(match (native, self.covering) {
                 (Some(_), Some(_)) if inside(g) => None,
-                (Some(e), Some(c)) => {
-                    let rg = self.reader.get_row_group(g).map_err(err)?;
-                    let n = rows_in(g);
-                    let cols: Vec<Vec<Option<f64>>> = c.iter().map(|&i| read_f64(rg.as_ref(), i, n)).collect::<Result<_>>()?;
-                    let v = |k: usize, r: usize| cols.get(k).and_then(|c| c.get(r).copied().flatten()).unwrap_or(f64::NAN);
-                    Some(
-                        (0..n)
-                            .map(|r| {
-                                let be = Extent::new(v(0, r), v(1, r), v(2, r), v(3, r));
-                                be.is_empty() || be.intersects(&e)
-                            })
-                            .collect(),
-                    )
-                }
+                (Some(e), Some(c)) => Some(self.covered_rows(md, g, &e, c)?),
                 _ => None,
             });
         }
@@ -350,8 +445,9 @@ impl FeatureSource for ParquetSource {
             let base = starts.get(g).copied().unwrap_or(0);
             // The columns hold the taken rows only, in order: the k-th is row `r`.
             for (k, (r, _)) in take.iter().enumerate().filter(|(_, t)| **t).enumerate() {
-                let geometry = geoms.get(k).and_then(|b| b.as_deref()).and_then(wkb::decode).and_then(|g| self.reproject.geometry(g));
-                let Some(geometry) = geometry else {
+                // A row without a geometry is left out; one that can't be read is skipped and counted.
+                let Some(bytes) = geoms.get(k).and_then(|b| b.as_deref()) else { continue };
+                let Some(geometry) = wkb::decode(bytes).and_then(|g| self.reproject.geometry(g)) else {
                     skipped += 1;
                     continue;
                 };
@@ -359,7 +455,7 @@ impl FeatureSource for ParquetSource {
                     continue;
                 }
                 let values = attrs.iter().map(|col| col.get(k).cloned().unwrap_or(Value::Null)).collect();
-                sample.keep(Feature { id: base + r as u64 + 1, geometry: Some(geometry), attrs: values });
+                sample.keep(Feature { id: base.saturating_add(r as u64 + 1), geometry: Some(geometry), attrs: values });
             }
         }
         let matched = if late { sample.seen() } else { matched.saturating_mul(thinned as u64) };
@@ -368,6 +464,84 @@ impl FeatureSource for ParquetSource {
 
     fn remote(&self) -> Option<Arc<Remote>> {
         self.remote.clone()
+    }
+
+    /// A file or an upload; a file by its web address is read a view at a time, not in full.
+    fn visits_chunks(&self) -> bool {
+        self.remote.is_none()
+    }
+
+    /// A row group at a time, in file order: the features, ids and skipped rows of a complete
+    /// read of the same extent. The taken rows of one row group are decoded together before
+    /// they are chunked, so the peak is a row group's columns plus a chunk.
+    fn visit_chunks(&self, extent: Option<Extent>, bytes: usize, visit: &mut dyn FnMut(Vec<Feature>) -> Result<()>) -> Result<Batch> {
+        let mut chunks = super::chunk_memory::Chunker::new(bytes, visit)?;
+        if self.remote.is_some() {
+            return Err(DataError::Unsupported("a whole GeoParquet by its web address read a chunk at a time".into()));
+        }
+        let req = Request { extent, limit: usize::MAX };
+        let md = self.reader.metadata();
+        let native = extent.map(|e| self.reproject.extent_from_lonlat(&e));
+        let mut out = Batch { complete: true, ..Batch::default() };
+        let mut base = 0u64;
+        for g in 0..md.num_row_groups() {
+            // From the declared row counts, as a read numbers them.
+            let start = base;
+            let declared = u64::try_from(md.row_group(g).num_rows()).unwrap_or(0);
+            base = base.saturating_add(declared);
+            let area = match (native, self.covering) {
+                (Some(e), Some(c)) => Some((e, c, group_extent(md, g, c))),
+                _ => None,
+            };
+            if let Some((e, _, Some(ge))) = area
+                && !ge.intersects(&e)
+            {
+                continue;
+            }
+            // A read takes at most `MAX_GROUP_ROWS` of a row group, and no more than its geometry
+            // column holds. A traversal promises every row, so a group it can't read whole is an
+            // error, not a quietly shorter export; it is refused before this group is read.
+            let readable = self.rows_in(md, g);
+            if declared > self.group_rows as u64 {
+                return Err(DataError::Format(format!(
+                    "GeoParquet: row group {g} has {declared} rows, more than the {} read from one",
+                    self.group_rows
+                )));
+            }
+            if declared > readable as u64 {
+                return Err(DataError::Format(format!("GeoParquet: row group {g} has columns shorter than its rows")));
+            }
+            let take = match area {
+                Some((e, c, ge)) if !ge.is_some_and(|ge| contains(&e, &ge)) => self.covered_rows(md, g, &e, c)?,
+                _ => vec![true; readable],
+            };
+            if !take.iter().any(|&t| t) {
+                continue;
+            }
+            let rg = self.reader.get_row_group(g).map_err(err)?;
+            let geoms = read_bytes(rg.as_ref(), self.geom_col, &take)?;
+            let attrs: Vec<Vec<Value>> = self.field_cols.iter().map(|&c| read_values(rg.as_ref(), c, &take)).collect::<Result<_>>()?;
+            let wanted = take.iter().filter(|&&t| t).count();
+            if geoms.len() != wanted || attrs.iter().any(|a| a.len() != wanted) {
+                return Err(DataError::Format(format!("GeoParquet: row group {g} has columns shorter than its rows")));
+            }
+            for (k, (r, _)) in take.iter().enumerate().filter(|(_, t)| **t).enumerate() {
+                // A row without a geometry is left out; one that can't be read is skipped and counted.
+                let Some(bytes) = geoms.get(k).and_then(|b| b.as_deref()) else { continue };
+                let Some(geometry) = wkb::decode(bytes).and_then(|geom| self.reproject.geometry(geom)) else {
+                    out.skipped += 1;
+                    continue;
+                };
+                if !in_request(&geometry, &req) {
+                    continue;
+                }
+                let values = attrs.iter().map(|col| col.get(k).cloned().unwrap_or(Value::Null)).collect();
+                out.matched += 1;
+                chunks.push(Feature { id: start.saturating_add(r as u64 + 1), geometry: Some(geometry), attrs: values })?;
+            }
+        }
+        chunks.flush()?;
+        Ok(out)
     }
 }
 
@@ -583,6 +757,51 @@ fn decimal_scale(c: &ColumnDescPtr) -> Option<i32> {
         _ if c.converted_type() == ConvertedType::DECIMAL => Some(c.type_scale()),
         _ => None,
     }
+}
+
+/// What a top-level column not read as a field holds, for the note saying it was left out: a
+/// list, map or struct, or a decimal, geometry, INT96 timestamp or binary value.
+fn column_kind(t: &parquet::schema::types::Type) -> &'static str {
+    let info = t.get_basic_info();
+    let logical = info.logical_type_ref();
+    if info.has_repetition() && info.repetition() == parquet::basic::Repetition::REPEATED {
+        return "list";
+    }
+    if t.is_group() {
+        return match (logical, info.converted_type()) {
+            (Some(LogicalType::List), _) | (_, ConvertedType::LIST) => "list",
+            (Some(LogicalType::Map), _) | (_, ConvertedType::MAP | ConvertedType::MAP_KEY_VALUE) => "map",
+            _ => "struct",
+        };
+    }
+    match (t.get_physical_type(), logical, info.converted_type()) {
+        (_, Some(LogicalType::Decimal(_)), _) | (_, _, ConvertedType::DECIMAL) => "decimal",
+        (_, Some(LogicalType::Geometry(_) | LogicalType::Geography(_)), _) => "geometry",
+        (Physical::INT96, ..) => "INT96 timestamp",
+        _ => "binary",
+    }
+}
+
+/// What a date or time column's whole numbers count ("days since 1970-01-01"); `None` for other
+/// columns.
+fn time_unit(c: &ColumnDescPtr) -> Option<String> {
+    use parquet::basic::TimeUnit;
+    let unit = |u: &TimeUnit| match u {
+        TimeUnit::MILLIS => "milliseconds",
+        TimeUnit::MICROS => "microseconds",
+        TimeUnit::NANOS => "nanoseconds",
+    };
+    let (count, since) = match (c.logical_type_ref(), c.converted_type()) {
+        (Some(LogicalType::Timestamp(t)), _) => (unit(&t.unit), "1970-01-01"),
+        (Some(LogicalType::Time(t)), _) => (unit(&t.unit), "midnight"),
+        (Some(LogicalType::Date), _) | (None, ConvertedType::DATE) => ("days", "1970-01-01"),
+        (None, ConvertedType::TIMESTAMP_MILLIS) => ("milliseconds", "1970-01-01"),
+        (None, ConvertedType::TIMESTAMP_MICROS) => ("microseconds", "1970-01-01"),
+        (None, ConvertedType::TIME_MILLIS) => ("milliseconds", "midnight"),
+        (None, ConvertedType::TIME_MICROS) => ("microseconds", "midnight"),
+        _ => return None,
+    };
+    Some(format!("{count} since {since}"))
 }
 
 /// A field type for a top-level column; `None` for types not read (binary, INT96, fixed-length).
@@ -874,6 +1093,20 @@ fn wkb_type_name(g: &crate::Geometry) -> &'static str {
 /// `bbox` covering column so readers can skip rows and row groups by extent. A table without
 /// geometry is written as plain Parquet.
 pub fn write(ds: &crate::Dataset) -> Result<Vec<u8>> {
+    write_features(ds.geometry_type, &ds.fields, Vec::new(), &mut |add| add(&ds.features))
+}
+
+/// Writes GeoParquet to `out`: the features `feed` hands to the function it is given, a run at
+/// a time, their attributes named by `fields`. Each run is written as row groups of at most
+/// `WRITE_GROUP_ROWS` rows, so only one run is held (a run's last group can be smaller, and a
+/// streamed export's groups end with its chunks); the geometry types and bounding box the `geo`
+/// metadata gives are gathered as the rows go and written with the footer.
+pub(crate) fn write_features<W: std::io::Write + Send>(
+    geometry_type: GeometryType,
+    fields: &[Field],
+    out: W,
+    feed: &mut dyn FnMut(&mut dyn FnMut(&[Feature]) -> Result<()>) -> Result<()>,
+) -> Result<W> {
     use parquet::basic::{Compression, Repetition};
     use parquet::data_type::{BoolType, ByteArray, ByteArrayType, DoubleType, Int64Type};
     use parquet::file::metadata::KeyValue;
@@ -881,9 +1114,9 @@ pub fn write(ds: &crate::Dataset) -> Result<Vec<u8>> {
     use parquet::file::writer::SerializedFileWriter;
     use parquet::schema::types::Type;
 
-    let has_geom = ds.geometry_type != GeometryType::None;
-    let geom_name = free_name(&ds.fields, "geometry");
-    let bbox_name = free_name(&ds.fields, "bbox");
+    let has_geom = geometry_type != GeometryType::None;
+    let geom_name = free_name(fields, "geometry");
+    let bbox_name = free_name(fields, "bbox");
     let prim = |name: &str, t: Physical, rep: Repetition, logical: Option<LogicalType>| {
         Type::primitive_type_builder(name, t).with_repetition(rep).with_logical_type(logical).build().map(Arc::new).map_err(err)
     };
@@ -898,7 +1131,7 @@ pub fn write(ds: &crate::Dataset) -> Result<Vec<u8>> {
             Type::group_type_builder(&bbox_name).with_repetition(Repetition::OPTIONAL).with_fields(corners).build().map_err(err)?,
         ));
     }
-    for f in &ds.fields {
+    for f in fields {
         cols.push(match f.ty {
             FieldType::Integer => prim(&f.name, Physical::INT64, Repetition::OPTIONAL, None)?,
             FieldType::Double => prim(&f.name, Physical::DOUBLE, Repetition::OPTIONAL, None)?,
@@ -908,12 +1141,102 @@ pub fn write(ds: &crate::Dataset) -> Result<Vec<u8>> {
     }
     let schema = Arc::new(Type::group_type_builder("schema").with_fields(cols).build().map_err(err)?);
 
-    let mut metadata = Vec::new();
+    let props = WriterProperties::builder().set_compression(Compression::SNAPPY).set_created_by("RustGIS".to_string()).build();
+    let mut w = SerializedFileWriter::new(out, schema, Arc::new(props)).map_err(err)?;
+
+    /// The row group's next column writer; an error should the schema end first.
+    fn next_column<'a, W: std::io::Write + Send>(
+        rg: &'a mut parquet::file::writer::SerializedRowGroupWriter<'_, W>,
+    ) -> Result<parquet::file::writer::SerializedColumnWriter<'a>> {
+        rg.next_column().map_err(err)?.ok_or_else(|| DataError::Format("GeoParquet: the schema ended early".into()))
+    }
+    /// The present values of an optional column and its definition levels.
+    fn levels<T>(values: impl Iterator<Item = Option<T>>) -> (Vec<T>, Vec<i16>) {
+        let (mut vals, mut defs) = (Vec::new(), Vec::new());
+        for v in values {
+            defs.push(i16::from(v.is_some()));
+            vals.extend(v);
+        }
+        (vals, defs)
+    }
+    let mut types: Vec<&'static str> = Vec::new();
+    let mut extent = Extent::EMPTY;
+    feed(&mut |features| {
+        for rows in features.chunks(WRITE_GROUP_ROWS) {
+            for g in rows.iter().filter_map(|f| f.geometry.as_ref()) {
+                let t = wkb_type_name(g);
+                if !types.contains(&t) {
+                    types.push(t);
+                }
+                extent = extent.union(&g.extent());
+            }
+            let mut rg = w.next_row_group().map_err(err)?;
+            if has_geom {
+                let (vals, defs) = levels(rows.iter().map(|f| f.geometry.as_ref().map(|g| ByteArray::from(wkb::encode(g)))));
+                let mut c = next_column(&mut rg)?;
+                c.typed::<ByteArrayType>().write_batch(&vals, Some(&defs), None).map_err(err)?;
+                c.close().map_err(err)?;
+                // A feature's bounding box, `None` without geometry (or with an empty one).
+                let boxes: Vec<Option<Extent>> =
+                    rows.iter().map(|f| f.geometry.as_ref().map(|g| g.extent()).filter(|e| !e.is_empty())).collect();
+                for corner in 0..4 {
+                    let (vals, defs) = levels(boxes.iter().map(|b| {
+                        b.map(|e| match corner {
+                            0 => e.min_x,
+                            1 => e.min_y,
+                            2 => e.max_x,
+                            _ => e.max_y,
+                        })
+                    }));
+                    let mut c = next_column(&mut rg)?;
+                    c.typed::<DoubleType>().write_batch(&vals, Some(&defs), None).map_err(err)?;
+                    c.close().map_err(err)?;
+                }
+            }
+            for (i, f) in fields.iter().enumerate() {
+                let attr = |r: &Feature| r.attrs.get(i).cloned().unwrap_or(Value::Null);
+                let mut c = next_column(&mut rg)?;
+                match f.ty {
+                    FieldType::Integer => {
+                        let (v, d) = levels(rows.iter().map(|r| match attr(r) {
+                            Value::Int(x) => Some(x),
+                            Value::Bool(b) => Some(i64::from(b)),
+                            // A whole float fits; anything else would lose its value.
+                            Value::Float(x) if x.fract() == 0.0 && x.abs() < 9.0e18 => Some(x as i64),
+                            Value::Text(s) => s.trim().parse().ok(),
+                            _ => None,
+                        }));
+                        c.typed::<Int64Type>().write_batch(&v, Some(&d), None).map_err(err)?;
+                    }
+                    FieldType::Double => {
+                        let (v, d) = levels(rows.iter().map(|r| attr(r).as_f64()));
+                        c.typed::<DoubleType>().write_batch(&v, Some(&d), None).map_err(err)?;
+                    }
+                    FieldType::Boolean => {
+                        let (v, d) = levels(rows.iter().map(|r| match attr(r) {
+                            Value::Bool(b) => Some(b),
+                            Value::Int(x) => Some(x != 0),
+                            _ => None,
+                        }));
+                        c.typed::<BoolType>().write_batch(&v, Some(&d), None).map_err(err)?;
+                    }
+                    FieldType::Text => {
+                        let (v, d) = levels(rows.iter().map(|r| match attr(r) {
+                            Value::Null => None,
+                            v => Some(ByteArray::from(v.to_string().into_bytes())),
+                        }));
+                        c.typed::<ByteArrayType>().write_batch(&v, Some(&d), None).map_err(err)?;
+                    }
+                }
+                c.close().map_err(err)?;
+            }
+            rg.close().map_err(err)?;
+        }
+        Ok(())
+    })?;
     if has_geom {
-        let mut types: Vec<&str> = ds.features.iter().filter_map(|f| f.geometry.as_ref()).map(wkb_type_name).collect();
         types.sort_unstable();
-        types.dedup();
-        let e = ds.extent();
+        let e = extent;
         let mut col = serde_json::json!({
             "encoding": "WKB",
             "geometry_types": types,
@@ -926,91 +1249,7 @@ pub fn write(ds: &crate::Dataset) -> Result<Vec<u8>> {
             col["bbox"] = serde_json::json!([e.min_x, e.min_y, e.max_x, e.max_y]);
         }
         let geo = serde_json::json!({"version": "1.1.0", "primary_column": geom_name, "columns": {geom_name.clone(): col}});
-        metadata.push(KeyValue::new("geo".to_string(), geo.to_string()));
-    }
-    let props = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
-        .set_created_by("RustGIS".to_string())
-        .set_key_value_metadata(Some(metadata))
-        .build();
-    let mut w = SerializedFileWriter::new(Vec::new(), schema, Arc::new(props)).map_err(err)?;
-
-    fn next_column<'a>(
-        rg: &'a mut parquet::file::writer::SerializedRowGroupWriter<'_, Vec<u8>>,
-    ) -> Result<parquet::file::writer::SerializedColumnWriter<'a>> {
-        rg.next_column().map_err(err)?.ok_or_else(|| DataError::Format("GeoParquet: the schema ended early".into()))
-    }
-    // The present values of an optional column and its definition levels.
-    fn levels<T>(values: impl Iterator<Item = Option<T>>) -> (Vec<T>, Vec<i16>) {
-        let (mut vals, mut defs) = (Vec::new(), Vec::new());
-        for v in values {
-            defs.push(i16::from(v.is_some()));
-            vals.extend(v);
-        }
-        (vals, defs)
-    }
-    for rows in ds.features.chunks(WRITE_GROUP_ROWS) {
-        let mut rg = w.next_row_group().map_err(err)?;
-        if has_geom {
-            let (vals, defs) = levels(rows.iter().map(|f| f.geometry.as_ref().map(|g| ByteArray::from(wkb::encode(g)))));
-            let mut c = next_column(&mut rg)?;
-            c.typed::<ByteArrayType>().write_batch(&vals, Some(&defs), None).map_err(err)?;
-            c.close().map_err(err)?;
-            // A feature's bounding box, `None` without geometry (or with an empty one).
-            let boxes: Vec<Option<Extent>> =
-                rows.iter().map(|f| f.geometry.as_ref().map(|g| g.extent()).filter(|e| !e.is_empty())).collect();
-            for corner in 0..4 {
-                let (vals, defs) = levels(boxes.iter().map(|b| {
-                    b.map(|e| match corner {
-                        0 => e.min_x,
-                        1 => e.min_y,
-                        2 => e.max_x,
-                        _ => e.max_y,
-                    })
-                }));
-                let mut c = next_column(&mut rg)?;
-                c.typed::<DoubleType>().write_batch(&vals, Some(&defs), None).map_err(err)?;
-                c.close().map_err(err)?;
-            }
-        }
-        for (i, f) in ds.fields.iter().enumerate() {
-            let attr = |r: &Feature| r.attrs.get(i).cloned().unwrap_or(Value::Null);
-            let mut c = next_column(&mut rg)?;
-            match f.ty {
-                FieldType::Integer => {
-                    let (v, d) = levels(rows.iter().map(|r| match attr(r) {
-                        Value::Int(x) => Some(x),
-                        Value::Bool(b) => Some(i64::from(b)),
-                        // A whole float fits; anything else would lose its value.
-                        Value::Float(x) if x.fract() == 0.0 && x.abs() < 9.0e18 => Some(x as i64),
-                        Value::Text(s) => s.trim().parse().ok(),
-                        _ => None,
-                    }));
-                    c.typed::<Int64Type>().write_batch(&v, Some(&d), None).map_err(err)?;
-                }
-                FieldType::Double => {
-                    let (v, d) = levels(rows.iter().map(|r| attr(r).as_f64()));
-                    c.typed::<DoubleType>().write_batch(&v, Some(&d), None).map_err(err)?;
-                }
-                FieldType::Boolean => {
-                    let (v, d) = levels(rows.iter().map(|r| match attr(r) {
-                        Value::Bool(b) => Some(b),
-                        Value::Int(x) => Some(x != 0),
-                        _ => None,
-                    }));
-                    c.typed::<BoolType>().write_batch(&v, Some(&d), None).map_err(err)?;
-                }
-                FieldType::Text => {
-                    let (v, d) = levels(rows.iter().map(|r| match attr(r) {
-                        Value::Null => None,
-                        v => Some(ByteArray::from(v.to_string().into_bytes())),
-                    }));
-                    c.typed::<ByteArrayType>().write_batch(&v, Some(&d), None).map_err(err)?;
-                }
-            }
-            c.close().map_err(err)?;
-        }
-        rg.close().map_err(err)?;
+        w.append_key_value_metadata(KeyValue::new("geo".to_string(), geo.to_string()));
     }
     w.into_inner().map_err(err)
 }

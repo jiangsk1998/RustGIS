@@ -256,9 +256,14 @@ pub fn decode_polyline(s: &str, precision: u32) -> Result<Vec<Coord>, String> {
 const MAX_WKT_COORDS: usize = 5_000_000;
 
 /// Reads well-known text (or EWKT, `SRID=2263;POINT (…)`): the geometry (`None` when empty) and
-/// the SRID if one is given. Z and M values are dropped; a `GEOMETRYCOLLECTION` keeps its first
-/// non-empty member.
+/// the SRID if one is given. Z and M values are dropped (see [`parse_wkt_zm`]); a
+/// `GEOMETRYCOLLECTION` keeps its first non-empty member.
 pub fn parse_wkt(text: &str) -> Result<(Option<Geometry>, Option<u32>), String> {
+    parse_wkt_zm(text).map(|(g, srid, _)| (g, srid))
+}
+
+/// [`parse_wkt`], also telling whether a coordinate had Z or M values, which were dropped.
+pub fn parse_wkt_zm(text: &str) -> Result<(Option<Geometry>, Option<u32>, bool), String> {
     let text = text.trim();
     let (srid, body) = if text.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("SRID=")) {
         let (s, rest) = text.split_once(';').ok_or("an SRID= without the ';' before its geometry")?;
@@ -266,12 +271,12 @@ pub fn parse_wkt(text: &str) -> Result<(Option<Geometry>, Option<u32>), String> 
     } else {
         (None, text)
     };
-    let mut p = WktParser { toks: wkt_tokens(body)?, at: 0, coords: 0 };
+    let mut p = WktParser { toks: wkt_tokens(body)?, at: 0, coords: 0, zm: false };
     let g = p.geometry(0)?;
     if p.at != p.toks.len() {
         return Err("text after the geometry".into());
     }
-    Ok((g, srid))
+    Ok((g, srid, p.zm))
 }
 
 #[derive(Debug, PartialEq)]
@@ -336,6 +341,8 @@ struct WktParser {
     toks: Vec<WktTok>,
     at: usize,
     coords: usize,
+    /// A coordinate had more than x and y.
+    zm: bool,
 }
 
 impl WktParser {
@@ -367,6 +374,7 @@ impl WktParser {
             self.at += 1;
         }
         self.coords += 1;
+        self.zm |= len > 2;
         if self.coords > MAX_WKT_COORDS {
             return Err("too many coordinates".into());
         }

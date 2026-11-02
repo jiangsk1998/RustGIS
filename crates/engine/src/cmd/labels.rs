@@ -132,8 +132,11 @@ pub fn commands() -> Vec<C> {
         C::new("labels.placement", "Label Placement", "Labeling › Label Placement", |s, p| {
             let pos = match ps(p, "position") {
                 Some(code) => Some(LabelPlacement::from_code(code).ok_or_else(|| format!("unknown placement '{code}'"))?),
-                None if p.get("offset").is_some() || p.get("repeat").is_some() => None,
-                None => return Err("position is required (or an offset or a repeat)".into()),
+                // A position that isn't a placement name is refused, not dropped for the others (null:
+                // none, as for the other keys).
+                None if p.get("position").is_some_and(|v| !v.is_null()) => return Err("position must be a placement name".into()),
+                None if ["offset", "repeat", "otherPositions"].iter().any(|k| p.get(k).is_some()) => None,
+                None => return Err("position is required (or an offset, a repeat or otherPositions)".into()),
             };
             let offset = match p.get("offset") {
                 None => None,
@@ -149,9 +152,23 @@ pub fn commands() -> Vec<C> {
                     _ => return Err("repeat must be a number of points, or 0 or null for none".into()),
                 },
             };
+            // A point's label tries the other places round it when its own is taken (#1011).
+            let others = match p.get("otherPositions") {
+                None => None,
+                Some(Value::Bool(on)) => Some(*on),
+                Some(_) => return Err("otherPositions must be true or false".into()),
+            };
+            // Only a point's label goes round it: on elsewhere it would do nothing (off is taken
+            // anywhere). `layer_id` refuses a missing layer.
+            if others == Some(true) && s.map().layer(s.layer_id(p)?).is_some_and(|l| l.geometry_type() != GeometryType::Point) {
+                return Err("otherPositions is for point layers".into());
+            }
             with_class(s, p, |c| {
                 if let Some(pos) = pos {
                     c.placement = pos;
+                }
+                if let Some(on) = others {
+                    c.other_positions = on;
                 }
                 if let Some(o) = offset {
                     c.offset = o;
@@ -163,7 +180,7 @@ pub fn commands() -> Vec<C> {
         })
         .when(need_feature_layer)
         .params(
-            r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "position"?: "auto"|"center"|"above"|"below"|"left"|"right"|"aboveRight"|"aboveLeft"|"belowRight"|"belowLeft"|"parallel" (along a line, straight)|"curved" (along a line, following its bends) (required without offset or repeat), "offset"?: [right, down] points (-200 to 200 each) the label moves from where its position puts it ([0, 0]: none; a label along a line isn't moved), "repeat"?: points (10 to 10000) between a line's labels, spaced out from the one at its middle, at most 32 a line (0 or null: the one at its middle; parallel and curved only)}"#,
+            r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "position"?: "auto"|"center"|"above"|"below"|"left"|"right"|"aboveRight"|"aboveLeft"|"belowRight"|"belowLeft"|"parallel" (along a line, straight)|"curved" (along a line, following its bends) (required without offset, repeat or otherPositions), "offset"?: [right, down] points (-200 to 200 each) the label moves from where its position puts it ([0, 0]: none; a label along a line isn't moved), "repeat"?: points (10 to 10000) between a line's labels, spaced out from the one at its middle, at most 32 a line (0 or null: the one at its middle; parallel and curved only), "otherPositions"?: bool (a point's label whose place is taken tries the others round the point, corners first; point layers only: true is refused on lines and polygons)}"#,
         ),
         // Label classes: each labels every feature its clause takes, as in ArcGIS Pro; the classes
         // listed first, Default last, are placed first (`Labeling`, #732).

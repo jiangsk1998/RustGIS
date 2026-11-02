@@ -360,10 +360,13 @@ fn national_map_add(s: &mut Session, p: &Value) -> CmdResult {
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or(svc.title);
     // Basemaps go with the basemaps; the rest are transparent overlays on top.
     let basemap = svc.category == "Basemaps";
+    // A drawn map (labels, symbols) is asked for as one picture of the view, so they aren't cut
+    // at tile edges (#1162); imagery in tiles.
+    let single = matches!(svc.mode, Mode::Export);
     super::tiles::add(
         s,
         &json!({"url": national_map_template(svc), "kind": "raster", "name": name, "attribution": svc.attribution,
-            "maxZoom": svc.max_zoom, "overlay": !basemap}),
+            "maxZoom": svc.max_zoom, "overlay": !basemap, "singleImage": single}),
     )
 }
 

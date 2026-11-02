@@ -15,6 +15,13 @@ Before picking work, read [ROADMAP.md](ROADMAP.md) (check Underway) and
 - `crates/engine/src/tests.rs::hostile_params_never_panic` and the analysis equivalent run every
   command/tool with junk parameters. Keep them green; every crash fix gets a regression test.
 
+## Never silent
+- A reader, writer, tool or command that drops, truncates or approximates data says what, how
+  much and where: Z values dropped, field names cut, a CRS assumed, features skipped.
+- Report through `Session::notify` (app, CLI, Python `take_notices`) or `ToolResult::messages`,
+  one notice per kind with a count; `eprintln!` alone doesn't count. Unusable results are errors.
+- Test both ways: lossy input gives the notice, clean input none. Existing silent losses are bugs.
+
 ## Architecture
 | Layer | Crate | Job |
 |---|---|---|
@@ -54,6 +61,10 @@ Before picking work, read [ROADMAP.md](ROADMAP.md) (check Underway) and
 ## Assets
 - No third-party vendor icons, images, styles, fonts, help text or code. Icons are drawn in
   code (`icons.rs`). Every asset file has a row in `ATTRIBUTION.md`.
+- Never copy or translate code from GPL, LGPL or other copyleft projects (such as GRASS, QGIS or
+  GEOS) into RustGIS, by hand or with an AI tool. Implementing a published algorithm is fine: cite
+  the paper or standard. Name in the pull request any project whose code you followed (see
+  [CONTRIBUTING.md](CONTRIBUTING.md#where-code-comes-from)).
 - Screenshots and other images are not committed here: they live in
   [opengeos/rustgis-assets](https://github.com/opengeos/rustgis-assets) (WebP, served at
   `https://assets.rustgis.app/images/…`) and docs link to them by URL.
@@ -63,16 +74,24 @@ Before picking work, read [ROADMAP.md](ROADMAP.md) (check Underway) and
 A new dependency must have a licence `deny.toml` allows (CI runs `cargo deny check licenses`); after
 changing dependencies, run `cargo xtask notices` to refresh the `THIRD-PARTY-LICENSES.txt` files the
 packages ship (the release build fails on stale ones).
-Pull requests run CI on Linux; pushes to `main` add macOS and Windows. Label a pull request
-`ci:windows`, `ci:macos` or `ci:full` to test there before merging (platform-specific code, paths,
-file dialogs). The release build of the apps runs nightly (`.github/workflows/nightly.yml`), with every
-platform's tests; a failure opens a `Nightly build failed` issue. `ci:full` also runs the release
-build on the pull request.
+Pull requests run CI on Linux; pushes to `main` add macOS and Windows (x64 and ARM64). Label a
+pull request `ci:windows`, `ci:macos` or `ci:full` to test there before merging (platform-specific
+code, paths, file dialogs). The release build of the apps runs nightly
+(`.github/workflows/nightly.yml`), with every platform's tests; a failure opens a
+`Nightly build failed` issue. `ci:full` also runs the release build on the pull request.
+
+## Review comments
+- Fix in the pull request what a review finds wrong: bugs, crash paths, silent data loss, a broken
+  rule from this file.
+- A quality point (style, naming, wording, a refactor, an extra test for code that works) may
+  wait for the **release quality pass**, where maintainers handle them together before each
+  release. Reply that it's left for the release quality pass, end the reply with
+  `<!-- quality-sweep -->`, and leave it out of the next push.
 
 ## Looking at the app
 - `cargo run --release -p rustgis` (opens the World Atlas sample).
 - Headless screenshots: `cargo run --release -p rustgis-ui-egui --example ui_shot -- script.jsonl`
   (see the example header). For UI work, render the actual changed UI and look at the PNG.
-  For substantial visible changes, include screenshots in the PR (before/after where useful);
-  see [attachment guidance](docs/contributing.md#documentation).
+  For any visible change, include screenshots in the PR (before and after for changed UI, after
+  only for new UI); see [attachment guidance](docs/contributing.md#documentation).
 - CLI: `rustgis-cli run --sample --cmd 'gp.run={"tool":"buffer","params":{"input":"Cities","distance":100}}' --cmd 'share.exportMap={"path":"out.png"}'`.

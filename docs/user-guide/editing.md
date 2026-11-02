@@ -10,7 +10,11 @@ to change it. **Data › Data Design** (and **Data › Fields**) adds and delete
 field from an expression; **Calculate Geometry** (in the attribute table's toolbar) fills a new or
 existing numeric field with each feature's area, perimeter, length or X/Y coordinate, in the units
 you choose, for all features or the selected ones. Length and perimeter include feet and miles;
-area includes square feet (`ft2`), acres (`ac`) and square miles (`mi2`). Every edit is one undo step.
+area includes square feet (`ft2`), acres (`ac`) and square miles (`mi2`). Every edit is one undo
+step. Areas, perimeters and lengths measure on the WGS 84 ellipsoid, the same measure as the network tools and the Measure panel (Spatial Join still
+measures on the sphere), with two exceptions: a ring with a full-turn edge (a globe-wide band)
+is measured on the sphere instead, and a ring winding around a pole is measured as the region it
+traces, where [Geoprocessing](analysis.md#geoprocessing-tools) gives the smaller polar cap.
 
 Undo (++ctrl+z++) and Redo (++ctrl+y++ or ++ctrl+shift+z++) restore project changes, not just
 feature edits; use ++cmd++ instead of ++ctrl++ on macOS. While typing in a text field, those

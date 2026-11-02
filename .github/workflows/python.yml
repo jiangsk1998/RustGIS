@@ -70,8 +70,12 @@ jobs:
           - { name: macos-x86_64, runner: macos-15-intel, target: x86_64 }
           - { name: macos-aarch64, runner: macos-latest, target: aarch64 }
           - { name: windows-x86_64, runner: windows-latest, target: x64 }
+          - { name: windows-aarch64, runner: windows-11-arm, target: aarch64 }
     steps:
       - uses: actions/checkout@v7
+      # The Windows ARM64 image ships no Rust toolchain; maturin-action needs rustup.
+      - uses: dtolnay/rust-toolchain@stable
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: apps/rustgis-python

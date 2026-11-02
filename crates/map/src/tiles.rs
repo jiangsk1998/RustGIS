@@ -182,6 +182,12 @@ pub struct TileLayer {
     /// map layer is active (the engine's `Session::selected_tile`).
     #[serde(skip)]
     pub selected: bool,
+    /// A layer drawn on request ([`TileLayer::on_request`]: a WMS, a map service's export) asked
+    /// for one picture of the view instead of tiles (#1162), so its symbols and labels aren't cut
+    /// at tile edges. Where that can't be (the globe, a tilted map, a projection its service
+    /// doesn't offer) it is drawn in tiles. Off in a project saved before: tiles, as then.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub single_image: bool,
 }
 
 /// The longest legend address kept.
@@ -303,6 +309,32 @@ fn is_normal(b: &crate::effects::Blend) -> bool {
 /// The deepest zoom level tiles are requested at.
 pub const MAX_ZOOM: u8 = 24;
 
+pub use rustgis_data::ogc::warp::sized;
+
+/// Whether a raster tile address is one its service draws on request, for any box and size
+/// ([`TileLayer::on_request`]): asked for by its box, with a size [`sized`] can write (a WMS's
+/// `WIDTH` and `HEIGHT`, a map service export's `size`, as numbers or size placeholders). An address
+/// with a box and no such size (a generic template) is asked for at its service's default size,
+/// so it is drawn in its own tiles.
+pub fn drawn_on_request(url: &str) -> bool {
+    let base = url.split('#').next().unwrap_or_default();
+    (base.contains("{bbox-epsg-3857}") || base.contains("{nbbox}")) && sizable(base)
+}
+
+/// Whether a picture's size can be written into `base`: it has the size keys, each a number
+/// ([`sized`] writes it) or a size placeholder (`{width}`, `{height}`, `{nw}`, `{nh}`).
+fn sizable(base: &str) -> bool {
+    let Some((path, query)) = base.split_once('?') else { return false };
+    let lower = path.to_ascii_lowercase();
+    let keys: &[&str] = if lower.ends_with("/export") || lower.ends_with("/exportimage") { &["size"] } else { &["width", "height"] };
+    keys.iter().all(|key| {
+        query.split('&').filter_map(|p| p.split_once('=')).any(|(k, v)| {
+            k.eq_ignore_ascii_case(key)
+                && (!v.contains('{') || matches!(v, "{nw}" | "{nh}" | "{nw},{nh}" | "{width}" | "{height}" | "{width},{height}"))
+        })
+    })
+}
+
 impl TileLayer {
     /// The local archive that Repair Data Source replaces.
     pub fn archive_file(&self) -> Option<&str> {
@@ -340,6 +372,43 @@ impl TileLayer {
             legends: Vec::new(),
             expanded: false,
             selected: false,
+            single_image: false,
+        }
+    }
+
+    /// Whether the service draws its pictures on request, for any box and size (a WMS's GetMap,
+    /// a map service's export), rather than cutting them from a tile set: what can be asked for
+    /// as one picture of the view, or in tiles of another size.
+    pub fn on_request(&self) -> bool {
+        self.kind == TileKind::Raster && drawn_on_request(&self.url)
+    }
+
+    /// Whether its tiles are asked for in Web Mercator by their box, so their size in pixels is
+    /// the layer's to choose (256, 512 or 1024): not one warped from a system of its own.
+    pub fn sized_tiles(&self) -> bool {
+        let (base, fragment) = self.url.split_once('#').unwrap_or((&self.url, ""));
+        // Asked for in Web Mercator: with no mark, or one saying so (a WMS that offers other
+        // systems too, drawn in Web Mercator as it comes). A `{width}` placeholder is filled
+        // with 256 whatever the tiles' size.
+        let mercator = fragment.is_empty() || fragment.split(';').any(|p| p == "crs=3857");
+        self.kind == TileKind::Raster
+            && base.contains("{bbox-epsg-3857}")
+            && !base.contains("{width}")
+            && !base.contains("{height}")
+            && sizable(base)
+            && mercator
+    }
+
+    /// Writes its tile size into its address (and its dated template's), for a layer asked for
+    /// by its tiles' box: their pictures are asked for that many pixels a side.
+    pub fn size_tiles(&mut self) {
+        if !self.sized_tiles() {
+            return;
+        }
+        let side = self.tile_size.to_string();
+        self.url = sized(&self.url, &side, &side);
+        if let Some(template) = self.time_url.as_mut() {
+            *template = sized(template, &side, &side);
         }
     }
 
@@ -397,7 +466,12 @@ impl TileLayer {
         self.bounds = self.bounds.filter(valid_bounds);
         self.max_zoom = self.max_zoom.min(MAX_ZOOM);
         self.min_zoom = self.min_zoom.min(self.max_zoom);
-        self.tile_size = if self.tile_size >= 384 { 512 } else { 256 };
+        self.tile_size = match self.tile_size {
+            ..384 => 256,
+            // A layer asked for by its tiles' box takes tiles of 1024 pixels too.
+            768.. if self.sized_tiles() => 1024,
+            _ => 512,
+        };
         if !self.opacity.is_finite() {
             self.opacity = 1.0;
         }

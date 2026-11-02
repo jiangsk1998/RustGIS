@@ -30,10 +30,12 @@ On Windows, use PowerShell:
 Get-Command rustgis-cli, winget -ErrorAction SilentlyContinue
 ```
 
-The documented Windows release assets are x64. Do not invent a native ARM64
-asset. If an existing CLI works, keep it; also check that the desktop app is
-installed. Prefer a package manager already present. Do not install a package
-manager just to avoid a release download, and do not silently elevate privileges.
+The documented Windows release assets are x64 (`windows-x86_64`) and, where a
+release has them, ARM64 (`windows-aarch64`). On ARM64, use the ARM64 asset when
+the release has one (winget installs x64 only). If an existing CLI works, keep
+it; also check that the desktop app is installed. Prefer a package manager
+already present. Do not install a package manager just to avoid a release
+download, and do not silently elevate privileges.
 
 ## 2. Install the desktop app and CLI
 
@@ -169,16 +171,25 @@ Check for an existing app before copying over it. The macOS releases are
 Developer ID signed and notarized. Prefer connecting to the internet and
 retrying if Apple cannot verify an old release; do not routinely strip quarantine.
 
-### Checked release downloads: Windows x64
+### Checked release downloads: Windows x64 and ARM64
 
-Prefer winget when present. Otherwise the portable zip needs no administrator
-rights and includes both the app and CLI. In PowerShell:
+On x64, prefer winget when present. On ARM64, winget installs the x64 build (run
+under emulation), so prefer the ARM64 zip below when the release has one. The
+portable zip needs no administrator rights and includes both the app and CLI.
+On ARM64 Windows the script takes the ARM64 zip when the release has one, else
+the x64 one. In PowerShell:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 $release = Invoke-RestMethod 'https://api.github.com/repos/opengeos/RustGIS/releases/latest'
 $version = $release.tag_name -replace '^v', ''
-$name = "RustGIS-$version-windows-x86_64-portable.zip"
+$arch = 'x86_64'
+$arm = "RustGIS-$version-windows-aarch64-portable.zip"
+$os = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+if ($os -eq 'Arm64' -and ($release.assets.name -contains $arm)) {
+  $arch = 'aarch64'
+}
+$name = "RustGIS-$version-windows-$arch-portable.zip"
 $asset = $release.assets | Where-Object name -eq $name
 $manifest = $release.assets | Where-Object name -eq 'SHA256SUMS'
 if (!$asset -or !$manifest) { throw 'Release asset or SHA256SUMS is missing' }
@@ -196,7 +207,7 @@ if ((Get-FileHash $zip -Algorithm SHA256).Hash -ine $expected) { throw 'Checksum
 $destination = Join-Path $env:LOCALAPPDATA "Programs\RustGIS-portable\$version"
 if (Test-Path $destination) { throw 'Destination exists; inspect it before updating' }
 Expand-Archive $zip -DestinationPath $destination
-$bin = Join-Path $destination "RustGIS-$version-windows-x86_64"
+$bin = Join-Path $destination "RustGIS-$version-windows-$arch"
 $env:Path = "$bin;$env:Path"
 & (Join-Path $bin 'rustgis-cli.exe') commands
 if ($LASTEXITCODE -ne 0) { throw 'RustGIS CLI failed' }
@@ -206,10 +217,11 @@ Start-Process (Join-Path $bin 'rustgis.exe')
 Use `$bin\rustgis-cli.exe` as the MCP command if the client does not inherit the
 updated PATH. For a permanent per-user PATH entry, preserve the existing value
 and avoid duplicates, or let the per-user installer manage it. The alternative
-`RustGIS-<version>-windows-x86_64-setup.exe` installs into
+`RustGIS-<version>-windows-<arch>-setup.exe` installs into
 `%LOCALAPPDATA%\Programs\RustGIS`. Verify its checksum before launching its
 installer. For authorized all-user deployment, the verified MSI uses
-`msiexec /i RustGIS-<version>-windows-x86_64.msi /qn`.
+`msiexec /i RustGIS-<version>-windows-<arch>.msi /qn` (`<arch>` is `x86_64` or
+`aarch64`).
 Do not sideload the unsigned release-page MSIX; use the Microsoft Store for
 that package. Windows installers may show a SmartScreen unknown-publisher
 warning; do not disable security controls to make installation unattended.

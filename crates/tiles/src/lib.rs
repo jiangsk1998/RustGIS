@@ -13,6 +13,7 @@ pub mod boundaries;
 pub mod cache;
 pub mod cog;
 pub mod cubes;
+mod dem;
 pub mod draw;
 pub mod earthdata;
 pub mod embeddings;

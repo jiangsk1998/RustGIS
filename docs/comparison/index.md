@@ -137,7 +137,7 @@ Stated plainly, so the tables above are worth trusting:
 
 - **Format breadth.** MySQL/MariaDB and SQL Server/Azure SQL are read only;
   PostGIS and GeoPackage support table write-back on desktop. Live database connections and
-  DuckDB files are desktop only. The web app doesn't write GeoPackages.
+  DuckDB files are desktop only. The web app doesn't write GeoPackages or FlatGeobufs.
   The native File Geodatabase reader is 2D and does not read compressed tables,
   raster fields or sparse row layouts; GDAL can fill these gaps on desktop. DWG and rasters
   such as JPEG 2000, NetCDF and HDF also need GDAL. SQL queries need DuckDB; both are external programs.

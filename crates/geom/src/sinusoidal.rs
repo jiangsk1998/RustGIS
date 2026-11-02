@@ -4,7 +4,8 @@
 //!
 //! On a sphere x = R·(λ−λ₀)·cos φ and y = R·φ; on an ellipsoid x = a·(λ−λ₀)·cos φ / √(1−e²·sin²φ)
 //! and y is the meridian distance, with PROJ's series for it and Newton's method for its inverse
-//! (`pj_mlfn`, `pj_inv_mlfn`). Both directions are exact up to that series.
+//! (`pj_mlfn`, `pj_inv_mlfn`; PROJ is MIT, see `INCLUDED` in `xtask/src/notices.rs`). Both
+//! directions are exact up to that series.
 
 use crate::Coord;
 

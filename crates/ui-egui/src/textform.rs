@@ -45,7 +45,9 @@ pub struct Settled {
     pub text: bool,
     /// The size changed and was let go (a drag ended, a value typed in).
     pub size: bool,
-    pub color: bool,
+    /// The colour changed: its button, for the caller to make a pick one undo step
+    /// ([`crate::widgets::one_step_per_press`]).
+    pub color: Option<egui::Response>,
     pub bold: bool,
     pub italic: bool,
     pub align: bool,
@@ -118,7 +120,7 @@ pub fn show(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tokens: &[&
         ui.end_row();
         if let Some(c) = f.color {
             ui.label(tl!("Color"));
-            out.color = crate::widgets::color_button(ui, c).changed();
+            out.color = Some(crate::widgets::color_button(ui, c)).filter(egui::Response::changed);
             ui.end_row();
         }
         if let Some(b) = f.bold {
@@ -191,14 +193,17 @@ pub fn show(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tokens: &[&
             let list = egui::ComboBox::from_id_salt(id.with("font"))
                 .selected_text(shown)
                 .height(320.0)
+                .close_behavior(crate::labelpane::SEARCHED_LIST_CLOSES)
                 .show_ui(ui, |ui| {
                     // Sans-serif and Serif first, then the installed families, found by typing.
                     let search =
                         if installed.is_some() { crate::labelpane::list_search(ui, search_id, tl!("Search fonts")) } else { String::new() };
                     for v in FontFamily::ALL {
-                        if ui.selectable_label(name.is_none() && *fam == v, tl!(v.label())).clicked() && (name.is_some() || *fam != v) {
-                            (*fam, *name) = (v, None);
-                            out.font = true;
+                        if ui.selectable_label(name.is_none() && *fam == v, tl!(v.label())).clicked() {
+                            if name.is_some() || *fam != v {
+                                (*fam, *name) = (v, None);
+                                out.font = true;
+                            }
                             crate::labelpane::end_search(ui, search_id);
                         }
                     }
@@ -321,7 +326,7 @@ mod tests {
                 for (on, what) in [
                     (s.text, "text"),
                     (s.size, "size"),
-                    (s.color, "color"),
+                    (s.color.is_some(), "color"),
                     (s.bold, "bold"),
                     (s.italic, "italic"),
                     (s.align, "align"),

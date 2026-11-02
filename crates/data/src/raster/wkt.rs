@@ -1281,6 +1281,55 @@ mod tests {
         assert_eq!(read_wkt(ESRI_32631), Ok((Crs::Epsg(32631), None)));
     }
 
+    /// A system kept with a layer says, as [`Crs::lacks_datum_shift`], what reading its WKT
+    /// noted: the datum has no shift to WGS 84. Checked over both corpora, NAD 27 with and without
+    /// TOWGS84, and a datum renamed off the national table.
+    #[test]
+    fn a_kept_system_says_its_datum_has_no_shift_as_reading_did() {
+        let nad27 = r#"GEOGCS["GCS_North_American_1927",DATUM["D_North_American_1927",SPHEROID["Clarke_1866",6378206.4,294.9786982]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]"#;
+        let shifted = nad27.replace("294.9786982]]", "294.9786982],TOWGS84[-8,160,176,0,0,0,0]]");
+        let prjs = include_str!("esri_datum_corpus.tsv").lines().filter(|l| !l.starts_with('#')).map(|l| l.split('\t').nth(5).unwrap());
+        let local = prjs.clone().next().unwrap().replace("D_Monte_Mario", "D_Local");
+        // An unknown datum on a sphere of WGS 84's major axis: noted, like any unknown datum.
+        let sphere =
+            r#"GEOGCS["Local",DATUM["Local",SPHEROID["Sphere",6378137,0]],PRIMEM["Greenwich",0],UNIT["Degree",0.0174532925199433]]"#;
+        let mercator = format!(
+            r#"PROJCS["Local Mercator",{sphere},PROJECTION["Mercator_1SP"],PARAMETER["central_meridian",0],PARAMETER["scale_factor",1],PARAMETER["false_easting",0],PARAMETER["false_northing",0],UNIT["Meter",1]]"#
+        );
+        let wkts: Vec<String> = [nad27.to_string(), shifted, local, GEOG_4326.to_string(), sphere.to_string()]
+            .into_iter()
+            .chain(prjs.map(str::to_string))
+            .chain(corpus().into_iter().map(|(_, _, w)| w.to_string()))
+            .collect();
+        // (Systems in the corpus that can't be read, such as Hotine Oblique Mercator variant B, are
+        // passed over.)
+        for (crs, note) in wkts.iter().filter_map(|w| read_wkt(w).ok()) {
+            assert_eq!(crs.lacks_datum_shift(), note.is_some(), "{}: {note:?}", crs.label());
+        }
+        assert!(crs_from_wkt(nad27).unwrap().lacks_datum_shift());
+        // The one exception: a Mercator on that sphere has Web Mercator's definition (typed as PROJ,
+        // it can't take `+nadgrids=@null`) and converts exactly as Web Mercator does, so its export
+        // says nothing, though reading it notes the unnamed datum. Web Mercator's own WKT reads as
+        // EPSG:3857.
+        let (crs, note) = read_wkt(&mercator).unwrap();
+        assert!(note.is_some() && !crs.lacks_datum_shift());
+        // A system known by its code, or typed without an ellipsoid, on WGS 84's or GRS 80's, or on
+        // Web Mercator's sphere, has its shift; one typed on another ellipsoid without a datum hasn't.
+        assert!(!Crs::LonLat.lacks_datum_shift() && !Crs::Epsg(32616).lacks_datum_shift());
+        for (typed, lacks) in [
+            ("+proj=utm +zone=16", false),
+            ("+proj=utm +zone=16 +ellps=WGS84", false),
+            ("+proj=utm +zone=16 +ellps=GRS80", false),
+            ("+proj=utm +zone=16 +ellps=clrk66", true),
+            ("+proj=merc +a=6378137 +b=6378137 +units=m", false),
+            ("+proj=merc +R=6378137", false),
+            ("+proj=merc +R=6378137.0 +units=m", false),
+            ("+proj=longlat +R=6378137", true),
+        ] {
+            assert_eq!(Crs::parse(typed).unwrap().lacks_datum_shift(), lacks, "{typed}");
+        }
+    }
+
     #[test]
     fn sirgas_2000_reads_as_wgs_84_without_a_note() {
         // As FBDS ships its hydrography of Brazil (Esri names), projected and geographic.

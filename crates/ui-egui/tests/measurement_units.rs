@@ -391,3 +391,26 @@ fn measurement_unit_choice_is_saved_restored_and_available_to_scripts() {
     assert!(restored.run("ui.measurementUnits", json!({"units": "unknown"})).is_err());
     assert!(!restored.ui.measurement_imperial);
 }
+
+#[test]
+fn moon_measure_readout_uses_its_sphere_instead_of_wgs84() {
+    let mut h = harness();
+    h.state_mut().run("map.body", json!({"name": "moon", "basemap": false})).unwrap();
+    h.state_mut().run("map.goToXY", json!({"lon": 0, "lat": 0, "scale": 100000})).unwrap();
+    h.state_mut().run("tool.set", json!({"tool": "measure"})).unwrap();
+    for _ in 0..3 {
+        h.step();
+    }
+    let center = h.state().map.view_rect.unwrap().0.center();
+    click_map(&mut h, center - egui::vec2(50.0, 0.0));
+    let first = h.state().map.pointer_lonlat.unwrap();
+    click_map(&mut h, center + egui::vec2(50.0, 0.0));
+    let last = h.state().map.pointer_lonlat.unwrap();
+    assert_eq!(h.state().map.sketch_len(), 2);
+    let body = h.state().session.map().body();
+    let expected = body.length(rustgis_engine::geom::geodesic_length_m(&[first, last]));
+    let expected = rustgis_engine::geom::format_distance(expected);
+    let text = painted_text(&h);
+    let readout = text.iter().find(|s| s.starts_with("Total ")).unwrap_or_else(|| panic!("{text:?}"));
+    assert!(readout.starts_with(&format!("Total {expected}   ")), "{readout}; expected {expected}");
+}

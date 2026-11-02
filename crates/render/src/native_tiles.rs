@@ -282,7 +282,27 @@ fn matrix_pictures(base: &str, ms: &[Matrix], area: [f64; 4], per_px: f64) -> Ve
 
 /// Draws a picture showing `area` of the system over the part of the pixmap `clip` (an area of
 /// the system within it) covers, `place` putting a point of the system on the pixmap.
-fn paint(pm: &mut Pixmap, img: &Pixmap, area: [f64; 4], clip: [f64; 4], opacity: f32, place: &dyn Fn(Coord) -> Option<(f32, f32)>) {
+pub(crate) fn paint(
+    pm: &mut Pixmap,
+    img: &Pixmap,
+    area: [f64; 4],
+    clip: [f64; 4],
+    opacity: f32,
+    place: &dyn Fn(Coord) -> Option<(f32, f32)>,
+) {
+    paint_blended(pm, img, area, clip, opacity, tiny_skia::BlendMode::SourceOver, place);
+}
+
+/// [`paint`], combined with what is beneath by `blend`.
+pub(crate) fn paint_blended(
+    pm: &mut Pixmap,
+    img: &Pixmap,
+    area: [f64; 4],
+    clip: [f64; 4],
+    opacity: f32,
+    blend: tiny_skia::BlendMode,
+    place: &dyn Fn(Coord) -> Option<(f32, f32)>,
+) {
     let corner = |x: f64, y: f64| place(Coord::new(x, y));
     let (Some(tl), Some(tr), Some(bl)) = (corner(area[0], area[3]), corner(area[2], area[3]), corner(area[0], area[1])) else { return };
     let (iw, ih) = (img.width() as f32, img.height() as f32);
@@ -300,7 +320,7 @@ fn paint(pm: &mut Pixmap, img: &Pixmap, area: [f64; 4], clip: [f64; 4], opacity:
     let Some(path) = path.finish() else { return };
     let shader = Pattern::new(img.as_ref(), SpreadMode::Pad, FilterQuality::Bilinear, opacity, transform);
     // Without anti-aliasing, neighbouring pictures meet without a seam.
-    let paint = Paint { shader, anti_alias: false, ..Paint::default() };
+    let paint = Paint { shader, anti_alias: false, blend_mode: blend, ..Paint::default() };
     pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
 }
 

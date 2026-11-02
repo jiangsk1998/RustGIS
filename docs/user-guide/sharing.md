@@ -12,7 +12,8 @@ Wavefront OBJ model with polygons extruded by a field.
 GeoPackage, GeoParquet, Shapefile (including a zip), FlatGeobuf, KML, KMZ or GPX (see
 [Writing](data-formats.md#writing)). GeoPackage, Shapefile and FlatGeobuf use the layer's source
 coordinate system by default; the `crs` parameter chooses another. A streamed layer exports its
-whole source, not just the features loaded for the view. `share.exportTable` exports a standalone
+whole source, not just the features loaded for the view. The web app downloads every format but
+GeoPackage and FlatGeobuf. `share.exportTable` exports a standalone
 table. **Data › Export** also writes rasters to GeoTIFF, and **Data Interop** converts layers to
 KML, GPX or CSV with WKT. Layouts, reports and presentations export from their own tabs and panes
 (see [Layouts and Reports](layouts.md)).

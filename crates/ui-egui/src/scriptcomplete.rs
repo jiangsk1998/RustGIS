@@ -205,6 +205,8 @@ struct Scan {
     nested: Option<Nested>,
     value: Option<(usize, String, bool)>,
     values: Vec<(String, String, bool)>,
+    // Top-level strings and numeric table IDs, in order; command value_of stays string-only.
+    inputs: Vec<(String, serde_json::Value)>,
 }
 
 /// A second-level object: the value of a top-level key (`"add": {…}`), or one of the objects in
@@ -223,11 +225,12 @@ fn scan(text: &str) -> Scan {
     let (mut depth, mut q, mut entry, mut start) = (0usize, Quotes::default(), false, None);
     // The top-level key just read, the one whose colon was just read (its value comes next),
     // where the key being read starts, and the top-level value being read.
-    let (mut named, mut valued, mut from, mut value) = (None::<String>, None::<String>, None, None);
+    let (mut named, mut valued, mut from, mut value) = (None::<String>, None::<String>, None, None::<(usize, String, bool)>);
     // The key whose array the text is in (an array of objects), and the second-level object the
     // text is in, with its depth: anywhere in it, deeper levels included.
     let (mut array, mut nested) = (None::<String>, None::<(Nested, usize)>);
     let mut values = Vec::new();
+    let mut inputs = Vec::new();
     for (i, &c) in chars.iter().enumerate() {
         let was_quoted = q.quoted();
         q.read(c);
@@ -235,7 +238,11 @@ fn scan(text: &str) -> Scan {
             // Its closing quote.
             if !q.quoted() {
                 if let Some((v, key, listed)) = value.take() {
-                    values.push((key, chars.get(v..i).unwrap_or_default().iter().collect(), listed));
+                    let text: String = chars.get(v..i).unwrap_or_default().iter().collect();
+                    if !listed {
+                        inputs.push((key.clone(), serde_json::Value::String(text.clone())));
+                    }
+                    values.push((key, text, listed));
                 }
                 start = None;
                 named = from.take().and_then(|f| chars.get(f..i)).map(|k| k.iter().collect());
@@ -285,7 +292,19 @@ fn scan(text: &str) -> Scan {
             ',' => entry = top,
             ':' => (valued, entry) = (named.take().filter(|_| depth == 1), false),
             c if c.is_whitespace() => {}
-            _ => entry = false,
+            _ => {
+                if depth == 1
+                    && c.is_ascii_digit()
+                    && let Some(key) = valued.as_ref()
+                {
+                    let token: String =
+                        chars.get(i..).unwrap_or_default().iter().take_while(|c| !c.is_whitespace() && !matches!(c, ',' | '}')).collect();
+                    if let Ok(id) = serde_json::from_str::<u32>(&token) {
+                        inputs.push((key.clone(), serde_json::json!(id)));
+                    }
+                }
+                entry = false;
+            }
         }
         // A key's name lasts up to its colon, and from there up to its value.
         if !c.is_whitespace() {
@@ -297,7 +316,7 @@ fn scan(text: &str) -> Scan {
             }
         }
     }
-    Scan { start, nested: nested.map(|(n, _)| n), value, values }
+    Scan { start, nested: nested.map(|(n, _)| n), value, values, inputs }
 }
 
 /// The line's object from its `{` up to the cursor at char `at` of `script`, read (`scan`), with
@@ -543,7 +562,7 @@ fn offer_at(script: &str, at: usize, ids: &[String], session: &rustgis_engine::S
                 };
                 // Not those its array already gives, before or after it: twice is the same work
                 // twice. The line's object without the word being typed, as `complete_keys` reads it.
-                let after = object_rest(script.get(byte_at(script, at)?..)?.split('\n').next()?);
+                let after = object_rest(script.get(byte_at(script, at)?..)?.split('\n').next()?, false);
                 let given = scan(&format!("{}{after}", script.get(byte_at(script, hint.brace)?..byte_at(script, start)?)?)).values;
                 let names = d
                     .fields
@@ -559,7 +578,7 @@ fn offer_at(script: &str, at: usize, ids: &[String], session: &rustgis_engine::S
         return Some(offer);
     }
     let KeyAt { hint: h, start, word, nested } = key_at(script, at)?;
-    let after = object_rest(script.get(byte_at(script, at)?..)?.split('\n').next()?);
+    let after = object_rest(script.get(byte_at(script, at)?..)?.split('\n').next()?, false);
     // The object the key goes in, from its `{` to its `}`, the word being typed taken out.
     let brace = nested.as_ref().map_or(h.brace, |n| n.brace);
     let object = format!("{}{after}", script.get(byte_at(script, brace)?..byte_at(script, start)?)?);
@@ -597,11 +616,23 @@ fn tool_value(script: &str, at: usize, session: &rustgis_engine::Session) -> Opt
     let tool = rustgis_engine::analysis::tool(&name)?;
     // The `"params"` object, read as a line's object from its `{`.
     let text = script.get(byte_at(script, brace)?..byte_at(script, at)?)?;
-    // A tool's parameter takes no array.
-    let (start, key, false) = scan(text).value? else { return None };
-    let word = word_from(text, start)?;
-    let start = brace + start;
+    // Field lists accept a single name as well as names within an array.
+    let (start, key, in_array) = scan(text).value?;
     let p = tool.params.iter().find(|p| p.name == key)?;
+    if in_array && !matches!(p.kind, K::Fields { .. }) {
+        return None;
+    }
+    // A text list of field names may hold spaces after its separators.
+    let word = if p.kind == K::FieldNames {
+        let word: String = text.chars().skip(start).collect();
+        if word.contains('\\') {
+            return None;
+        }
+        word
+    } else {
+        word_from(text, start)?
+    };
+    let start = brace + start;
     let map = session.map();
     match p.kind {
         K::Layer | K::PolygonLayer | K::PointLayer | K::RasterLayer | K::VectorLayer => {
@@ -615,24 +646,64 @@ fn tool_value(script: &str, at: usize, session: &rustgis_engine::Session) -> Opt
             let names = layers.map(|l| l.name.as_str()).chain(tables.map(|(_, t)| t.name.as_str()));
             value_ids(start, at, &word, names, Of::Layers)
         }
-        K::Field | K::NumericField | K::CoordinateField => {
-            let after = object_rest(script.get(byte_at(script, at)?..)?.split('\n').next()?);
-            let input = value_of(&format!("{text}{after}"), crate::panes::first_layer(tool)?.name)?;
-            let d = crate::panes::input_dataset(session, &input)?;
-            let names = d.fields.iter().enumerate().filter(|(i, _)| takes_field(p.kind, d, *i)).map(|(_, f)| f.name.as_str());
-            value_ids(start, at, &word, names, Of::ToolFields(input))
+        K::Field | K::FieldNames | K::NumericField | K::CoordinateField | K::Fields { .. } => {
+            let after = object_rest(script.get(byte_at(script, at)?..)?.split('\n').next()?, in_array);
+            let source = crate::fieldlists::input(p.kind).or_else(|| crate::panes::layer_for_param(tool, p.name).map(|p| p.name))?;
+            let whole = format!("{text}{after}");
+            let input = scan(&whole).inputs.into_iter().rev().find(|(key, _)| key == source)?.1;
+            let (d, of) = match input {
+                serde_json::Value::String(name) if !name.contains('\\') => {
+                    (crate::panes::input_dataset(session, &name)?, Of::ToolFields(name))
+                }
+                serde_json::Value::Number(id) => {
+                    let id = u32::try_from(id.as_u64()?).ok()?;
+                    (&session.project.table(id)?.dataset, Of::TableFields(id))
+                }
+                _ => return None,
+            };
+            let without_word = format!("{}{after}", script.get(byte_at(script, brace)?..byte_at(script, start)?)?);
+            // Scan retains raw JSON string contents; decode before comparing with dataset names.
+            let given: std::collections::HashSet<String> = scan(&without_word)
+                .values
+                .into_iter()
+                .filter(|(k, _, listed)| *listed && k == &key)
+                .filter_map(|(_, value, _)| serde_json::from_str::<String>(&format!("\"{value}\"")).ok())
+                .map(|name| name.trim().to_ascii_lowercase())
+                .collect();
+            let names = d
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(i, f)| takes_field(p.kind, d, *i) && (!in_array || !given.contains(&f.name.to_ascii_lowercase())))
+                .map(|(_, f)| f.name.as_str());
+            let (start, word) = if p.kind == K::FieldNames {
+                let (off, suffix) = list_suffix(&word);
+                (start + off, suffix)
+            } else {
+                (start, word)
+            };
+            value_ids(start, at, &word, names, of)
         }
         K::Choice(choices) => value_ids(start, at, &word, choices.iter().copied(), Of::Choices),
         _ => None,
     }
 }
 
+/// The name a `Fields` completion replaces: the list's last entry, after any `,`/`;` and the
+/// spaces following it, with the character offset it begins at, so earlier entries stay typed.
+fn list_suffix(word: &str) -> (usize, String) {
+    let cut = word.char_indices().filter(|(_, c)| matches!(c, ',' | ';')).map(|(i, c)| i + c.len_utf8()).next_back().unwrap_or(0);
+    let (head, tail) = word.split_at(cut);
+    let spaces = tail.len() - tail.trim_start().len();
+    (head.chars().count() + tail[..spaces].chars().count(), tail.trim_start().to_string())
+}
+
 /// What follows a cursor in a key (`after`, to the line's end) up to the `}` that closes the key's
 /// object, or all of it when nothing closes it: an object after it on the line (the next one in
 /// its array, a later key's) isn't read as holding its keys.
-fn object_rest(after: &str) -> &str {
-    // In the key's quotes, then one level in.
-    let (mut depth, mut q) = (1usize, Quotes::in_string());
+fn object_rest(after: &str, in_array: bool) -> &str {
+    // Inside quotes in the object, and optionally its field-name array.
+    let (mut depth, mut q) = (if in_array { 2usize } else { 1usize }, Quotes::in_string());
     for (i, c) in after.char_indices() {
         if !q.read(c) {
             continue;
@@ -780,9 +851,12 @@ fn param_line(p: &rustgis_engine::analysis::ParamSpec) -> String {
         K::VectorLayer => tl_raw!("vector layer"),
         K::RasterLayers => tl_raw!("raster layers (names separated by ;)"),
         K::VectorLayers => tl_raw!("vector layers (names separated by ;)"),
-        K::Field => tl_raw!("a field of the first layer"),
-        K::NumericField => tl_raw!("a numeric field of the first layer"),
-        K::CoordinateField => tl_raw!("a field of the first layer holding coordinates"),
+        K::Field => tl_raw!("a field of the associated input"),
+        K::FieldNames => tl_raw!("field names (separated by commas)"),
+        K::NumericField => tl_raw!("a numeric field of the associated input"),
+        K::CoordinateField => tl_raw!("a field of the associated input holding coordinates"),
+        K::Fields { .. } => tl_raw!("ordered field names"),
+        K::FieldStatistics { .. } => tl_raw!("field and statistic pairs"),
         K::Number => tl_raw!("number"),
         K::Text => tl_raw!("text"),
         K::Bool => tl_raw!("bool"),
@@ -2682,6 +2756,35 @@ mod tests {
         assert_eq!((o.items, o.of), (numeric.clone(), Some(super::Of::ToolFields("Cities".into()))), "a numeric field");
         let o = offer(&app, r#"gp.run {"tool": "summaryStatistics", "params": {"input": "Cities", "case": ""#).unwrap();
         assert_eq!(o.items, fields, "any field");
+        let o = offer(&app, r#"gp.run {"tool": "summaryStatistics", "params": {"input": "Cities", "case": [""#).unwrap();
+        assert_eq!(o.items, fields, "field-list array values");
+        let o = offer(&app, r#"gp.run {"tool": "pivotTable", "params": {"input": "Cities", "fields": [""#).unwrap();
+        assert_eq!(o.items, fields, "pivot row fields");
+        let o = offer(&app, r#"gp.run {"tool":"summaryStatistics","params":{"input":"Cities","case":[" NAME ",""#).unwrap();
+        assert!(
+            !o.items.iter().any(|f| f.eq_ignore_ascii_case("name")),
+            "previous array entry excluded with execution's trimming and casing"
+        );
+        let before = r#"gp.run {"tool":"pivotTable","params":{"input":"Cities","fields":[""#;
+        let o = super::offer_at(&format!(r#"{before}","name"]}}}}"#), before.chars().count(), &[], &app.session).unwrap();
+        assert!(!o.items.iter().any(|f| f.eq_ignore_ascii_case("name")), "later array entry excluded");
+        let id = app.session.project.tables[0].id;
+        for tool in ["summaryStatistics", "pivotTable"] {
+            let key = if tool == "summaryStatistics" { "case" } else { "fields" };
+            let text = format!(r#"gp.run {{"tool":"{tool}","params":{{"input":{id},"{key}":[""#);
+            let o = offer(&app, &text).unwrap();
+            assert_eq!((o.items, o.of), (vec!["total".to_string()], Some(super::Of::TableFields(id))), "numeric ID before another key");
+        }
+        let before = r#"gp.run {"tool":"summaryStatistics","params":{"case":[""#;
+        let o = super::offer_at(&format!(r#"{before}"],"input":{id}}}}}"#), before.chars().count(), &[], &app.session).unwrap();
+        assert_eq!(
+            (o.items, o.of),
+            (["total".to_string()].to_vec(), Some(super::Of::TableFields(id))),
+            "numeric standalone table ID after array"
+        );
+        let s = r#"gp.run {"tool": "summaryStatistics", "params": {"case": [""#;
+        let o = super::offer_at(&format!(r#"{s}"], "input": "Cities"}}}}"#), s.chars().count(), &[], &app.session).unwrap();
+        assert_eq!(o.items, fields, "the input after a field array");
         let s = r#"gp.run {"tool": "summaryStatistics", "params": {"field": ""#;
         let o = super::offer_at(&format!(r#"{s}", "input": "Cities"}}}}"#), s.chars().count(), &[], &app.session).unwrap();
         assert_eq!(o.items, numeric, "the input after the field");
@@ -2697,6 +2800,29 @@ mod tests {
         assert!(offer(&app, r#"gp.run {"tool": "nope", "params": {"input": ""#).is_none(), "a tool that isn't there");
         assert!(offer(&app, r#"gp.run {"tool": "buffer", "params": {"input": {"x": ""#).is_none(), "deeper");
         assert!(offer(&app, r#"task.addStep {"command": "buffer", "params": {"input": ""#).is_none(), "another command's params");
+        app.session.project.tables[0].dataset.fields.push(Field::new("a\"b", FieldType::Text));
+        let quoted = serde_json::to_string("a\"b").unwrap();
+        let text = format!(r#"gp.run {{"tool":"pivotTable","params":{{"input":{id},"fields":[{quoted},""#);
+        assert_eq!(offer(&app, &text).unwrap().items, ["total"], "escaped name before cursor excluded");
+        let before = format!(r#"gp.run {{"tool":"pivotTable","params":{{"input":{id},"fields":[""#);
+        let text = format!(r#"{before}",{quoted}]}}}}"#);
+        assert_eq!(
+            super::offer_at(&text, before.chars().count(), &[], &app.session).unwrap().items,
+            ["total"],
+            "escaped name after cursor excluded"
+        );
+        let unicode = r#""to\u0074al""#;
+        let text = format!(r#"gp.run {{"tool":"pivotTable","params":{{"input":{id},"fields":[{unicode},""#);
+        assert_eq!(offer(&app, &text).unwrap().items, ["a\"b"], "Unicode escape decoded before comparison");
+    }
+
+    /// A `Fields` completion replaces only the list's last name, so earlier names stay typed.
+    #[test]
+    fn a_field_list_completes_only_its_last_name() {
+        assert_eq!(super::list_suffix("name, pop"), (6, "pop".into()));
+        assert_eq!(super::list_suffix("name;pop"), (5, "pop".into()));
+        assert_eq!(super::list_suffix("name, "), (6, String::new()));
+        assert_eq!(super::list_suffix("pop"), (0, "pop".into()));
     }
 
     /// Beside a table, its rows and the table icon; beside a tool's field, its type and the field
@@ -2979,10 +3105,14 @@ mod tests {
     #[test]
     fn object_rest_stops_at_the_keys_object() {
         use super::object_rest;
-        assert_eq!(object_rest(r#"me": "a"}, {"name": "b"}]}"#), r#"me": "a"}"#);
-        assert_eq!(object_rest(r#"": {"b": [1]}, "c": "}"}, "d": 1}"#), r#"": {"b": [1]}, "c": "}"}"#, "nested, and a brace in a string");
-        assert_eq!(object_rest(r#"a\"b": 1}"#), r#"a\"b": 1}"#, "an escaped quote in the key");
-        assert_eq!(object_rest(r#"": 1, "b""#), r#"": 1, "b""#, "not closed");
-        assert_eq!(object_rest(""), "");
+        assert_eq!(object_rest(r#"me": "a"}, {"name": "b"}]}"#, false), r#"me": "a"}"#);
+        assert_eq!(
+            object_rest(r#"": {"b": [1]}, "c": "}"}, "d": 1}"#, false),
+            r#"": {"b": [1]}, "c": "}"}"#,
+            "nested, and a brace in a string"
+        );
+        assert_eq!(object_rest(r#"a\"b": 1}"#, false), r#"a\"b": 1}"#, "an escaped quote in the key");
+        assert_eq!(object_rest(r#"": 1, "b""#, false), r#"": 1, "b""#, "not closed");
+        assert_eq!(object_rest("", false), "");
     }
 }

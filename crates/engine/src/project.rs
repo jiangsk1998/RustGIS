@@ -228,6 +228,7 @@ impl From<TableFile> for Table {
                 source,
                 crs: None,
                 crs_incomplete: false,
+                zm_dropped: false,
                 windowed: false,
             },
         }

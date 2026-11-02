@@ -8,7 +8,16 @@ use serde_json::{Value, json};
 
 use crate::RustGisApp;
 use crate::theme::{Tokens, semibold};
-use rustgis_engine::cmd::notebook::CellKind;
+use rustgis_engine::cmd::notebook::{Cell, CellKind};
+
+/// A notebook cell's image output in the pane.
+pub enum NotebookImage {
+    Shown(egui::TextureHandle),
+    /// Not a PNG, or larger than the pane draws.
+    Unreadable,
+    /// Waiting for room in the image budget: its size as RGBA bytes.
+    Waiting(usize),
+}
 
 /// State of these panes.
 #[derive(Default)]
@@ -22,6 +31,16 @@ pub struct DocState {
     /// Cell text being edited, by (notebook, cell), with the cell text it started from: saved
     /// when the field loses focus, and dropped if the cell changed underneath (undo, a command).
     pub edits: HashMap<(usize, usize), (String, String)>,
+    /// Image outputs of notebook cells, by a hash of their base64 PNG.
+    pub images: HashMap<u64, NotebookImage>,
+    /// The hash of each (notebook, cell, image) at `image_revision`, so a payload is hashed once
+    /// per change to the project rather than every frame.
+    pub image_keys: HashMap<(usize, usize, usize), u64>,
+    pub image_revision: u64,
+    /// The revision whose unused textures were last dropped.
+    pub image_pruned: u64,
+    /// Keys the image hashes per run, so a notebook can't make two images collide on purpose.
+    pub image_hasher: std::collections::hash_map::RandomState,
     pub message: Option<(String, bool)>,
     /// The page whose fields are being edited, and their text and duration.
     pub editing: Option<(usize, usize)>,
@@ -285,6 +304,8 @@ fn preview(app: &mut RustGisApp, ui: &mut Ui, i: usize, t: &Tokens) {
 pub fn notebook(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     message(app, ui, t);
     if app.session.project.notebooks.is_empty() {
+        // No notebook left to show the images of.
+        app.docs.images.clear();
         ui.label(
             egui::RichText::new(tl!("No notebooks yet. Analyze › New Notebook starts one, or Add and Open Notebook opens one.")).weak(),
         );
@@ -295,6 +316,8 @@ pub fn notebook(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     let Ok(i) = rustgis_engine::cmd::notebook::index(&app.session, &Value::Null) else { return };
     let names: Vec<String> = app.session.project.notebooks.iter().map(|r| r.name.clone()).collect();
+    // A Python (or other language) notebook from Jupyter: its code cells are shown, not run.
+    let language = app.session.project.notebooks.get(i).and_then(|nb| nb.language_label());
     ui.horizontal(|ui| {
         egui::ComboBox::from_id_salt("nb_pick")
             .selected_text(names.get(i).map_or("", |s| s.as_str()))
@@ -308,7 +331,7 @@ pub fn notebook(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             })
             .response
             .on_hover_text(tl!("Notebook"));
-        if ui.small_button(tl!("Run All")).clicked() {
+        if language.is_none() && ui.small_button(tl!("Run All")).clicked() {
             run(app, "notebook.run", json!({"notebook": i}));
             app.map.invalidate();
         }
@@ -316,16 +339,29 @@ pub fn notebook(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             let _ = app.run("ui.saveItem", json!({"kind": "notebook"}));
         }
     });
-    // One cell is copied at a time (the commands below need the app), not the whole notebook.
+    if let Some(lang) = &language {
+        let hint =
+            crate::i18n::fmt("{language} cells don't run here: open this notebook in Jupyter to run them.", &[("language", lang.as_str())]);
+        ui.label(egui::RichText::new(hint).small().color(t.text_dim));
+    }
+    // One cell's shown fields are copied at a time (the commands below need the app), not the
+    // whole notebook, nor the cell's Jupyter fields, which can hold megabytes of outputs.
     let n = app.session.project.notebooks.get(i).map_or(0, |nb| nb.cells.len());
     for k in 0..n {
-        let Some(cell) = app.session.project.notebooks.get(i).and_then(|nb| nb.cells.get(k)).cloned() else { break };
+        let (session, docs) = (&app.session, &mut app.docs);
+        let Some(c) = session.project.notebooks.get(i).and_then(|nb| nb.cells.get(k)) else { break };
+        let (images, hidden) = cell_images(docs, ui.ctx(), session.revision, (i, k), c);
+        let cell = Cell { kind: c.kind, source: c.source.clone(), output: c.output.clone(), error: c.error, jupyter: None };
         egui::Frame::NONE.stroke(egui::Stroke::new(1.0, t.border)).corner_radius(4).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                let kind = if cell.kind == CellKind::Code { tl!("Commands") } else { tl!("Text") };
+                let kind = match (cell.kind, &language) {
+                    (CellKind::Code, Some(lang)) => lang.clone(),
+                    (CellKind::Code, None) => tl!("Commands").to_string(),
+                    (CellKind::Markdown, _) => tl!("Text").to_string(),
+                };
                 ui.label(egui::RichText::new(kind).small().color(t.text_dim));
-                if cell.kind == CellKind::Code && ui.small_button(tl!("Run")).clicked() {
+                if cell.kind == CellKind::Code && language.is_none() && ui.small_button(tl!("Run")).clicked() {
                     // Save an edit in progress first.
                     if let Some((text, _)) = app.docs.edits.remove(&(i, k)) {
                         run(app, "notebook.editCell", json!({"notebook": i, "cell": k, "source": text}));
@@ -363,17 +399,145 @@ pub fn notebook(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 let c = if cell.error { Color32::from_rgb(0xC0, 0x30, 0x30) } else { t.text_dim };
                 ui.label(egui::RichText::new(out.as_str()).small().monospace().color(c));
             }
+            for tex in images {
+                let size = tex.size_vec2();
+                let w = size.x.min(ui.available_width()).max(1.0);
+                ui.image((tex.id(), vec2(w, w * size.y / size.x.max(1.0))));
+            }
+            if hidden > 0 {
+                let note = tl!("Some images aren't shown: the notebook's images use all the memory set aside for them.");
+                ui.label(egui::RichText::new(note).small().color(t.text_dim));
+            }
         });
         ui.add_space(4.0);
     }
+    // Every cell has now named its images: after a change, or when some wait for room, drop the
+    // textures of images not in this notebook (a closed one's, or another's: they decode again
+    // when shown).
+    let waiting = app.docs.images.values().any(|e| matches!(e, NotebookImage::Waiting(_)));
+    if waiting || app.docs.image_pruned != app.session.revision {
+        app.docs.image_pruned = app.session.revision;
+        let live: std::collections::HashSet<u64> = app.docs.image_keys.values().copied().collect();
+        let before = app.docs.images.len();
+        app.docs.images.retain(|k, _| live.contains(k));
+        // The waiting images try the freed room on the next frame.
+        if app.docs.images.len() < before {
+            ui.ctx().request_repaint();
+        }
+    }
     ui.horizontal(|ui| {
-        if ui.button(tl!("Add Commands")).clicked() {
+        let add = match &language {
+            Some(lang) => crate::i18n::fmt("Add {language}", &[("language", lang.as_str())]),
+            None => tl!("Add Commands").to_string(),
+        };
+        if ui.button(add).clicked() {
             run(app, "notebook.addCell", json!({"notebook": i, "kind": "code"}));
         }
         if ui.button(tl!("Add Text")).clicked() {
             run(app, "notebook.addCell", json!({"notebook": i, "kind": "markdown"}));
         }
     });
+}
+
+/// Longest side of a notebook image drawn, and the most image memory (RGBA) kept for them.
+const MAX_IMAGE_SIDE: u32 = 4096;
+const IMAGE_BUDGET: usize = 256 << 20;
+
+/// The textures of a cell's PNG outputs, and how many are waiting for room in the budget.
+fn cell_images(
+    docs: &mut DocState,
+    ctx: &egui::Context,
+    revision: u64,
+    at: (usize, usize),
+    cell: &Cell,
+) -> (Vec<egui::TextureHandle>, usize) {
+    use std::hash::BuildHasher;
+    if docs.image_revision != revision {
+        docs.image_keys.clear();
+        docs.image_revision = revision;
+    }
+    let max_side = ctx.input(|i| i.max_texture_side).min(MAX_IMAGE_SIDE as usize) as u32;
+    let used = |docs: &DocState| -> usize {
+        docs.images.values().map(|e| if let NotebookImage::Shown(t) = e { t.size()[0] * t.size()[1] * 4 } else { 0 }).sum()
+    };
+    let (mut out, mut hidden) = (Vec::new(), 0);
+    for (j, png) in cell.images().iter().enumerate() {
+        let key = *docs.image_keys.entry((at.0, at.1, j)).or_insert_with(|| docs.image_hasher.hash_one(png.as_ref()));
+        let (bytes, png) = match docs.images.get(&key) {
+            Some(NotebookImage::Shown(tex)) => {
+                out.push(tex.clone());
+                continue;
+            }
+            Some(NotebookImage::Unreadable) => continue,
+            // Retried once something else frees room.
+            Some(NotebookImage::Waiting(bytes)) => {
+                if used(docs) + bytes > IMAGE_BUDGET {
+                    hidden += 1;
+                    continue;
+                }
+                (*bytes, png_bytes(png))
+            }
+            None => {
+                // The header gives the size, so an image that can't fit isn't decoded.
+                let png = png_bytes(png);
+                let Some((w, h)) = png.as_deref().and_then(|p| png_dimensions(p, max_side)) else {
+                    docs.images.insert(key, NotebookImage::Unreadable);
+                    continue;
+                };
+                let bytes = w as usize * h as usize * 4;
+                // Evicting happens after every cell has named its images (in `notebook`).
+                if used(docs) + bytes > IMAGE_BUDGET {
+                    docs.images.insert(key, NotebookImage::Waiting(bytes));
+                    hidden += 1;
+                    continue;
+                }
+                (bytes, png)
+            }
+        };
+        let entry = match png.as_deref().and_then(|p| decode_png(p, max_side)) {
+            Some(img) if img.width() * img.height() * 4 == bytes => {
+                let tex = ctx.load_texture("notebook_image", img, egui::TextureOptions::LINEAR);
+                out.push(tex.clone());
+                NotebookImage::Shown(tex)
+            }
+            _ => NotebookImage::Unreadable,
+        };
+        docs.images.insert(key, entry);
+    }
+    (out, hidden)
+}
+
+/// A base64 PNG from a notebook file (hostile input) as bytes.
+fn png_bytes(b64: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let clean: Vec<u8> = b64.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD.decode(clean).ok()
+}
+
+/// A PNG reader that refuses images over `max_side` pixels a side (at most `MAX_IMAGE_SIDE`).
+fn png_reader(bytes: &[u8], max_side: u32) -> image::ImageReader<std::io::Cursor<&[u8]>> {
+    let max_side = max_side.min(MAX_IMAGE_SIDE);
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(max_side);
+    limits.max_image_height = Some(max_side);
+    limits.max_alloc = Some(u64::from(max_side) * u64::from(max_side) * 8);
+    reader.limits(limits);
+    reader
+}
+
+/// The size a PNG's header gives, if within `max_side` pixels a side; nothing is decoded.
+fn png_dimensions(png: &[u8], max_side: u32) -> Option<(u32, u32)> {
+    let (w, h) = png_reader(png, max_side).into_dimensions().ok()?;
+    (w <= max_side.min(MAX_IMAGE_SIDE) && h <= max_side.min(MAX_IMAGE_SIDE)).then_some((w, h))
+}
+
+/// A PNG from a notebook file (hostile input): `None` unless it decodes within `max_side`
+/// pixels a side (at most `MAX_IMAGE_SIDE`, and what the GPU takes).
+fn decode_png(png: &[u8], max_side: u32) -> Option<egui::ColorImage> {
+    let img = png_reader(png, max_side).decode().ok()?.to_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    Some(egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
 }
 
 /// Shared items (Publish › Share As › Jobs) with their Manage tools, and the data stores.
@@ -437,4 +601,46 @@ pub fn shares(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             run(app, "share.upload", json!({"path": f.display().to_string()}));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::RgbaImage::new(1, 1).write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).unwrap();
+        // Rewrite the header's size, and its checksum, so only the size is wrong.
+        bytes[16..20].copy_from_slice(&w.to_be_bytes());
+        bytes[20..24].copy_from_slice(&h.to_be_bytes());
+        let crc = !bytes[12..29]
+            .iter()
+            .fold(!0u32, |c, &b| (0..8).fold(c ^ u32::from(b), |c, _| (c >> 1) ^ (0xEDB8_8320 & 0u32.wrapping_sub(c & 1))));
+        bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn notebook_images_decode_within_limits() {
+        use base64::Engine;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        // A real 3000 x 1 image, so the side limit is what refuses it.
+        let mut wide = Vec::new();
+        image::RgbaImage::new(3000, 1).write_to(&mut std::io::Cursor::new(&mut wide), image::ImageFormat::Png).unwrap();
+        assert!(png_bytes(&b64(&wide)).and_then(|p| decode_png(&p, MAX_IMAGE_SIDE)).is_some());
+        let decode = |b64: &str, side| png_bytes(b64).and_then(|p| decode_png(&p, side));
+        let dimensions = |b64: &str, side| png_bytes(b64).and_then(|p| png_dimensions(&p, side));
+        let small = decode(&format!("{}\n", b64(&png(1, 1))), MAX_IMAGE_SIDE).expect("a small PNG decodes, line break and all");
+        assert_eq!(small.size, [1, 1]);
+        // A header claiming a huge image is refused before anything that size is allocated.
+        assert!(decode(&b64(&png(100_000, 100_000)), MAX_IMAGE_SIDE).is_none());
+        // Nor one over the GPU's largest texture.
+        assert!(decode(&b64(&png(1, 1)), 2048).is_some());
+        assert!(decode(&b64(&wide), 2048).is_none());
+        assert!(decode("not base64!", MAX_IMAGE_SIDE).is_none());
+        // The size is read from the header alone, and refused the same way.
+        assert_eq!(dimensions(&b64(&png(1, 1)), MAX_IMAGE_SIDE), Some((1, 1)));
+        assert_eq!(dimensions(&b64(&wide), 2048), None);
+        assert_eq!(dimensions(&b64(&png(100_000, 100_000)), MAX_IMAGE_SIDE), None);
+    }
 }

@@ -1,4 +1,4 @@
-//! Allocation accounting for complete render chunks.
+//! Allocation accounting for the chunks of a complete traversal (drawing, exports).
 use crate::{Feature, Geometry, Value};
 use std::mem::size_of;
 
@@ -32,4 +32,51 @@ pub fn feature_bytes(f: &Feature) -> usize {
 /// Actual allocated chunk storage, including spare capacity.
 pub fn features_bytes(features: &Vec<Feature>) -> usize {
     features.iter().fold(features.capacity().saturating_mul(size_of::<Feature>()), |n, f| n.saturating_add(feature_bytes(f)))
+}
+
+/// Gathers features into chunks of at most `bytes` of owned storage for
+/// [`FeatureSource::visit_chunks`](super::FeatureSource::visit_chunks), handing each to the
+/// visitor as it fills. A feature larger than the target on its own is handed over alone.
+pub(crate) struct Chunker<'a> {
+    bytes: usize,
+    used: usize,
+    features: Vec<Feature>,
+    visit: &'a mut dyn FnMut(Vec<Feature>) -> crate::Result<()>,
+}
+
+impl<'a> Chunker<'a> {
+    /// Refuses a zero target, which no feature fits.
+    pub(crate) fn new(bytes: usize, visit: &'a mut dyn FnMut(Vec<Feature>) -> crate::Result<()>) -> crate::Result<Self> {
+        if bytes == 0 {
+            return Err(crate::DataError::Format("the chunk memory budget is zero".into()));
+        }
+        Ok(Chunker { bytes, used: 0, features: Vec::new(), visit })
+    }
+
+    /// Adds a feature, first handing over the chunk it would overflow.
+    pub(crate) fn push(&mut self, feature: Feature) -> crate::Result<()> {
+        let size = feature_bytes(&feature).saturating_add(size_of::<Feature>());
+        if !self.features.is_empty() && self.used.saturating_add(size) > self.bytes {
+            self.flush()?;
+        }
+        // A geometry is indivisible: a row bigger than the target is kept whole rather than
+        // dropped or failing the whole traversal.
+        if size > self.bytes {
+            return (self.visit)(vec![feature]);
+        }
+        self.used = self.used.saturating_add(size);
+        self.features.push(feature);
+        Ok(())
+    }
+
+    /// Hands over the features gathered so far, if any.
+    pub(crate) fn flush(&mut self) -> crate::Result<()> {
+        if self.features.is_empty() {
+            return Ok(());
+        }
+        let mut chunk = std::mem::take(&mut self.features);
+        chunk.shrink_to_fit();
+        self.used = 0;
+        (self.visit)(chunk)
+    }
 }

@@ -108,6 +108,9 @@ pub struct Style {
     pub stroke_levels: Option<bool>,
     /// Point markers turned by a field (`Some(None)`: not turned).
     pub marker_rotation: Option<Option<MarkerRotation>>,
+    /// Its data-defined size, colours, outline width and angle, as expressions (`Some` of an
+    /// empty one: none).
+    pub symbol_by: Option<crate::symbol_by::SymbolBy>,
     pub reference_scale: Option<f64>,
     pub labels: Option<Labeling>,
     /// 0 opaque to 100 invisible.
@@ -160,6 +163,13 @@ impl Style {
         // Only a point layer's markers turn.
         if let Some(r) = &self.marker_rotation {
             layer.marker_rotation = r.clone().filter(|_| layer.geometry_type() == rustgis_data::GeometryType::Point);
+        }
+        if let Some(by) = &self.symbol_by {
+            layer.symbol_by = by.clone();
+            // Only a point layer's markers turn.
+            if layer.geometry_type() != rustgis_data::GeometryType::Point {
+                layer.symbol_by.angle = None;
+            }
         }
         if let Some(r) = self.reference_scale {
             layer.reference_scale = Some(r);

@@ -121,7 +121,7 @@ fn drawn_source(r: &Resolved, level: u8) -> Option<String> {
                     _ => source = Some(id),
                 }
             }
-            LayerKind::Raster => return None,
+            LayerKind::Raster | LayerKind::Hillshade | LayerKind::ColorRelief => return None,
         }
     }
     source.map(String::from)

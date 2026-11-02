@@ -18,6 +18,7 @@ use rustgis_data::source::{Batch, FeatureSource, Request, SourceInfo};
 use rustgis_geom::Extent;
 use serde::{Deserialize, Serialize};
 
+mod render_lod;
 mod window;
 
 /// Retained streamed rows and geometry caches per map; excludes scratch and render/export copies.
@@ -54,6 +55,9 @@ pub struct SourceLayer {
     handle: Option<Arc<dyn FeatureSource>>,
     #[serde(skip)]
     window: Option<Window>,
+    /// Whole-source thinning decisions shared by render snapshots, independent of view rows.
+    #[serde(skip)]
+    render_lod: Arc<Mutex<render_lod::Decisions>>,
     #[serde(skip)]
     pending: Option<Arc<Pending>>,
     /// Projection used for this disposable window's geometry cache.
@@ -613,9 +617,30 @@ impl SourceLayer {
         Ok(new)
     }
 
+    /// A source that can be read whole a chunk at a time, for an export.
+    pub fn visit_source(&self) -> Option<Arc<dyn FeatureSource>> {
+        self.handle.as_ref().filter(|h| h.visits_chunks()).cloned()
+    }
+
     /// A source capable of a complete, ordered render traversal.
     pub fn chunk_source(&self) -> Option<Arc<dyn FeatureSource>> {
         self.handle.as_ref().filter(|h| h.streams_chunks()).cloned()
+    }
+
+    /// Reuses a complete source's thinning decision for a projection and LOD level. Both
+    /// outcomes are retained across render snapshots; failed calculations are retried. The
+    /// bounded cache follows the open handle, and explicit source resets discard it.
+    pub fn cached_thinning(
+        &self,
+        projection: &str,
+        level: i32,
+        calculate: impl FnOnce() -> rustgis_data::Result<bool>,
+    ) -> rustgis_data::Result<bool> {
+        let Some(handle) = &self.handle else { return calculate() };
+        // Calculations insert only on success, so an escaped source panic leaves a valid
+        // cache. Recover the guard so later frames can cache successful decisions again.
+        let mut cache = self.render_lod.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.get_or_try_insert(handle, projection, level, calculate)
     }
 
     /// Retained interaction bytes assigned by the map, or the standalone default.
@@ -892,6 +917,12 @@ impl SourceLayer {
 
     /// Forgets the window, so the next view reads again (after the source changes).
     pub fn reset(&mut self) {
+        self.render_lod = Default::default();
+        self.reset_window();
+    }
+
+    /// Drops disposable view rows while retaining decisions about the unchanged full source.
+    pub(crate) fn reset_window(&mut self) {
         self.window = None;
         self.pending = None;
         self.ready_cache = None;
@@ -1087,6 +1118,22 @@ pub fn generation() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// Reopening this same layer must invalidate populated decisions even without `reset`.
+    #[test]
+    fn reopening_a_populated_thinning_cache_uses_the_new_handle() {
+        let mut ds = rustgis_data::Dataset::new("source", rustgis_data::GeometryType::Point, vec![]);
+        ds.push(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(0.0, 0.0))), vec![]);
+        let bytes = std::sync::Arc::new(rustgis_data::source::fgb::write(&ds).unwrap());
+        let handle = rustgis_data::source::open_shared("source.fgb", bytes.clone(), None).unwrap();
+        let mut source = super::SourceLayer::from_bytes("source.fgb", bytes, None, handle);
+        assert!(!source.cached_thinning("mercator", 0, || Ok(false)).unwrap());
+        let old_handle = source.handle.clone().unwrap();
+        source.open().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&old_handle, source.handle.as_ref().unwrap()));
+        assert!(source.cached_thinning("mercator", 0, || Ok(true)).unwrap());
+        assert!(source.cached_thinning("mercator", 0, || panic!("new handle's decision must be cached")).unwrap());
+    }
+
     #[test]
     fn postgis_edits_keep_their_row_versions() {
         let edit = super::PostgisEdit {

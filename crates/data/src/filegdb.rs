@@ -17,6 +17,7 @@
 //! Files are hostile input: every count and offset is checked, rows that can't be read are skipped
 //! and counted.
 
+use crate::footprint::{Hull, P3, UNIONS};
 use crate::raster::{Crs, Transformer};
 use crate::{DataError, Dataset, Field, FieldType, Geometry, GeometryType, ReadReport, Result, Value};
 use rustgis_geom::Coord;
@@ -32,12 +33,6 @@ const MAX_FIELDS: usize = 4096;
 const MAX_PARTS: u64 = 1 << 24;
 /// Most faces of one multipatch merged into its footprint; beyond, its outline is its points' hull.
 const MAX_FACES: usize = 200_000;
-/// Most faces of one multipatch merged by a union; past it, the hull too (a union's time grows
-/// faster than its faces, so one crafted row mustn't stall loading). The browser merges none: a
-/// panic in the union library can't be caught there, and hostile input mustn't end the page, so
-/// multipatches are always the hulls of their points (see [`footprint`]). On the desktop the catch
-/// relies on the workspace's default `panic = "unwind"`.
-const MAX_UNION_FACES: usize = 50_000;
 /// Most faces merged for one table, whatever its rows ask: past it, multipatches are hulls, so a
 /// crafted table can't make loading take hours.
 const MAX_TABLE_FACES: usize = if cfg!(target_arch = "wasm32") { 500_000 } else { 4_000_000 };
@@ -309,9 +304,15 @@ fn read_table(name: &str, t: &[u8], x: &[u8], wkid: Option<u32>) -> Result<Optio
         return Ok(None);
     }
     let mut ds = Dataset::new(name, layer_type, fields);
+    // A multipatch's heights are kept as fields and noted below; its measures aren't.
+    let zm = table.geometry.is_some() && (table.has_m || (table.has_z && table.shape != Shape::Multipatch));
     ds.crs = crs;
     let geometry_at = table.fields.iter().position(|f| f.kind == Kind::Geometry);
     let (mut curves, mut wall_hulls, mut unmerged, mut unprojected) = (0usize, 0usize, 0usize, 0usize);
+    // Multipatches with points but no footprint: too few, all on one line, or not finite numbers.
+    let mut no_footprint = 0usize;
+    // Shapes decoded, a multipatch's too (its M values go even when it has no footprint).
+    let mut decoded = 0usize;
     let mut budget = MAX_TABLE_FACES;
     for (row, offset) in rows {
         let Some(mut values) = table.row(t, offset) else {
@@ -330,16 +331,19 @@ fn read_table(name: &str, t: &[u8], x: &[u8], wkid: Option<u32>) -> Result<Optio
         if let (Some(g), Some(def)) = (geometry_at.and_then(|i| values.get(i)).and_then(|v| v.blob.as_ref()), table.geometry.as_ref()) {
             match decode_geometry(g, def, &mut budget) {
                 Ok(Decoded::Geometry(geom, curved)) => {
+                    decoded += 1;
                     curves += curved;
                     geometry = Some(geom);
                 }
                 Ok(Decoded::Patch(patch)) => {
+                    decoded += 1;
                     if let (Some((lo, hi)), Some(at)) = (patch.z, z_at) {
                         attrs.resize(at, Value::Null);
                         attrs.extend([Value::Float(lo), Value::Float(hi), Value::Float(hi - lo)]);
                     }
                     wall_hulls += usize::from(patch.hull == Some(Hull::NoFaces));
                     unmerged += usize::from(patch.hull == Some(Hull::Unmerged));
+                    no_footprint += usize::from(patch.footprint.is_none() && patch.has_points);
                     geometry = patch.footprint;
                 }
                 Ok(Decoded::Empty) => {}
@@ -364,8 +368,17 @@ fn read_table(name: &str, t: &[u8], x: &[u8], wkid: Option<u32>) -> Result<Optio
             .messages
             .push(format!("{unprojected} features have coordinates outside their coordinate system: they are kept without geometry"));
     }
+    if zm {
+        // The table declares them for every shape.
+        ds.drop_zm(&mut report, decoded);
+    }
     if patches {
         report.messages.push("3D multipatches are drawn as their footprints, with their lowest and highest Z in z_min and z_max, and the difference in height".into());
+    }
+    if no_footprint > 0 {
+        report.messages.push(format!(
+            "{no_footprint} multipatches have no footprint (their points don't outline an area: fewer than three, all on one line, or not finite numbers): they are kept without geometry"
+        ));
     }
     if wall_hulls > 0 {
         report.messages.push(format!("{wall_hulls} multipatches with no faces seen from above are drawn as the outline of their points"));
@@ -573,6 +586,10 @@ struct Table {
     utf8: bool,
     /// How many fields have a bit in each row's null flags.
     nullable: usize,
+    /// The geometries carry Z values (which reading drops, but a multipatch keeps as fields).
+    has_z: bool,
+    /// The geometries carry M values (which reading drops).
+    has_m: bool,
 }
 
 /// One field's value in a row: a value, or a geometry's bytes.
@@ -582,6 +599,8 @@ struct Cell<'a> {
 }
 
 impl Table {
+    /// Reads a table's header: its fields, geometry kind and definition, and whether geometries
+    /// carry Z or M values.
     fn parse(t: &[u8]) -> Result<Table> {
         let bad = |what: &str| DataError::Format(format!("unreadable table ({what})"));
         let mut c = Cur::new(t, 32);
@@ -692,7 +711,7 @@ impl Table {
                 nullable += 1;
             }
         }
-        Ok(Table { fields, geometry, shape, utf8: flags & 0x100 != 0, nullable })
+        Ok(Table { fields, geometry, shape, utf8: flags & 0x100 != 0, nullable, has_z, has_m })
     }
 
     fn field(&self, name: &str) -> Option<usize> {
@@ -865,15 +884,8 @@ struct Patch {
     z: Option<(f64, f64)>,
     /// Why the footprint is the hull of its points, when it is.
     hull: Option<Hull>,
-}
-
-/// Why a multipatch's footprint is the hull of its points.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Hull {
-    /// No face shows from above (only walls).
-    NoFaces,
-    /// Its faces weren't merged: too many, past the table's budget, or the union failed.
-    Unmerged,
+    /// Whether it has any points. One with none has nothing to outline: it isn't counted as lacking a footprint.
+    has_points: bool,
 }
 
 const HAS_Z: u64 = 0x8000_0000;
@@ -971,7 +983,7 @@ fn decode_geometry(b: &[u8], def: &GeomDef, budget: &mut usize) -> std::result::
             });
             let pts: Vec<P3> = pts.iter().enumerate().map(|(i, p)| [p.x, p.y, zs.get(i).copied().unwrap_or(0.0)]).collect();
             let (footprint, hull) = footprint(&split(&pts, &sizes), &kinds, budget);
-            Ok(Decoded::Patch(Patch { footprint, z, hull }))
+            Ok(Decoded::Patch(Patch { footprint, z, hull, has_points: !pts.is_empty() }))
         }
         _ => Err(()),
     }
@@ -1034,9 +1046,6 @@ fn signed_area(ring: &[Coord]) -> f64 {
         .sum()
 }
 
-/// A point with its height.
-type P3 = [f64; 3];
-
 /// A multipatch's faces, each its outer ring and then its holes: triangles from strips, fans and
 /// triangle lists, and rings. At most [`MAX_FACES`]; the flag says some were left out.
 fn faces(parts: &[Vec<P3>], kinds: &[u64]) -> (Vec<Vec<Vec<P3>>>, bool) {
@@ -1085,83 +1094,12 @@ fn faces(parts: &[Vec<P3>], kinds: &[u64]) -> (Vec<Vec<Vec<P3>>>, bool) {
     (faces, truncated)
 }
 
-/// A multipatch's footprint: the union of its faces seen from above. Faces standing on edge, such
-/// as walls, show nothing and are left out. The footprint is the hull of its points when no face
-/// shows, or when its faces aren't merged: more than [`MAX_FACES`], more seen from above than
-/// [`MAX_UNION_FACES`] or than the table's `budget` has left (which they then take from it).
+/// A multipatch's footprint (see [`crate::footprint::footprint`]): the union of its faces seen
+/// from above, or the hull of its points. More than [`MAX_FACES`] faces are never merged.
 fn footprint(parts: &[Vec<P3>], kinds: &[u64], budget: &mut usize) -> (Option<Geometry>, Option<Hull>) {
-    use geo::{ConvexHull, Orient, orient::Direction};
     // Where no union runs (the browser), the faces aren't built at all: the hull stands in.
-    let unions = !cfg!(target_arch = "wasm32");
-    let (faces, truncated) = if unions { faces(parts, kinds) } else { (Vec::new(), false) };
-    let all = || parts.iter().flatten();
-    let (x0, x1) = all().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p[0]), b.max(p[0])));
-    let (y0, y1) = all().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p[1]), b.max(p[1])));
-    let size = (x1 - x0).max(y1 - y0);
-    if !size.is_finite() {
-        return (None, None);
-    }
-    // A face shows from above by the cosine of its tilt (its projected area over its area): walls,
-    // even leaning ones, show as slivers, which cover nothing and which the union can't always
-    // take. Faces narrower than a ten-thousandth of the patch are left out too (a flat patch).
-    let shows = |ring: &[P3]| {
-        let (mut nx, mut ny, mut nz) = (0.0, 0.0, 0.0);
-        let (mut longest, mut area2) = (0.0f64, 0.0);
-        // From the ring's first point: projected coordinates run to millions, whose products would
-        // lose the millimetres a small face is measured in.
-        let o = ring.first().copied().unwrap_or([0.0; 3]);
-        let local: Vec<P3> = ring.iter().map(|p| [p[0] - o[0], p[1] - o[1], p[2] - o[2]]).collect();
-        for (a, b) in local.iter().zip(local.iter().cycle().skip(1)) {
-            nx += (a[1] - b[1]) * (a[2] + b[2]);
-            ny += (a[2] - b[2]) * (a[0] + b[0]);
-            nz += (a[0] - b[0]) * (a[1] + b[1]);
-            longest = longest.max((b[0] - a[0]).hypot(b[1] - a[1]));
-            area2 += a[0] * b[1] - b[0] * a[1];
-        }
-        let n = (nx * nx + ny * ny + nz * nz).sqrt();
-        n > 0.0 && nz.abs() / n > 0.05 && longest > 0.0 && area2.abs() / longest > size * 1e-4
-    };
-    let ring2 = |r: &[P3]| geo::LineString::from(r.iter().map(|p| (p[0], p[1])).collect::<Vec<_>>());
-    // Past the cap, a partial union would be wrong: the hull below stands in.
-    let seen: Vec<geo::Polygon<f64>> = faces
-        .iter()
-        .filter(|_| !truncated)
-        .filter_map(|face| {
-            let (outer, holes) = face.split_first()?;
-            (outer.len() >= 3 && shows(outer))
-                .then(|| geo::Polygon::new(ring2(outer), holes.iter().map(|h| ring2(h)).collect()).orient(Direction::Default))
-        })
-        .collect();
-    let merge = unions && !truncated && seen.len() <= MAX_UNION_FACES && seen.len() <= *budget;
-    // The union library may still trip over faces it can't place: the hull stands in then. (In the
-    // browser, where a panic can't be caught, nothing is merged: see `MAX_UNION_FACES`.)
-    let union = if seen.is_empty() || !merge {
-        None
-    } else {
-        // Spent before the union runs, so faces whose union panics (and become the hull) count too:
-        // the budget bounds the work tried, not the footprints made.
-        *budget -= seen.len();
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| geo::unary_union(seen.iter()))).ok().filter(|u| !u.0.is_empty())
-    };
-    let (shape, hull) = match union {
-        Some(u) => (u, None),
-        None => {
-            let points: Vec<geo::Point<f64>> = all().map(|p| geo::Point::new(p[0], p[1])).collect();
-            if points.len() < 3 {
-                return (None, None);
-            }
-            let why = if unions && seen.is_empty() && !truncated { Hull::NoFaces } else { Hull::Unmerged };
-            (geo::MultiPolygon::new(vec![geo::MultiPoint::from(points).convex_hull()]), Some(why))
-        }
-    };
-    let ring = |ls: &geo::LineString<f64>| ls.0.iter().map(|c| Coord::new(c.x, c.y)).collect::<Vec<_>>();
-    let polys: Vec<Vec<Vec<Coord>>> = shape
-        .0
-        .iter()
-        .filter(|p| p.exterior().0.len() >= 4)
-        .map(|p| std::iter::once(ring(p.exterior())).chain(p.interiors().iter().map(ring)).collect())
-        .collect();
-    if polys.is_empty() { (None, None) } else { (Some(Geometry::Polygon(polys)), hull) }
+    let (faces, truncated) = if UNIONS { faces(parts, kinds) } else { (Vec::new(), false) };
+    crate::footprint::footprint(&faces, truncated, parts, budget)
 }
 
 #[cfg(test)]

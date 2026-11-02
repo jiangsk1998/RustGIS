@@ -314,6 +314,11 @@ pub(crate) const MAX_IDW_WORK: usize = 400_000_000;
 
 /// Cells visible from an observer (1) or not (0) within `radius_m`; outside the radius no-data.
 pub fn viewshed(r: &Raster, b: usize, observer: Coord, height: f64, radius_m: f64) -> Result<Vec<f32>, String> {
+    viewshed_on(None, r, b, observer, height, radius_m)
+}
+
+/// [`viewshed`] on `threads` threads, or as many as its work calls for.
+fn viewshed_on(threads: Option<usize>, r: &Raster, b: usize, observer: Coord, height: f64, radius_m: f64) -> Result<Vec<f32>, String> {
     let (oc, or) = r.pixel_at(observer).ok_or("the observer is outside the raster")?;
     let z0 = r.value(b, oc, or).ok_or("the observer stands on no-data")? as f64 + height;
     let (cx, cy) = r.cell_size_m();
@@ -328,52 +333,77 @@ pub fn viewshed(r: &Raster, b: usize, observer: Coord, height: f64, radius_m: f6
     let rad_r = (radius_m / cy).ceil() as i64;
     // Each cell walks a ray back to the observer: bound cells × ray length, not just cells.
     let cells = (2 * rad_c + 1).saturating_mul(2 * rad_r + 1);
-    if cells > 25_000_000 || cells.saturating_mul(rad_c.max(rad_r) / 2 + 1) > MAX_VIEWSHED_WORK {
+    let ray_work = cells.saturating_mul(rad_c.max(rad_r) / 2 + 1);
+    if cells > 25_000_000 || ray_work > MAX_VIEWSHED_WORK {
         return Err("the radius covers too many cells; use a smaller radius".into());
     }
     let w = r.width as usize;
     let mut out = vec![NODATA; w * r.height as usize];
     const R: f64 = 6_371_000.0 * 4.0 / 3.0;
-    for row in (or - rad_r).max(0)..=(or + rad_r).min(r.height as i64 - 1) {
-        for col in (oc - rad_c).max(0)..=(oc + rad_c).min(r.width as i64 - 1) {
-            let (dx, dy) = ((col - oc) as f64 * cx, (row - or) as f64 * cy);
-            let dist = dx.hypot(dy);
-            if dist > radius_m {
-                continue;
-            }
-            let idx = row as usize * w + col as usize;
-            let Some(zt) = r.value(b, col, row) else { continue };
-            if dist == 0.0 {
-                if let Some(o) = out.get_mut(idx) {
-                    *o = 1.0;
+    // Each cell walks its own ray and writes only itself, so the rows within the radius are made
+    // on several threads when the work is large (#1252).
+    let (first, last) = ((or - rad_r).max(0), (or + rad_r).min(r.height as i64 - 1));
+    let rows = usize::try_from(last - first + 1).unwrap_or(0);
+    let threads = threads.unwrap_or_else(|| crate::parallel::threads_for_rows(rows, usize::try_from(ray_work).unwrap_or(usize::MAX), 0));
+    let window = out.chunks_mut(w).skip(usize::try_from(first).unwrap_or(0)).take(rows);
+    crate::parallel::for_each_row(
+        window,
+        threads,
+        || (),
+        |_, i, line: &mut [f32]| {
+            let row = first + i as i64;
+            for col in (oc - rad_c).max(0)..=(oc + rad_c).min(r.width as i64 - 1) {
+                let (dx, dy) = ((col - oc) as f64 * cx, (row - or) as f64 * cy);
+                let dist = dx.hypot(dy);
+                if dist > radius_m {
+                    continue;
                 }
-                continue;
-            }
-            let target = (zt as f64 - dist * dist / (2.0 * R) - z0) / dist;
-            // Walk the ray from the observer; any cell higher than the line hides the target.
-            let steps = ((col - oc).abs().max((row - or).abs())) as usize;
-            let mut visible = true;
-            for s in 1..steps {
-                let t = s as f64 / steps as f64;
-                let (c, rr) = ((oc as f64 + (col - oc) as f64 * t).round() as i64, (or as f64 + (row - or) as f64 * t).round() as i64);
-                let Some(zi) = r.value(b, c, rr) else { continue };
-                let di = dist * t;
-                if (zi as f64 - di * di / (2.0 * R) - z0) / di > target {
-                    visible = false;
-                    break;
+                let Some(zt) = r.value(b, col, row) else { continue };
+                if dist == 0.0 {
+                    if let Some(o) = line.get_mut(col as usize) {
+                        *o = 1.0;
+                    }
+                    continue;
+                }
+                let target = (zt as f64 - dist * dist / (2.0 * R) - z0) / dist;
+                // Walk the ray from the observer; any cell higher than the line hides the target.
+                let steps = ((col - oc).abs().max((row - or).abs())) as usize;
+                let mut visible = true;
+                for s in 1..steps {
+                    let t = s as f64 / steps as f64;
+                    let (c, rr) = ((oc as f64 + (col - oc) as f64 * t).round() as i64, (or as f64 + (row - or) as f64 * t).round() as i64);
+                    let Some(zi) = r.value(b, c, rr) else { continue };
+                    let di = dist * t;
+                    if (zi as f64 - di * di / (2.0 * R) - z0) / di > target {
+                        visible = false;
+                        break;
+                    }
+                }
+                if let Some(o) = line.get_mut(col as usize) {
+                    *o = if visible { 1.0 } else { 0.0 };
                 }
             }
-            if let Some(o) = out.get_mut(idx) {
-                *o = if visible { 1.0 } else { 0.0 };
-            }
-        }
-    }
+        },
+    );
     Ok(out)
 }
 
 /// Inverse distance weighted interpolation of point values onto a longitude/latitude grid, from
 /// each cell's `neighbours` nearest points, or from every point (as QGIS does) when it is 0.
 pub fn idw(points: &[(Coord, f64)], extent: &Extent, cell_deg: f64, power: f64, neighbours: usize, name: &str) -> Result<Raster, String> {
+    idw_on(None, points, extent, cell_deg, power, neighbours, name)
+}
+
+/// [`idw`] on `threads` threads, or as many as its work calls for.
+fn idw_on(
+    threads: Option<usize>,
+    points: &[(Coord, f64)],
+    extent: &Extent,
+    cell_deg: f64,
+    power: f64,
+    neighbours: usize,
+    name: &str,
+) -> Result<Raster, String> {
     if points.len() < 2 {
         return Err("interpolation needs at least two points with values".into());
     }
@@ -395,37 +425,46 @@ pub fn idw(points: &[(Coord, f64)], extent: &Extent, cell_deg: f64, power: f64, 
         return Err("the distance coefficient must be zero or more".into());
     }
     let k = if neighbours == 0 { points.len() } else { neighbours.clamp(1, points.len()) };
-    let mut data = Vec::with_capacity(w * h);
-    let mut near: Vec<(f64, f64)> = Vec::with_capacity(points.len());
-    for row in 0..h {
-        // East-west degrees shrink with latitude, which only changes by row.
-        let kx = (extent.max_y - (row as f64 + 0.5) * cell_deg).to_radians().cos();
-        for col in 0..w {
-            let c = Coord::new(extent.min_x + (col as f64 + 0.5) * cell_deg, extent.max_y - (row as f64 + 0.5) * cell_deg);
-            near.clear();
-            near.extend(points.iter().map(|(p, v)| {
-                let dx = (p.x - c.x) * kx;
-                ((dx * dx + (p.y - c.y).powi(2)).sqrt(), *v)
-            }));
-            if k < near.len() {
-                near.select_nth_unstable_by(k - 1, |a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-                near.truncate(k);
+    // Each row on its own, on several threads when the work is large (#1252); a thread's
+    // distances go into its own buffer.
+    let scratch_bytes = points.len().saturating_mul(std::mem::size_of::<(f64, f64)>());
+    let threads =
+        threads.unwrap_or_else(|| crate::parallel::threads_for_rows(h, w.saturating_mul(h).saturating_mul(points.len()), scratch_bytes));
+    let mut data = vec![NODATA; w * h];
+    crate::parallel::for_each_row(
+        data.chunks_mut(w),
+        threads,
+        || Vec::with_capacity(points.len()),
+        |near: &mut Vec<(f64, f64)>, row, out: &mut [f32]| {
+            // East-west degrees shrink with latitude, which only changes by row.
+            let kx = (extent.max_y - (row as f64 + 0.5) * cell_deg).to_radians().cos();
+            for (col, o) in out.iter_mut().enumerate() {
+                let c = Coord::new(extent.min_x + (col as f64 + 0.5) * cell_deg, extent.max_y - (row as f64 + 0.5) * cell_deg);
+                near.clear();
+                near.extend(points.iter().map(|(p, v)| {
+                    let dx = (p.x - c.x) * kx;
+                    ((dx * dx + (p.y - c.y).powi(2)).sqrt(), *v)
+                }));
+                if k < near.len() {
+                    near.select_nth_unstable_by(k - 1, |a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                    near.truncate(k);
+                }
+                let v = if let Some(exact) = near.iter().find(|(d, _)| *d < 1e-12) {
+                    exact.1
+                } else {
+                    // Weights relative to the nearest point's: the same ratios as 1/dᵖ, without
+                    // overflowing for a high power.
+                    let nearest = near.iter().map(|(d, _)| *d).fold(f64::INFINITY, f64::min);
+                    let (num, den) = near.iter().fold((0.0, 0.0), |(n, d), (dist, v)| {
+                        let wgt = (nearest / dist).powf(power);
+                        (n + wgt * v, d + wgt)
+                    });
+                    num / den
+                };
+                *o = if v.is_finite() { v as f32 } else { NODATA };
             }
-            let v = if let Some(exact) = near.iter().find(|(d, _)| *d < 1e-12) {
-                exact.1
-            } else {
-                // Weights relative to the nearest point's: the same ratios as 1/dᵖ, without
-                // overflowing for a high power.
-                let nearest = near.iter().map(|(d, _)| *d).fold(f64::INFINITY, f64::min);
-                let (num, den) = near.iter().fold((0.0, 0.0), |(n, d), (dist, v)| {
-                    let wgt = (nearest / dist).powf(power);
-                    (n + wgt * v, d + wgt)
-                });
-                num / den
-            };
-            data.push(if v.is_finite() { v as f32 } else { NODATA });
-        }
-    }
+        },
+    );
     let gt = GeoTransform { origin_x: extent.min_x, origin_y: extent.max_y, pixel_width: cell_deg, pixel_height: -cell_deg };
     Raster::new(name, w as u32, h as u32, vec![data], gt, Crs::LonLat, Some(NODATA as f64), ColorHint::Gray, "Float32")
         .map_err(|e| e.to_string())
@@ -1083,6 +1122,56 @@ impl Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Viewshed rows made on several threads see what one thread sees (#1252), with the radius
+    /// inside the raster and reaching past its edges.
+    #[test]
+    fn viewshed_on_several_threads_is_viewshed_on_one() {
+        let (w, h) = (90u32, 70u32);
+        let data = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                if i % 97 == 5 { -9999.0 } else { 300.0 + 40.0 * (x * 0.21).sin() * (y * 0.17).cos() + 25.0 * ((x + y) * 0.4).sin() }
+            })
+            .collect();
+        let transform = GeoTransform { origin_x: 0.0, origin_y: 45.0, pixel_width: 0.0003, pixel_height: -0.0003 };
+        let dem = Raster::new("dem", w, h, vec![data], transform, Crs::LonLat, Some(-9999.0), ColorHint::Gray, "Float32")
+            .unwrap_or_else(|e| panic!("{e}"));
+        // Visible, hidden and no-data cells, as one thread gives them: a change to the
+        // ray walk shows here, not only a difference between thread counts.
+        for (at, radius, expected) in
+            [(Coord::new(0.012, 44.990), 500.0, [207, 775, 5318]), (Coord::new(0.003, 44.985), 5_000.0, [185, 6050, 65])]
+        {
+            let one = viewshed_on(Some(1), &dem, 0, at, 2.0, radius).unwrap_or_else(|e| panic!("{e}"));
+            let counts = [1.0, 0.0, NODATA].map(|k| one.iter().filter(|v| v.to_bits() == k.to_bits()).count());
+            assert_eq!(counts, expected, "radius {radius}");
+            for threads in [2, 7, 16] {
+                let many = viewshed_on(Some(threads), &dem, 0, at, 2.0, radius).unwrap_or_else(|e| panic!("{e}"));
+                assert!(one.iter().map(|v| v.to_bits()).eq(many.iter().map(|v| v.to_bits())), "{threads} threads, radius {radius}");
+            }
+        }
+    }
+
+    /// Rows made on several threads give the same surface, bit for bit, as one thread (#1252),
+    /// from every point and from the nearest few.
+    #[test]
+    fn idw_on_several_threads_is_idw_on_one() {
+        let pts: Vec<(Coord, f64)> = (0..500)
+            .map(|i| {
+                let (x, y) = ((i * 37 % 500) as f64 / 50.0, (i * 91 % 500) as f64 / 50.0);
+                (Coord::new(x, 40.0 + y), (x * 1.3).sin() * 100.0 + y * 7.0)
+            })
+            .collect();
+        let extent = Extent::new(0.0, 40.0, 10.0, 50.0);
+        for neighbours in [0, 8] {
+            let one = idw_on(Some(1), &pts, &extent, 0.1, 2.0, neighbours, "idw").unwrap_or_else(|e| panic!("{e}"));
+            for threads in [2, 7, 16] {
+                let many = idw_on(Some(threads), &pts, &extent, 0.1, 2.0, neighbours, "idw").unwrap_or_else(|e| panic!("{e}"));
+                let bits = |r: &Raster| r.bands[0].data.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&one), bits(&many), "{threads} threads, {neighbours} neighbours");
+            }
+        }
+    }
 
     #[test]
     fn terrain_rows_match_scalar_edges_nodata_and_orientations() {

@@ -1,0 +1,180 @@
+name: Fuzz
+
+# Coverage-guided fuzzing of the file readers (fuzz/README.md): every target for ten minutes a
+# night, and for a minute on a pull request labelled `ci:fuzz` (one that adds or changes a
+# reader). Malformed bytes that crash a reader, exhaust memory (over 2 GB) or hang it (over 10 s
+# on one input) are saved, fuzzing carries on, and at the end the target fails and uploads them.
+# At night, failing inputs open a "Fuzzing found a crash" issue. A later success doesn't close
+# it, since the failing inputs aren't re-run: it is closed once the reader is fixed. The crate is
+# outside the workspace and needs nightly Rust; nothing else installs either.
+#
+#   gh workflow run fuzz.yml -R opengeos/RustGIS --ref main -f seconds=600
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target (1 to 2400)
+        default: "600"
+
+# Only a pull request's run gives way to a newer one, and only to one for the same label (adding
+# another label starts a run here too). A nightly run finishes and uploads the inputs it saved; each
+# manual run has a group of its own, so one never waits for, replaces or cancels another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event.label.name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  licences:
+    name: Fuzz crate licences and format
+    if: (github.event_name == 'pull_request' && github.event.label.name == 'ci:fuzz') || (github.event_name != 'pull_request' && (github.repository == 'opengeos/RustGIS' || github.event_name == 'workflow_dispatch'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      # fuzz/deny.toml: the workspace's licences plus NCSA, for libFuzzer.
+      - run: cargo deny --manifest-path fuzz/Cargo.toml --locked check licenses
+      # The workspace's `cargo fmt --all` doesn't reach this crate.
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml --check
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    if: (github.event_name == 'pull_request' && github.event.label.name == 'ci:fuzz') || (github.event_name != 'pull_request' && (github.repository == 'opengeos/RustGIS' || github.event_name == 'workflow_dispatch'))
+    runs-on: ubuntu-latest
+    # Room for a cold build (about 10 minutes) and the longest run allowed (2400 s).
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [read_layers, sniff, geotiff, wkt, wkb, mvt, project]
+    env:
+      SECONDS_PER_TARGET: ${{ github.event_name == 'pull_request' && '60' || inputs.seconds || '600' }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          shared-key: fuzz
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.target == 'read_layers' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # The corpus each target has grown, kept between nights. Restored and saved as separate steps:
+      # the combined action saves only when the job passes, and a target with a known finding fails.
+      - uses: actions/cache/restore@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Build
+        working-directory: fuzz
+        run: cargo fuzz build -O
+      - name: Seed the corpus
+        working-directory: fuzz
+        run: target/x86_64-unknown-linux-gnu/release/seeds
+      - name: Fuzz
+        working-directory: fuzz
+        run: |
+          # Digits only, and at most four once leading zeros are dropped, so the arithmetic below
+          # can't wrap; the checked number is what runs.
+          v="$SECONDS_PER_TARGET"
+          case "$v" in ''|*[!0-9]*) echo "::error::seconds must be a whole number from 1 to 2400"; exit 1;; esac
+          v="${v#"${v%%[!0]*}"}"
+          case "$v" in ?????*) echo "::error::seconds must be a whole number from 1 to 2400"; exit 1;; esac
+          # libFuzzer reads 0 as no limit; over 2400 s, a cold build and the run could outlast the job's
+          # timeout, and its findings would be lost.
+          n=$((10#${v:-0}))
+          [ "$n" -gt 0 ] && [ "$n" -le 2400 ] || { echo "::error::seconds must be from 1 to 2400"; exit 1; }
+          # Fork mode with the ignore flags keeps fuzzing past a finding, so one known failure (an
+          # unreleased fix in a dependency, say) doesn't stop the rest of the target being explored.
+          # Each failing input is saved in artifacts/<target>/.
+          cargo fuzz run -O "$TARGET" -- -fork=1 -ignore_crashes=1 -ignore_ooms=1 -ignore_timeouts=1 \
+            -max_total_time="$n" -rss_limit_mb=2048 -timeout=10
+      - name: Findings
+        id: findings
+        # libFuzzer can exit non-zero after an ignored finding: check for saved inputs either way.
+        if: ${{ !cancelled() }}
+        working-directory: fuzz
+        run: |
+          if [ -n "$(ls -A "artifacts/$TARGET" 2>/dev/null)" ]; then
+            ls -l "artifacts/$TARGET"
+            echo "::error::$TARGET: $(ls "artifacts/$TARGET" | wc -l) failing inputs (crash-, oom- or timeout-)"
+            exit 1
+          fi
+      - name: Keep the corpus
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        uses: actions/cache/save@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      - name: Keep the failing inputs
+        if: failure() && steps.findings.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+
+  report:
+    name: Report
+    needs: [licences, fuzz]
+    # Only a failing input is a finding: a failed build or licence check fails the run without an
+    # issue. The inputs come from the fuzz jobs' uploads.
+    if: always() && github.event_name == 'schedule' && needs.fuzz.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: fuzz-*
+          path: findings
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(ls -A findings 2>/dev/null)" ]; then
+            echo "The fuzz run failed without a failing input (a build or setup step): no issue."
+            exit 0
+          fi
+          targets="$(ls findings | sed 's/^fuzz-//' | paste -sd, -)"
+          title="Fuzzing found a crash"
+          open="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" \
+            --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // \"\"")"
+          # One issue at a time: a reader that keeps failing isn't news every night, but a target that
+          # starts failing is, so it gets a comment on the open issue. The targets reported so far are
+          # read only from the hidden markers this step writes, in the issue and comments it posted.
+          if [ -z "$open" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" \
+              --body "The nightly fuzz run on $GITHUB_SHA found failing inputs for: $targets. Run: $RUN. They are attached to the run as artifacts; fix the reader and add each input as a regression test (fuzz/README.md).
+          <!-- fuzz-targets: $targets -->"
+          else
+            # The issue's body and this workflow's own comments: github-actions posts with GITHUB_TOKEN.
+            seen=" $(gh issue view "$open" -R "$GITHUB_REPOSITORY" --json author,body,comments --jq '
+              [(select(.author.login == "app/github-actions" or .author.login == "github-actions") | .body),
+               (.comments[] | select(.author.login == "app/github-actions" or .author.login == "github-actions") | .body)] | join("\n")' \
+              | sed -n 's/.*<!-- fuzz-targets: \([a-z_,]*\) -->.*/\1/p' | tr ',\n' '  ') "
+            new=""
+            for t in $(echo "$targets" | tr ',' ' '); do
+              case "$seen" in *" $t "*) ;; *) new="$new${new:+,}$t";; esac
+            done
+            if [ -n "$new" ]; then
+              gh issue comment "$open" -R "$GITHUB_REPOSITORY" \
+                --body "The nightly fuzz run on $GITHUB_SHA also found failing inputs for: $new. Run: $RUN.
+          <!-- fuzz-targets: $new -->"
+            fi
+          fi

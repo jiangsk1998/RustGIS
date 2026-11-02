@@ -270,7 +270,7 @@ pub fn nasa_earthdata(app: &mut RustGisApp, ui: &mut egui::Ui) {
         let mut follow = !app.ui.web_services.fixed;
         if ui
             .checkbox(&mut follow, tl!("Follow the time slider"))
-            .on_hover_text(tl!("Step through the days with the time slider (View › Time), which starts with the layer's"))
+            .on_hover_text(tl!("Step through the days with the time slider (View › Time), which starts with the layer's days"))
             .changed()
         {
             app.ui.web_services.fixed = !follow;

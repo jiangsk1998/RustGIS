@@ -147,6 +147,30 @@ fn disk_index_is_reused_and_corrupt_cache_is_rebuilt() {
     std::fs::remove_dir_all(folder).unwrap();
 }
 
+/// Opening costs the same whatever the cache holds: building an index sweeps the cache folder
+/// once, reusing one sweeps it not at all, and neither release does (#1230).
+#[test]
+fn opening_sweeps_the_cache_only_to_build_an_index() {
+    let folder = dir();
+    let source = folder.join("points.shp");
+    points_shapefile(&source);
+    let cache_root = folder.join("cache");
+    cache::with_index_dir(cache_root.clone(), || {
+        let before = cache::sweeps();
+        let built = ShpSource::open_path(&source, "points").unwrap();
+        assert!(built.info().indexed);
+        assert_eq!(cache::sweeps(), before + 1, "building an index sweeps once");
+        drop(built);
+        let reused = ShpSource::open_path(&source, "points").unwrap();
+        assert!(reused.info().indexed);
+        assert_eq!(reused.read(&Request::all()).unwrap().features.len(), 600);
+        drop(reused);
+        assert_eq!(cache::sweeps(), before + 1, "reusing an index and releasing either sweeps nothing");
+        cache::maintain(&cache_root, 0).unwrap();
+    });
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
 #[test]
 fn disk_queries_match_legacy_scan_sampling_and_edges() {
     let folder = dir();

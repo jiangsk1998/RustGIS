@@ -2259,6 +2259,7 @@ mod tests {
         use rustgis_engine::geom::lonlat_to_merc;
         use rustgis_engine::map::{TileKind, TileLayer};
         use rustgis_engine::render::rustgis_tiles;
+        let _turn = crate::fetching::turn();
         // A tile of soft gradients, so a tile drawn at the wrong place or scale shows.
         rustgis_tiles::cache::set_fetcher(|url, done| {
             if !url.starts_with("https://parity.test/") {

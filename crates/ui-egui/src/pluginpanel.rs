@@ -527,4 +527,99 @@ mod tests {
         assert_eq!(shown(&decomposed, "arbol", &[]), ["601"]);
         assert_eq!(shown(&decomposed, "árbol arbol", &[]), ["601"], "a word given twice");
     }
+
+    /// A plugin's command adding data by address doesn't wait for it: the app downloads it off
+    /// the frame, as the browser does, and the layer lands as the plugin asked for it (#1144).
+    #[test]
+    fn a_plugin_adds_data_by_address_off_the_frame() {
+        let _turn = crate::fetching::turn();
+        use rustgis_engine::plugins;
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/places.csv", listener.local_addr().unwrap());
+        // The server answers once told to: the command has returned before the data can land.
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let _ = wait.recv();
+                let _ = s.read(&mut [0u8; 4096]);
+                let body = "name,east,north\nA,1,2\nB,3,4\n";
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        let pkg = plugins::Package::from_zip(&plugins::testing::package("ui-url", &["edit", "network"])).unwrap();
+        plugins::load(pkg, "test").unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 860.0)).with_step_dt(0.05).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            RustGisApp::with_sample(),
+        );
+        let app = h.state_mut();
+        let params = json!({"url": url, "name": "Places", "x": "east", "y": "north"});
+        let r = app.run("plugin:ui-url/f", json!({"op": "layer.addUrl", "params": params})).unwrap();
+        assert_eq!(r["pending"], true);
+        assert!(app.session.map().layer_by_name("Places").is_none(), "nothing waited");
+        go.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while h.state().session.map().layer_by_name("Places").is_none() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting");
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let places = h.state().session.map().layer_by_name("Places").unwrap();
+        let e = places.dataset.extent();
+        assert_eq!([e.min_x, e.min_y, e.max_x, e.max_y], [1.0, 2.0, 3.0, 4.0], "its points read from the columns the plugin named");
+        plugins::unload("ui-url");
+    }
+
+    /// A GeoTIFF asked for as a scan keeps only its pixels: the app downloads it whole, once,
+    /// without first reading its header to see whether it could be read in place.
+    #[test]
+    fn a_scan_by_address_is_downloaded_whole_without_a_probe() {
+        let _turn = crate::fetching::turn();
+        use rustgis_engine::plugins;
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/scene.tif", listener.local_addr().unwrap());
+        let file = rustgis_engine::data::raster::cog::example(512, 256);
+        let asked = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = asked.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                counted.fetch_add(1, Ordering::Relaxed);
+                let _ = s.read(&mut [0u8; 4096]);
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", file.len());
+                let _ = s.write_all(&file);
+            }
+        });
+        let pkg = plugins::Package::from_zip(&plugins::testing::package("ui-scan", &["edit", "network"])).unwrap();
+        plugins::load(pkg, "test").unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 860.0)).with_step_dt(0.05).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            RustGisApp::with_sample(),
+        );
+        let params = json!({"url": url, "as": "scan", "name": "Scan"});
+        let r = h.state_mut().run("plugin:ui-scan/f", json!({"op": "layer.addUrl", "params": params})).unwrap();
+        assert_eq!(r["pending"], true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while h.state().session.map().layer_by_name("Scan").is_none() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting");
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(h.state().session.map().layer_by_name("Scan").is_some_and(|l| l.is_raster()));
+        assert!(h.state().ui.cog_probes.is_empty());
+        assert_eq!(asked.load(Ordering::Relaxed), 1, "one download, no probe first");
+        plugins::unload("ui-scan");
+    }
 }

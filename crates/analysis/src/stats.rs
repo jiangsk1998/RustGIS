@@ -45,7 +45,7 @@ pub enum Stat {
 }
 
 /// The statistics with a fixed name, with those names. Percentiles are `P1` to `P99`.
-const NAMED: [(&str, Stat); 18] = [
+pub(crate) const NAMED: [(&str, Stat); 18] = [
     ("COUNT", Stat::Count),
     ("SUM", Stat::Sum),
     ("MEAN", Stat::Mean),

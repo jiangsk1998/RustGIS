@@ -453,15 +453,7 @@ pub fn profile(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         )
     };
     let line: Vec<egui::Pos2> = pts.iter().map(|p| to(*p)).collect();
-    let mut fill = line.clone();
-    fill.push(pos2(rect.max.x - 6.0, rect.max.y - 16.0));
-    fill.push(pos2(rect.min.x + 6.0, rect.max.y - 16.0));
-    painter.add(egui::Shape::Path(egui::epaint::PathShape {
-        points: fill,
-        closed: true,
-        fill: t.accent.gamma_multiply(0.18),
-        stroke: egui::epaint::PathStroke::NONE,
-    }));
+    painter.add(egui::Shape::mesh(area_under(&line, rect.max.y - 16.0, t.accent.gamma_multiply(0.18))));
     painter.add(egui::Shape::line(line, egui::Stroke::new(2.0, t.accent)));
     let fmt = |v: f64| crate::measure_units::elevation(v, app.ui.measurement_imperial);
     painter.text(rect.left_top() + vec2(6.0, 4.0), egui::Align2::LEFT_TOP, fmt(hi), regular(10.0), t.text_dim);
@@ -496,6 +488,22 @@ pub struct Reducing {
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub result: std::sync::Arc<std::sync::Mutex<Option<Result<Vec<u8>, String>>>>,
+}
+
+/// The area between a profile's line and its base, as one quad (two triangles) per segment: a
+/// filled path is drawn as a fan from its first point, which only fills a convex shape, and the
+/// area under a profile rarely is.
+fn area_under(line: &[egui::Pos2], base: f32, colour: Color32) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    for w in line.windows(2) {
+        let i = mesh.vertices.len() as u32;
+        for p in [w[0], w[1], pos2(w[1].x, base), pos2(w[0].x, base)] {
+            mesh.colored_vertex(p, colour);
+        }
+        mesh.add_triangle(i, i + 1, i + 2);
+        mesh.add_triangle(i, i + 2, i + 3);
+    }
+    mesh
 }
 
 /// A summary that has finished, added to the map (or its error kept for the pane): called
@@ -975,6 +983,38 @@ pub fn catalog_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// The area under a profile is filled segment by segment: every triangle stays between two
+    /// neighbouring samples and between the line and the base, however the line bends.
+    #[test]
+    fn a_profile_fills_under_its_line_only() {
+        // Up, down below the start, up again: a concave outline, which a fan from its first point
+        // would cross.
+        let line = [pos2(0.0, 50.0), pos2(10.0, 10.0), pos2(20.0, 90.0), pos2(30.0, 40.0)];
+        let mesh = area_under(&line, 100.0, Color32::WHITE);
+        assert_eq!((mesh.vertices.len(), mesh.indices.len()), (12, 18));
+        for tri in mesh.indices.chunks(3) {
+            let v: Vec<egui::Pos2> = tri.iter().map(|&i| mesh.vertices[i as usize].pos).collect();
+            let (x0, x1) = (v.iter().map(|p| p.x).fold(f32::MAX, f32::min), v.iter().map(|p| p.x).fold(f32::MIN, f32::max));
+            assert!(x1 - x0 <= 10.0, "a triangle spans more than one segment: {v:?}");
+            let seg = line.windows(2).find(|w| w[0].x == x0 && w[1].x == x1).unwrap();
+            for p in &v {
+                assert!(p.y <= 100.0 && p.y >= seg[0].y.min(seg[1].y), "{p:?} is outside {seg:?} and the base");
+            }
+        }
+        // Its area is the sum of the trapezoids: (50+90)/2·10 + (90+10)/2·10 + (10+60)/2·10 (the
+        // depth below each sample, the base at 100).
+        let area: f32 = mesh
+            .indices
+            .chunks(3)
+            .map(|t| {
+                let [a, b, c] = [0, 1, 2].map(|k| mesh.vertices[t[k] as usize].pos);
+                ((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)).abs() / 2.0
+            })
+            .sum();
+        assert!((area - 1550.0).abs() < 1e-3, "{area}");
+        assert!(area_under(&line[..1], 100.0, Color32::WHITE).vertices.is_empty());
+    }
 
     #[test]
     fn the_step_being_edited_follows_a_move() {

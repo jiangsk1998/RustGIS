@@ -1,7 +1,8 @@
 name: CI
 
 # macOS and Windows are slow: pushes to main test on every platform, pull requests on Linux, plus
-# macOS when labelled `ci:macos`, Windows when labelled `ci:windows`, and both for `ci:full`.
+# macOS when labelled `ci:macos`, Windows (x64 and ARM64) when labelled `ci:windows`, and both for
+# `ci:full`.
 # Adding the label runs that platform straight away (ci-label.yml); later pushes include it here.
 
 on:

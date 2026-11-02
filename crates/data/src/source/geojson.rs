@@ -12,7 +12,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use super::{Batch, FeatureSource, Reproject, Request, SourceInfo, clamp_limit, stride};
-use crate::io::{FeatureSink, Schema, declared_crs, geojson_attrs, geojson_geometry, geometry_to_lonlat};
+use crate::io::{FeatureSink, Schema, declared_crs, geojson_attrs, geojson_geometry, geojson_has_z, geometry_to_lonlat};
 use crate::{DataError, Feature, GeometryType, Result};
 use rustgis_geom::Extent;
 use serde_json::Value as Json;
@@ -59,6 +59,8 @@ struct Scan {
     /// Points, lines and polygons seen.
     kinds: [usize; 3],
     skipped: usize,
+    /// The places of features whose heights reading drops.
+    zm: Vec<u32>,
 }
 
 impl Scan {
@@ -83,6 +85,10 @@ impl Scan {
         };
         let b = match &geom {
             Some(g) => {
+                // Only a geometry kept counts.
+                if geojson_has_z(f) {
+                    self.zm.push(u32::try_from(self.places.len()).unwrap_or(u32::MAX));
+                }
                 let e = g.extent();
                 self.extent = self.extent.union(&e);
                 if let Some(slot) = self.kinds.get_mut(kind_slot(g.kind())) {
@@ -181,7 +187,7 @@ impl GeoJsonSource {
             Some((1, _)) => GeometryType::Polyline,
             Some(_) => GeometryType::Polygon,
         };
-        let info = SourceInfo {
+        let mut info = SourceInfo {
             name: name.to_string(),
             format: "GeoJSON",
             geometry_type,
@@ -191,7 +197,13 @@ impl GeoJsonSource {
             crs: reproject.label(),
             indexed: false,
             notes,
+            zm_dropped: false,
         };
+        // Features the declared system can't convert are left out, and so are their heights.
+        let zm = scan.zm.iter().filter(|i| failed.binary_search(i).is_err()).count() as u64;
+        if zm > 0 {
+            info.drop_zm(Some(zm));
+        }
         let unreadable = scan.skipped;
         Ok(GeoJsonSource { info, path: path.to_path_buf(), places: scan.places, boxes: scan.boxes, reproject, failed, unreadable })
     }

@@ -472,8 +472,19 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                     }).response.labelled_by(input_label.id);
                 });
                 let input_label = ui.label(format!("{} =", app.dialogs.a));
-                ui.add(egui::TextEdit::singleline(&mut app.dialogs.text).hint_text(tl!("e.g.  pop_est / 1000000   or   'Africa'   or   name")).desired_width(f32::INFINITY)).labelled_by(input_label.id);
-                ui.label(egui::RichText::new(tl!("A value, a field, or two of them joined by + − × ÷. Applies to the selected rows, or every row when none is selected.")).small().weak());
+                let edit = egui::TextEdit::singleline(&mut app.dialogs.text)
+                    .hint_text(tl!("e.g.  pop_est / 1000000   or   upper(name) || ' ' || round(area, 1)"))
+                    .char_limit(rustgis_engine::data::query::MAX_LEN)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY);
+                ui.add(edit).labelled_by(input_label.id);
+                let text = app.dialogs.text.trim();
+                let reads = app.session.active_layer.and_then(|id| app.session.map().layer(id)).filter(|_| !text.is_empty()).map(|l| rustgis_engine::cmd::edit::check_calculation(text, &l.dataset));
+                if let Some(Err(e)) = reads {
+                    let t = Tokens::get(ui.ctx());
+                    ui.label(egui::RichText::new(crate::i18n::fmt("Invalid: {error}", &[("error", &e)])).small().color(t.red));
+                }
+                ui.label(egui::RichText::new(tl!("Fields, numbers, 'text', + - * / % ^, || to join text, comparisons, CASE and functions such as round(), upper(), if() or scale_linear(). Applies to the selected rows, or every row when none is selected.")).small().weak());
                 close = buttons(app, ui, "Calculate", |app| app.run("edit.calculateField", json!({"field": app.dialogs.a, "expression": app.dialogs.text})).map(|_| ()));
             }
             "definitionQuery" => {
@@ -569,6 +580,13 @@ pub const EXPORT_FORMATS: &[(&str, &str)] = &[
     ("GPX", "gpx"),
 ];
 
+/// The formats Export Features offers: all of [`EXPORT_FORMATS`] on the desktop. The web app
+/// leaves out GeoPackage, written with SQLite, and FlatGeobuf, whose writer needs a temporary
+/// file; the browser has neither.
+pub(crate) fn export_formats(web: bool) -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    EXPORT_FORMATS.iter().filter(move |(_, e)| !(web && matches!(*e, "gpkg" | "fgb")))
+}
+
 /// Export Features: the active layer, in a format picked here (a file's type isn't changed by
 /// the filter chosen in a save dialog, and the web app has no save dialog).
 fn export_layer(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
@@ -583,8 +601,7 @@ fn export_layer(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             .selected_text(shown)
             .width(220.0)
             .show_ui(ui, |ui| {
-                // GeoPackages are written with SQLite, which the web app doesn't have.
-                for (label, ext) in EXPORT_FORMATS.iter().filter(|(_, e)| !(web && *e == "gpkg")) {
+                for (label, ext) in export_formats(web) {
                     ui.selectable_value(&mut app.dialogs.mode, *ext, *label);
                 }
             })
@@ -2147,6 +2164,39 @@ fn crs_details(ui: &mut egui::Ui, chosen: &str, current: &str, t: &Tokens) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The web app's Export Features offers only formats it can write: no GeoPackage (SQLite) or
+    /// FlatGeobuf (whose writer needs a temporary file; choosing it aborted the app). The
+    /// dialog's own Format list is opened and read, as a user would.
+    #[test]
+    fn the_web_export_dialog_offers_no_geopackage_or_flatgeobuf() {
+        use egui_kittest::kittest::Queryable;
+        for web in [true, false] {
+            let mut app = RustGisApp::with_sample();
+            if web {
+                app = app.with_services(crate::Services { download: Some(Box::new(|_, _| Ok(()))), ..Default::default() });
+            }
+            app.session.active_layer = app.session.map().layers.first().map(|l| l.id);
+            app.run("ui.dialog", json!({"name": "exportLayer"})).unwrap();
+            let mut h = egui_kittest::Harness::builder().with_size(vec2(1400.0, 900.0)).with_max_steps(64).build_ui_state(
+                |ui, app: &mut RustGisApp| {
+                    let ctx = ui.ctx().clone();
+                    app.logic(&ctx);
+                    app.ui(ui);
+                },
+                app,
+            );
+            h.run_steps(4);
+            h.get_by_label("Format").click();
+            h.run_steps(4);
+            let offered = |label: &str| h.query_all_by_label(label).count() > 0;
+            assert!(offered("GeoParquet") && offered("KML"), "web {web}: the Format list is open");
+            assert_eq!(offered("FlatGeobuf"), !web, "web {web}");
+            assert_eq!(offered("GeoPackage"), !web, "web {web}");
+        }
+        let web: Vec<&str> = export_formats(true).map(|(_, e)| *e).collect();
+        assert_eq!(web, ["geojson", "parquet", "shp", "csv", "kml", "kmz", "gpx"]);
+    }
 
     /// The Coordinate System dialog re-centres a preset (opengeos/RustGIS#517): the central
     /// meridian, set as assistive technology does, goes into the code that Apply uses.

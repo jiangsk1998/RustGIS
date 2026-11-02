@@ -2346,10 +2346,12 @@ impl LabelClass {
     }
 }
 
-/// A label on the map, as (layer id, row, label class in `Labeling::in_order`, repeat): a feature
-/// has a label for each class labelling it (#732), and along a line each repeat is one of its own
-/// (0 for the one at the line's middle, and for every label not repeated).
-pub type LabelKey = (u32, usize, usize, usize);
+/// A label on the map, as (layer id, feature id, label class in `Labeling::in_order`, repeat): a
+/// feature has a label for each class labelling it (#732), and along a line each repeat is one of
+/// its own (0 for the one at the line's middle, and for every label not repeated). The feature is
+/// named by its full-width id, not its row, so a lock holds through edits that move rows (#1046)
+/// and distinct 64-bit ids stay distinct on wasm32 (#1135).
+pub type LabelKey = (u32, u64, usize, usize);
 
 /// A layer's label classes read against its data, in `Labeling::in_order`: every class whose
 /// clause takes a row labels it.

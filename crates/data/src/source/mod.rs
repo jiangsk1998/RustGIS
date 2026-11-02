@@ -105,8 +105,17 @@ impl Family {
 /// File types read through a provider.
 pub const EXTENSIONS: &[&str] = &["gpkg", "parquet", "geoparquet", "fgb", "las", "laz"];
 
-/// The most features one read returns, whatever the request asks for.
+/// The most features one read returns, whatever the request asks for. A whole read of a source
+/// read a chunk at a time is bounded by [`MAX_READ_BYTES`] instead.
 pub const MAX_LIMIT: usize = if cfg!(target_arch = "wasm32") { 500_000 } else { 2_000_000 };
+
+/// The most memory a whole read may hold of a source that can be read a chunk at a time
+/// ([`FeatureSource::visits_chunks`]): its features' storage, as [`chunk_memory::features_bytes`]
+/// counts it.
+pub const MAX_READ_BYTES: u64 = if cfg!(target_arch = "wasm32") { 1 << 30 } else { 4 << 30 };
+
+/// The chunk size a whole read asks for; each chunk is moved into the dataset as it comes.
+const READ_CHUNK_BYTES: usize = 8 << 20;
 
 /// Whether a file name is read through a provider.
 pub fn is_source_name(name: &str) -> bool {
@@ -162,9 +171,38 @@ pub struct SourceInfo {
     /// Things worth telling whoever adds the source (an unknown coordinate system read as
     /// longitude/latitude, tables left out).
     pub notes: Vec<String>,
+    /// The source has Z or M values, which reading drops (see [`Dataset::zm_dropped`]).
+    pub zm_dropped: bool,
 }
 
 impl SourceInfo {
+    /// Marks the source as having Z or M values, which reading drops, and notes it once: in
+    /// `features` features when known (every one, when the source declares them). A count of 0 (an
+    /// empty source) drops nothing and says nothing.
+    pub(crate) fn drop_zm(&mut self, features: Option<u64>) {
+        if !self.zm_dropped && features != Some(0) {
+            self.zm_dropped = true;
+            self.notes.push(crate::zm_note(features));
+        }
+    }
+
+    /// Notes what happened to some columns in one note, counting them and naming the first 12
+    /// with their kind ("price (decimal)"): `what` says it for one column, then for several.
+    /// Nothing when there are none.
+    pub(crate) fn note_columns(&mut self, cols: &[(String, String)], what: [&str; 2]) {
+        const NAMED: usize = 12;
+        let [one, several] = what;
+        let n = cols.len();
+        let what = match n {
+            0 => return,
+            1 => one,
+            _ => several,
+        };
+        let named: Vec<String> = cols.iter().take(NAMED).map(|(name, kind)| format!("{name} ({kind})")).collect();
+        let more = if n > NAMED { format!(" and {} more", n - NAMED) } else { String::new() };
+        self.notes.push(format!("{n} column{} {what}: {}{more}", if n == 1 { "" } else { "s" }, named.join(", ")));
+    }
+
     /// The source's coordinate system, when it isn't longitude/latitude and is known by its EPSG
     /// code.
     pub fn coordinate_system(&self) -> Option<Crs> {
@@ -202,15 +240,30 @@ pub struct Batch {
 
 /// A vector data source read in place.
 pub trait FeatureSource: Send + Sync {
-    /// Whether complete, ordered traversal is available without an interaction row limit.
+    /// Whether the map draws the source by complete traversal ([`FeatureSource::visit_chunks`])
+    /// on every render rather than from a sampled view window. Implies
+    /// [`FeatureSource::visits_chunks`].
     fn streams_chunks(&self) -> bool {
         false
     }
-    /// Visits every matching feature in source painter order. Release each chunk before the
-    /// next callback. `bytes` targets owned feature storage; an indivisible larger row is emitted alone.
-    /// Callback errors stop traversal. Success returns an empty, complete summary batch.
+    /// Whether [`FeatureSource::visit_chunks`] is available, for a pass over the whole source
+    /// (an export) that holds one chunk at a time. Unlike [`FeatureSource::streams_chunks`], it
+    /// leaves drawing alone.
+    fn visits_chunks(&self) -> bool {
+        self.streams_chunks()
+    }
+    /// Visits every matching feature in source painter order: the features and ids a complete
+    /// [`FeatureSource::read`] of the same extent gives, in the same order and with the same
+    /// skipped count when there is no extent (an extent read through an index may order and skip
+    /// differently). Release each chunk before the next callback. `bytes` targets owned feature
+    /// storage; an indivisible larger row is emitted alone, and a provider may hold its own unit
+    /// of the file (a GeoParquet row group) or an index's list of matches (FlatGeobuf, for an
+    /// extent) besides. Callback errors stop traversal. Success returns an empty, complete
+    /// summary batch. Its `matched` is the provider's count of matches: the features visited for
+    /// GeoPackage, FlatGeobuf and GeoParquet, the records the index matched for Shapefile (which
+    /// may include rows skipped or deleted).
     fn visit_chunks(&self, _extent: Option<Extent>, _bytes: usize, _visit: &mut dyn FnMut(Vec<Feature>) -> Result<()>) -> Result<Batch> {
-        Err(DataError::Format("this provider does not support chunk traversal".into()))
+        Err(DataError::Unsupported("a source that can't be read a chunk at a time".into()))
     }
     fn info(&self) -> &SourceInfo;
     /// Whether features were left out of every read because the coordinate system the source
@@ -484,8 +537,39 @@ pub fn layers(path: &Path) -> Result<Vec<String>> {
     }
 }
 
-/// Reads a whole source into a dataset, refusing sources over [`MAX_LIMIT`] and incomplete reads.
+/// Reads a whole source into a dataset: a chunk at a time up to [`MAX_READ_BYTES`] where the
+/// source can, otherwise in one read up to [`MAX_LIMIT`]. A larger source, or an incomplete read,
+/// is refused.
 pub fn materialize(src: &dyn FeatureSource) -> Result<(Dataset, ReadReport)> {
+    materialize_within(src, MAX_READ_BYTES)
+}
+
+/// [`materialize`], with `budget` bytes for a source read a chunk at a time.
+fn materialize_within(src: &dyn FeatureSource, budget: u64) -> Result<(Dataset, ReadReport)> {
+    let info = src.info();
+    let (features, skipped) = if src.visits_chunks() { read_chunks(src, budget)? } else { read_at_once(src)? };
+    let mut ds = Dataset::new(info.name.clone(), info.geometry_type, info.fields.clone());
+    ds.crs = info.coordinate_system();
+    // A streamed Shapefile skips unconvertible shapes rather than retaining empty geometry.
+    // Once materialized, it must still direct CRS repairs back to the original file.
+    ds.crs_incomplete = (info.format == "Shapefile" && skipped > 0) || src.lost_to_crs();
+    ds.zm_dropped = info.zm_dropped;
+    ds.features = features.into();
+    let report = ReadReport {
+        skipped: skipped + src.skipped_at_open(),
+        messages: info.notes.iter().map(|n| format!("{}: {n}", info.name)).collect(),
+    };
+    if ds.geometry_type == GeometryType::None
+        && let Some(g) = ds.features.iter().find_map(|f| f.geometry.as_ref())
+    {
+        ds.geometry_type = g.kind();
+    }
+    Ok((ds, report))
+}
+
+/// Every feature of a source in one read, and the rows it skipped, refusing a source over
+/// [`MAX_LIMIT`] and an incomplete read.
+fn read_at_once(src: &dyn FeatureSource) -> Result<(Vec<Feature>, usize)> {
     let info = src.info();
     let too_many = |n| DataError::Format(format!("{}: the layer has {n} features, more than the {MAX_LIMIT} read at once", info.name));
     // Refuse before reading or allocating a sample when the source already knows its size.
@@ -508,22 +592,47 @@ pub fn materialize(src: &dyn FeatureSource) -> Result<(Dataset, ReadReport)> {
     if info.count.is_none() && batch.features.len() >= MAX_LIMIT {
         return Err(DataError::Format(format!("{}: the layer has more features than the {MAX_LIMIT} read at once", info.name)));
     }
-    let mut ds = Dataset::new(info.name.clone(), info.geometry_type, info.fields.clone());
-    ds.crs = info.coordinate_system();
-    // A streamed Shapefile skips unconvertible shapes rather than retaining empty geometry.
-    // Once materialized, it must still direct CRS repairs back to the original file.
-    ds.crs_incomplete = (info.format == "Shapefile" && batch.skipped > 0) || src.lost_to_crs();
-    ds.features = batch.features.into();
-    let report = ReadReport {
-        skipped: batch.skipped + src.skipped_at_open(),
-        messages: info.notes.iter().map(|n| format!("{}: {n}", info.name)).collect(),
+    Ok((batch.features, batch.skipped))
+}
+
+/// Every feature of a source that can be read a chunk at a time, and the rows it skipped,
+/// refusing the source once its features would hold more than `budget` bytes.
+fn read_chunks(src: &dyn FeatureSource, budget: u64) -> Result<(Vec<Feature>, usize)> {
+    let info = src.info();
+    let row_bytes = std::mem::size_of::<Feature>() as u64;
+    let too_large = || {
+        DataError::Format(format!(
+            "{}: the layer needs more than the {} MiB a whole read may hold: clip or filter it first",
+            info.name,
+            budget >> 20
+        ))
     };
-    if ds.geometry_type == GeometryType::None
-        && let Some(g) = ds.features.iter().find_map(|f| f.geometry.as_ref())
-    {
-        ds.geometry_type = g.kind();
+    let no_memory = || DataError::Format(format!("{}: not enough memory to read the whole layer", info.name));
+    // A count that alone is too many rows is refused before reading. It isn't trusted to size the
+    // rows: a file's header can claim any count.
+    if info.count.is_some_and(|n| n.saturating_mul(row_bytes) > budget) {
+        return Err(too_large());
     }
-    Ok((ds, report))
+    let mut features: Vec<Feature> = Vec::new();
+    let mut held = 0u64;
+    let batch = src.visit_chunks(None, READ_CHUNK_BYTES, &mut |chunk| {
+        held = chunk.iter().fold(held, |n, f| n.saturating_add(chunk_memory::feature_bytes(f) as u64));
+        let needed = features.len().saturating_add(chunk.len());
+        if needed > features.capacity() {
+            // Grow by doubling, but never past what the budget leaves for the rows.
+            let room = usize::try_from(budget.saturating_sub(held) / row_bytes).unwrap_or(usize::MAX);
+            let grown = needed.max(features.capacity().saturating_mul(2)).min(room);
+            if grown < needed {
+                return Err(too_large());
+            }
+            features.try_reserve_exact(grown - features.len()).map_err(|_| no_memory())?;
+        } else if held.saturating_add((features.capacity() as u64).saturating_mul(row_bytes)) > budget {
+            return Err(too_large());
+        }
+        features.extend(chunk);
+        Ok(())
+    })?;
+    Ok((features, batch.skipped))
 }
 
 /// The geometry type of a source that doesn't declare one, from its first feature.

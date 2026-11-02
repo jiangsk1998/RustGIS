@@ -745,6 +745,7 @@ mod tests {
     /// from, whatever happened to the connection meanwhile, and a download that fails has none.
     #[test]
     fn a_delayed_download_is_named_when_it_lands_and_a_failed_one_is_not() {
+        let _turn = crate::fetching::turn();
         let mut h = harness();
         let base = serve(|head| {
             if head.contains("/missing") {
@@ -809,6 +810,7 @@ mod tests {
     /// downloaded; Recent names the coverage's source after the connection once it lands.
     #[test]
     fn a_coverage_is_named_once_its_download_lands() {
+        let _turn = crate::fetching::turn();
         use rustgis_engine::data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
         let r = Raster::new(
             "soc",
@@ -865,6 +867,7 @@ mod tests {
     /// clicking that entry opens the service browser on the same address.
     #[test]
     fn recent_in_the_pane_shows_the_connection_and_reopens_its_service() {
+        let _turn = crate::fetching::turn();
         let base = serve(|_| (200, WMS.as_bytes().to_vec()));
         let url = format!("{base}/wms");
         let mut h = harness();

@@ -196,6 +196,17 @@ mod tests {
         assert!(web_sw("no placeholders", &files, "00ff").is_err());
     }
 
+    // A page opened as a local file cannot start the app: it says so instead of spinning.
+    #[test]
+    fn web_page_explains_opening_it_as_a_local_file() {
+        let page = include_str!("../../apps/rustgis-web/index.html");
+        assert!(page.contains("<div id=\"rustgis_local\" role=\"alert\" hidden>"));
+        assert!(page.contains("python3 -m http.server 8080"));
+        let check = page.find("location.protocol === \"file:\"").unwrap();
+        assert!(page.find("id=\"rustgis_local\" role").unwrap() < check, "the script needs the notice in the page");
+        assert!(page[check..].contains("document.getElementById(\"rustgis_local\").hidden = false"));
+    }
+
     #[test]
     fn web_shell_lists_the_app_files_and_versions_them() {
         let dir = std::env::temp_dir().join(format!("rustgis-xtask-web-shell-{}", std::process::id()));

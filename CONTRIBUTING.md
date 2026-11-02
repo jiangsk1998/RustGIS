@@ -28,8 +28,10 @@ something on the roadmap (or not on it) interests you, propose it and open a pul
    below) use an issue and wait for a maintainer's reply; otherwise either works.
 3. **Open a pull request.** Draft pull requests are welcome early, to get feedback on the
    approach before the work is finished. Link the issue (`Closes #123`) and fill in the
-   [pull request template](.github/pull_request_template.md). Before it is ready for review, it
-   must meet the rules and quality gates in [AGENTS.md](AGENTS.md).
+   [pull request template](.github/pull_request_template.md). If the change shows on screen, add
+   screenshots to the description (before and after for a change to existing UI, after only for
+   new UI); see [attachments](docs/contributing.md#documentation). Before it is ready for review,
+   it must meet the rules and quality gates in [AGENTS.md](AGENTS.md).
 
 ## Pick freely or coordinate first
 
@@ -47,3 +49,34 @@ something on the roadmap (or not on it) interests you, propose it and open a pul
 Roadmap themes are not releases or an order; an item moves to Done when it lands. A
 pull request that lands a roadmap item, or an item of [GEOLIBRE_PARITY.md](GEOLIBRE_PARITY.md),
 updates that file in the same change.
+
+## AI-assisted contributions
+
+Code written with AI tools is welcome, from anyone, whatever their programming experience
+([#203](https://github.com/opengeos/RustGIS/discussions/203)). A contribution is judged by its
+quality, not by who or what wrote it.
+
+Whoever opens a pull request is responsible for it, however it was written:
+
+- you have read the change and can explain what it does and why;
+- you ran the checks in [AGENTS.md](AGENTS.md) and looked at what the change does (the
+  screenshot, the output file, the numbers) rather than trusting a tool's summary of it;
+- the pull request description and replies to review comments say what is true of the change,
+  whether or not a tool drafted them.
+
+## Where code comes from
+
+RustGIS is licensed under Apache-2.0, so everything in it must be your own work or come from a
+source whose licence allows that.
+
+- Don't copy code from GPL, LGPL, AGPL or other copyleft projects (such as GRASS, QGIS or GEOS),
+  and don't ask an AI tool to translate it into Rust: a translation is still a copy.
+- Implementing an algorithm from a paper, a standard or a specification is fine. Cite it in a
+  code comment or the pull request.
+- If you followed another project's code while writing yours, name it in the pull request so a
+  reviewer can check.
+- Running another program only to produce expected test results is fine, as the
+  [analysis reference corpus](ATTRIBUTION.md) does with GEOS and PROJ.
+
+Report security problems privately, as [SECURITY.md](SECURITY.md) describes, not in an issue or
+pull request.

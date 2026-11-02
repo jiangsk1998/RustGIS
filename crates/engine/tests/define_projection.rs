@@ -115,6 +115,8 @@ fn invalid_crs_or_unconvertible_coordinate_leaves_layer_unchanged() {
 
 #[test]
 fn loose_and_streamed_overrides_survive_project_reopen_and_do_not_write_prj() {
+    // Streamed Shapefiles are indexed: keep those out of the user's cache (#1230).
+    rustgis_engine::data::source::shp::use_temporary_index_dir();
     let dir = std::env::temp_dir().join(format!("rustgis-m1-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let parts = io::shapefile_parts_in(&native(), Crs::parse("EPSG:4269").unwrap()).unwrap().0;
@@ -190,6 +192,8 @@ fn zip_override_applies_to_each_shapefile_and_keeps_geojson_coordinates() {
 
 #[test]
 fn blank_shapefile_crs_keeps_prj_for_whole_and_streamed_imports() {
+    // Streamed Shapefiles are indexed: keep those out of the user's cache (#1230).
+    rustgis_engine::data::source::shp::use_temporary_index_dir();
     let dir = std::env::temp_dir().join(format!("rustgis-m1-blank-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     for (ext, bytes) in io::shapefile_parts_in(&native(), Crs::parse("EPSG:32631").unwrap()).unwrap().0 {

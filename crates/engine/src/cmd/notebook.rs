@@ -1,8 +1,11 @@
 //! Analyze › Notebook (New Notebook, Add and Open Notebook): notebooks of text and command cells.
 //! A command cell is a script (one command per line, `id {json}`) whose results show beneath it.
-//! Notebooks save as RustGIS notebooks or Jupyter notebooks, and open from either.
+//! Notebooks save as RustGIS notebooks or Jupyter notebooks, and open from either. A Jupyter
+//! notebook in another language (Python) keeps its kernel, metadata and outputs through open and
+//! save; its code cells are shown but not run.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,6 +25,10 @@ const MAX_OUTPUT: usize = 20_000;
 pub struct Notebook {
     pub name: String,
     pub cells: Vec<Cell>,
+    /// A Jupyter notebook's `metadata` (kernel, language, extensions) and `nbformat_minor`, kept
+    /// to save it back as it was. Shared, so undo snapshots don't copy it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jupyter: Option<Arc<Value>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -32,6 +39,12 @@ pub struct Cell {
     pub output: Option<String>,
     #[serde(default)]
     pub error: bool,
+    /// A Jupyter cell's other fields (`cell_type`, `id`, `metadata`, `outputs`,
+    /// `execution_count`, attachments), kept to save it back as it was. Running the cell here
+    /// drops its Jupyter outputs, which `output` then replaces. Shared, so undo snapshots don't
+    /// copy the outputs (images included).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jupyter: Option<Arc<Value>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,11 +58,48 @@ pub enum CellKind {
 
 impl Cell {
     fn new(kind: CellKind, source: &str) -> Cell {
-        Cell { kind, source: source.chars().take(MAX_SOURCE).collect(), output: None, error: false }
+        Cell { kind, source: source.chars().take(MAX_SOURCE).collect(), output: None, error: false, jupyter: None }
+    }
+
+    /// The PNG images (base64, possibly with line breaks) among the cell's Jupyter outputs,
+    /// borrowed where the file has them as one string.
+    pub fn images(&self) -> Vec<std::borrow::Cow<'_, str>> {
+        let outputs = self.jupyter.as_deref().and_then(|j| j.get("outputs")).and_then(Value::as_array);
+        outputs
+            .into_iter()
+            .flatten()
+            .filter_map(|o| o.get("data").and_then(|d| d.get("image/png")))
+            .map(|png| match png {
+                Value::String(t) => std::borrow::Cow::Borrowed(t.as_str()),
+                other => std::borrow::Cow::Owned(jupyter_text(other)),
+            })
+            .filter(|png| !png.trim().is_empty())
+            .collect()
     }
 }
 
 impl Notebook {
+    /// The language of a Jupyter notebook whose code cells aren't RustGIS commands (`python`),
+    /// from its kernel, or `code` when it names none (RustGIS writes `rustgis`); `None` for
+    /// command notebooks.
+    pub fn language(&self) -> Option<&str> {
+        let Some(meta) = self.jupyter.as_deref()?.get("metadata") else { return Some("code") };
+        let field = |a: &str, b: &str| meta.get(a).and_then(|v| v.get(b)).and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty());
+        // The kernel's language, else the language info's, else the kernel's name (`python3`).
+        let lang = field("kernelspec", "language")
+            .or_else(|| field("language_info", "name"))
+            .or_else(|| field("kernelspec", "name").map(|n| if n.to_ascii_lowercase().starts_with("python") { "python" } else { n }))
+            .unwrap_or("code");
+        (!lang.eq_ignore_ascii_case("rustgis")).then_some(lang)
+    }
+
+    /// `language` as a label (`Python`).
+    pub fn language_label(&self) -> Option<String> {
+        // From the file, so kept short.
+        let mut chars = self.language()?.chars().take(32);
+        Some(chars.next().into_iter().flat_map(char::to_uppercase).chain(chars).collect())
+    }
+
     pub(crate) fn clamp(&mut self) {
         self.name = self.name.chars().take(200).collect();
         self.cells.truncate(MAX_CELLS);
@@ -74,6 +124,7 @@ pub fn commands() -> Vec<C> {
                     Cell::new(CellKind::Markdown, &format!("# {name}\n\nCommand cells run one command per line: `id {{json}}`.")),
                     Cell::new(CellKind::Code, "# For example:\n# map.goToXY {\"lon\": 12.5, \"lat\": 41.9, \"scale\": 2000000}"),
                 ],
+                jupyter: None,
             };
             let r = push(s, nb)?;
             // Trusted only once it exists.
@@ -236,11 +287,20 @@ fn run_cells(s: &mut Session, p: &Value) -> CmdResult {
     // Commands in a cell may add or remove notebooks, so this one is found by name each time.
     let name = s.project.notebooks.get(i).map(|nb| nb.name.clone()).unwrap_or_default();
     let find = |s: &Session| s.project.notebooks.iter().position(|nb| nb.name.eq_ignore_ascii_case(&name));
-    let mut ran = 0;
+    let one = p.get("cell").is_some();
+    let (mut ran, mut skipped) = (0, 0);
     for k in cells {
         let Some(i) = find(s) else { break };
         let Some(c) = s.project.notebooks.get(i).and_then(|nb| nb.cells.get(k)) else { break };
         if c.kind != CellKind::Code {
+            continue;
+        }
+        // Another language's cells (a Python notebook) are kept, not run as commands.
+        if let Some(lang) = s.project.notebooks.get(i).and_then(Notebook::language_label) {
+            if one {
+                return Err(format!("this is a {lang} cell: RustGIS runs command cells only, so run it in Jupyter"));
+            }
+            skipped += 1;
             continue;
         }
         let script = c.source.clone();
@@ -270,16 +330,27 @@ fn run_cells(s: &mut Session, p: &Value) -> CmdResult {
             }
             Err(e) => e,
         };
-        if let Some(c) = find(s).and_then(|i| s.project.notebooks.get_mut(i)).and_then(|nb| nb.cells.get_mut(k)) {
+        // Into the cell that ran, which a command removing or adding cells may have moved: the
+        // cell with its source nearest to where it was.
+        let ran_cell = find(s).and_then(|i| s.project.notebooks.get_mut(i)).and_then(|nb| {
+            let at = nb.cells.iter().enumerate().filter(|(_, c)| c.source == script).min_by_key(|(n, _)| n.abs_diff(k))?.0;
+            nb.cells.get_mut(at)
+        });
+        if let Some(c) = ran_cell {
             c.output = Some(text.chars().take(MAX_OUTPUT).collect());
             c.error = failed;
+            // The Jupyter outputs are from an earlier run; this one's output replaces them.
+            if let Some(j) = c.jupyter.as_mut().map(Arc::make_mut).and_then(Value::as_object_mut) {
+                j.remove("outputs");
+                j.insert("execution_count".into(), Value::Null);
+            }
         }
         ran += 1;
         if failed {
             return Ok(json!({"ran": ran, "error": k}));
         }
     }
-    Ok(json!({"ran": ran}))
+    if skipped > 0 { Ok(json!({"ran": ran, "skipped": skipped})) } else { Ok(json!({"ran": ran})) }
 }
 
 /// The first line (1-based) of a cell whose command could reach outside the session.
@@ -297,7 +368,7 @@ fn untrusted_line(script: &str) -> Option<usize> {
 }
 
 /// Text of a Jupyter field: a string or a list of lines.
-fn jupyter_text(v: &Value) -> String {
+pub(crate) fn jupyter_text(v: &Value) -> String {
     match v {
         Value::String(t) => t.clone(),
         Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
@@ -305,54 +376,210 @@ fn jupyter_text(v: &Value) -> String {
     }
 }
 
+/// `text` without terminal colour codes (`ESC [ … m`), as in Python tracebacks.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+        } else if chars.clone().next() == Some('[') {
+            // A control sequence ends at its first letter.
+            for c in chars.by_ref().skip(1) {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The text a Jupyter cell's outputs show: streams, results and displays as plain text, errors
+/// as their traceback; and whether one is an error.
+fn jupyter_outputs(outputs: &[Value]) -> (String, bool) {
+    let mut text = String::new();
+    let mut error = false;
+    let mut after_stream = false;
+    for o in outputs {
+        let stream = o.get("output_type").and_then(Value::as_str) == Some("stream");
+        let piece = match o.get("output_type").and_then(Value::as_str) {
+            Some("stream") => {
+                error |= o.get("name").and_then(Value::as_str) == Some("stderr");
+                jupyter_text(o.get("text").unwrap_or(&Value::Null))
+            }
+            Some("execute_result" | "display_data") => {
+                jupyter_text(o.get("data").and_then(|d| d.get("text/plain")).unwrap_or(&Value::Null))
+            }
+            Some("error") => {
+                error = true;
+                let trace: Vec<String> =
+                    o.get("traceback").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(strip_ansi).collect();
+                if trace.is_empty() {
+                    let field = |k: &str| o.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+                    format!("{}: {}", field("ename"), field("evalue"))
+                } else {
+                    trace.join("\n")
+                }
+            }
+            _ => continue,
+        };
+        if piece.is_empty() {
+            continue;
+        }
+        // Streams carry on where the last stream stopped; anything else starts a line.
+        if !text.is_empty() && !text.ends_with('\n') && !(stream && after_stream) {
+            text.push('\n');
+        }
+        text.push_str(&piece);
+        after_stream = stream;
+    }
+    (text, error)
+}
+
 /// A RustGIS or Jupyter notebook.
 fn parse(text: &str, fallback_name: &str) -> Result<Notebook, String> {
     let v: Value = serde_json::from_str(text).map_err(|e| format!("not a notebook: {e}"))?;
+    // nbformat 3 keeps its cells in worksheets: opened as 4, they'd be lost on save.
+    if let Some(major) = v.get("nbformat").and_then(Value::as_u64).filter(|n| *n < 4) {
+        return Err(format!("this is an nbformat {major} notebook; RustGIS opens nbformat 4 notebooks (Jupyter converts older ones)"));
+    }
     if v.get("nbformat").is_some() {
-        let mut nb = Notebook { name: v["metadata"]["title"].as_str().unwrap_or(fallback_name).to_string(), cells: Vec::new() };
-        for c in v["cells"].as_array().into_iter().flatten().take(MAX_CELLS) {
-            let kind = if c["cell_type"].as_str() == Some("code") { CellKind::Code } else { CellKind::Markdown };
-            let mut cell = Cell::new(kind, &jupyter_text(&c["source"]));
-            let outputs = c["outputs"].as_array().into_iter().flatten();
-            let out: String = outputs.clone().map(|o| jupyter_text(&o["text"])).collect();
+        let meta = v.get("metadata").filter(|m| m.is_object());
+        let name = meta.and_then(|m| m.get("title")).and_then(Value::as_str).unwrap_or(fallback_name).to_string();
+        // Kept even when empty: a Jupyter notebook that doesn't say it's RustGIS isn't commands.
+        let mut j = serde_json::Map::new();
+        j.insert("metadata".into(), meta.cloned().unwrap_or_else(|| json!({})));
+        if let Some(minor) = v.get("nbformat_minor").filter(|n| n.is_u64()) {
+            j.insert("nbformat_minor".into(), minor.clone());
+        }
+        let jupyter = Some(Arc::new(Value::Object(j)));
+        let mut nb = Notebook { name, cells: Vec::new(), jupyter };
+        let cells = v.get("cells").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+        // Dropping the extra cells would lose them on the next save.
+        if cells.len() > MAX_CELLS {
+            return Err(format!("this notebook has {} cells; RustGIS opens notebooks of up to {MAX_CELLS}", cells.len()));
+        }
+        // Cutting a cell short would lose its end on the next save.
+        if let Some(n) = cells.iter().position(|c| jupyter_text(c.get("source").unwrap_or(&Value::Null)).chars().nth(MAX_SOURCE).is_some())
+        {
+            return Err(format!("cell {} of this notebook is longer than {MAX_SOURCE} characters, the most RustGIS opens", n + 1));
+        }
+        for c in cells {
+            // Skipping a cell that isn't an object would lose it on the next save.
+            let Some(fields) = c.as_object() else { return Err("a cell of this notebook isn't a JSON object".into()) };
+            let kind = if c.get("cell_type").and_then(Value::as_str) == Some("code") { CellKind::Code } else { CellKind::Markdown };
+            let mut cell = Cell::new(kind, &jupyter_text(c.get("source").unwrap_or(&Value::Null)));
+            let outputs = c.get("outputs").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+            let (out, error) = jupyter_outputs(outputs);
             if !out.is_empty() {
                 cell.output = Some(out.chars().take(MAX_OUTPUT).collect());
-                cell.error = outputs.clone().any(|o| o["name"] == "stderr" || o["output_type"] == "error");
+                cell.error = error;
             }
+            let mut rest = fields.clone();
+            rest.remove("source");
+            cell.jupyter = Some(Arc::new(Value::Object(rest)));
             nb.cells.push(cell);
         }
         return Ok(nb);
     }
+    let cells = v.get("cells").and_then(Value::as_array).map_or(0, Vec::len);
+    if cells > MAX_CELLS {
+        return Err(format!("this notebook has {cells} cells; RustGIS opens notebooks of up to {MAX_CELLS}"));
+    }
     let mut nb: Notebook = serde_json::from_value(v).map_err(|e| format!("not a RustGIS notebook: {e}"))?;
+    if let Some(n) = nb.cells.iter().position(|c| c.source.chars().nth(MAX_SOURCE).is_some()) {
+        return Err(format!("cell {} of this notebook is longer than {MAX_SOURCE} characters, the most RustGIS opens", n + 1));
+    }
     if nb.name.trim().is_empty() {
         nb.name = fallback_name.to_string();
     }
     Ok(nb)
 }
 
-/// The notebook as a RustGIS notebook or (nbformat 4) Jupyter notebook.
-pub fn notebook_file(s: &Session, i: usize, jupyter: bool) -> Result<Vec<u8>, String> {
-    let nb = s.project.notebooks.get(i).ok_or("no notebook")?;
-    let v = if jupyter {
-        let lines = |t: &str| -> Value { json!(t.split_inclusive('\n').collect::<Vec<_>>()) };
-        let cells: Vec<Value> = nb
-            .cells
-            .iter()
-            .map(|c| match c.kind {
-                CellKind::Markdown => json!({"cell_type": "markdown", "metadata": {}, "source": lines(&c.source)}),
-                CellKind::Code => {
+/// A Jupyter cell id (nbformat 4.5): 1 to 64 letters, digits, `-` and `_`.
+fn valid_cell_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// The notebook as an nbformat 4 Jupyter notebook, with what was kept from the file it came from.
+fn jupyter_file(nb: &Notebook) -> Value {
+    let lines = |t: &str| -> Value { json!(t.split_inclusive('\n').collect::<Vec<_>>()) };
+    let kept = nb.jupyter.as_deref();
+    let minor = kept.and_then(|j| j.get("nbformat_minor")).and_then(Value::as_u64).unwrap_or(5);
+    let mut metadata = match kept.and_then(|j| j.get("metadata")).filter(|m| m.is_object()) {
+        Some(m) => m.clone(),
+        None => json!({"language_info": {"name": "rustgis"}}),
+    };
+    // A notebook from elsewhere keeps its own title, or none.
+    if (kept.is_none() || metadata.get("title").is_some())
+        && let Some(m) = metadata.as_object_mut()
+    {
+        m.insert("title".into(), json!(nb.name));
+    }
+    // Cells need unique ids from nbformat 4.5; ones without get a free one.
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let ids: Vec<Option<String>> = nb
+        .cells
+        .iter()
+        .map(|c| {
+            let id = c.jupyter.as_deref().and_then(|j| j.get("id")).and_then(Value::as_str);
+            id.filter(|id| valid_cell_id(id) && used.insert(id.to_string())).map(str::to_string)
+        })
+        .collect();
+    let mut next = 0usize;
+    let cells: Vec<Value> = nb
+        .cells
+        .iter()
+        .zip(ids)
+        .map(|(c, id)| {
+            let mut cell = c.jupyter.as_deref().and_then(Value::as_object).cloned().unwrap_or_default();
+            let raw = cell.get("cell_type").and_then(Value::as_str) == Some("raw");
+            let cell_type = match c.kind {
+                CellKind::Code => "code",
+                CellKind::Markdown if raw => "raw",
+                CellKind::Markdown => "markdown",
+            };
+            cell.insert("cell_type".into(), json!(cell_type));
+            cell.entry("metadata").or_insert_with(|| json!({}));
+            cell.insert("source".into(), lines(&c.source));
+            if c.kind == CellKind::Code {
+                if !cell.get("outputs").is_some_and(Value::is_array) {
                     let outputs: Vec<Value> = c
                         .output
                         .iter()
                         .map(|o| json!({"output_type": "stream", "name": if c.error { "stderr" } else { "stdout" }, "text": lines(o)}))
                         .collect();
-                    json!({"cell_type": "code", "metadata": {}, "execution_count": null, "outputs": outputs, "source": lines(&c.source)})
+                    cell.insert("outputs".into(), json!(outputs));
                 }
-            })
-            .collect();
-        json!({"nbformat": 4, "nbformat_minor": 5, "metadata": {"title": nb.name, "language_info": {"name": "rustgis"}}, "cells": cells})
-    } else {
-        serde_json::to_value(nb).map_err(|e| e.to_string())?
-    };
+                cell.entry("execution_count").or_insert(Value::Null);
+            } else {
+                cell.remove("outputs");
+                cell.remove("execution_count");
+            }
+            if minor >= 5 {
+                let id = id.unwrap_or_else(|| {
+                    loop {
+                        next += 1;
+                        let id = format!("cell-{next}");
+                        if used.insert(id.clone()) {
+                            break id;
+                        }
+                    }
+                });
+                cell.insert("id".into(), json!(id));
+            } else {
+                cell.remove("id");
+            }
+            Value::Object(cell)
+        })
+        .collect();
+    json!({"nbformat": 4, "nbformat_minor": minor, "metadata": metadata, "cells": cells})
+}
+
+/// The notebook as a RustGIS notebook or (nbformat 4) Jupyter notebook.
+pub fn notebook_file(s: &Session, i: usize, jupyter: bool) -> Result<Vec<u8>, String> {
+    let nb = s.project.notebooks.get(i).ok_or("no notebook")?;
+    let v = if jupyter { jupyter_file(nb) } else { serde_json::to_value(nb).map_err(|e| e.to_string())? };
     serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())
 }

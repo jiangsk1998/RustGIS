@@ -205,6 +205,19 @@ fn toolbox_of(m: &Value, category: &str) -> String {
     }
 }
 
+/// The runner has no field metadata: infer suggestions from the last name component.
+/// Keep these editable in the form, since names can also describe new output columns.
+fn field_kind(name: &str) -> Option<ParamKind> {
+    match name.rsplit('_').next()? {
+        last if last.eq_ignore_ascii_case("fields") => Some(ParamKind::FieldNames),
+        last if last.eq_ignore_ascii_case("field") => {
+            let numeric = name.split('_').any(|part| part.eq_ignore_ascii_case("weight") || part.eq_ignore_ascii_case("numeric"));
+            Some(if numeric { ParamKind::NumericField } else { ParamKind::Field })
+        }
+        _ => None,
+    }
+}
+
 fn spec_of(m: &Value) -> Option<(ToolSpec, Meta)> {
     let id = m.get("id")?.as_str()?;
     let name = m.get("display_name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or(id);
@@ -256,7 +269,7 @@ fn spec_of(m: &Value) -> Option<(ToolSpec, Meta)> {
                 }
                 _ if data == Data::Bool => ParamKind::Bool,
                 _ if data == Data::Number => ParamKind::Number,
-                _ => ParamKind::Text,
+                _ => field_kind(pname).unwrap_or(ParamKind::Text),
             },
         };
         // Example file names in the defaults ("dem.tif") are not defaults for a layer.

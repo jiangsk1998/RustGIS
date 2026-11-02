@@ -30,6 +30,9 @@ pub struct GpkgSource {
     reproject: Reproject,
     /// A copy written for a file opened from memory, removed when the source is dropped.
     temp: Option<PathBuf>,
+    /// The database file and its identity when opened ([`file_identity`]), for a traversal on a
+    /// connection of its own to check it reads the same file.
+    file: Option<(PathBuf, Option<(u64, u64)>)>,
 }
 
 impl Drop for GpkgSource {
@@ -69,7 +72,10 @@ fn feature_tables(conn: &Connection) -> Result<Vec<String>> {
 
 impl GpkgSource {
     pub fn open(path: &Path, layer: Option<&str>) -> Result<Self> {
-        Self::open_conn(open_db(path)?, layer, None)
+        // The identity is taken before the database is opened: a file put in its place after
+        // this leaves it describing the file opened, which a traversal then refuses to swap.
+        let id = file_identity(path);
+        Self::open_conn(open_db(path)?, layer, None, id)
     }
 
     /// Opens a GeoPackage held in memory, through a temporary copy (SQLite reads files). The copy
@@ -100,7 +106,8 @@ impl GpkgSource {
             return Err(e.into());
         }
         drop(f);
-        match open_db(&p).and_then(|c| Self::open_conn(c, layer, Some(p.clone()))) {
+        let id = file_identity(&p);
+        match open_db(&p).and_then(|c| Self::open_conn(c, layer, Some(p.clone()), id)) {
             Ok(s) => Ok(s),
             Err(e) => {
                 let _ = std::fs::remove_file(&p);
@@ -109,7 +116,10 @@ impl GpkgSource {
         }
     }
 
-    fn open_conn(conn: Connection, layer: Option<&str>, temp: Option<PathBuf>) -> Result<Self> {
+    /// Opens a feature table (`layer`, else the first) on an open database from its metadata,
+    /// noting what reading changes: an unknown coordinate system, other tables, Z or M values
+    /// dropped. `id` is the file's identity taken before it was opened.
+    fn open_conn(conn: Connection, layer: Option<&str>, temp: Option<PathBuf>, id: Option<(u64, u64)>) -> Result<Self> {
         let tables = feature_tables(&conn)?;
         let table = match layer {
             Some(l) => tables
@@ -191,10 +201,23 @@ impl GpkgSource {
             .ok()
         });
         let extent = native.map(|e| reproject.extent_to_lonlat(&e)).unwrap_or(Extent::EMPTY);
-        let count = conn
-            .query_row(&format!("SELECT COUNT(*) FROM {}", quote(&table)), [], |r| r.get::<_, i64>(0))
-            .ok()
-            .and_then(|n| u64::try_from(n).ok());
+        // Z and M are 0 (none), 1 (every geometry) or 2 (optional: looked for in the first rows).
+        let zm: Option<(i64, i64)> = conn
+            .query_row("SELECT z, m FROM gpkg_geometry_columns WHERE table_name = ?1 AND column_name = ?2", [&table, &geom], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .ok();
+        // Rows; with Z or M declared for every geometry, also the rows with one (what the note on
+        // them counts), in the same scan. Counting geometries reads every blob, so only then.
+        let mandatory = zm.is_some_and(|(z, m)| z == 1 || m == 1);
+        let counted = if mandatory { format!("COUNT({})", quote(&geom)) } else { "0".into() };
+        let counts = conn
+            .query_row(&format!("SELECT COUNT(*), {counted} FROM {}", quote(&table)), [], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })
+            .ok();
+        let count = counts.and_then(|(n, _)| u64::try_from(n).ok());
+        let geometries = counts.filter(|_| mandatory).and_then(|(_, g)| u64::try_from(g).ok());
         let geometry_type = match geom_type.to_ascii_uppercase().as_str() {
             "POINT" | "MULTIPOINT" => GeometryType::Point,
             "LINESTRING" | "MULTILINESTRING" | "CURVE" | "MULTICURVE" => GeometryType::Polyline,
@@ -211,12 +234,42 @@ impl GpkgSource {
             crs: reproject.label(),
             indexed: rtree.is_some(),
             notes,
+            zm_dropped: false,
         };
-        let mut src = GpkgSource { info, conn: Mutex::new(Some(conn)), table, geom, pk, rtree, reproject, temp };
+        let file = conn.path().filter(|p| !p.is_empty()).map(|p| (PathBuf::from(p), id));
+        let mut src = GpkgSource { info, conn: Mutex::new(Some(conn)), table, geom, pk, rtree, reproject, temp, file };
         if src.info.geometry_type == GeometryType::None {
             src.info.geometry_type = src.peek_kind();
         }
+        match zm {
+            // Every geometry has them.
+            Some((z, m)) if z == 1 || m == 1 => src.info.drop_zm(geometries),
+            Some((z, m)) if z == 2 || m == 2 => match src.peek_zm() {
+                Some(true) => src.info.drop_zm(None),
+                Some(false) => {}
+                None => src.info.notes.push("couldn't tell whether it has Z or M values, which RustGIS doesn't keep".into()),
+            },
+            _ => {}
+        }
         Ok(src)
+    }
+
+    /// Whether any of the first few geometries has Z or M values (a query that stops there);
+    /// `None` when they can't be read.
+    fn peek_zm(&self) -> Option<bool> {
+        let guard = self.conn.lock().ok()?;
+        let conn = guard.as_ref()?;
+        let sql = format!("SELECT {g} FROM {t} WHERE {g} IS NOT NULL LIMIT 16", g = quote(&self.geom), t = quote(&self.table));
+        let mut st = conn.prepare(&sql).ok()?;
+        let mut rows = st.query([]).ok()?;
+        while let Some(r) = rows.next().ok()? {
+            if let Ok(ValueRef::Blob(b)) = r.get_ref(0)
+                && split_blob(b).is_some_and(|(_, body)| wkb::has_zm(body))
+            {
+                return Some(true);
+            }
+        }
+        Some(false)
     }
 
     /// The geometry type of a table declared as plain `GEOMETRY`, from its first few rows (a
@@ -368,6 +421,67 @@ impl FeatureSource for GpkgSource {
         }
         Ok(out)
     }
+
+    /// Every table in a file is scanned in full, whatever its index.
+    fn visits_chunks(&self) -> bool {
+        self.file.is_some()
+    }
+
+    /// A scan in table order: the envelope in each geometry's header tests the extent before
+    /// decoding, as a read without the spatial index does, with the same statement. It runs on a
+    /// read-only connection of its own, one statement and so one snapshot of the database. The
+    /// map's reads of the layer go on, and the source's connection isn't held while the visitor
+    /// runs; another program writing to the file waits for the scan to end, as for any reader
+    /// (outside WAL mode). A file put in place of the one opened is refused (where the system
+    /// says files' identities); a file removed fails as missing.
+    fn visit_chunks(&self, extent: Option<Extent>, bytes: usize, visit: &mut dyn FnMut(Vec<Feature>) -> Result<()>) -> Result<Batch> {
+        let mut chunks = super::chunk_memory::Chunker::new(bytes, visit)?;
+        let Some((path, id)) = &self.file else { return Err(DataError::Format("GeoPackage: no file to read".into())) };
+        let same_file = || {
+            // A missing file is an error of its own, not a replacement.
+            std::fs::metadata(path)?;
+            if id.is_some() && file_identity(path) != *id {
+                return Err(DataError::Format(format!("{}: the file was replaced since it was added; add it again", path.display())));
+            }
+            Ok(())
+        };
+        same_file()?;
+        let conn = open_db(path)?;
+        same_file()?;
+        let req = Request { extent, limit: usize::MAX };
+        let native = extent.map(|e| self.reproject.extent_from_lonlat(&e));
+        let sql = format!("SELECT {} FROM {}", self.select_list(), quote(&self.table));
+        let mut st = conn.prepare(&sql).map_err(err)?;
+        let mut rows = st.query([]).map_err(err)?;
+        let mut out = Batch { complete: true, ..Batch::default() };
+        while let Some(r) = rows.next().map_err(err)? {
+            match self.feature(r, native.as_ref(), &req).map_err(err)? {
+                Row::Feature(f) => {
+                    out.matched += 1;
+                    chunks.push(f)?;
+                }
+                Row::Skip => {}
+                Row::Bad => out.skipped += 1,
+            }
+        }
+        chunks.flush()?;
+        Ok(out)
+    }
+}
+
+/// A file's device and inode, which tell it from another file put at its path since; `None`
+/// where the system doesn't say them.
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// WGS 84 as OGC WKT, the coordinate system GeoPackages are written in.
@@ -420,6 +534,68 @@ pub fn write(ds: &crate::Dataset, path: &Path) -> Result<()> {
 /// Existing destinations are refused, as with [`write`].
 pub fn write_in(ds: &crate::Dataset, path: &Path, crs: Crs) -> Result<()> {
     check_new_destination(path)?;
+    let tmp = temp_database_beside(path)?;
+    let conn = Connection::open(&tmp).map_err(err)?;
+    build(&conn, ds, crs)?;
+    install(conn, tmp, path)
+}
+
+/// As [`write_in`], for a layer `name` of `geometry_type` with `fields`: the features `feed`
+/// hands to the function it is given, a run at a time, already in `crs`'s coordinates, so a
+/// whole layer needn't be held. A point layer's table type and whether ids are kept are chosen
+/// from the features so far; should a later one contradict that choice, the export starts
+/// again with it settled (feeding the features again), giving the file [`write_in`] would.
+pub(crate) fn write_features_in(
+    name: &str,
+    geometry_type: GeometryType,
+    fields: &[Field],
+    path: &Path,
+    crs: Crs,
+    feed: &mut dyn FnMut(&mut dyn FnMut(&[crate::Feature]) -> Result<()>) -> Result<()>,
+) -> Result<()> {
+    check_new_destination(path)?;
+    let (mut multi_points, mut keep_ids) = (None, true);
+    // Each choice changes at most once.
+    for _ in 0..3 {
+        let tmp = temp_database_beside(path)?;
+        let conn = Connection::open(&tmp).map_err(err)?;
+        let (mut layout, mut extent, mut redo) = (None, Extent::EMPTY, None);
+        let fed = feed(&mut |features| {
+            if layout.is_none() {
+                let multi =
+                    multi_points.unwrap_or_else(|| features.iter().any(|f| matches!(f.geometry, Some(crate::Geometry::MultiPoint(_)))));
+                layout = Some(create(&conn, name, geometry_type, fields, crs, multi)?);
+            }
+            let Some(l) = layout.as_ref() else { return Err(DataError::Format("GeoPackage: no table to write".into())) };
+            for g in features.iter().filter_map(|f| f.geometry.as_ref()) {
+                extent = extent.union(&g.extent());
+            }
+            redo = insert(&conn, l, features, keep_ids)?;
+            match redo {
+                // Stops the traversal; the export starts again below.
+                Some(_) => Err(DataError::Format("GeoPackage: starting again".into())),
+                None => Ok(()),
+            }
+        });
+        match (fed, redo) {
+            (_, Some(Redo::MultiPoints)) => multi_points = Some(true),
+            (_, Some(Redo::Renumber)) => keep_ids = false,
+            (Err(e), None) => return Err(e),
+            (Ok(()), None) => {
+                let layout = match layout {
+                    Some(l) => l,
+                    None => create(&conn, name, geometry_type, fields, crs, multi_points.unwrap_or(false))?,
+                };
+                finish(&conn, &layout, extent)?;
+                return install(conn, tmp, path);
+            }
+        }
+    }
+    Err(DataError::Format("GeoPackage: the export didn't settle on a table".into()))
+}
+
+/// A new temporary file beside `path`, removed unless [`install`]ed.
+fn temp_database_beside(path: &Path) -> Result<tempfile::TempPath> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     // Drop the file handle before SQLite opens it, including on Windows. TempPath cleans up on
     // every error, and persist_noclobber refuses files created after the check above as well.
@@ -431,9 +607,11 @@ pub fn write_in(ds: &crate::Dataset, path: &Path, crs: Crs) -> Result<()> {
         // Match ordinary exports: request 0666 and let the user's umask restrict it.
         builder.permissions(std::fs::Permissions::from_mode(0o666));
     }
-    let tmp = builder.tempfile_in(parent)?.into_temp_path();
-    let conn = Connection::open(&tmp).map_err(err)?;
-    build(&conn, ds, crs)?;
+    Ok(builder.tempfile_in(parent)?.into_temp_path())
+}
+
+/// Closes a built database and moves it to `path`, which must still be new.
+fn install(conn: Connection, tmp: tempfile::TempPath, path: &Path) -> Result<()> {
     conn.close().map_err(|(_, e)| err(e))?;
     // Built without syncing (fast); synced once before installation. Windows needs a write handle.
     std::fs::OpenOptions::new().write(true).open(&tmp)?.sync_all()?;
@@ -472,15 +650,49 @@ fn destination_error(path: &Path, error: std::io::Error) -> DataError {
     }
 }
 
+/// Builds a whole layer's GeoPackage on `conn`, its table chosen from all its features.
 fn build(conn: &Connection, ds: &crate::Dataset, crs: Crs) -> Result<()> {
-    use rusqlite::types::Value as Sql;
+    let multi_points = ds.features.iter().any(|f| matches!(f.geometry, Some(crate::Geometry::MultiPoint(_))));
+    let layout = create(conn, &ds.name, ds.geometry_type, &ds.fields, crs, multi_points)?;
+    // Feature ids are kept when they are unique and fit; otherwise SQLite numbers the rows.
+    let mut seen = std::collections::HashSet::new();
+    let keep_ids = ds.features.iter().all(|f| i64::try_from(f.id).is_ok() && seen.insert(f.id));
+    // The table is made for the whole layer, so nothing should need doing again; should a
+    // feature not fit after all, the export fails rather than leave it out.
+    if insert(conn, &layout, &ds.features, keep_ids)?.is_some() {
+        return Err(DataError::Format("GeoPackage: a feature doesn't fit the table chosen for the layer".into()));
+    }
+    finish(conn, &layout, ds.extent())
+}
+
+/// A feature table being written: its names, and what its rows hold.
+struct Layout {
+    table: String,
+    geom: String,
+    columns: Vec<String>,
+    fields: Vec<Field>,
+    has_geom: bool,
+    multi_points: bool,
+    geom_type: &'static str,
+    srs_id: i32,
+    /// The table, geometry and id column, and spatial index, quoted for SQL.
+    table_q: String,
+    geom_q: String,
+    fid_q: String,
+    rtree_q: String,
+}
+
+/// Creates the GeoPackage's tables and the empty feature table (and its spatial index) for a
+/// layer, in a transaction [`finish`] commits. A point layer holding any multipoint is a
+/// MULTIPOINT table, whose single points [`insert`] writes as one-point multipoints.
+fn create(conn: &Connection, name: &str, geometry_type: GeometryType, fields: &[Field], crs: Crs, multi_points: bool) -> Result<Layout> {
     // An EPSG system by its code; a custom one numbered as GDAL numbers them.
     let srs_id = match crs.epsg() {
         0 => 100_000,
         c => i32::from(c),
     };
     // Not a reserved name, and never empty.
-    let mut table: String = ds.name.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string();
+    let mut table: String = name.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string();
     if table.is_empty() {
         table = "layer".into();
     }
@@ -490,12 +702,12 @@ fn build(conn: &Connection, ds: &crate::Dataset, crs: Crs) -> Result<()> {
     {
         table = format!("layer_{table}");
     }
-    let has_geom = ds.geometry_type != GeometryType::None;
-    let fid = free_name(&ds.fields, "fid");
-    let geom = free_name(&ds.fields, "geom");
+    let has_geom = geometry_type != GeometryType::None;
+    let fid = free_name(fields, "fid");
+    let geom = free_name(fields, "geom");
     // SQLite column names are unique without regard to case: a later `a` beside `A` becomes `a_1`.
-    let mut columns: Vec<String> = Vec::with_capacity(ds.fields.len());
-    for f in &ds.fields {
+    let mut columns: Vec<String> = Vec::with_capacity(fields.len());
+    for f in fields {
         let taken = |n: &str, cols: &[String]| {
             cols.iter().any(|c| c.eq_ignore_ascii_case(n)) || n.eq_ignore_ascii_case(&fid) || n.eq_ignore_ascii_case(&geom)
         };
@@ -505,8 +717,7 @@ fn build(conn: &Connection, ds: &crate::Dataset, crs: Crs) -> Result<()> {
             .unwrap_or_else(|| f.name.clone());
         columns.push(name);
     }
-    let multi_points = ds.features.iter().any(|f| matches!(f.geometry, Some(crate::Geometry::MultiPoint(_))));
-    let geom_type = match ds.geometry_type {
+    let geom_type = match geometry_type {
         GeometryType::Point if multi_points => "MULTIPOINT",
         GeometryType::Point => "POINT",
         GeometryType::Polyline => "MULTILINESTRING",
@@ -537,7 +748,7 @@ fn build(conn: &Connection, ds: &crate::Dataset, crs: Crs) -> Result<()> {
     if has_geom {
         cols.push(format!("{g} {geom_type}"));
     }
-    for (f, col) in ds.fields.iter().zip(&columns) {
+    for (f, col) in fields.iter().zip(&columns) {
         let ty = match f.ty {
             FieldType::Integer => "INTEGER",
             FieldType::Double => "REAL",
@@ -572,36 +783,89 @@ fn build(conn: &Connection, ds: &crate::Dataset, crs: Crs) -> Result<()> {
         .map_err(err)?;
     }
 
-    // Feature ids are kept when they are unique and fit; otherwise SQLite numbers the rows.
-    let mut seen = std::collections::HashSet::new();
-    let keep_ids = ds.features.iter().all(|f| i64::try_from(f.id).is_ok() && seen.insert(f.id));
-    {
-        let names: Vec<String> =
-            std::iter::once(i.clone()).chain(has_geom.then(|| g.clone())).chain(columns.iter().map(|c| quote(c))).collect();
-        let marks = vec!["?"; names.len()].join(", ");
-        let mut st = conn.prepare(&format!("INSERT INTO {t} ({}) VALUES ({marks})", names.join(", "))).map_err(err)?;
-        // The spatial index is filled here; its triggers (which call functions only GeoPackage
-        // software defines) are created after.
-        let mut index =
-            if has_geom { Some(conn.prepare(&format!("INSERT INTO {rt} VALUES (?1, ?2, ?3, ?4, ?5)")).map_err(err)?) } else { None };
-        for f in &ds.features {
-            let mut row: Vec<Sql> = Vec::with_capacity(names.len());
-            row.push(if keep_ids { i64::try_from(f.id).map(Sql::Integer).unwrap_or(Sql::Null) } else { Sql::Null });
-            if has_geom {
-                row.push(f.geometry.as_ref().map(|x| Sql::Blob(blob(x, multi_points, srs_id))).unwrap_or(Sql::Null));
+    Ok(Layout {
+        table,
+        geom,
+        columns,
+        fields: fields.to_vec(),
+        has_geom,
+        multi_points,
+        geom_type,
+        srs_id,
+        table_q: t,
+        geom_q: g,
+        fid_q: i,
+        rtree_q: rt,
+    })
+}
+
+/// What a streamed export found it must start again for, having chosen from the features so far.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Redo {
+    /// A multipoint in a POINT table: the table is MULTIPOINT.
+    MultiPoints,
+    /// An id that doesn't fit or is taken: SQLite numbers every row.
+    Renumber,
+}
+
+/// Inserts features into the table [`create`] made, and their boxes into its spatial index.
+/// With `keep_ids` each keeps its id; otherwise SQLite numbers it. Stops at the first feature
+/// the table as made can't hold as the whole layer would have it (a multipoint in a POINT
+/// table, an id that doesn't fit or is taken), saying what to [`Redo`].
+fn insert(conn: &Connection, layout: &Layout, features: &[crate::Feature], keep_ids: bool) -> Result<Option<Redo>> {
+    use rusqlite::types::Value as Sql;
+    let Layout { columns, fields, has_geom, multi_points, srs_id, table_q: t, geom_q: g, fid_q: i, rtree_q: rt, .. } = layout;
+    let (has_geom, multi_points, srs_id) = (*has_geom, *multi_points, *srs_id);
+    let names: Vec<String> =
+        std::iter::once(i.clone()).chain(has_geom.then(|| g.clone())).chain(columns.iter().map(|c| quote(c))).collect();
+    let marks = vec!["?"; names.len()].join(", ");
+    let mut st = conn.prepare_cached(&format!("INSERT INTO {t} ({}) VALUES ({marks})", names.join(", "))).map_err(err)?;
+    // The spatial index is filled here; its triggers (which call functions only GeoPackage
+    // software defines) are created after.
+    let mut index =
+        if has_geom { Some(conn.prepare_cached(&format!("INSERT INTO {rt} VALUES (?1, ?2, ?3, ?4, ?5)")).map_err(err)?) } else { None };
+    for f in features {
+        if has_geom && !multi_points && matches!(f.geometry, Some(crate::Geometry::MultiPoint(_))) && layout.geom_type == "POINT" {
+            return Ok(Some(Redo::MultiPoints));
+        }
+        let id = if keep_ids {
+            match i64::try_from(f.id) {
+                Ok(id) => Sql::Integer(id),
+                Err(_) => return Ok(Some(Redo::Renumber)),
             }
-            for (k, fd) in ds.fields.iter().enumerate() {
-                row.push(sql_value(f.attrs.get(k).unwrap_or(&Value::Null), fd.ty));
+        } else {
+            Sql::Null
+        };
+        let mut row: Vec<Sql> = Vec::with_capacity(names.len());
+        row.push(id);
+        if has_geom {
+            row.push(f.geometry.as_ref().map(|x| Sql::Blob(blob(x, multi_points, srs_id))).unwrap_or(Sql::Null));
+        }
+        for (k, fd) in fields.iter().enumerate() {
+            row.push(sql_value(f.attrs.get(k).unwrap_or(&Value::Null), fd.ty));
+        }
+        match st.execute(params_from_iter(row)) {
+            Ok(_) => {}
+            // The id is taken: the table's only key.
+            Err(rusqlite::Error::SqliteFailure(e, _)) if keep_ids && e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY => {
+                return Ok(Some(Redo::Renumber));
             }
-            st.execute(params_from_iter(row)).map_err(err)?;
-            let e = f.geometry.as_ref().map(|x| x.extent()).unwrap_or(Extent::EMPTY);
-            if let (Some(ix), false) = (index.as_mut(), e.is_empty()) {
-                ix.execute(rusqlite::params![conn.last_insert_rowid(), e.min_x, e.max_x, e.min_y, e.max_y]).map_err(err)?;
-            }
+            Err(e) => return Err(err(e)),
+        }
+        let e = f.geometry.as_ref().map(|x| x.extent()).unwrap_or(Extent::EMPTY);
+        if let (Some(ix), false) = (index.as_mut(), e.is_empty()) {
+            ix.execute(rusqlite::params![conn.last_insert_rowid(), e.min_x, e.max_x, e.min_y, e.max_y]).map_err(err)?;
         }
     }
+    Ok(None)
+}
 
-    let e = ds.extent();
+/// Records the table in the GeoPackage's contents with its `extent`, adds the triggers that keep
+/// its spatial index in step with edits, and commits.
+fn finish(conn: &Connection, layout: &Layout, extent: Extent) -> Result<()> {
+    let Layout { table, geom, has_geom, geom_type, srs_id, table_q: t, geom_q: g, fid_q: i, rtree_q: rt, .. } = layout;
+    let (has_geom, srs_id) = (*has_geom, *srs_id);
+    let e = extent;
     let bounds: [Option<f64>; 4] = if e.is_empty() { [None; 4] } else { [Some(e.min_x), Some(e.min_y), Some(e.max_x), Some(e.max_y)] };
     let srs: Option<i64> = has_geom.then_some(i64::from(srs_id));
     conn.execute(

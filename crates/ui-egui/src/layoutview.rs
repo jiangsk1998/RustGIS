@@ -53,6 +53,10 @@ type Box4 = (f64, f64, f64, f64);
 pub struct LayoutView {
     texture: Option<egui::TextureHandle>,
     key: Option<(u64, usize, [usize; 2], i64, i64, i64)>,
+    /// The tile cache's generation the page was drawn at while a legend picture it shows was
+    /// still on its way (in the browser, which doesn't wait for them): drawn again once a fetch
+    /// lands.
+    legends_wait: Option<u64>,
     /// Page zoom (1 = fit) and pan, in screen points.
     zoom: f32,
     pan: egui::Vec2,
@@ -581,8 +585,13 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
     let dpi = (px_per_mm as f64 * 25.4).min(max_side / layout.width.max(layout.height) * 25.4).clamp(20.0, 300.0);
     let size = [(page.width() * ppp) as usize, (page.height() * ppp) as usize];
     let key = (app.session.revision, li, size, (dpi * 10.0) as i64, layout.width as i64, layout.height as i64);
-    if app.layout.key != Some(key) && size[0] > 2 && size[1] > 2 {
+    // Only once the pictures have: any other fetch landing (the map's tiles) bumps the generation.
+    let landed = app.layout.legends_wait.is_some_and(|g| g != rustgis_engine::render::rustgis_tiles::cache::generation())
+        && !rustgis_engine::render::layout::legends_pending(&layout, &app.session.project.maps);
+    if (app.layout.key != Some(key) || landed) && size[0] > 2 && size[1] > 2 {
         let info = page_info(app, li);
+        // Before drawing: a fetch landing while it draws is a reason to draw again.
+        let generation = rustgis_engine::render::rustgis_tiles::cache::generation();
         if let Some(pm) = rustgis_engine::render::layout::render(&layout, &mut app.session.project.maps, dpi, &info) {
             let img = egui::ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
             match &mut app.layout.texture {
@@ -590,7 +599,14 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
                 None => app.layout.texture = Some(ui.ctx().load_texture("layout", img, egui::TextureOptions::LINEAR)),
             }
             app.layout.key = Some(key);
+            // Natively the page waited for them already: drawn again, it would wait again.
+            app.layout.legends_wait = (cfg!(target_arch = "wasm32")
+                && rustgis_engine::render::layout::legends_pending(&layout, &app.session.project.maps))
+            .then_some(generation);
         }
+    }
+    if app.layout.legends_wait.is_some() {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
     }
     // A pan's preview is drawn as the pan starts, and let go when it ends.
     match app.layout.drag {
@@ -1251,7 +1267,9 @@ fn grid_properties(app: &mut RustGisApp, ui: &mut Ui, grid: Option<&Grid>, id: u
         ui.end_row();
         ui.label(tl!("Color"));
         let mut c = crate::theme::c32(g.color);
-        if crate::widgets::color_button(ui, &mut c).changed() {
+        let resp = crate::widgets::color_button(ui, &mut c);
+        if resp.changed() {
+            crate::widgets::one_step_per_press(app, &resp);
             set(app, json!({"color": crate::theme::rgba(c).hex()}));
         }
         ui.end_row();
@@ -1600,7 +1618,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         for (label, key, current) in [("Fill", "fill", *fill), ("Outline", "outline", *outline)] {
                             ui.label(tl!(label));
                             let mut c = crate::theme::c32(current);
-                            if crate::widgets::color_button(ui, &mut c).changed() {
+                            let resp = crate::widgets::color_button(ui, &mut c);
+                            if resp.changed() {
+                                crate::widgets::one_step_per_press(app, &resp);
                                 update(app, json!({key: crate::theme::rgba(c).hex()}));
                             }
                             ui.end_row();
@@ -1657,7 +1677,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         for (label, key, current) in [("Fill", "fill", *fill), ("Outline", "outline", *outline)] {
                             ui.label(tl!(label));
                             let mut c = crate::theme::c32(current);
-                            if crate::widgets::color_button(ui, &mut c).changed() {
+                            let resp = crate::widgets::color_button(ui, &mut c);
+                            if resp.changed() {
+                                crate::widgets::one_step_per_press(app, &resp);
                                 update(app, json!({key: crate::theme::rgba(c).hex()}));
                             }
                             ui.end_row();
@@ -1676,7 +1698,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                     ElementKind::Line { color, width, dir, head } => {
                         ui.label(tl!("Color"));
                         let mut c = crate::theme::c32(*color);
-                        if crate::widgets::color_button(ui, &mut c).changed() {
+                        let resp = crate::widgets::color_button(ui, &mut c);
+                        if resp.changed() {
+                            crate::widgets::one_step_per_press(app, &resp);
                             update(app, json!({"color": crate::theme::rgba(c).hex()}));
                         }
                         ui.end_row();
@@ -1751,7 +1775,8 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
         if settled.size {
             update(app, json!({"size": sz}));
         }
-        if settled.color {
+        if let Some(resp) = &settled.color {
+            crate::widgets::one_step_per_press(app, resp);
             update(app, json!({"color": crate::theme::rgba(c).hex()}));
         }
         if settled.bold {
@@ -1775,8 +1800,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             update(app, font);
         }
     }
-    // The layers a legend lists: a checkbox for each vector layer of its frame's map, ticked when
-    // listed. Names gone from the map drop out of the list as it's written back.
+    // The layers a legend lists: a checkbox for each vector layer of its frame's map and each
+    // WMS or WMTS layer with a legend, ticked when listed. Names gone from the map drop out of
+    // the list as it's written back.
     if let ElementKind::Legend { frame, exclude, .. } = &e.kind {
         let map = layout.element(*frame).and_then(|f| match &f.kind {
             ElementKind::MapFrame { map, .. } => app.session.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)),
@@ -1786,17 +1812,25 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             .map(|m| {
                 // Once each: layers may share a name, and the legend leaves names out.
                 let mut names: Vec<String> = Vec::new();
-                for l in m.layers.iter().filter(|l| !l.graphics && !l.is_raster()) {
-                    if !names.iter().any(|n| n.eq_ignore_ascii_case(&l.name)) {
-                        names.push(l.name.clone());
+                let listed = m.layers.iter().filter(|l| !l.graphics && !l.is_raster()).map(|l| &l.name);
+                for name in listed.chain(m.tiles.iter().filter(|t| !t.legends.is_empty()).map(|t| &t.name)) {
+                    if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                        names.push(name.clone());
                     }
                 }
                 names
             })
             .unwrap_or_default();
         // The names left out that the map still has, those not listed here (a raster's) too.
-        let kept: Vec<String> =
-            exclude.iter().filter(|x| map.is_some_and(|m| m.layers.iter().any(|l| l.name.eq_ignore_ascii_case(x)))).cloned().collect();
+        let kept: Vec<String> = exclude
+            .iter()
+            .filter(|x| {
+                map.is_some_and(|m| {
+                    m.layers.iter().map(|l| &l.name).chain(m.tiles.iter().map(|t| &t.name)).any(|n| n.eq_ignore_ascii_case(x))
+                })
+            })
+            .cloned()
+            .collect();
         if !names.is_empty() {
             ui.add_space(4.0);
             egui::CollapsingHeader::new(tl!("Layers")).id_salt(("legend_layers", id)).default_open(!exclude.is_empty()).show(ui, |ui| {
@@ -1829,7 +1863,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             egui::Grid::new(("indicator_props", id)).num_columns(2).show(ui, |ui| {
                 ui.label(tl!("Color"));
                 let mut c = crate::theme::c32(*extent_color);
-                if crate::widgets::color_button(ui, &mut c).changed() {
+                let resp = crate::widgets::color_button(ui, &mut c);
+                if resp.changed() {
+                    crate::widgets::one_step_per_press(app, &resp);
                     update(app, json!({"extentIndicator": {"color": crate::theme::rgba(c).hex()}}));
                 }
                 ui.end_row();
@@ -2651,6 +2687,57 @@ mod tests {
         let a = line_angle((e.x, e.y, e.w, e.h), dir, head);
         assert!(a > 10.0, "turned to {a}°");
         assert_eq!(h.state().session.undo_depth(), undo + 1, "one undo step");
+    }
+
+    /// A drag in the picker of a text's colour, in the shared text form, is one undo step (#1194).
+    #[test]
+    fn a_colour_drag_in_the_format_pane_is_one_undo_step() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        use rustgis_engine::map::layout::ElementKind;
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Colour"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let title = app.session.project.layouts[li].elements.iter().find(|e| e.name == "Title").unwrap().id;
+        app.layout.selected = Some(title);
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                with_format(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        let color = |app: &RustGisApp| match &app.session.project.layouts[li].element(title).unwrap().kind {
+            ElementKind::Text { color, .. } => *color,
+            kind => panic!("{kind:?}"),
+        };
+        let before = color(h.state());
+        let undo = h.state().session.undo_depth();
+        let pane_numbers = h.query_all_by_role(Role::SpinButton).count();
+        h.get_by_role(Role::ColorWell).click();
+        h.run();
+        // The picker's first number (red) follows the pane's own.
+        let at = h.query_all_by_role(Role::SpinButton).nth(pane_numbers).unwrap().rect().center();
+        h.hover_at(at);
+        h.drag_at(at);
+        h.step();
+        for dx in [16.0, 32.0, 48.0] {
+            h.hover_at(at + vec2(dx, 0.0));
+            h.step();
+            assert_ne!(color(h.state()), before, "the page follows the picker");
+            assert_eq!(h.state().session.undo_depth(), undo + 1, "one step however many frames");
+        }
+        h.drop_at(at + vec2(48.0, 0.0));
+        h.run();
+        assert_eq!(h.state().session.undo_depth(), undo + 1);
+        h.state_mut().run("edit.undo", json!(null)).unwrap();
+        assert_eq!(color(h.state()), before);
     }
 
     /// A layout's text has the shared text form (#516): the page's dynamic text as well as the

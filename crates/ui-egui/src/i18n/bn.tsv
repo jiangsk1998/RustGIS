@@ -14,11 +14,15 @@
 /T	/T
 00:00 UTC	00:00 UTC
 06:00 UTC	06:00 UTC
+0° crosses the line square	0° রেখাকে সমকোণে ছেদ করে
 12:00 UTC	12:00 UTC
+16 imported Zarr stores are already queued	16টি ইমপোর্ট করা Zarr store ইতিমধ্যে সারিতে আছে
 18:00 UTC	18:00 UTC
 3035, vn2000tm3	3035, vn2000tm3
 3D mesh	3D মেশ
 <None>	কোনোটিই নয়
+<null>	<null>
+A .geolibre project as a map	একটি .geolibre প্রজেক্ট মানচিত্র হিসেবে
 A .qgs or .qgz project as a map	একটি .qgs বা .qgz প্রজেক্ট মানচিত্র হিসেবে
 A 3D globe seen from space.	মহাকাশ থেকে দেখা একটি 3D পৃথিবী-গোলক।
 A blank map with a basemap	বেসম্যাপসহ একটি ফাঁকা মানচিত্র
@@ -26,19 +30,33 @@ A call for the rustgis Python package	rustgis Python প্যাকেজের
 A catalogue's (CSW 2.0.2) address: search its records by words and, if you like, the map's area, then add the services and files they link to.	একটি ক্যাটালগের (CSW 2.0.2) ঠিকানা: শব্দ দিয়ে এর রেকর্ড খুঁজুন, চাইলে মানচিত্রের এলাকার ভিত্তিতেও খুঁজুন, তারপর লিঙ্ক করা সার্ভিস ও ফাইল যোগ করুন।
 A ChatGPT plan or app usage limit was reached. Review Weekly usage before trying again.	ChatGPT প্ল্যান বা অ্যাপ ব্যবহারের সীমা পূর্ণ হয়েছে। আবার চেষ্টা করার আগে Weekly usage দেখুন।
 A ChatGPT sign-in can only be used with the OpenAI API.	ChatGPT সাইন-ইন শুধু OpenAI API-এর সঙ্গে ব্যবহার করা যায়।
+A colour, hatch lines, markers on a grid, a gradient, or a shapeburst (shaded from the edge inwards)	একটি রং, হ্যাচ রেখা, গ্রিডে মার্কার, একটি গ্রেডিয়েন্ট বা একটি শেপবার্স্ট (ধার থেকে ভেতরে ছায়াযুক্ত)
+A command id is required.	একটি কমান্ড আইডি প্রয়োজন।
 A connection has this name: give this one another name to remember its keys.	এই নামে একটি সংযোগ আছে: এর key মনে রাখতে এটিকে অন্য নাম দিন।
+A copy of {name} with unsaved changes was kept a minute ago.	অসংরক্ষিত পরিবর্তনসহ {name}-এর একটি কপি এক মিনিট আগে রাখা হয়েছিল।
+A copy of {name} with unsaved changes was kept less than a minute ago.	অসংরক্ষিত পরিবর্তনসহ {name}-এর একটি কপি এক মিনিটেরও কম আগে রাখা হয়েছিল।
+A copy of {name} with unsaved changes was kept {n} days ago.	অসংরক্ষিত পরিবর্তনসহ {name}-এর একটি কপি {n} দিন আগে রাখা হয়েছিল।
+A copy of {name} with unsaved changes was kept {n} hours ago.	অসংরক্ষিত পরিবর্তনসহ {name}-এর একটি কপি {n} ঘণ্টা আগে রাখা হয়েছিল।
+A copy of {name} with unsaved changes was kept {n} minutes ago.	অসংরক্ষিত পরিবর্তনসহ {name}-এর একটি কপি {n} মিনিট আগে রাখা হয়েছিল।
 A country's administrative boundaries from geoBoundaries (CC BY 4.0): the country itself (ADM0), its first-level divisions (ADM1, such as states) and finer ones.	geoBoundaries (CC BY 4.0) থেকে একটি দেশের প্রশাসনিক সীমানা: দেশটি নিজে (ADM0), এর প্রথম-স্তরের বিভাগ (ADM1, যেমন রাজ্য) এবং আরও সূক্ষ্ম বিভাগ।
 A custom stretch is in this raster's own units: pick another stretch type to save it as the default.	কাস্টম stretch এই raster-এর নিজস্ব এককে থাকে: ডিফল্ট হিসেবে সংরক্ষণ করতে অন্য stretch ধরন বেছে নিন।
+A data cube's trend needs its period: fill in From and To	Data cube-এর প্রবণতার জন্য সময়কাল দরকার: From ও To পূরণ করুন
+A date is missing between two commas	দুটি কমার মাঝে একটি তারিখ নেই
 A fast, free and open-source GIS written in pure Rust, for mapping, analyzing and sharing geospatial data on the desktop and in the browser.	ডেস্কটপ ও ব্রাউজারে ভৌগোলিক ডেটা মানচিত্রে দেখানো, বিশ্লেষণ ও শেয়ার করার জন্য Rust-এ লেখা দ্রুত, মুক্ত ও open-source GIS।
 A field (known once the model runs)	একটি ফিল্ড (মডেল চালানোর পর জানা যাবে)
 A flat scene centred on the view (azimuthal equidistant).	দৃশ্যকে কেন্দ্র করে সমতল দৃশ্য (azimuthal equidistant)।
 A GeoLens server's datasets, read as features (the first 1,000 of each).	GeoLens সার্ভারের ডেটাসেট, feature হিসেবে পড়া হয় (প্রতিটির প্রথম ১,০০০টি)।
 A globe scene.	একটি গ্লোব দৃশ্য।
 A hidden class leaves its features unlabelled.	লুকানো শ্রেণির ফিচারগুলোতে লেবেল দেখানো হয় না।
+A label along a line isn't moved.	রেখা বরাবর থাকা লেবেল সরানো হয় না।
+A label every so far along the line.	রেখা বরাবর নির্দিষ্ট দূরত্ব পরপর একটি লেবেল।
+A large serif title; the note, the locator and the legend in a column at the right.	একটি বড় সেরিফ শিরোনাম; নোট, লোকেটর ও লেজেন্ড ডানদিকের একটি কলামে।
 A latitude and longitude (40.7, -74.0 or 40°42'N 74°0'W), a layer, a bookmark or a value in a layer's table. Enter picks the highlighted row; Search places looks the text up as a place	অক্ষাংশ ও দ্রাঘিমাংশ (40.7, -74.0 অথবা 40°42'N 74°0'W), একটি layer, bookmark অথবা layer-এর টেবিলের কোনো মান। Enter চাপলে হাইলাইট করা সারি বেছে নেওয়া হয়; Search places লেখাটিকে স্থানের নাম হিসেবে খোঁজে
 A layer keeps at most {max} label classes besides Default.	ডিফল্ট ছাড়া একটি লেয়ারে সর্বোচ্চ {max}টি লেবেল শ্রেণি থাকতে পারে।
 A layer the model reads	মডেল যে layer পড়ে
+A line break wherever this occurs, left out (a space puts each word on its own line).	যেখানেই এটি থাকে সেখানে line break হয় এবং এটি বাদ যায় (একটি space প্রতিটি শব্দকে আলাদা লাইনে রাখে)।
 A line for the Script pane	Script প্যানেলের জন্য একটি লাইন
+A line, or markers or hash marks along it	একটি রেখা, অথবা তার বরাবর মার্কার বা হ্যাশ চিহ্ন
 A magnifying lens that follows the pointer.	পয়েন্টারকে অনুসরণ করে এমন একটি বিবর্ধক কাচ।
 A map, feature or coverage service's address: WMS, WMTS, WFS, WCS, OGC API Features or Tiles, or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer (or a services directory, to browse).	মানচিত্র, feature বা coverage সার্ভিসের ঠিকানা: WMS, WMTS, WFS, WCS, OGC API Features বা Tiles; অথবা ArcGIS FeatureServer, MapServer, ImageServer কিংবা VectorTileServer (ব্রাউজ করার জন্য service directory-ও হতে পারে)।
 a name, or owner/name such as giswqs/geospatial	একটি নাম, অথবা giswqs/geospatial-এর মতো owner/name
@@ -52,6 +70,7 @@ A place or an address	একটি স্থান বা ঠিকানা
 A previously saved key is still kept unencrypted in the app's preferences until it can be moved to the system keychain.	আগে সংরক্ষিত একটি key system keychain-এ সরানো না যাওয়া পর্যন্ত app-এর preference-এ এনক্রিপশন ছাড়া রাখা আছে।
 A project keeps at least one map	একটি প্রজেক্টে অন্তত একটি মানচিত্র থাকে
 A projected coordinate system.	একটি projected coordinate system।
+A rectangle behind the text.	টেক্সটের পেছনে একটি আয়তক্ষেত্র।
 A report listing the selected layer's records, page after page.	নির্বাচিত layer-এর রেকর্ড পৃষ্ঠা ধরে তালিকাভুক্ত করা একটি প্রতিবেদন।
 A result that only feeds other tools is removed once the model has run; add an output to keep it.	শুধু অন্য টুলে ইনপুট হিসেবে ব্যবহৃত ফলাফল মডেল চালানোর পর সরিয়ে ফেলা হয়; রাখতে চাইলে একটি output যোগ করুন।
 A result the model keeps, under a name	একটি নামের অধীনে মডেল যে ফলাফল সংরক্ষণ করে
@@ -63,8 +82,8 @@ A task holds at most 200 steps: stop recording to make it, then record the rest 
 A template with the first selected feature's values	প্রথম নির্বাচিত feature-এর মানসহ একটি template
 A tile layer per grid tile, each following the time slider through its dates.	গ্রিডের প্রতিটি tile-এর জন্য একটি tile layer, প্রতিটি তারিখে time slider-কে অনুসরণ করে।
 A tile service's address: raster tiles with {z}/{x}/{y} (or {-y}, {q}, {bbox-epsg-3857} for WMS), vector tiles (.pbf) or TileJSON, a MapLibre style, a PMTiles archive (a web address, or a file on this computer), or an MBTiles file on this computer.	tile service-এর ঠিকানা: {z}/{x}/{y} (WMS-এর জন্য {-y}, {q}, {bbox-epsg-3857}) দিয়ে raster tile, vector tile (.pbf), TileJSON, MapLibre style, PMTiles archive (ওয়েব ঠিকানা বা এই কম্পিউটারের ফাইল), অথবা এই কম্পিউটারের MBTiles ফাইল।
+A token for {server}	{server}-এর জন্য একটি token
 A token is set.	একটি token সেট করা আছে।
-A value, a field, or two of them joined by + − × ÷. Applies to the selected rows, or every row when none is selected.	একটি মান, একটি field, অথবা + − × ÷ দিয়ে যুক্ত দুটি মান। নির্বাচিত সারিতে প্রয়োগ হয়; কিছু নির্বাচিত না থাকলে সব সারিতে।
 a vector a pixel	প্রতি pixel-এ একটি vector
 a vector an image patch	একটি image patch-এর একটি vector
 A Zarr store (format 2 or 3) by its web address, with consolidated metadata, or a folder on this computer. A variable's map is read for the steps picked of its other dimensions, such as time.	ওয়েব ঠিকানা দিয়ে Zarr store (format 2 বা 3), consolidated metadata-সহ, অথবা এই কম্পিউটারের একটি folder। time-এর মতো অন্য dimension-এর নির্বাচিত ধাপগুলোর জন্য variable-এর মানচিত্র পড়া হয়।
@@ -96,6 +115,7 @@ Add a bar chart of a layer's numeric field.	একটি layer-এর সংখ�
 Add a circle.	একটি বৃত্ত যোগ করুন।
 Add a class with this one's field, text symbol, placement and range.	এই শ্রেণির ফিল্ড, পাঠ্য প্রতীক, অবস্থান নির্ধারণ ও পরিসর দিয়ে একটি শ্রেণি যোগ করুন।
 Add a colorbar of a raster layer's colour scale in the map frame.	মানচিত্রের frame-এ raster layer-এর রঙের স্কেলের colorbar যোগ করুন।
+Add a data file to the map.	মানচিত্রে একটি ডেটা ফাইল যোগ করুন।
 Add a description.	একটি বর্ণনা যোগ করুন।
 Add a field.	একটি field যোগ করুন।
 Add a file path	একটি ফাইলের path যোগ করুন
@@ -118,7 +138,7 @@ Add a second map frame first	প্রথমে দ্বিতীয় এক�
 Add a straight line.	একটি সরলরেখা যোগ করুন।
 Add a text element.	একটি text element যোগ করুন।
 Add a web basemap over the others instead of replacing them, to blend it with them. Click one that shows to take it off.	উপরে আরেকটি web basemap যোগ করুন, আগেরটিকে প্রতিস্থাপন না করে একসঙ্গে দেখানোর জন্য। এটি সরাতে দৃশ্যমান basemap-এ ক্লিক করুন।
-Add a Zarr variable first (Add Data › Zarr…).	প্রথমে একটি Zarr variable যোগ করুন (Add Data › Zarr…)।
+Add a Zarr variable first (Home › Add › Add Data › Zarr…).	প্রথমে একটি Zarr variable যোগ করুন (হোম › যোগ করুন › ডেটা যোগ করুন › Zarr…)।
 Add Administrative Boundaries	প্রশাসনিক সীমানা যোগ করুন
 Add an arrow. Turn it with the round handle above it, or set its angle in its properties.	একটি তীর যোগ করুন। উপরের গোল হাতল দিয়ে এটি ঘোরান, অথবা properties-এ কোণ নির্ধারণ করুন।
 Add an Earthdata Login token (Earthdata Login, above) to put NASA GeoTIFFs on the map.	মানচিত্রে NASA GeoTIFF দেখাতে Earthdata Login token (উপরে Earthdata Login) যোগ করুন।
@@ -141,11 +161,13 @@ Add Commands	কমান্ড যোগ করুন
 Add Data	ডেটা যোগ করুন
 Add Data (from file contents)	ডেটা যোগ করুন (ফাইলের বিষয়বস্তু থেকে)
 Add Data (from text)	ডেটা যোগ করুন (টেক্সট থেকে)
+Add data from another source or use a data-adding option.	অন্য উৎস থেকে ডেটা যোগ করুন বা ডেটা যোগ করার একটি বিকল্প ব্যবহার করুন।
 Add Data From Database	ডেটাবেস থেকে ডেটা যোগ করুন
 Add data from public web services and catalogs.	সর্বজনীন web service ও catalog থেকে ডেটা যোগ করুন।
 Add Data From SQL	SQL থেকে ডেটা যোগ করুন
 Add Data From URL	URL থেকে ডেটা যোগ করুন
 Add Data From URL…	URL থেকে ডেটা যোগ করুন…
+Add Data options	ডেটা যোগ করার বিকল্প
 Add Data Store…	Data Store যোগ করুন…
 Add Data…	ডেটা যোগ করুন…
 Add Delimited Text	Delimited Text যোগ করুন
@@ -158,13 +180,13 @@ Add field	field যোগ করুন
 Add field boundaries	কৃষিজমির সীমানা যোগ করুন
 Add field density	কৃষিজমির ঘনত্ব যোগ করুন
 Add Fields of the World	বিশ্বের কৃষিজমি যোগ করুন
+Add Fill	পূরণ যোগ করুন
 Add Folder	ফোল্ডার যোগ করুন
 Add Folder…	ফোল্ডার যোগ করুন…
 Add folder…	ফোল্ডার যোগ করুন…
 Add From Database	ডেটাবেস থেকে যোগ করুন
 Add From Service	Service থেকে যোগ করুন
 Add From Service…	Service থেকে যোগ করুন…
-Add GeoJSON, CSV or Shapefile data to the map.	মানচিত্রে GeoJSON, CSV বা Shapefile ডেটা যোগ করুন।
 Add Graphic	গ্রাফিক যোগ করুন
 Add Graphics Layer	Graphics layer যোগ করুন
 Add Input	Input যোগ করুন
@@ -172,6 +194,7 @@ Add Job	Job যোগ করুন
 Add Keyframe	Keyframe যোগ করুন
 Add Label Class	Label class যোগ করুন
 Add Layer File	Layer file যোগ করুন
+Add Mark	মার্ক যোগ করুন
 Add Open Data	Open Data যোগ করুন
 Add Output	Output যোগ করুন
 Add Overture Maps Data	Overture Maps ডেটা যোগ করুন
@@ -181,8 +204,10 @@ Add pages, layouts, related reports and related records to the report.	report-�
 Add Photos	ছবি যোগ করুন
 Add Plugin Folder…	Plugin folder যোগ করুন…
 Add points	বিন্দু যোগ করুন
+Add PostGIS Layer	PostGIS layer যোগ করুন
 Add raster tiles, vector tiles or a map style by address.	ঠিকানা দিয়ে raster tile, vector tile বা map style যোগ করুন।
 Add Rule	নিয়ম যোগ করুন
+Add rule	নিয়ম যোগ করুন
 Add sample countries	নমুনা দেশ যোগ করুন
 Add Sample Data	নমুনা ডেটা যোগ করুন
 Add Satellite Embeddings	Satellite Embeddings যোগ করুন
@@ -192,6 +217,7 @@ Add skill…	skill যোগ করুন…
 Add STAC Asset	STAC Asset যোগ করুন
 Add STAC Data Cube	STAC Data Cube যোগ করুন
 Add STAC Footprints	STAC Footprints যোগ করুন
+Add statistic	পরিসংখ্যান যোগ করুন
 Add Step	ধাপ যোগ করুন
 Add Stroke	Stroke যোগ করুন
 Add Style	Style যোগ করুন
@@ -201,7 +227,6 @@ Add Text	টেক্সট যোগ করুন
 Add text that updates: page, date, scale, map and more.	পৃষ্ঠার নম্বর, তারিখ, স্কেল, মানচিত্র এবং আরও তথ্য আপডেট হয় এমন টেক্সট যোগ করুন।
 Add the attribute table of a layer in the map frame.	map frame-এ একটি layer-এর attribute table যোগ করুন।
 Add the current view as a keyframe.	বর্তমান view-কে keyframe হিসেবে যোগ করুন।
-Add the maps of a map file, map package, project or project package.	map file, map package, project বা project package-এর মানচিত্র যোগ করুন।
 Add The National Map Service	The National Map Service যোগ করুন
 Add this GeoTIFF to the map	এই GeoTIFF মানচিত্রে যোগ করুন
 Add this MCP server to your agent:	আপনার agent-এ এই MCP server যোগ করুন:
@@ -210,13 +235,16 @@ Add Tile Layer…	Tile layer যোগ করুন…
 Add To Current Selection	বর্তমান নির্বাচনে যোগ করুন
 Add to Favourites	প্রিয়তে যোগ করুন
 Add to Map	মানচিত্রে যোগ করুন
-Add vector data.	vector ডেটা যোগ করুন।
+Add to Time Slider	Time slider-এ যোগ করুন
 Add view	view যোগ করুন
 Add With Options…	বিকল্পসহ যোগ করুন…
 Add Zarr Variable	Zarr variable যোগ করুন
 Add Zarr Variable…	Zarr variable যোগ করুন…
+Add {language}	{language} যোগ করুন
+Add {n}	{n} যোগ করুন
 Add ▾	যোগ করুন ▾
 Added	যোগ করা হয়েছে
+Added from {start} to {end}: the time slider steps through it	{start} থেকে {end} পর্যন্ত যোগ করা হয়েছে: time slider এর মধ্য দিয়ে ধাপে ধাপে চলে
 Added Overture's {theme} as map tiles ({release}; some themes show only zoomed in): {attribution}	Overture-এর {theme} map tile হিসেবে যোগ করা হয়েছে ({release}; কিছু theme শুধু zoom করলে দেখা যায়): {attribution}
 Added {name}	{name} যোগ করা হয়েছে
 Added {p} points, {l} lines and {g} polygons	{p}টি বিন্দু, {l}টি লাইন এবং {g}টি polygon যোগ করা হয়েছে
@@ -226,6 +254,10 @@ Additional surrounds.	অতিরিক্ত পারিপার্শ্ব
 Address	ঠিকানা
 Address fields	ঠিকানার field
 Adds geodesic area (km²), length (km) or centroid coordinates as fields.	geodesic area (km²), দৈর্ঘ্য (km) অথবা centroid-এর স্থানাঙ্ক field হিসেবে যোগ করে।
+Adds the cube where the map is, following the time slider through its dates	মানচিত্র যেখানে আছে সেখানে cube যোগ করে, প্রতিটি তারিখে time slider-কে অনুসরণ করে
+Adds the distance to the nearest feature of another layer, its id and the nearest point on it.	অন্য layer-এর নিকটতম feature পর্যন্ত দূরত্ব, তার id এবং তার ওপর নিকটতম বিন্দু যোগ করে।
+Adds the whole cube, following the time slider through its dates	পুরো cube যোগ করে, প্রতিটি তারিখে time slider-কে অনুসরণ করে
+Add…	যোগ করুন…
 ADM0	ADM0
 ADM0 — the country	ADM0 — দেশ
 ADM1	ADM1
@@ -273,6 +305,10 @@ Allow this agent's RustGIS action?	এই agent-এর RustGIS action অনু�
 Along lines	রেখা বরাবর
 Along Selected Line	নির্বাচিত লাইন বরাবর
 Alt+	Alt+
+Alt+Shift+ArrowDown	Alt+Shift+ArrowDown
+Alt+Shift+ArrowLeft	Alt+Shift+ArrowLeft
+Alt+Shift+ArrowRight	Alt+Shift+ArrowRight
+Alt+Shift+ArrowUp	Alt+Shift+ArrowUp
 Alternating bar	বিকল্প বার
 Altitude	উচ্চতা
 Always allow	সব সময় অনুমতি দিন
@@ -280,6 +316,7 @@ Amazon S3	Amazon S3
 Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	endpoint-এর মাধ্যমে Amazon S3 বা S3-সামঞ্জস্যপূর্ণ সার্ভিস (MinIO, Cloudflare R2, Wasabi…)। RustGIS বন্ধ হওয়া পর্যন্ত key রাখা হয়; সংরক্ষিত connection-এ নাম, endpoint ও region থাকে, গোপন key নয়।
 amenity=cafe, shop	amenity=cafe, shop
 An agent on this computer asks to:	এই কম্পিউটারের একজন agent অনুমতি চাইছে:
+An ArcGIS Online organization's or an ArcGIS Enterprise portal's address; ArcGIS Online when blank	একটি ArcGIS Online organization বা ArcGIS Enterprise পোর্টালের ঠিকানা; ফাঁকা থাকলে ArcGIS Online
 An AWS profile	একটি AWS profile
 Analysis	বিশ্লেষণ
 Analyze	বিশ্লেষণ করুন
@@ -289,10 +326,12 @@ AND	AND
 Angle	কোণ
 Animated GIF	অ্যানিমেটেড GIF
 Animation	অ্যানিমেশন
+Another dropped file wasn't opened: drop it again once you've answered about the unsaved changes.	ছেড়ে দেওয়া আরেকটি ফাইল খোলা হয়নি: অসংরক্ষিত পরিবর্তন সম্পর্কে উত্তর দেওয়ার পর সেটি আবার ছাড়ুন।
 Another run is under way.	অন্য একটি কাজ ইতিমধ্যে চলছে।
 Any	যেকোনো
 anywhere in the records	রেকর্ডের যেকোনো স্থানে
 API key	API কী
+Appends vector layers of the same geometry type into a new layer, optionally combining their attributes.	একই জ্যামিতির vector layer-গুলো একটি নতুন layer-এ যুক্ত করে, চাইলে তাদের attribute একত্র করে।
 Apply	প্রয়োগ করুন
 Apply a function to a raster	raster-এ একটি function প্রয়োগ করুন
 Apply Control Points	Control Point প্রয়োগ করুন
@@ -307,6 +346,8 @@ ArcGIS Hub	ArcGIS Hub
 ArcGIS Portal	ArcGIS পোর্টাল
 ArcGIS Portal…	ArcGIS পোর্টাল…
 ArcGIS REST	ArcGIS REST
+ArcGIS Sign-In Status	ArcGIS সাইন-ইন অবস্থা
+ArcGIS token	ArcGIS token
 Archive	আর্কাইভ
 Archive History	আর্কাইভের ইতিহাস
 Archiving	আর্কাইভ করা হচ্ছে
@@ -317,19 +358,28 @@ Area of use: within {r}° of the {lon}° meridian	ব্যবহারের �
 Area of use: within {r}° of {lon}°, {lat}°	ব্যবহারের এলাকা: {lon}°, {lat}° বিন্দুর {r}°-এর মধ্যে
 Area {area}   ·   Perimeter {perimeter}	ক্ষেত্রফল {area}   ·   পরিসীমা {perimeter}
 Areas (name, land use, area)	এলাকা (নাম, ভূমি ব্যবহার, ক্ষেত্রফল)
+Arithmetic Progression	সমান্তর প্রগতি
 Arrange	সাজান
+Arrange Element	Element সাজান
 Arrow	তীর
 Arrowheads	তীরের মাথা
 Ask a question about your data, or describe what to do with the map. The assistant runs RustGIS commands for you; every change can be undone.	আপনার ডেটা সম্পর্কে প্রশ্ন করুন, অথবা মানচিত্রে কী করতে হবে তা বলুন। Assistant আপনার হয়ে RustGIS কমান্ড চালায়; প্রতিটি পরিবর্তন ফিরিয়ে নেওয়া যায়।
 Ask about the map, or tell it what to do…	মানচিত্র সম্পর্কে জিজ্ঞেস করুন, অথবা কী করতে হবে বলুন…
 Ask about your data, or tell the assistant what to do with the map.	আপনার ডেটা সম্পর্কে জিজ্ঞেস করুন, অথবা মানচিত্রে কী করতে হবে assistant-কে বলুন।
+Ask Which Layers to Add	কোন layer যোগ হবে জিজ্ঞাসা করুন
 Asking NASA's CMR…	NASA CMR-কে জিজ্ঞেস করা হচ্ছে…
 Asking the catalog…	ক্যাটালগে খোঁজা হচ্ছে…
+Asking the map service…	Map service-কে জিজ্ঞাসা করা হচ্ছে…
 Asking the NLDI…	NLDI-কে জিজ্ঞেস করা হচ্ছে…
 Asset	Asset
+Assign Escape	Escape নির্ধারণ করুন
 Assistant settings	Assistant-এর সেটিংস
+At both ends	দুই প্রান্তে
+At inner vertices	ভেতরের ভার্টেক্সে
+At intervals	নির্দিষ্ট ব্যবধানে
 At the end	শেষে
 At the start	শুরুতে
+At vertices	ভার্টেক্সে
 Atlas	অ্যাটলাস
 Attachments	সংযুক্তি
 Attribute\nTable	অ্যাট্রিবিউট\nটেবিল
@@ -344,10 +394,14 @@ Auto-complete (2 clicks)	স্বয়ংক্রিয় পূরণ (২ 
 Auto-complete Profile	স্বয়ংক্রিয় পূরণের profile
 Autofill Fields	Field স্বয়ংক্রিয়ভাবে পূরণ করুন
 Automatic	স্বয়ংক্রিয়
-Automatic (m or km)	স্বয়ংক্রিয় (m বা km)
+Automatic (mm to km)	স্বয়ংক্রিয় (mm থেকে km)
 Automatic (system language)	স্বয়ংক্রিয় (সিস্টেমের ভাষা)
 Automatic (system time zone and region)	স্বয়ংক্রিয় (সিস্টেমের সময় অঞ্চল ও অঞ্চল)
 Automatic ({kind})	স্বয়ংক্রিয় ({kind})
+Autosave	স্বয়ংক্রিয় সংরক্ষণ
+Autosave couldn't keep a recovery copy: {error}	স্বয়ংক্রিয় সংরক্ষণ পুনরুদ্ধার কপি রাখতে পারেনি: {error}
+autosave failed unexpectedly; it goes on with the next copy	স্বয়ংক্রিয় সংরক্ষণ অপ্রত্যাশিতভাবে ব্যর্থ হয়েছে; পরবর্তী কপিতে এটি চলতে থাকবে
+autosave needs the desktop app	স্বয়ংক্রিয় সংরক্ষণের জন্য desktop app দরকার
 Avoid	এড়িয়ে যান
 AWS, anonymous	AWS, বেনামি
 Azimuth	আজিমুথ
@@ -356,6 +410,7 @@ Back to the Map	মানচিত্রে ফিরে যান
 Back to the map	মানচিত্রে ফিরে যান
 Back to tools	টুলে ফিরে যান
 Backdrop	পটভূমি
+Background	পটভূমি
 Band	ব্যান্ড
 Band Combination	ব্যান্ডের সমন্বয়
 Band must be a positive integer, list of bands, or 'all'.	Band অবশ্যই একটি ধনাত্মক পূর্ণসংখ্যা, band-এর তালিকা অথবা 'all' হতে হবে।
@@ -363,6 +418,7 @@ Band values at a point	একটি বিন্দুতে ব্যান্�
 Band {n}	ব্যান্ড {n}
 Bands	ব্যান্ডসমূহ
 Bands: blue green red NIR SWIR	ব্যান্ড: নীল সবুজ লাল NIR SWIR
+Banner	ব্যানার
 Basemap	বেসম্যাপ
 Basemaps	বেসম্যাপসমূহ
 Basin from hydrolocation	হাইড্রোলোকেশন থেকে অববাহিকা
@@ -379,6 +435,7 @@ Bike	সাইকেল
 Bilinear	দ্বিরৈখিক
 Bind To Time Slider	সময় স্লাইডারের সঙ্গে যুক্ত করুন
 Bind to Time Slider	সময় স্লাইডারের সঙ্গে যুক্ত করুন
+Bindings: {bindings} · Conflicts: {conflicts} · Unknown commands: {unknown}	বাইন্ডিং: {bindings} · দ্বন্দ্ব: {conflicts} · অজানা কমান্ড: {unknown}
 Blank	ফাঁকা
 Blank for Amazon S3	Amazon S3-এর জন্য ফাঁকা
 Blank Letter page	ফাঁকা Letter পৃষ্ঠা
@@ -387,6 +444,7 @@ Blank Page	ফাঁকা পৃষ্ঠা
 Blend: {mode}	মিশ্রণ: {mode}
 Block Feature Selection	Feature নির্বাচন আটকে দিন
 Blue	নীল
+Blur	ঝাপসা
 Bold	গাঢ়
 Bold label text.	গাঢ় label text।
 Bookmark Description	Bookmark-এর বর্ণনা
@@ -399,19 +457,20 @@ Boundaries…	সীমানা…
 Bounding\nGeometry	সীমানা নির্ধারণের\nজ্যামিতি
 Brightness	উজ্জ্বলতা
 Brightness, contrast, saturation and sepia for the whole map.	পুরো মানচিত্রের উজ্জ্বলতা, contrast, saturation ও sepia।
+Bring Forward	এক ধাপ সামনে আনুন
 Bring this bookmark's map into view to update it	এই bookmark-এর মানচিত্রটি দেখান, যাতে এটি আপডেট করা যায়
+Bring to Front	সবার সামনে আনুন
 Browse	ব্রাউজ করুন
 Browse Connection	Connection ব্রাউজ করুন
 Browse it in the Browser	Browser-এ খুলে দেখুন
 Browse Plugins	Plugin ব্রাউজ করুন
-Browse the geoprocessing toolbox.	Geoprocessing toolbox ব্রাউজ করুন।
-Browse the project's maps, tables and folders.	প্রজেক্টের মানচিত্র, টেবিল ও ফোল্ডার ব্রাউজ করুন।
 Browse this folder below	নিচে এই ফোল্ডার ব্রাউজ করুন
 Browse with	যে অ্যাপ দিয়ে ব্রাউজ করবেন
 Browse, install, update and remove plugins.	Plugin ব্রাউজ, ইনস্টল, আপডেট ও অপসারণ করুন।
 Browser	ব্রাউজার
 Browser\nPane	Browser\nপ্যানেল
 Browser View	ব্রাউজার ভিউ
+Browse…	ব্রাউজ করুন…
 Bucket	বাকেট
 Bucket {bucket} at {endpoint}	{endpoint}-এ বাকেট {bucket}
 Buckets	Bucket-সমূহ
@@ -430,7 +489,12 @@ Bundle the project and its data into one file to share.	শেয়ার ক�
 Bundle the visible layers, with simplified geometry for phones and tablets.	দৃশ্যমান layer-গুলো মোবাইল ও ট্যাবলেটে ব্যবহারের উপযোগী সরলীকৃত geometry-সহ প্যাক করুন।
 By\nAttributes	\nঅ্যাট্রিবিউট অনুসারে
 By\nLocation	\nঅবস্থান অনুসারে
+By Coordinates	স্থানাঙ্ক দিয়ে
+By Coordinates…	স্থানাঙ্ক দিয়ে…
+By Expression	এক্সপ্রেশন দিয়ে
 By layer	Layer অনুযায়ী
+By Place or Address	স্থান বা ঠিকানা দিয়ে
+By Place or Address…	স্থান বা ঠিকানা দিয়ে…
 by {author}	{author}-এর
 By {field}	{field} অনুসারে
 cached tiles	cache করা tile
@@ -445,18 +509,22 @@ Calculate Geometry Attributes	জ্যামিতির অ্যাট্র�
 Calculate raster statistics per polygon	প্রতিটি polygon-এর জন্য raster পরিসংখ্যান গণনা করুন
 Calculate Statistics	পরিসংখ্যান গণনা করুন
 Calculated {rows} features	{rows}টি feature হিসাব করা হয়েছে
+Calculates a magnitude-per-unit-area surface from point features using a kernel function.	Kernel function ব্যবহার করে point feature থেকে প্রতি একক ক্ষেত্রফলের মানের একটি পৃষ্ঠ হিসাব করে।
 Calculates raster summary statistics for each polygon feature.	প্রতিটি polygon feature-এর জন্য raster-এর সারসংক্ষেপ পরিসংখ্যান গণনা করে।
 Calculation	হিসাব
 Camera	ক্যামেরা
 Camera Effect	ক্যামেরার প্রভাব
 Can't read this folder	এই ফোল্ডার পড়া যাচ্ছে না
 Cancel	বাতিল
+Cancel ArcGIS Sign-In	ArcGIS সাইন ইন বাতিল করুন
 Cancel Caching	Caching বাতিল করুন
 Cap	প্রান্ত-সংযোগ
 Capture To Clipboard	Clipboard-এ ক্যাপচার করুন
+Cards on a light page: the map, the locator and the legend each in one.	হালকা পৃষ্ঠায় কার্ড: মানচিত্র, লোকেটর ও লেজেন্ড একেকটি কার্ডে।
 CARGO_PKG_VERSION	CARGO_PKG_VERSION
 Cartography	কার্টোগ্রাফি
 Case Field	Case field
+Case Fields	কেস field
 Cast Shadow	ছায়া প্রক্ষেপণ করুন
 Catalog	ক্যাটালগ
 catalog is a static STAC catalog's catalog.json or collection.json	catalog হলো static STAC catalog-এর catalog.json বা collection.json
@@ -481,6 +549,8 @@ Change the map's backdrop.	মানচিত্রের পটভূমি প
 Change the map's coordinate system	মানচিত্রের coordinate system পরিবর্তন করুন
 Change the page size and orientation.	পৃষ্ঠার আকার ও অভিমুখ পরিবর্তন করুন।
 Change the project (add layers, edit features, change symbology)	প্রজেক্ট পরিবর্তন করুন (layer যোগ, feature সম্পাদনা, symbology পরিবর্তন)
+Changed rows	পরিবর্তিত সারি
+Character	অক্ষর
 Chart categories	Chart-এর category
 Chart Frame	Chart frame
 ChatGPT (sign in)	ChatGPT (সাইন ইন)
@@ -508,21 +578,27 @@ Choose a delimited text file or a spreadsheet, then pick its columns.	Delimited 
 Choose a destination	একটি গন্তব্য বেছে নিন
 Choose a field to apply this renderer:	এই renderer প্রয়োগ করতে একটি field বেছে নিন:
 choose a file first	আগে একটি ফাইল বেছে নিন
+Choose a GeoPackage layer	একটি GeoPackage layer বেছে নিন
+Choose a layer	একটি layer বেছে নিন
 Choose a layer…	একটি layer বেছে নিন…
 Choose a model.	একটি model বেছে নিন।
 Choose a resampling type for the raster layer.	raster layer-এর জন্য resampling-এর ধরন বেছে নিন।
 Choose a saved S3 connection before opening this source.	এই source খোলার আগে একটি সংরক্ষিত S3 সংযোগ বেছে নিন।
+Choose a shortcut file in the browser.	ব্রাউজারে একটি শর্টকাট ফাইল বেছে নিন।
 Choose a start	শুরুর স্থান বেছে নিন
 Choose a stop	শেষের স্থান বেছে নিন
+Choose a table to load for editing	সম্পাদনার জন্য লোড করতে একটি টেবিল বেছে নিন
 Choose a zipped Shapefile, or pick its .shp and .dbf together.	একটি zip করা Shapefile বেছে নিন, অথবা এর .shp ও .dbf একসাথে বেছে নিন।
 Choose an account	একটি account বেছে নিন
 Choose Connection	সংযোগ বেছে নিন
 Choose Connection…	সংযোগ বেছে নিন…
 Choose extra buttons for the Quick Access Toolbar.	Quick Access Toolbar-এর জন্য অতিরিক্ত বোতাম বেছে নিন।
 Choose File…	ফাইল বেছে নিন…
+Choose Folder…	ফোল্ডার বেছে নিন…
 Choose how the flat map lays out the Earth.	সমতল মানচিত্রে পৃথিবী কীভাবে উপস্থাপিত হবে তা বেছে নিন।
 Choose how the layer is drawn.	layer কীভাবে আঁকা হবে তা বেছে নিন।
 Choose how the raster is drawn.	raster কীভাবে আঁকা হবে তা বেছে নিন।
+Choose Layers	Layer বেছে নিন
 Choose polygon, lasso, or radius selection.	বহুভুজ, ল্যাসো বা ব্যাসার্ধ দিয়ে নির্বাচন বেছে নিন।
 Choose Project…	প্রজেক্ট বেছে নিন…
 Choose S3 Connection	S3 সংযোগ বেছে নিন
@@ -536,6 +612,7 @@ Choose which saved connection to use for this database. This choice lasts for th
 Choose which tabs the ribbon shows.	Ribbon-এ কোন tab দেখানো হবে তা বেছে নিন।
 Circle	বৃত্ত
 Circle Radius (km)	বৃত্তের ব্যাসার্ধ (km)
+Cities	শহর
 Class	শ্রেণি
 Class color	শ্রেণির রং
 Class Style	শ্রেণির style
@@ -543,6 +620,7 @@ Class {n}	শ্রেণি {n}
 Class {n} up to	শ্রেণি {n}, সর্বোচ্চ
 Classes	শ্রেণিসমূহ
 Classes from training polygons.	training polygon থেকে শ্রেণিসমূহ।
+Classic	ক্লাসিক
 Classic arrow	ক্লাসিক তীর
 Classification\nTools	শ্রেণিবিন্যাসের\nটুল
 Classification\nWizard	শ্রেণিবিন্যাসের\nউইজার্ড
@@ -562,6 +640,7 @@ Clear NLDI result	NLDI ফলাফল মুছুন
 Clear search	অনুসন্ধান মুছুন
 Clear Selection	নির্বাচন মুছুন
 Clear selection	নির্বাচন মুছুন
+Clear Session Log	সেশন লগ মুছে ফেলুন
 Clear the filter to reorder	পুনরায় সাজাতে filter মুছুন
 Clear the selection in every layer.	সব layer থেকে নির্বাচন মুছুন।
 Clear the selection.	নির্বাচন মুছুন।
@@ -598,6 +677,7 @@ Click to select the node	node নির্বাচন করতে ক্লি
 Click to select, double-click to add, right-click for more	নির্বাচন করতে একবার ক্লিক, যোগ করতে ডাবল-ক্লিক, আরও বিকল্পের জন্য ডান-ক্লিক
 Click to switch between decimal degrees and DMS	দশমিক ডিগ্রি ও DMS-এর মধ্যে বদলাতে ক্লিক করুন
 Click vertices · click the start or double-click to select · Shift adds · Ctrl/Cmd removes · Esc cancels	শীর্ষবিন্দুতে ক্লিক করুন · নির্বাচন করতে শুরুর বিন্দুতে ক্লিক বা ডাবল-ক্লিক করুন · Shift যোগ করে · Ctrl/Cmd সরায় · Esc বাতিল করে
+Client ID	Client ID
 Clip	ক্লিপ
 Clip a raster to the view, or resample it.	দৃশ্যমান অংশে raster clip করুন অথবা resample করুন।
 Clip Features	Feature clip করুন
@@ -606,6 +686,7 @@ Clip To Map View	মানচিত্রের দৃশ্যে clip কর�
 Clip To Polygon	Polygon অনুযায়ী clip করুন
 Clip to polygon layer	Polygon layer অনুযায়ী clip করুন
 Clipboard	ক্লিপবোর্ড
+Clips input features by each split polygon, writing one layer per split polygon or split field value.	প্রতিটি split polygon দিয়ে input feature clip করে, প্রতিটি split polygon বা split field-এর মানের জন্য একটি করে layer লেখে।
 Close	বন্ধ করুন
 Close (Esc)	বন্ধ করুন (Esc)
 Close All	সব বন্ধ করুন
@@ -614,6 +695,7 @@ Close ModelBuilder	ModelBuilder বন্ধ করুন
 Close Others	অন্যগুলো বন্ধ করুন
 Close Table	টেবিল বন্ধ করুন
 Close table	টেবিল বন্ধ করুন
+Close the connection that PostGIS layers loaded for editing save through.	সম্পাদনার জন্য লোড করা PostGIS layer যে সংযোগ দিয়ে সংরক্ষণ করে সেটি বন্ধ করুন।
 Close the layout and show the map.	layout বন্ধ করে মানচিত্র দেখান।
 Close the time slider (it stays on; Time Slider opens it again).	time slider বন্ধ করুন (এটি চালু থাকে; Time Slider আবার খুলবে)।
 Close thread	Thread বন্ধ করুন
@@ -638,6 +720,7 @@ Colors from the raster's own color table.	raster-এর নিজস্ব color
 Colour ramps (RustGIS, QGIS, GDAL, GMT)	রঙের র‍্যাম্প (RustGIS, QGIS, GDAL, GMT)
 Columns named like longitude/latitude, easting/northing or geometry are picked for you.	longitude/latitude, easting/northing অথবা geometry-র মতো নামযুক্ত column-গুলো স্বয়ংক্রিয়ভাবে বেছে নেওয়া হয়।
 Combinations from the box above, one per line	উপরের বাক্সের সমন্বয়গুলো, প্রতি লাইনে একটি
+Combines two polygon layers into every piece either covers, with the attributes of both where they overlap.	দুটি polygon layer-কে এমন সব টুকরোয় মেলায় যা যেকোনো একটি ঢাকে, যেখানে মিলে যায় সেখানে দুটিরই attribute রেখে।
 COMID {comid}	COMID {comid}
 Comma	কমা
 Comma-separated (optional)	কমা দিয়ে আলাদা করা (ঐচ্ছিক)
@@ -654,23 +737,26 @@ Compare	তুলনা করুন
 Compare two rasters	দুটি raster তুলনা করুন
 Compass rose	কম্পাসের গোলাপ
 Completed	সম্পন্ন
+Condition	শর্ত
 Confirm uninstall	আনইনস্টল নিশ্চিত করুন
 Conic, conformal: true shapes across a mid-latitude region; set its meridian and parallels to the region.	Conic, conformal: মধ্য অক্ষাংশের অঞ্চলে আকৃতি ঠিক থাকে; অঞ্চল অনুযায়ী meridian ও parallel নির্ধারণ করুন।
 Conic, equal-area: true sizes across a mid-latitude region; set its meridian and parallels to the region.	Conic, equal-area: মধ্য অক্ষাংশের অঞ্চলে আকার ঠিক থাকে; অঞ্চল অনুযায়ী meridian ও parallel নির্ধারণ করুন।
+Conical	শঙ্কু আকার
 Connect	সংযুক্ত করুন
-Connect a folder to the Browser.	Browser-এর সঙ্গে একটি folder সংযুক্ত করুন।
+Connect PostGIS	PostGIS সংযুক্ত করুন
 Connect to S3	S3-তে সংযুক্ত করুন
 Connect, or pick a layer	সংযুক্ত করুন, অথবা একটি layer বেছে নিন
+Connected for editing: {db}	সম্পাদনার জন্য সংযুক্ত: {db}
 Connected to {kind} {title}	{kind} {title}-এর সঙ্গে সংযুক্ত
 Connecting to {url}…	{url}-এ সংযোগ করা হচ্ছে…
 Connection	সংযোগ
 connection.new returned no id	connection.new কোনো ID ফেরত দেয়নি
 Connections	সংযোগসমূহ
 Connections you add are listed here	আপনি যে সংযোগ যোগ করেন সেগুলো এখানে তালিকাভুক্ত হবে
-Connections…	সংযোগ…
 Constant	ধ্রুবক
 Constant height	ধ্রুব উচ্চতা
 Constant…	ধ্রুবক…
+Content	বিষয়বস্তু
 Contingent Values	শর্তাধীন মান
 Continue	চালিয়ে যান
 Continue with ChatGPT	ChatGPT দিয়ে চালিয়ে যান
@@ -682,7 +768,6 @@ Convert a layer to another format	একটি layer-কে অন্য format-
 Convert the selected layer's labels into an annotation layer.	নির্বাচিত layer-এর label-গুলো annotation layer-এ রূপান্তর করুন।
 Convert this layer's labels into an annotation layer.	এই layer-এর label-গুলো annotation layer-এ রূপান্তর করুন।
 Convert To Annotation	Annotation-এ রূপান্তর করুন
-Convert to Annotation	Annotation-এ রূপান্তর করুন
 Converted data	রূপান্তরিত ডেটা
 Convert…	রূপান্তর করুন…
 Coordinate	স্থানাঙ্ক
@@ -717,6 +802,8 @@ Copy the selected features and delete them.	নির্বাচিত feature-
 Copy the selected layer's data source path.	নির্বাচিত layer-এর data source path কপি করুন।
 Copy this element (Ctrl+D, ⌘D on a Mac)	এই element কপি করুন (Ctrl+D, Mac-এ ⌘D)
 Copy this run as code, or open it in its tool	এই run-টি code হিসেবে কপি করুন, অথবা এর tool-এ খুলুন
+Copy, Cut and Paste keys cannot be reassigned.	কপি, কাটুন ও পেস্টের কী পুনরায় নির্ধারণ করা যায় না।
+Corner radius	কোণের ব্যাসার্ধ
 Corrections	সংশোধন
 Cost	খরচ
 could not draw the map	মানচিত্র আঁকা যায়নি
@@ -724,7 +811,7 @@ could not start the keychain worker	keychain worker চালু করা য�
 Couldn't check for updates: {error}	আপডেট পরীক্ষা করা যায়নি: {error}
 Couldn't download the font for {language}; pick the language again to retry.	{language}-এর font ডাউনলোড করা যায়নি; আবার চেষ্টা করতে ভাষাটি পুনরায় বেছে নিন।
 Couldn't load the plugin registry: {error}	Plugin registry লোড করা যায়নি: {error}
-Count, sum, mean, min, max and standard deviation of a field, optionally per case field.	একটি field-এর count, sum, mean, min, max ও standard deviation; চাইলে case field অনুযায়ী।
+Counterclockwise	ঘড়ির কাঁটার বিপরীতে
 Countries, cities, rivers and lakes	দেশ, শহর, নদী ও হ্রদ
 Country	দেশ
 Counts a layer's points by the A5 cell holding them (cells of equal area, so the count is a density), with a field's sum and mean.	A5 cell-এ থাকা বিন্দুর সংখ্যা layer অনুযায়ী গণনা করে (সমান ক্ষেত্রফলের cell হওয়ায় এটি density), সঙ্গে একটি field-এর sum ও mean।
@@ -743,6 +830,7 @@ Create Point	Point তৈরি করুন
 Create Polygon	Polygon তৈরি করুন
 Create Profile	Profile তৈরি করুন
 Create Thumbnail	Thumbnail তৈরি করুন
+Creates a point at each vertex of the input features.	Input feature-এর প্রতিটি ভার্টেক্সে একটি বিন্দু তৈরি করে।
 Creates a point inside each input feature.	প্রতিটি input feature-এর ভেতরে একটি বিন্দু তৈরি করে।
 Creates points from a table's x and y coordinate fields.	টেবিলের x ও y coordinate field থেকে বিন্দু তৈরি করে।
 Creates polygons around input features at a given distance.	নির্দিষ্ট দূরত্বে input feature-গুলোর চারপাশে polygon তৈরি করে।
@@ -763,6 +851,7 @@ Curved	বাঁকা
 Custom	কাস্টম
 Custom Min/Max	কাস্টম Min/Max
 Customize	কাস্টমাইজ করুন
+Customize keyboard shortcuts.	কীবোর্ড শর্টকাট কাস্টমাইজ করুন।
 Cut	কাটুন
 Cut a raster into web map tiles	raster-কে web map tile-এ কাটুন
 Cut a raster into web map tiles (XYZ PNG) with a viewer page.	viewer page-সহ raster-কে web map tile (XYZ PNG)-এ কাটুন।
@@ -773,6 +862,12 @@ Dash-dot	ড্যাশ-ডট
 Dashed	ড্যাশযুক্ত
 Data	ডেটা
 Data\nSources	ডেটা\nউৎস
+Data Cube Catalog	Data cube ক্যাটালগ
+Data cube: {name}, read whole	Data cube: {name}, পুরোটা পড়া
+Data cube: {name}, where the map is	Data cube: {name}, মানচিত্র যেখানে আছে
+Data Cubes	Data cube-সমূহ
+Data cubes ready to open: a series of images over time, with its collection, band and range filled in.	খোলার জন্য প্রস্তুত data cube: সময়ের সঙ্গে ছবির একটি ধারা, তার সংগ্রহ, ব্যান্ড ও পরিসর পূরণ করা।
+Data Cubes…	Data cube-সমূহ…
 Data Design	ডেটা ডিজাইন
 Data Engineering	ডেটা ইঞ্জিনিয়ারিং
 Data Interop	ডেটা আন্তঃকার্যক্ষমতা
@@ -780,7 +875,6 @@ Data Management	ডেটা ব্যবস্থাপনা
 Data privacy	ডেটার গোপনীয়তা
 Data Source	Data source
 Data Sources	Data source-সমূহ
-Data Sources Pane	ডেটা সোর্স প্যান
 Data Stores	Data store-সমূহ
 Data type	ডেটার ধরন
 Data you add is listed here	আপনি যে ডেটা যোগ করেন তা এখানে তালিকাভুক্ত হবে
@@ -791,7 +885,6 @@ databases are read through DuckDB, a program the browser can't run	DuckDB-এর
 Database…	ডেটাবেস…
 Dataset	ডেটাসেট
 Datasets on Hugging Face by name or owner/name; browse a dataset's files and add GeoTIFFs, GeoParquet, PMTiles, LiDAR and other files.	নাম বা owner/name দিয়ে Hugging Face-এ dataset খুঁজুন; dataset-এর file ব্রাউজ করে GeoTIFF, GeoParquet, PMTiles, LiDAR ও অন্যান্য file যোগ করুন।
-Data…	ডেটা…
 Date	তারিখ
 Dates	তারিখসমূহ
 Dates a cell needs	একটি cell-এর জন্য প্রয়োজনীয় তারিখ
@@ -836,9 +929,12 @@ Delete the layout {name}?	{name} layout মুছে ফেলবেন?
 Delete the map {name}?	{name} মানচিত্র মুছে ফেলবেন?
 Delete the selected features.	নির্বাচিত feature মুছুন।
 Delete the step	ধাপটি মুছুন
+Deleted rows	মুছে ফেলা সারি
 Delimited Text	বিভাজক-চিহ্নিত টেক্সট
 Delimited text and spreadsheets	Delimited text ও spreadsheet
 Delimited Text…	বিভাজক-চিহ্নিত টেক্সট…
+Delimiter	বিভাজক
+Density	ঘনত্ব
 Depth Priority	গভীরতার অগ্রাধিকার
 Descending	অবরোহী
 Describing	বর্ণনা করা হচ্ছে
@@ -863,9 +959,15 @@ Directions From Here	এখান থেকে দিকনির্দেশ
 Directions To Here	এখানে আসার দিকনির্দেশ
 Directions use an external routing server	দিকনির্দেশে বাহ্যিক routing server ব্যবহার করা হয়
 Discard	বাতিল করুন
+Discard GeoPackage Edits	GeoPackage edit বাতিল করুন
+Discard GeoPackage Edits…	GeoPackage edit বাতিল করুন…
+discard is true or false	discard হলো true বা false
+Discard PostGIS Edits	PostGIS edit বাতিল করুন
+Discard PostGIS Edits…	PostGIS edit বাতিল করুন…
 Discard unsaved changes to the current model?	বর্তমান model-এর অসংরক্ষিত পরিবর্তন বাতিল করবেন?
 Disconnect	সংযোগ বিচ্ছিন্ন করুন
 Disconnect From S3	S3 থেকে সংযোগ বিচ্ছিন্ন করুন
+Disconnect PostGIS	PostGIS সংযোগ বিচ্ছিন্ন করুন
 Display	প্রদর্শন
 Display Filters	প্রদর্শনের filter
 Display Filters ({n})	প্রদর্শনের filter ({n})
@@ -875,6 +977,8 @@ Dissolve Field	ডিসলভ ফিল্ড
 Distance	দূরত্ব
 Distance (km)	দূরত্ব (km)
 Distance Coefficient P	দূরত্ব সহগ P
+Distance Field	দূরত্ব field
+Distance Units	দূরত্বের একক
 Distance units	দূরত্বের একক
 Distances along the surface, heights, areas and volumes.	পৃষ্ঠ বরাবর দূরত্ব, উচ্চতা, ক্ষেত্রফল ও আয়তন।
 DISTINCT	DISTINCT
@@ -886,6 +990,7 @@ Do the exercise once: each command that changes the project becomes a step	এ�
 Do the step for me	আমার হয়ে ধাপটি করুন
 Documents	নথি
 Domains	ডোমেইন
+Don't Save	সংরক্ষণ করবেন না
 Done	সম্পন্ন
 Dotted	বিন্দুযুক্ত
 Double	ডাবল
@@ -929,15 +1034,21 @@ Drag to draw a rectangle.	আয়তক্ষেত্র আঁকতে ট�
 Drag to resize the message box	message box-এর আকার বদলাতে টানুন
 Drag tools from the palette onto the canvas.	palette থেকে canvas-এ tool টেনে আনুন।
 Drag vertices on the map; click an edge to add one	মানচিত্রে vertex টানুন; যোগ করতে edge-এ ক্লিক করুন
+Draw	আঁকুন
 Draw a halo around label text.	label text-এর চারপাশে halo আঁকুন।
 Draw a labelled latitude/longitude grid over the map frame.	map frame-এর ওপর অক্ষাংশ/দ্রাঘিমাংশের label-সহ grid আঁকুন।
 Draw a model: chain tools from input layers to the results to keep	একটি model আঁকুন: input layer থেকে সংরক্ষণযোগ্য ফলাফল পর্যন্ত tool-গুলো chain করুন
 Draw a model: chain tools from input layers to the results to keep.	একটি model আঁকুন: input layer থেকে সংরক্ষণযোগ্য ফলাফল পর্যন্ত tool-গুলো chain করুন।
+Draw as: {how}	যেভাবে আঁকা হবে: {how}
 Draw at its place in the stack, the bottom stroke first	stack-এ নির্ধারিত অবস্থানে আঁকুন, প্রথমে নিচের stroke
 Draw every feature's strokes of one level before the next, so casings join under the cores where lines meet	পরের স্তরে যাওয়ার আগে এক স্তরের সব feature-এর stroke আঁকুন, যাতে line মেলায় outline-এর নিচে core-গুলো যুক্ত হয়
+Draw it over every other element	এটি অন্য সব element-এর ওপরে আঁকুন
+Draw it over the element above it	এটি ওপরের element-এর ওপরে আঁকুন
+Draw it under every other element	এটি অন্য সব element-এর নিচে আঁকুন
+Draw it under the element below it	এটি নিচের element-এর নিচে আঁকুন
 Draw labels at every scale and distance.	প্রতিটি scale ও দূরত্বে label আঁকুন।
 Draw new features in the selected layer. Double-click to finish lines and polygons.	নির্বাচিত layer-এ নতুন feature আঁকুন। line ও polygon শেষ করতে ডাবল-ক্লিক করুন।
-Draw new single-band rasters with the inverted grey stretch again.	নতুন single-band raster-এ আবার উল্টানো ধূসর stretch ব্যবহার করুন।
+Draw new single-band rasters with the grey stretch again.	নতুন single-band raster-এ আবার ধূসর stretch ব্যবহার করুন।
 Draw only polygon outlines, keeping their colors and widths.	রং ও প্রস্থ অপরিবর্তিত রেখে শুধু polygon-এর outline আঁকুন।
 Draw points as bins coloured by how many fall in each.	প্রতিটি bin-এ পড়া বিন্দুর সংখ্যা অনুযায়ী রঙিন bin হিসেবে বিন্দু আঁকুন।
 Draw polygons as outlines only.	শুধু outline হিসেবে polygon আঁকুন।
@@ -957,6 +1068,7 @@ Drone and aerial imagery shared on OpenAerialMap, newest first, added as cloud-o
 Duplicate	নকল করুন
 Duplicate Connection	Connection নকল করুন
 Duplicate Element	Element নকল করুন
+Duplicate Keys	ডুপ্লিকেট কী
 Duplicate Layout	Layout নকল করুন
 Duplicate Map	Map নকল করুন
 Dusk	গোধূলি
@@ -967,7 +1079,7 @@ Dynamic range adjustment (stretch the pixels in view)	গতিশীল range a
 Dynamic range adjustment: stretch using the pixels in view.	গতিশীল range adjustment: দৃশ্যমান pixel ব্যবহার করে stretch করুন।
 Dynamical	গতিশীল
 Dynamical…	গতিশীল…
-e.g.  pop_est / 1000000   or   'Africa'   or   name	যেমন  pop_est / 1000000   অথবা   'Africa'   অথবা   name
+e.g.  pop_est / 1000000   or   upper(name) || ' ' || round(area, 1)	যেমন  pop_est / 1000000   বা   upper(name) || ' ' || round(area, 1)
 e.g. 0, 255, -9999	যেমন 0, 255, -9999
 e.g. continent = 'Europe'	যেমন continent = 'Europe'
 e.g. pop_est > 100000000 AND continent = 'Asia'	যেমন pop_est > 100000000 AND continent = 'Asia'
@@ -997,6 +1109,8 @@ Edit Attribute	অ্যাট্রিবিউট সম্পাদনা
 Edit Cell	Cell সম্পাদনা
 Edit Connection	Connection সম্পাদনা
 Edit Description	বর্ণনা সম্পাদনা
+Edit GeoPackage Table	GeoPackage টেবিল সম্পাদনা
+Edit GeoPackage Table…	GeoPackage টেবিল সম্পাদনা…
 Edit Graphic	Graphic সম্পাদনা
 Edit Status	সম্পাদনার অবস্থা
 Edit Steps	ধাপ সম্পাদনা
@@ -1005,12 +1119,14 @@ Edit Text…	টেক্সট সম্পাদনা…
 Edit the title and instructions	শিরোনাম ও নির্দেশনা সম্পাদনা করুন
 Edit Vertex	Vertex সম্পাদনা
 Edit Vertices	Vertex-গুলো সম্পাদনা
+Edit › Features	সম্পাদনা › Feature-সমূহ
 Editing	সম্পাদনা
 Editing on	সম্পাদনা চালু
 Editing Settings	সম্পাদনার সেটিংস
 Editing settings.	সম্পাদনার সেটিংস।
 Editor\nTools	সম্পাদনা\nটুল
 Editor Tools	সম্পাদনার টুল
+Editorial	সম্পাদকীয়
 Edits since the project was saved.	প্রজেক্ট সংরক্ষণের পর থেকে করা পরিবর্তন।
 Edits the project	প্রজেক্ট সম্পাদনা করে
 Edit…	সম্পাদনা…
@@ -1048,6 +1164,7 @@ EPSG code	EPSG কোড
 EPSG or ESRI code	EPSG বা ESRI code
 EPSG:	EPSG:
 EPSG:2263	EPSG:2263
+EPSG:25832, WKT or a PROJ string; empty: the map's when projected, else the UTM zone at the frame's centre.	EPSG:25832, WKT বা একটি PROJ string; ফাঁকা: projected হলে মানচিত্রেরটি, নইলে ফ্রেমের কেন্দ্রে থাকা UTM zone।
 EPSG:4326	EPSG:4326
 Equal	সমান
 Equal Earth	Equal Earth
@@ -1063,12 +1180,14 @@ Escape	Escape
 ESRI	ESRI
 ESRI:	ESRI:
 Europe Equal Area (ETRS89 LAEA)	Europe Equal Area (ETRS89 LAEA)
+every	প্রতি
 Every band's value at a pixel.	একটি pixel-এ প্রতিটি band-এর মান।
 Every editing tool.	প্রতিটি editing tool।
 Every label setting of this layer, in the Labeling pane.	Labeling pane-এ এই layer-এর সব label setting।
 Every layer, as FEMA draws them	FEMA যেভাবে আঁকে, সেভাবে প্রতিটি layer
 Every run, in order, as a script that opens the project	প্রজেক্ট খোলে এমন script হিসেবে প্রতিটি run, ক্রমানুসারে
 every Socrata site, or one such as data.cityofnewyork.us	সব Socrata site, অথবা data.cityofnewyork.us-এর মতো একটি site
+Every {n} min	প্রতি {n} মিনিটে
 Everywhere	সব জায়গায়
 Existing field	বিদ্যমান field
 Existing Template	বিদ্যমান template
@@ -1077,6 +1196,7 @@ exit roundabout	রাউন্ডঅ্যাবাউট থেকে বে�
 Expand Group	Group প্রসারিত করুন
 Expand Legend	Legend প্রসারিত করুন
 Expand the ribbon (Ctrl+F1)	Ribbon প্রসারিত করুন (Ctrl+F1)
+Expand Tile Legend	Tile legend প্রসারিত করুন
 Explode	বিস্ফোরিত করুন
 Exploratory 3D Analysis	অনুসন্ধানমূলক 3D বিশ্লেষণ
 Exploratory Analysis	অনুসন্ধানমূলক বিশ্লেষণ
@@ -1094,6 +1214,7 @@ Export Features	ফিচার রপ্তানি
 Export Features (tool)	ফিচার রপ্তানি (টুল)
 Export Features needs a vector layer (Data › Export Raster writes a raster)	Feature export-এর জন্য vector layer দরকার (Data › Export Raster raster লেখে)
 Export Features…	ফিচার রপ্তানি…
+Export Keyboard Shortcuts…	কীবোর্ড শর্টকাট রপ্তানি…
 Export Layout	লেআউট রপ্তানি
 Export Map	Map export
 Export Map failed unexpectedly	Map export অপ্রত্যাশিতভাবে ব্যর্থ হয়েছে
@@ -1107,6 +1228,7 @@ Export Raster	রাস্টার রপ্তানি
 Export Raster…	রাস্টার রপ্তানি…
 Export Report	প্রতিবেদন রপ্তানি
 Export Report…	প্রতিবেদন রপ্তানি…
+Export Session Log	সেশন লগ রপ্তানি
 Export Table	টেবিল রপ্তানি
 Export the animation as PNG frames (zip).	Animation-কে PNG frame (zip) হিসেবে export করুন।
 Export the layer.	Layer export করুন।
@@ -1124,6 +1246,8 @@ Export To 3D File	3D file-এ export
 Exported to {path}.	{path}-এ export করা হয়েছে।
 exporting animations needs the desktop app	animation export করতে desktop app দরকার
 exporting time animations needs the desktop app	সময়ভিত্তিক animation export করতে desktop app দরকার
+Exports a styled raster layer as Web Mercator PNG tiles in a PMTiles archive.	একটি styled raster layer-কে PMTiles আর্কাইভে Web Mercator PNG tile হিসেবে রপ্তানি করে।
+Exports a vector layer as a Web Mercator vector-tile PMTiles archive.	একটি vector layer-কে Web Mercator vector-tile PMTiles আর্কাইভ হিসেবে রপ্তানি করে।
 Export…	রপ্তানি…
 Expression	এক্সপ্রেশন
 Extent	ভৌগোলিক বিস্তার
@@ -1138,6 +1262,7 @@ Face Culling	ফেস কালিং
 Faces	Face
 Factor	গুণক
 Failed	ব্যর্থ
+Fallback	ফলব্যাক
 FALSE	FALSE
 Farthest	সবচেয়ে দূরের
 Faster drawing: no antialiasing.	দ্রুত আঁকা: antialiasing নেই।
@@ -1148,9 +1273,11 @@ Feature\nAnalysis	Feature\nবিশ্লেষণ
 Feature\nTo Point	Feature থেকে\nPoint
 Feature Cache	ফিচার ক্যাশ
 Feature Layer	ফিচার লেয়ার
+Feature layers: ask the service only for the features that cross the map's view	Feature layer: service-এর কাছে শুধু মানচিত্রের view ছেদকারী feature চাওয়া হবে
 Feature Templates	ফিচার টেমপ্লেট
 Feature templates: default values for new features.	Feature template: নতুন feature-এর ডিফল্ট মান।
 Feature To Point	Feature থেকে Point
+Feature Vertices To Points	Feature-এর ভার্টেক্স থেকে Point
 featured products	বিশেষভাবে প্রদর্শিত পণ্য
 Features	Feature-সমূহ
 Features most like the selected one	নির্বাচিতটির সঙ্গে সবচেয়ে মিল আছে এমন feature
@@ -1165,6 +1292,7 @@ Field	ফিল্ড
 field * 2, 'text', a + b	field * 2, 'text', a + b
 Field boundaries	কৃষিজমির সীমানা
 Field density	কৃষিজমির ঘনত্ব
+Field is missing from this input.	এই input-এ field নেই।
 Field name	Field-এর নাম
 Field Prefix	ফিল্ড প্রিফিক্স
 Field to Sum and Average	যোগ ও গড় করার field
@@ -1174,6 +1302,7 @@ Fields colored by score, drawn from zoom 9	স্কোর অনুসারে
 Fields of the World	Fields of the World
 Fields of the World…	Fields of the World…
 fields, comma separated	field, কমা দিয়ে আলাদা
+Fields, numbers, 'text', + - * / % ^, || to join text, comparisons, CASE and functions such as round(), upper(), if() or scale_linear(). Applies to the selected rows, or every row when none is selected.	Field, সংখ্যা, 'text', + - * / % ^, টেক্সট জোড়ার জন্য ||, তুলনা, CASE এবং round(), upper(), if() বা scale_linear() এর মতো function। নির্বাচিত সারিতে প্রয়োগ হয়, কিছু নির্বাচিত না থাকলে সব সারিতে।
 Fields, statistics, groups, pictures, attachments and charts in the report.	report-এ field, পরিসংখ্যান, group, ছবি, সংযুক্তি ও chart।
 Fields:	Field:
 File	ফাইল
@@ -1185,14 +1314,17 @@ file path	ফাইলের path
 Files ({n})	ফাইল ({n})
 Fill	পূরণ
 Fill Cache	Cache পূরণ করুন
+Fill Layers	পূরণ layer
 Fill the cache whenever the projection changes.	projection বদলালেই cache পূরণ করুন।
+Fill {n}	পূরণ {n}
+Fills	পূরণসমূহ
+Fills for	পূরণসমূহ:
 Film grain	ফিল্ম গ্রেইন
 Filter	ফিল্টার
 Filter bookmarks	Bookmark filter করুন
 Filter layers	Layer filter করুন
 Filter rows…	সারি filter করুন…
-Find a place by coordinates.	স্থানাঙ্ক দিয়ে কোনো স্থান খুঁজুন।
-Find a place or an address by name (OpenStreetMap).	নাম দিয়ে কোনো স্থান বা ঠিকানা খুঁজুন (OpenStreetMap)।
+Find a place by coordinates, name, or address.	স্থানাঙ্ক, নাম বা ঠিকানা দিয়ে কোনো স্থান খুঁজুন।
 Find and run geoprocessing tools.	Geoprocessing tool খুঁজুন ও চালান।
 Find any command by name (Ctrl+K).	নাম দিয়ে যেকোনো command খুঁজুন (Ctrl+K)।
 Find Items	Item খুঁজুন
@@ -1201,8 +1333,11 @@ Find plugins in the RustGIS plugin registry.	RustGIS plugin registry-তে plug
 Find Similar	সদৃশ খুঁজুন
 Find Tools	Tool খুঁজুন
 Finding routes…	Route খোঁজা হচ্ছে…
+Finish File Export	ফাইল রপ্তানি শেষ করুন
 Finish Polygon	Polygon শেষ করুন
 Finish Profile	Profile শেষ করুন
+Finish signing in in the browser…	Browser-এ সাইন ইন শেষ করুন…
+Finish signing in in the pop-up window…	Pop-up window-তে সাইন ইন শেষ করুন…
 Finish Tool Run	Tool চালানো শেষ করুন
 Finished: {tool}	সম্পন্ন: {tool}
 Firewall	ফায়ারওয়াল
@@ -1228,6 +1363,8 @@ Folder…	ফোল্ডার…
 Follow the time slider	Time slider অনুসরণ করুন
 Font	ফন্ট
 for a store that doesn't say	যে store এটি উল্লেখ করে না তার জন্য
+For ArcGIS Online, the client ID is RustGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	ArcGIS Online-এর জন্য client ID হলো RustGIS-এর নিজস্ব app। ArcGIS Enterprise পোর্টালের জন্য সেখানে একটি OAuth app নিবন্ধন করুন (Content › New item › Developer credentials), যার redirect URL হবে {redirect}, এবং তার client ID দিন।
+for the layers that change with time, as they list their times (2024-06-01, 1995)	সময়ের সঙ্গে বদলানো layer-এর জন্য, যেভাবে তারা তাদের সময় তালিকাভুক্ত করে (2024-06-01, 1995)
 Forest	বন
 Forget Earthdata Login Token	Earthdata Login token ভুলে যান
 Forget Saved Keys	সংরক্ষিত key ভুলে যান
@@ -1246,6 +1383,7 @@ From Service…	Service থেকে…
 From symbol	প্রতীক থেকে
 From the address	ঠিকানা থেকে
 from the address	ঠিকানা থেকে
+from the names	নাম থেকে
 from the service	service থেকে
 From URL…	URL থেকে…
 Full Extent	সম্পূর্ণ extent
@@ -1256,6 +1394,7 @@ Function	ফাংশন
 Function Editor	ফাংশন এডিটর
 Gamma	Gamma
 Gemini stopped the reply ({reason}).	Gemini উত্তর থামিয়েছে ({reason})।
+General	সাধারণ
 Generalization	সাধারণীকরণ
 Generate a token	Token তৈরি করুন
 geoBoundaries listed no countries: type a country's code	geoBoundaries কোনো দেশ দেখায়নি: একটি দেশের code লিখুন
@@ -1272,11 +1411,15 @@ GeoJSON, CSV, GeoParquet, FlatGeobuf, GeoPackage, zipped Shapefiles, KML, GPX or
 GeoLens	GeoLens
 GeoLens…	GeoLens…
 GeoLibre	GeoLibre
+GeoLibre project	GeoLibre প্রজেক্ট
+GeoLibre Project…	GeoLibre প্রজেক্ট…
 GeoLibre Tools	GeoLibre টুলস
 Geometric Interval	জ্যামিতিক interval
 Geometry	জ্যামিতি
 Geometry lost during import cannot be recovered here. Use Import Original File to choose its coordinate system before reading it. Streamed layers must first be loaded into memory.	ইমপোর্টের সময় হারানো geometry এখানে পুনরুদ্ধার করা যায় না। পড়ার আগে এর স্থানাঙ্ক ব্যবস্থা বেছে নিতে মূল file ইমপোর্ট ব্যবহার করুন। Stream করা layer আগে memory-তে load করতে হবে।
 GeoPackage	GeoPackage
+GeoPackage Edits	GeoPackage edit
+GeoPackage tables are edited in the desktop app	GeoPackage টেবিল desktop app-এ সম্পাদনা করা হয়
 GeoParquet	GeoParquet
 Geoprocessing	জিওপ্রসেসিং
 Geoprocessing history.	Geoprocessing-এর ইতিহাস।
@@ -1289,7 +1432,9 @@ GitHub	GitHub
 GitHub's latest release has no version number	GitHub-এর সর্বশেষ release-এ version number নেই
 GitHub's reply isn't a release	GitHub-এর উত্তর কোনো release নয়
 GitHub's reply names no release	GitHub-এর উত্তর কোনো release-এর নাম উল্লেখ করে না
+Give a valid tile archive index.	একটি বৈধ tile archive index দিন।
 Give a Zarr store's address or folder	Zarr store-এর address বা folder দিন
+Give both ends of the period, or neither	সময়কালের দুই প্রান্তই দিন, অথবা কোনোটিই নয়
 Give the catalogue's web address	catalog-এর web address দিন
 Give the file's web address	ফাইলের web address দিন
 Give the service's web address	service-এর web address দিন
@@ -1307,13 +1452,13 @@ Go to Date	তারিখে যান
 Go To Map Link	Map link-এ যান
 Go to the first step.	প্রথম ধাপে যান।
 Go to the last step.	শেষ ধাপে যান।
-Go To XY	XY-তে যান
 Go to {coordinate}	{coordinate}-এ যান
 Google Gemini	Google Gemini
 Got it	বুঝেছি
 GPU	GPU
 GPU\nRendering	GPU\nরেন্ডারিং
 GPX	GPX
+Gradient	গ্রেডিয়েন্ট
 Graduated Colors	ধাপভিত্তিক রং
 Granules	দানা
 Graphic Style	গ্রাফিক স্টাইল
@@ -1337,10 +1482,15 @@ Groups	Group-সমূহ
 Guided analysis: suitability, visibility, networks, interpolation and more.	নির্দেশিত বিশ্লেষণ: উপযোগিতা, দৃশ্যমানতা, নেটওয়ার্ক, interpolation এবং আরও অনেক কিছু।
 Guides	গাইডসমূহ
 Halo	হ্যালো
+Halo color	হ্যালোর রং
+Halo width	হ্যালোর প্রস্থ
 Harbour (qualitative)	বন্দর (গুণগত)
+Hash marks	হ্যাশ চিহ্ন
+Hatch lines	হ্যাচ রেখা
 Hazards	বিপদ
 Haze	ধোঁয়াশা
 Haze, fog, rain or snow over the map.	মানচিত্রের ওপর ধোঁয়াশা, কুয়াশা, বৃষ্টি বা তুষার।
+Head/Tail Breaks	Head/Tail Breaks
 Height	উচ্চতা
 Height (mm)	উচ্চতা (mm)
 Help	সহায়তা
@@ -1352,7 +1502,10 @@ Hide Group	Group লুকান
 Hide labels when the viewer is closer than this.	দর্শক এর চেয়ে কাছে এলে label লুকান।
 Hide labels when the viewer is farther than this.	দর্শক এর চেয়ে দূরে গেলে label লুকান।
 Hide Layers	Layer লুকান
+Hide legend	লেজেন্ড লুকান
+Hide legend and source layers	লেজেন্ড ও source layer লুকান
 Hide other values	অন্য মান লুকান
+Hide source layers	Source layer লুকান
 Hide Steps	ধাপ লুকান
 Hide the description	বর্ণনা লুকান
 Hide values (no data)	মান লুকান (NoData)
@@ -1369,18 +1522,19 @@ Hold	স্থগিত করুন
 HOME	হোম
 Home	হোম
 Home › Add	হোম › যোগ করুন
-Home › Add Data	হোম › ডেটা যোগ করুন
+Home › Add › Add Data	হোম › যোগ করুন › ডেটা যোগ করুন
+Home › Add › Web Data	হোম › যোগ করুন › ওয়েব ডেটা
+Home › Add › Web Data › United States	হোম › যোগ করুন › ওয়েব ডেটা › যুক্তরাষ্ট্র
 Home › Inspect › Measure	হোম › পরিদর্শন › পরিমাপ
 Home › Navigate	হোম › নেভিগেট
 Home › Navigate › Bookmarks	হোম › নেভিগেট › বুকমার্ক
-Home › Web Data	হোম › ওয়েব ডেটা
-Home › Web Data › United States	হোম › ওয়েব ডেটা › যুক্তরাষ্ট্র
 Homepage	হোমপেজ
 Horizontal	অনুভূমিক
 host=localhost dbname=gis user=postgres	host=localhost dbname=gis user=postgres
 host=… dbname=… user=…	host=… dbname=… user=…
 Hosted Imagery	হোস্টেড ইমেজারি
 Hour	ঘণ্টা
+How often RustGIS keeps a copy of unsaved work, to offer it back after a crash.	Crash-এর পরে ফেরত দিতে RustGIS কত ঘন ঘন অসংরক্ষিত কাজের একটি কপি রাখবে।
 How the layer's colours combine with the tile layers and basemap beneath.	layer-এর রং নিচের tile layer ও basemap-এর সঙ্গে কীভাবে মিশবে।
 How the layer's colours combine with what's beneath.	layer-এর রং নিচের বিষয়বস্তুর সঙ্গে কীভাবে মিশবে।
 HUB Ocean's Ocean Data Platform: marine datasets, read as features (up to 10,000 each).	HUB Ocean-এর Ocean Data Platform: সামুদ্রিক dataset feature হিসেবে পড়া হয় (প্রতিটিতে সর্বোচ্চ ১০,০০০টি)।
@@ -1391,12 +1545,16 @@ Hydrography	হাইড্রোগ্রাফি
 Icechunk only, not read yet	শুধু Icechunk, এখনো পড়া হয়নি
 Id: {id}	ID: {id}
 Identify	শনাক্ত করুন
+Identify WMS Layer	WMS layer শনাক্ত করুন
+Identity	আইডেন্টিটি
+Identity Features	আইডেন্টিটি feature
 Idle	নিষ্ক্রিয়
 IDW\nInterpolation	IDW\nইন্টারপোলেশন
 IDW Interpolation	IDW ইন্টারপোলেশন
 IGN LiDAR HD	IGN LiDAR HD
 IGN LiDAR HD…	IGN LiDAR HD…
 IGN's LiDAR HD point clouds of France: 1 km tiles where the map is, added as COPC point clouds.	ফ্রান্সের IGN-এর LiDAR HD point cloud: মানচিত্রের এলাকার জন্য ১ km tile, COPC point cloud হিসেবে যোগ করা হয়।
+Ignore holes	ফাঁকা অংশ উপেক্ষা করুন
 Illumination	আলোকায়ন
 Image Analysis	ছবি বিশ্লেষণ
 Image Classification	ছবি শ্রেণিবিন্যাস
@@ -1408,11 +1566,13 @@ ImageServer	ImageServer
 Image…	ছবি…
 Imperial	ইম্পেরিয়াল
 Import	ইমপোর্ট
-Import\nProject	\nপ্রজেক্ট ইমপোর্ট
 Import All	সব ইমপোর্ট করুন
 Import Bookmarks	বুকমার্ক ইমপোর্ট
 Import Bookmarks…	বুকমার্ক ইমপোর্ট…
 Import Deep Learning Package	Deep Learning package ইমপোর্ট
+Import GeoLibre Project	GeoLibre প্রজেক্ট ইমপোর্ট
+Import Keyboard Shortcuts	কীবোর্ড শর্টকাট ইমপোর্ট
+Import Keyboard Shortcuts…	কীবোর্ড শর্টকাট ইমপোর্ট…
 Import Layout	Layout ইমপোর্ট
 Import Layout…	Layout ইমপোর্ট…
 Import Model	Model ইমপোর্ট
@@ -1431,16 +1591,24 @@ Import Styles From…	এখান থেকে style ইমপোর্ট ক�
 Import Task	Task ইমপোর্ট
 Import Task…	Task ইমপোর্ট…
 Import Thumbnail	Thumbnail ইমপোর্ট
+Imported bindings replace conflicting keys. Unknown commands are kept for later use.	ইমপোর্ট করা বাইন্ডিং দ্বন্দ্বপূর্ণ কী প্রতিস্থাপন করে। অজানা কমান্ড পরবর্তী ব্যবহারের জন্য রাখা হয়।
+Imported Zarr slice exceeds the 128 MiB download limit	ইমপোর্ট করা Zarr slice 128 MiB ডাউনলোড সীমা ছাড়িয়ে গেছে
 Import…	ইমপোর্ট…
 IN	IN
 In Beyond	নির্ধারিত সীমার বাইরে
+In degrees.	ডিগ্রিতে।
 In memory	মেমরিতে
 In Progress	চলমান
 in progress	চলমান
 In project	প্রজেক্টে
 In RustGIS, it can:	RustGIS-এ এটি পারে:
 In the browser, pick the .shp and .dbf together, with any sidecars, or pick a ZIP. The override applies to every Shapefile in the ZIP.	Browser-এ .shp ও .dbf একসাথে, সঙ্গের sidecar file-সহ বেছে নিন, অথবা একটি ZIP বেছে নিন। এই override ZIP-এর প্রতিটি Shapefile-এ প্রযোজ্য।
+In the coordinate system's units: metres for UTM.	স্থানাঙ্ক ব্যবস্থার এককে: UTM-এর জন্য মিটার।
+In the middle	মাঝখানে
 In use	ব্যবহৃত হচ্ছে
+Indent	ভেতরে সরান
+Indent Group	Group ভেতরে সরান
+Indent Layer	Layer ভেতরে সরান
 Indexes	Index
 Indices	সূচক
 Infographics	ইনফোগ্রাফিক
@@ -1449,6 +1617,7 @@ INPUT	ইনপুট
 Input	ইনপুট
 Input Features	ইনপুট feature
 Input Layer	ইনপুট layer
+Input Layers	ইনপুট layer
 Input Points	ইনপুট point
 Input Polygons	ইনপুট polygon
 Input Raster	ইনপুট raster
@@ -1483,10 +1652,15 @@ Interpolates a raster surface from feature values by inverse distance weighting,
 Interpolation	ইন্টারপোলেশন
 Interpolation Attribute	ইন্টারপোলেশন অ্যাট্রিবিউট
 Interpret the layer's native coordinates in this coordinate system. This changes where it draws; the source file is unchanged.	Layer-এর নিজস্ব স্থানাঙ্ক এই স্থানাঙ্ক ব্যবস্থায় ব্যাখ্যা করুন। এতে এটি কোথায় আঁকা হয় তা বদলায়; উৎস file অপরিবর্তিত থাকে।
+Intersect	ইন্টারসেক্ট
 Interval	ব্যবধান
+Into the group just above it, as its last item	ঠিক ওপরের group-এর ভেতরে, শেষ item হিসেবে
 invalid child id	child process-এর ID অবৈধ
+Invalid or reserved shortcut key.	শর্টকাট কী অবৈধ বা সংরক্ষিত।
 Invalid selection outline · draw a smaller area	নির্বাচনের সীমানা অবৈধ · আরও ছোট এলাকা আঁকুন
 Invalid selection outline · draw a smaller radius	নির্বাচনের সীমানা অবৈধ · আরও ছোট ব্যাসার্ধ আঁকুন
+Invalid shortcut binding.	শর্টকাট বাইন্ডিং অবৈধ।
+Invalid shortcut key.	শর্টকাট কী অবৈধ।
 Invalid: {error}	অবৈধ: {error}
 Invert	উল্টান
 Invert color scheme	রঙের scheme উল্টান
@@ -1494,32 +1668,42 @@ Invert the selection.	নির্বাচন উল্টে দিন।
 IS	IS
 IS NULL	IS NULL
 it connects to an address on the internet	ইন্টারনেটের কোনো ঠিকানায় সংযোগ করে
+It didn't open: {error}	এটি খোলেনি: {error}
 It has no code: nothing in it runs.	এতে কোনো code নেই: এর ভেতরে কিছুই চলে না।
 It is locked, or one of its surrounds is: unlock it first	এটি অথবা এর কোনো পারিপার্শ্বিক উপাদান locked; আগে unlock করুন
+It is remembered on this computer.	এই কম্পিউটারে এটি মনে রাখা হয়।
 it is reserved to you (plugins, scripts, tasks, models and the GeoLibre runner)	এটি আপনার জন্য সংরক্ষিত (plugin, script, task, model ও GeoLibre runner)
 it needs input: open it from its pane or button, or run it from a script or the assistant	এটির input দরকার: pane বা button থেকে খুলুন, অথবা script বা assistant থেকে চালান
+It opens unsaved; saving replaces {file}.	এটি অসংরক্ষিত অবস্থায় খোলে; সংরক্ষণ করলে {file} প্রতিস্থাপিত হবে।
 it reads or writes files on this computer	এটি এই কম্পিউটারে ফাইল পড়ে বা লেখে
 it replaces the open project	এটি খোলা প্রজেক্ট প্রতিস্থাপন করে
 it runs a plugin's command	এটি plugin-এর command চালায়
 It runs in a sandbox with no other access to your computer or the network.	এটি sandbox-এ চলে; আপনার কম্পিউটার বা নেটওয়ার্কে অন্য কোনো অ্যাক্সেস নেই।
 It runs: {program}	এটি চালায়: {program}
+It was never saved: it opens unsaved, and Save asks where to write it.	এটি কখনো সংরক্ষিত হয়নি: এটি অসংরক্ষিত অবস্থায় খোলে, এবং সংরক্ষণ জিজ্ঞাসা করবে কোথায় লিখতে হবে।
 It's in the Symbology pane, open on the step's layer.	এটি Symbology pane-এ, ধাপটির layer-এ খোলা।
 It's installed but turned off: turn it on in the Plugin Manager.	এটি ইনস্টল আছে কিন্তু বন্ধ: Plugin Manager-এ চালু করুন।
 It's too large to keep in the browser: install it again on your next visit.	এটি browser-এ রাখার জন্য অনেক বড়: পরেরবার আসলে আবার ইনস্টল করুন।
 Italic	ইটালিক
 Item Pop-ups	Item pop-up
 Item {id}	আইটেম {id}
+its default	এর ডিফল্ট
+Its default: {default}. Its times: {times}	এর ডিফল্ট: {default}। এর সময়: {times}
 Its firewall ({firewall}) blocked RustGIS. The service may only allow some applications: contact its administrator and send them the details below.	এর firewall ({firewall}) RustGIS-কে আটকেছে। service হয়তো শুধু কিছু application অনুমোদন করে: administrator-এর সঙ্গে যোগাযোগ করে নিচের বিবরণ পাঠান।
 Its tool isn't available now (a plugin's, not loaded, or a suite's, not installed)	এর tool এখন পাওয়া যাচ্ছে না (plugin-এরটি লোড হয়নি অথবা suite ইনস্টল নেই)
 Jobs	Job-সমূহ
 JOIN	JOIN
 Join	জয়েন
 Join Features	ফিচার জয়েন
+Join Field	জয়েন field
 Join Operation	জয়েন অপারেশন
+Joins	জয়েন
 Joins attributes from a join layer to a target layer based on their spatial relationship.	স্থানিক সম্পর্কের ভিত্তিতে join layer-এর attribute target layer-এ যুক্ত করে।
+Joins attributes from a source table or layer to a target layer or table based on matching key values.	মিলে যাওয়া key মানের ভিত্তিতে source table বা layer-এর attribute target layer বা table-এ যুক্ত করে।
 Journal figure, 1 column (90 mm)	জার্নাল চিত্র, ১ কলাম (৯০ mm)
 Journal figure, 1.5 columns (140 mm)	জার্নাল চিত্র, ১.৫ কলাম (১৪০ mm)
 Journal figure, 2 columns (190 mm)	জার্নাল চিত্র, ২ কলাম (১৯০ mm)
+JSON value	JSON মান
 Keep a history of every edit to the layer, to look back or restore.	পরে পর্যালোচনা বা পুনরুদ্ধারের জন্য layer-এর প্রতিটি edit-এর ইতিহাস রাখুন।
 Keep an archive of edits	Edit-এর archive রাখুন
 keep current	বর্তমানটি রাখুন
@@ -1534,8 +1718,14 @@ Keep this result	এই ফলাফল রাখুন
 Keep Tool	Tool রাখুন
 Keep value	মান রাখুন
 Keeps the access key ID and secret access key in this computer's credential store, never in the connection or the project.	Access key ID ও গোপন access key এই কম্পিউটারের credential store-এ রাখে, কখনো সংযোগ বা প্রজেক্টে নয়।
+Keeps the parts of two polygon layers that only one of them covers, with that layer's attributes.	দুটি polygon layer-এর যে অংশ শুধু একটি ঢাকে সেগুলো রাখে, সেই layer-এর attribute সহ।
+Keeps the token in the system's credential store, so it is there when RustGIS starts again. Unticked, a token remembered before is deleted when you save another.	Token সিস্টেমের credential store-এ রাখে, যাতে RustGIS আবার শুরু হলে এটি থাকে। টিক না দিলে, আগে মনে রাখা token অন্যটি সংরক্ষণ করলে মুছে যায়।
+Kernel Density	কার্নেল ঘনত্ব
+Kernel Type	কার্নেলের ধরন
 Key	কী
+Keyboard\nShortcuts	কীবোর্ড\nশর্টকাট
 Keyboard Shortcuts	কীবোর্ড শর্টকাট
+Keyboard shortcuts	কীবোর্ড শর্টকাট
 Keyboard shortcuts.	কীবোর্ড শর্টকাট।
 Keys are available for this session but were not remembered on this computer.	Key এই সেশনে পাওয়া যাচ্ছে, কিন্তু এই কম্পিউটারে মনে রাখা হয়নি।
 Keys are kept for this session only: there is no credential store to remember them in here.	Key শুধু এই সেশনের জন্য রাখা হয়: এখানে মনে রাখার মতো কোনো credential store নেই।
@@ -1564,7 +1754,6 @@ Labels	Label
 labels are drawn for feature layers, not rasters	label raster-এ নয়, feature layer-এ আঁকা হয়
 Labels are drawn for feature layers, not rasters.	Label raster-এ নয়, feature layer-এ আঁকা হয়।
 Labels are off for this layer: the clause applies once they are on.	এই layer-এর label বন্ধ আছে: চালু করলে clause প্রয়োগ হবে।
-Labels of the classes listed first are placed first when they compete for room.	জায়গার জন্য প্রতিযোগিতা হলে তালিকার প্রথম দিকের শ্রেণির লেবেল আগে বসানো হয়।
 Lagoon	লেগুন
 Lambert Conformal Conic	Lambert Conformal Conic
 Lambert Cylindrical Equal Area	Lambert Cylindrical Equal Area
@@ -1576,6 +1765,7 @@ Last agent call failed: {call} ({secs} s ago)	সর্বশেষ agent call �
 Last agent call: {call} ({secs} s ago)	সর্বশেষ agent call: {call} ({secs} সেকেন্ড আগে)
 Last map render time	মানচিত্র render-এর সর্বশেষ সময়
 Last Project	সর্বশেষ প্রজেক্ট
+Later	পরে
 Latitude	অক্ষাংশ
 Latitude (Y)	অক্ষাংশ (Y)
 Lay the nodes out along the flow	প্রবাহ বরাবর node-গুলো সাজান
@@ -1607,6 +1797,7 @@ Leave the keys blank to log in with the keys saved on this computer, or type oth
 Left	বামে
 Legend	লেজেন্ড
 Legend label. Clear it to show the value again.	Legend label। মানটি আবার দেখাতে এটি মুছুন।
+Length	দৈর্ঘ্য
 Length {length} · gain {gain} · loss {loss}	দৈর্ঘ্য {length} · উত্থান {gain} · পতন {loss}
 Let the assistant hand tasks to agents on this computer	এই কম্পিউটারের agent-দের assistant দিয়ে task দেওয়ার অনুমতি দিন
 Let your Agents Control RustGIS	আপনার agent-দের RustGIS নিয়ন্ত্রণ করতে দিন
@@ -1624,6 +1815,7 @@ Limit where tools work, and the cell size of new rasters.	tool কোথায�
 Limit which features draw with a SQL expression.	SQL expression দিয়ে আঁকা feature সীমিত করুন।
 Limits	সীমা
 Line	রেখা
+Line alignment	রেখা সারিবদ্ধকরণ
 Line color	Line-এর রং
 Line Of Sight	দৃষ্টিরেখা
 Line of sight between two points	দুটি বিন্দুর মধ্যকার দৃষ্টিরেখা
@@ -1631,8 +1823,10 @@ Line Of Sight From Here	এখান থেকে দৃষ্টিরেখা
 Line Strokes	Line stroke
 Line width	Line-এর প্রস্থ
 Line {n} isn't four numbers (column row lon lat)	Line {n}-এ চারটি সংখ্যা নেই (column row lon lat)
+Linear	রৈখিক
 Lines	Line-সমূহ
 Lines and ticks	Line ও tick
+Lines longer than this are broken between their words.	এর চেয়ে লম্বা লাইন শব্দের মাঝে ভাঙা হয়।
 LineString	LineString
 Link	লিংক
 Link Cursors	কার্সর লিংক করুন
@@ -1648,8 +1842,10 @@ List Connections	Connection তালিকাভুক্ত করুন
 List Data Sources	Data source তালিকাভুক্ত করুন
 List Database Columns	Database-এর column তালিকাভুক্ত করুন
 List Database Tables	Database table তালিকাভুক্ত করুন
+List Datasets	Dataset তালিকা করুন
 List geoBoundaries Countries	geoBoundaries-এর দেশ তালিকাভুক্ত করুন
 List Layers in File	ফাইলে থাকা layer তালিকাভুক্ত করুন
+List PostGIS Tables	PostGIS table তালিকাভুক্ত করুন
 List Products	পণ্য তালিকাভুক্ত করুন
 List S3 Bucket	S3 bucket তালিকাভুক্ত করুন
 List Source Cooperative Files	Source Cooperative-এর file তালিকাভুক্ত করুন
@@ -1661,18 +1857,27 @@ List the provider's models	Provider-এর model তালিকাভুক্�
 List this layer in the legend	Legend-এ এই layer দেখান
 List what it holds	এর ভেতরের বিষয়বস্তু তালিকাভুক্ত করুন
 Listed for discovery: RustGIS doesn't read this dataset yet. Its data and paper are linked above.	আবিষ্কারের জন্য তালিকাভুক্ত: RustGIS এখনো এই dataset পড়ে না। এর data ও গবেষণাপত্রের লিংক উপরে আছে।
+Listing datasets…	Dataset তালিকাভুক্ত হচ্ছে…
 Listing…	তালিকা তৈরি হচ্ছে…
 Lit	আলোকিত
 Live summary of the features in view.	দৃশ্যমান feature-গুলোর সরাসরি সারাংশ।
+Load	লোড
+Load a GeoPackage layer's rows again as they are in the file, dropping its edits.	একটি GeoPackage layer-এর সারি ফাইলে যেমন আছে তেমনভাবে আবার লোড করুন, তার edit বাদ দিয়ে।
+Load a PostGIS layer's rows again as they are in the database, dropping its edits.	একটি PostGIS layer-এর সারি ডেটাবেসে যেমন আছে তেমনভাবে আবার লোড করুন, তার edit বাদ দিয়ে।
 Load All Features	সব feature লোড করুন
 Load an unpacked plugin from its folder while you develop it.	উন্নয়নের সময় folder থেকে unpack করা plugin লোড করুন।
+Load for editing	সম্পাদনার জন্য লোড করুন
 Load more	আরও লোড করুন
 Load sources & plot	source লোড ও plot করুন
+Load the table whole (up to 100,000 rows) so its edits can be saved back to it with Edit › Save to PostGIS. It needs a single-column integer primary key.	পুরো টেবিল লোড করুন (100,000 সারি পর্যন্ত), যাতে সম্পাদনা › PostGIS-এ সংরক্ষণ দিয়ে তার edit তাতে ফেরত সংরক্ষণ করা যায়। এর জন্য একক-কলামের integer primary key দরকার।
 Load Whitebox and GeoLibre tools	Whitebox ও GeoLibre tool লোড করুন
 Loaded {name} from its folder.	নিজের folder থেকে {name} লোড হয়েছে।
 Loading the GeoLibre tools…	GeoLibre tool লোড হচ্ছে…
 Loading…	লোড হচ্ছে…
 Loads map tiles from the web	ওয়েব থেকে map tile লোড করে
+Loads one feature table of a GeoPackage on this computer (up to 100,000 rows) so its edits can be saved back to that table with Edit › Save to GeoPackage. It needs an INTEGER PRIMARY KEY.	এই কম্পিউটারের একটি GeoPackage-এর একটি feature table লোড করে (100,000 সারি পর্যন্ত), যাতে সম্পাদনা › GeoPackage-এ সংরক্ষণ দিয়ে তার edit সেই টেবিলে ফেরত সংরক্ষণ করা যায়। এর জন্য একটি INTEGER PRIMARY KEY দরকার।
+Loads the layer's rows again as they are in the database now. Its edits that weren't saved are dropped (Undo brings them back).	Layer-এর সারি এখন ডেটাবেসে যেমন আছে তেমনভাবে আবার লোড করে। সংরক্ষণ না করা edit বাদ যায় (পূর্বাবস্থায় ফেরান সেগুলো ফেরত আনে)।
+Loads the layer's rows again as they are in the file now. Its edits that weren't saved are dropped (Undo brings them back).	Layer-এর সারি এখন ফাইলে যেমন আছে তেমনভাবে আবার লোড করে। সংরক্ষণ না করা edit বাদ যায় (পূর্বাবস্থায় ফেরান সেগুলো ফেরত আনে)।
 Local	স্থানীয়
 Locate	অবস্থান নির্ণয়
 Locate GeoLibre Runner	GeoLibre Runner খুঁজুন
@@ -1683,6 +1888,7 @@ Locator	লোকেটর
 Lock	লক করুন
 Locked	লক করা
 Locked: unlock it in the Format pane to move or change it	লক করা: সরাতে বা বদলাতে Format pane-এ unlock করুন
+Log Commands	কমান্ড লগ করুন
 Log In to Connection	Connection-এ লগ ইন
 Log In to {name}…	{name}-এ লগ ইন…
 Log In…	লগ ইন…
@@ -1739,14 +1945,21 @@ Mapping	মানচিত্রায়ন
 Maps	মানচিত্রসমূহ
 Maps move together.	মানচিত্রগুলো একসঙ্গে নড়ে।
 MapServer	MapServer
+Mark {n}	মার্ক {n}
 Marker	মার্কার
+Marker Rotation	মার্কার ঘূর্ণন
+Markers	মার্কার
+Marks	মার্ক
+Marks for	মার্ক:
 Mask Values	Mask করার মান
 Masking	মাস্কিং
 Match Option	মিলের বিকল্প
 Matching places	মিলে যাওয়া স্থান
+Matplotlib	Matplotlib
 Max	সর্বোচ্চ
 Max %	সর্বোচ্চ %
 Max Neighbors	সর্বোচ্চ প্রতিবেশী
+Maximum Zoom	সর্বোচ্চ zoom
 Maximum zoom	সর্বোচ্চ zoom
 MCP Relay	MCP relay
 MCP relay is already listening on 127.0.0.1:{port}; stop it first to use port {asked}	MCP relay ইতিমধ্যে 127.0.0.1:{port}-এ listen করছে; {asked} port ব্যবহার করতে আগে এটি বন্ধ করুন
@@ -1761,6 +1974,7 @@ Measure Distance	দূরত্ব পরিমাপ
 Measure geodesic distances and areas on the map.	মানচিত্রে geodesic দূরত্ব ও ক্ষেত্রফল পরিমাপ করুন।
 Measure on this body, with one of its basemaps.	এই জ্যোতিষ্কে, এর একটি basemap ব্যবহার করে পরিমাপ করুন।
 Measure with an elevation raster	elevation raster দিয়ে পরিমাপ করুন
+Measured grid	পরিমাপকৃত গ্রিড
 Measurement units	পরিমাপের একক
 Measurement units must be metric or imperial	পরিমাপের একক metric বা imperial হতে হবে
 Measurements so far.	এ পর্যন্ত পরিমাপ।
@@ -1768,6 +1982,7 @@ Mensuration	মাপজোক
 Mensuration Tools	মাপজোকের tool
 Merge	একত্র করুন
 Merge elevation rasters into a surface model and export a 3D mesh.	elevation raster-গুলো একত্র করে surface model তৈরি করুন এবং 3D mesh export করুন।
+Merge Rules	একত্রীকরণের নিয়ম
 Merges polygons that share a field value into one feature per value.	একই field value-যুক্ত polygon একত্র করে প্রতিটি value-র জন্য একটি feature তৈরি করে।
 Messages appear here.	বার্তাগুলো এখানে দেখা যাবে।
 Meters	মিটার
@@ -1782,12 +1997,15 @@ Min must be less than Max	Min অবশ্যই Max-এর চেয়ে ক�
 Min must not be more than Max	Min, Max-এর চেয়ে বেশি হতে পারবে না
 Minimum Bounding Geometry	সর্বনিম্ন bounding geometry
 Minimum Maximum	সর্বনিম্ন সর্বোচ্চ
+Minimum Zoom	সর্বনিম্ন zoom
 Minus	বিয়োগ
 Minutes	মিনিট
 minutes ago	মিনিট আগে
+minutes is a whole number from 0 (off) to 60	minutes হলো 0 (বন্ধ) থেকে 60 পর্যন্ত একটি পূর্ণ সংখ্যা
 Miter	মাইটার
 Mobile Map	মোবাইল মানচিত্র
 Mod+	Mod+
+Mod+A	Mod+A
 Mod+C	Mod+C
 Mod+D	Mod+D
 Mod+Equals	Mod+Equals
@@ -1815,6 +2033,7 @@ Modified Mann–Kendall (Hamed & Rao)	পরিবর্তিত Mann–Kendall
 Modified Mann–Kendall (Yue & Wang)	পরিবর্তিত Mann–Kendall (Yue & Wang)
 Modify	পরিবর্তন
 Modify Selected Features	নির্বাচিত feature পরিবর্তন করুন
+Modular	মডিউলার
 Mollweide (equal-area world)	Mollweide (সমক্ষেত্রফলবিশিষ্ট বিশ্ব)
 Month	মাস
 Months	মাসসমূহ
@@ -1826,13 +2045,19 @@ Mosaic images into an orthomosaic	ছবি একত্র করে orthomosai
 Mosaic Rasters	রাস্টার মোজাইক
 Mosaic the visible rasters into an orthomosaic.	দৃশ্যমান raster-গুলো একত্র করে orthomosaic তৈরি করুন।
 Most cloud cover (%)	সর্বোচ্চ মেঘের আচ্ছাদন (%)
+Most rows	সর্বাধিক সারি
+Most rows: a whole number	সর্বাধিক সারি: একটি পূর্ণ সংখ্যা
 Mouse wheel	মাউসের wheel
 Move	সরান
 Move Bookmark	Bookmark সরান
 Move Down	নিচে সরান
 Move down	নিচে সরান
+Move down: labels of the classes listed first are placed first when they compete for room.	নিচে সরান: জায়গার জন্য প্রতিযোগিতা হলে তালিকার প্রথম দিকের শ্রেণির লেবেল আগে বসানো হয়।
 Move Group	Group সরান
+Move Group To Group	Group-কে group-এ সরান
 Move Label Class	Label class সরান
+Move polygon vertices stored at the same coordinate in this layer, including point-only contacts.	এই layer-এ একই স্থানাঙ্কে সংরক্ষিত polygon-এর ভার্টেক্স সরান, শুধু বিন্দুতে স্পর্শ করাগুলোসহ।
+Move Shared Vertex	শেয়ার করা ভার্টেক্স সরান
 Move Task Step	Task step সরান
 Move To Bottom	একেবারে নিচে সরান
 Move To Group	Group-এ সরান
@@ -1840,6 +2065,7 @@ Move To Top	একেবারে ওপরে সরান
 Move To {group}	{group}-এ সরান
 Move Up	ওপরে সরান
 Move up	ওপরে সরান
+Move up: labels of the classes listed first are placed first when they compete for room.	ওপরে সরান: জায়গার জন্য প্রতিযোগিতা হলে তালিকার প্রথম দিকের শ্রেণির লেবেল আগে বসানো হয়।
 Move, rotate, scale, merge, explode, split or flip the selected features.	নির্বাচিত feature সরান, ঘোরান, scale করুন, একত্র করুন, explode, ভাগ বা উল্টে দিন।
 Move, Rotate, Scale…	সরান, ঘোরান, scale করুন…
 MultiLineString	MultiLineString
@@ -1868,7 +2094,10 @@ Navigate with the mouse (planar) or walk with W A S D, Q and E (first-person).	�
 Navigation	নেভিগেশন
 Navigation Mode	নেভিগেশন মোড
 Navigator	নেভিগেটর
+NDVI, MODIS, rain…	NDVI, MODIS, বৃষ্টি…
 NDVI, NDWI, SAVI, NBR, NDBI, EVI.	NDVI, NDWI, SAVI, NBR, NDBI, EVI।
+Near	নিকটতম
+Near Features	নিকটবর্তী feature
 Nearest Neighbor	নিকটতম প্রতিবেশী
 Neatline	মানচিত্রের সীমানার রেখা
 Needs three or more bands.	তিন বা তার বেশি band দরকার।
@@ -1887,7 +2116,6 @@ New Connection	নতুন Connection
 New Connection ▾	নতুন Connection ▾
 New conversation	নতুন কথোপকথন
 New Custom Template	নতুন কাস্টম Template
-New Custom Template…	নতুন কাস্টম Template…
 New features use this template's values	নতুন feature এই template-এর মান ব্যবহার করবে
 New field	নতুন field
 New Group	নতুন Group
@@ -1902,6 +2130,7 @@ New project	নতুন project
 New Publication Layout	নতুন প্রকাশনা layout
 New Relationship…	নতুন Relationship…
 New Report	নতুন Report
+New rows	নতুন সারি
 New Selection	নতুন Selection
 New Style	নতুন Style
 New Style From Layer	Layer থেকে নতুন Style
@@ -1926,12 +2155,15 @@ No catalogs below this one: Find Items lists its items	এর নিচে ক�
 No COMID was returned for this point.	এই বিন্দুর জন্য কোনো COMID ফেরত আসেনি।
 no command	কোনো command নেই
 No data at the points picked.	নির্বাচিত বিন্দুগুলোতে কোনো ডেটা নেই।
+No data cube matches	কোনো data cube মেলে না
 No datasets match.	কোনো dataset মেলেনি।
 No datasets with data RustGIS can add	RustGIS যোগ করতে পারে এমন ডেটাসহ কোনো dataset নেই
 no date in the name	নামে কোনো তারিখ নেই
+no download service	কোনো download service নেই
 No edits since the project was saved	প্রজেক্ট সংরক্ষণের পর কোনো পরিবর্তন নেই
 No features are selected in this layer.	এই layer-এ কোনো feature নির্বাচিত নেই।
 No field of this layer holds dates.	এই layer-এর কোনো field-এ তারিখ নেই।
+No fields match	কোনো field মেলে না
 No Fill	কোনো fill নেই
 No geometry to calculate	হিসাব করার মতো geometry নেই
 No granules in this view and date range.	এই view ও তারিখের range-এ কোনো granule নেই।
@@ -1985,6 +2217,7 @@ North	উত্তর
 North\nArrow	উত্তর\nতীর
 North Polar Stereographic	উত্তর মেরু স্টেরিওগ্রাফিক
 NOT	NOT
+Not a GeoLibre project	GeoLibre প্রজেক্ট নয়
 not a picture	ছবি নয়
 not a RustGIS layout	RustGIS layout নয়
 not a RustGIS project	RustGIS project নয়
@@ -2000,6 +2233,7 @@ Notebook Pane	নোটবুক প্যান
 Nothing found	কিছু পাওয়া যায়নি
 Nothing found where the map is	মানচিত্র যেখানে আছে, সেখানে কিছু পাওয়া যায়নি
 Nothing here	এখানে কিছু নেই
+Nothing matches.	কিছুই মেলে না।
 Nothing named {name} to rename	পুনঃনামকরণের জন্য {name} নামে কিছু নেই
 Nothing shared yet. Publish › Share As makes web maps, layers, styles, scenes and more.	এখনও কিছু শেয়ার করা হয়নি। Publish › Share As দিয়ে web map, layer, style, scene এবং আরও অনেক কিছু তৈরি হয়।
 Nothing to add here	এখানে যোগ করার কিছু নেই
@@ -2021,36 +2255,46 @@ Off, west and south are negative: -112.5°.	Off অবস্থায় পশ�
 Offline	অফলাইন
 Offline area	অফলাইন এলাকা
 Offset	অফসেট
+Offset down	নিচে অফসেট
+Offset right	ডানে অফসেট
 OGC API	OGC API
 OGC API Features and Tiles	OGC API Features ও Tiles
 OID	OID
+Older copies waiting: {n}.	অপেক্ষমাণ পুরোনো কপি: {n}।
 Ollama (local)	Ollama (স্থানীয়)
 On	চালু
 On Hold	স্থগিত
 on hold	স্থগিত
+on must be true or false	on অবশ্যই true বা false হতে হবে
 On the desktop, the key can also come from {vars}.	Desktop-এ key {vars} থেকেও আসতে পারে।
 On-screen compass, zoom slider and pan pad.	পর্দায় কম্পাস, zoom slider ও pan pad।
 One command per line: id {json}. Lines starting with # are comments.	প্রতি লাইনে একটি command: id {json}। # দিয়ে শুরু হওয়া লাইন comment।
 One DuckDB SELECT: DuckDB Spatial's ST_ functions, files and web addresses (read_parquet('…')), and the tables of the database below. Ctrl+Enter runs it.	DuckDB-এর একটি SELECT: DuckDB Spatial-এর ST_ function, file ও web address (read_parquet(‘…’)), এবং নিচের database-এর table। চালাতে Ctrl+Enter চাপুন।
+One fill, from the symbol. Add fills to stack colours, hatch lines and markers.	প্রতীক থেকে একটি পূরণ। রং, হ্যাচ রেখা ও মার্কার স্তরে স্তরে রাখতে পূরণ যোগ করুন।
 One layer: a Zarr variable or a raster's bands	একটি layer: Zarr variable অথবা raster-এর band
+One marker, from the symbol. Add marks to stack markers, or to shift or turn them.	প্রতীক থেকে একটি মার্কার। মার্কার স্তরে স্তরে রাখতে, বা সরাতে বা ঘোরাতে মার্ক যোগ করুন।
 One page per feature of an index layer.	একটি index layer-এর প্রতিটি feature-এর জন্য একটি পৃষ্ঠা।
 One per line: code=name	প্রতি লাইনে একটি: code=name
+One picture of the view: symbols and labels aren't cut at tile edges, and the service is asked once a view. Drawn in tiles on the globe, on a tilted map, or in a projection the service doesn't offer.	View-এর একটি ছবি: প্রতীক ও লেবেল tile-এর ধারে কাটা পড়ে না, এবং প্রতিটি view-এ service-কে একবার জিজ্ঞাসা করা হয়। গ্লোবে, হেলানো মানচিত্রে, বা service যে অভিক্ষেপ দেয় না তাতে tile হিসেবে আঁকা হয়।
 One stroke, from the symbol. Add strokes for casings, parallel lines and offsets.	প্রতীক থেকে একটি stroke। casing, parallel line ও offset-এর জন্য stroke যোগ করুন।
+only a discovered list can invalidate the saved table	only a discovered list can invalidate the saved table
+Only a tile archive read from a file (PMTiles or MBTiles) can be repaired.	শুধু ফাইল থেকে পড়া tile archive (PMTiles বা MBTiles) মেরামত করা যায়।
+Only cubes with data where the map is	শুধু মানচিত্র যেখানে আছে সেখানে ডেটা থাকা cube
 Only features matching this expression draw in {layer}.	শুধু এই expression-এর সঙ্গে মেলা feature {layer}-এ আঁকা হবে।
 Only selected polygons will be included in the output.	Output-এ শুধু নির্বাচিত polygon অন্তর্ভুক্ত হবে।
+Only the map's area	শুধু মানচিত্রের এলাকা
 Only where the map is	শুধু মানচিত্র যেখানে আছে
 Opacity	অস্বচ্ছতা
 Open	খুলুন
 Open a .rgis project	একটি .rgis project খুলুন
+Open a Data Cube	একটি data cube খুলুন
 open a layout first	আগে একটি layout খুলুন
 Open a model file (*.model.json)	একটি model file (*.model.json) খুলুন
 Open a model of this project	এই project-এর একটি model খুলুন
 Open a RustGIS or Jupyter notebook.	RustGIS বা Jupyter notebook খুলুন।
-Open a RustGIS project.	RustGIS project খুলুন।
 Open an offline area to edit.	সম্পাদনার জন্য offline area খুলুন।
 Open browser again	Browser আবার খুলুন
 Open Custom Template	Custom template খুলুন
-Open Custom Template…	Custom template খুলুন…
 Open data catalogs registered with Portolan: pick a publisher's catalog, then Find Items for its collections.	Portolan-এ নিবন্ধিত open-data catalog খুলুন: publisher-এর catalog বেছে নিয়ে collection-এর জন্য Find Items ব্যবহার করুন।
 Open data catalogues searched by text. Files are added by their address (read in place when they can be); a service opens Add From Service to pick its layer.	টেক্সট দিয়ে খোঁজা open-data catalog। File তাদের address দিয়ে যোগ হয় (সম্ভব হলে একই জায়গায় পড়া হয়); service তার layer বেছে নিতে Add From Service খোলে।
 Open data products on Source Cooperative. GeoParquet, FlatGeobuf, cloud-optimised GeoTIFFs and PMTiles are read in place; other files are downloaded.	Source Cooperative-এর open-data product। GeoParquet, FlatGeobuf, cloud-optimized GeoTIFF ও PMTiles একই জায়গায় পড়া হয়; অন্য file ডাউনলোড হয়।
@@ -2092,13 +2336,17 @@ OpenFreeMap Liberty	OpenFreeMap Liberty
 OpenFreeMap Positron	OpenFreeMap Positron
 OpenFreeMap © OpenMapTiles Data from OpenStreetMap	OpenFreeMap © OpenMapTiles; ডেটা OpenStreetMap থেকে
 Opening {url}…	{url} খোলা হচ্ছে…
+Opens Trend Analysis with this cube, read whole	এই cube, পুরোটা পড়া, নিয়ে প্রবণতা বিশ্লেষণ খোলে
+Opens Trend Analysis with this cube, where the map is	এই cube, মানচিত্র যেখানে আছে, নিয়ে প্রবণতা বিশ্লেষণ খোলে
 OpenStreetMap	OpenStreetMap
 OpenStreetMap data where the map is, from an Overpass server: a preset, or tag filters such as amenity=cafe, shop. The area can be up to about 50 × 50 km. © OpenStreetMap contributors (ODbL).	Overpass server থেকে মানচিত্র যেখানে আছে সেখানে OpenStreetMap ডেটা: একটি preset অথবা amenity=cafe, shop-এর মতো tag filter। এলাকা প্রায় ৫০ × ৫০ km পর্যন্ত হতে পারে। © OpenStreetMap contributors (ODbL)।
 OpenStreetMap's public server	OpenStreetMap-এর public server
 OpenStreetMap, Esri, USGS, NASA and more, from the plugin registry.	Plugin registry থেকে OpenStreetMap, Esri, USGS, NASA এবং আরও অনেক কিছু।
 OpenStreetMap…	OpenStreetMap…
 Open…	খুলুন…
+Opt+	Opt+
 Optional	ঐচ্ছিক
+optional, such as population > 10000	ঐচ্ছিক, যেমন population > 10000
 Optional. Shift+Enter starts a new line.	ঐচ্ছিক। নতুন লাইন শুরু করতে Shift+Enter চাপুন।
 Options	বিকল্প
 OR	OR
@@ -2113,8 +2361,14 @@ Origin	উৎপত্তি
 Origin key	উৎপত্তির key
 Ortho Mapping	অর্থো ম্যাপিং
 Other	অন্যান্য
+Other copies of unsaved work will be offered at the next start ({n}).	অসংরক্ষিত কাজের অন্য কপিগুলো পরের বার শুরুতে দেওয়া হবে ({n})।
 Other Data	অন্যান্য ডেটা
 Out Beyond	বাইরের দিকে
+Out of its group, just below that group	তার group থেকে বাইরে, সেই group-এর ঠিক নিচে
+Out of the group it is in, just below that group	যে group-এ আছে তা থেকে বাইরে, সেই group-এর ঠিক নিচে
+Outdent	বাইরে সরান
+Outdent Group	Group বাইরে সরান
+Outdent Layer	Layer বাইরে সরান
 Outline	আউটলাইন
 Outline another frame's extent in this map frame.	এই map frame-এ অন্য frame-এর extent-এর outline দেখান।
 Outline color	Outline-এর রং
@@ -2129,7 +2383,8 @@ Over 1,000 raster, vector, LiDAR, hydrology and terrain tools, from an optional 
 Overlapping	একটির ওপর আরেকটি পড়া
 Overlay	ওভারলে
 overlay	ওভারলে
-Overlay (a transparent layer kept on top, such as labels or roads)	Overlay (একটি স্বচ্ছ layer, যা উপরে থাকে; যেমন label বা রাস্তা)
+Overlay (on top of the map's layers, such as labels, roads or a WMS layer; otherwise a basemap under them)	ওভারলে (মানচিত্রের layer-এর ওপরে, যেমন লেবেল, রাস্তা বা WMS layer; অন্যথায় তাদের নিচে একটি বেসম্যাপ)
+Overlay Features	ওভারলে feature
 Overture has no {ty} data where the map is	মানচিত্র যেখানে আছে, সেখানে Overture-এর {ty} ডেটা নেই
 Overture Maps	Overture Maps
 Overture Maps' open data: buildings, places, transportation, administrative divisions, base layers and addresses. Where the map is, its features are read in place from Overture's GeoParquet files (zoom to a city or smaller); the whole world comes as map tiles.	Overture Maps-এর open data: ভবন, স্থান, পরিবহন, প্রশাসনিক বিভাগ, base layer ও ঠিকানা। মানচিত্র যেখানে আছে, সেখানে Overture-এর GeoParquet file থেকে feature সরাসরি পড়া হয় (শহর বা তার চেয়ে ছোট এলাকায় zoom করুন); পুরো পৃথিবী map tile হিসেবে আসে।
@@ -2140,6 +2395,9 @@ Package a trained deep learning model.	প্রশিক্ষিত deep learn
 Package Map	Map package করুন
 Package Project	Project package করুন
 Package Results	ফলাফল package করুন
+Pad	প্যাড
+Padding across	আড়াআড়ি প্যাডিং
+Padding up and down	ওপর-নিচ প্যাডিং
 Page	পৃষ্ঠা
 Page\nSize	পৃষ্ঠা\nআকার
 Page after: {name}	{name}-এর পরে পৃষ্ঠা
@@ -2157,15 +2415,16 @@ Pan	প্যান
 Pan (Explore) · any tool	Pan (Explore) · যেকোনো tool
 Pan and Zoom Map	মানচিত্র সরান ও zoom করুন
 Pan To	Pan করে যান
-Pan to a longitude/latitude.	একটি দ্রাঘিমাংশ/অক্ষাংশে view সরান।
 Pan with the mouse, zoom with the wheel and click features to see their attributes.	মাউস দিয়ে pan, wheel দিয়ে zoom, আর attribute দেখতে feature-এ ক্লিক করুন।
 Pan/Zoom\nMap	মানচিত্র\nপ্যান/জুম
 Pane Sets	Pane set
+Panel	প্যানেল
 Paper	কাগজ
 Parallel	সমান্তরাল
 Parent folder	উপরের folder
 parks, bike lanes, flood zones…	পার্ক, বাইক লেন, বন্যা অঞ্চল…
 Password	পাসওয়ার্ড
+Past its points: its end colors, back and forth, or over again	বিন্দুগুলোর পরে: প্রান্তের রং, আসা-যাওয়া করে, বা আবার শুরু থেকে
 Paste	পেস্ট
 Paste a token	Token পেস্ট করুন
 Paste copied features into the selected layer, or as a new layer.	কপি করা feature নির্বাচিত layer-এ বা নতুন layer হিসেবে paste করুন।
@@ -2176,6 +2435,7 @@ Paste Layers	Layer-গুলো পেস্ট করুন
 Paste Special	বিশেষভাবে পেস্ট
 Paste Special (as a new layer)	বিশেষভাবে পেস্ট (নতুন layer হিসেবে)
 paste your key	আপনার key পেস্ট করুন
+path is required	path আবশ্যক
 Pause	বিরতি
 Pause.	বিরতি।
 PDF	PDF
@@ -2198,10 +2458,14 @@ Pictures	ছবি
 Pictures, attachments and chart	ছবি, সংযুক্তি ও chart
 Pipe	পাইপ
 Pitch	ঢাল
+Pivot Field	পিভট field
+Pivot Table	পিভট টেবিল
 Pixel	পিক্সেল
 Pixel Editor	পিক্সেল এডিটর
+Pixel Size	পিক্সেল আকার
 Pixel Size (°)	পিক্সেলের আকার (°)
 Pixel type	Pixel-এর ধরন
+Place	স্থান
 Place a raster on the map	মানচিত্রে একটি raster বসান
 Place a raster on the map from control points or the view.	control point বা view থেকে মানচিত্রে একটি raster বসান।
 Placement	অবস্থান নির্ধারণ
@@ -2235,6 +2499,7 @@ PMTiles archive	PMTiles আর্কাইভ
 PNG frames (zip)	PNG ফ্রেম (zip)
 PNG image	PNG ছবি
 Point	বিন্দু
+Point the selected layer at its file after the file moved or was renamed.	ফাইল সরানো বা নাম বদলানোর পর নির্বাচিত layer-কে তার ফাইলে নির্দেশ করুন।
 Points	বিন্দুসমূহ
 points each	প্রতিটিতে বিন্দু
 Polar, conformal: Antarctica and the Southern Ocean.	মেরু অঞ্চল, conformal: অ্যান্টার্কটিকা ও দক্ষিণ মহাসাগর।
@@ -2248,11 +2513,16 @@ Pop-up Mode	Pop-up মোড
 pop_max > 1000000	pop_max > 1000000
 Popular datasets…	জনপ্রিয় dataset…
 Populated Places	জনবসতিপূর্ণ স্থান
+Population Field	জনসংখ্যা field
 Portal	পোর্টাল
 Portolan	Portolan
 Portolan…	Portolan…
 Portrait	লম্বালম্বি
 Position	অবস্থান
+Poster	পোস্টার
+PostGIS Connection	PostGIS সংযোগ
+PostGIS Edits	PostGIS edit
+PostGIS tables are edited in the desktop app	PostGIS টেবিল desktop app-এ সম্পাদনা করা হয়
 PostgreSQL/PostGIS	PostgreSQL/PostGIS
 Postprocessing	পরবর্তী প্রক্রিয়াকরণ
 power 2	ঘাত 2
@@ -2265,7 +2535,9 @@ Preparing its Python environment…	এর Python environment প্রস্ত
 Presentation	প্রেজেন্টেশন
 Presentation File	প্রেজেন্টেশন ফাইল
 Presentation Pane	প্রেজেন্টেশন প্যান
+Preserve Attributes	Attribute রক্ষা করুন
 Preset	প্রিসেট
+Press a key combination to assign it. Escape cancels.	নির্ধারণ করতে একটি কী সমন্বয় চাপুন। Escape বাতিল করে।
 Press Load sources & plot first	আগে Load sources & plot চাপুন
 Preview and set up the report.	Report-এর preview দেখুন ও সেটআপ করুন।
 Preview, edit and play the presentation.	Presentation-এর preview দেখুন, সম্পাদনা করুন ও চালান।
@@ -2294,15 +2566,17 @@ Project	প্রজেক্ট
 Project\nPackage	প্রজেক্ট\nপ্যাকেজ
 Project Info	প্রজেক্টের তথ্য
 project is "sample", "blank", "last" or {"path": a project file}	project হলো "sample", "blank", "last" অথবা {"path": a project file}
+Project Raster	রাস্টার প্রজেক্ট করুন
 Project Template	প্রজেক্ট টেমপ্লেট
-Project templates: start projects from a saved setup.	Project template: সংরক্ষিত সেটআপ থেকে project শুরু করুন।
 project's path is required	project-এর path আবশ্যক
 Projection	অভিক্ষেপ
 Projections	Projection-সমূহ
-Projects (RustGIS, QGIS)	প্রজেক্ট (RustGIS, QGIS)
+Projects and JSON data (RustGIS, QGIS, GeoLibre)	প্রজেক্ট ও JSON ডেটা (RustGIS, QGIS, GeoLibre)
 Properties	বৈশিষ্ট্য
 Property	বৈশিষ্ট্য
 Proportional Symbols	আনুপাতিক প্রতীক
+Provide keys to reset, or no parameters to reset all.	রিসেট করার কী দিন, অথবা সব রিসেট করতে কোনো প্যারামিটার দেবেন না।
+Provide shortcut file text, data or a path.	শর্টকাট ফাইলের টেক্সট, ডেটা বা পাথ দিন।
 Provider	প্রদানকারী
 Provinces:	প্রদেশ:
 Proximity	নিকটতা
@@ -2328,6 +2602,7 @@ Quick\nAccess	দ্রুত\nঅ্যাক্সেস
 Quick Access Toolbar	দ্রুত অ্যাক্সেস টুলবার
 Quick actions	দ্রুত কাজ
 Quick Analysis	দ্রুত বিশ্লেষণ
+Radial	রেডিয়াল
 radius km	ব্যাসার্ধ km
 radius m	ব্যাসার্ধ m
 Radius {distance} (approximate)	ব্যাসার্ধ {distance} (আনুমানিক)
@@ -2350,15 +2625,18 @@ Raster Information	Raster তথ্য
 Raster Layer	রাস্টার লেয়ার
 Raster layer	রাস্টার লেয়ার
 Raster tiles (XYZ)	রাস্টার টাইল (XYZ)
+Raster to PMTiles	রাস্টার থেকে PMTiles
 Raster · {w} × {h} · {n} bands · {renderer}	রাস্টার · {w} × {h} · {n} ব্যান্ড · {renderer}
 Read and write files on this computer	এই কম্পিউটারে file পড়ুন ও লিখুন
+Read error	পড়ার ত্রুটি
 Read the bands picked for the view (at most about 6 km a side)	view-এর জন্য নির্বাচিত band পড়ুন (প্রতি পাশে সর্বোচ্চ প্রায় ৬ km)
 Read the map's layers and features	মানচিত্রের layer ও feature পড়ুন
 Read the points in the view, coloured by their principal components	view-এর বিন্দুগুলো তাদের principal component অনুযায়ী রঙ করে পড়ুন
-Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes, never in the project, and sent only to NASA's Earthdata data servers.	granule-এর file পড়তে Earthdata Login token দরকার, যা NASA-র সব DAAC-এ কাজ করে। RustGIS বন্ধ হওয়া পর্যন্ত এটি রাখা হয়, project-এ নয়, এবং শুধু NASA Earthdata data server-এ পাঠানো হয়।
+Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	granule-এর file পড়তে Earthdata Login token দরকার, যা NASA-র সব DAAC-এ কাজ করে। মনে রাখুন-এ টিক না দিলে RustGIS বন্ধ হওয়া পর্যন্ত এটি রাখা হয়, project-এ নয়, এবং শুধু NASA Earthdata data server-এ পাঠানো হয়।
 Reading the catalog: {n} documents read, {m} items found…	Catalog পড়া হচ্ছে: {n}টি নথি পড়া হয়েছে, {m}টি item পাওয়া গেছে…
 Reading the catalog…	Catalog পড়া হচ্ছে…
 Reading the embeddings…	Embedding পড়া হচ্ছে…
+Reading the file's layers…	ফাইলের layer পড়া হচ্ছে…
 Reading the installed fonts…	ইনস্টল করা ফন্ট পড়া হচ্ছে…
 Reading the store… ({n} files to go)	Store পড়া হচ্ছে… (আরও {n}টি file বাকি)
 Reading the tileset of	এর tileset পড়া হচ্ছে
@@ -2373,6 +2651,9 @@ Record Task	Task রেকর্ড করুন
 Recorded Task	রেকর্ড করা Task
 Recording stopped: another project opened, and its {n} steps were for the previous one.	রেকর্ডিং থেমেছে: অন্য project খোলা হয়েছে, আর এর {n}টি ধাপ আগের project-এর জন্য ছিল।
 Recording: {n} steps	রেকর্ড করা হচ্ছে: {n}টি ধাপ
+Recover	পুনরুদ্ধার করুন
+Recover unsaved work?	অসংরক্ষিত কাজ পুনরুদ্ধার করবেন?
+Recovered unsaved work in {name}. Save to keep it.	{name}-এ অসংরক্ষিত কাজ পুনরুদ্ধার হয়েছে। রাখতে সংরক্ষণ করুন।
 Rectangle	আয়তক্ষেত্র
 Red	লাল
 Redo	আবার করুন
@@ -2383,6 +2664,7 @@ Red–Blue	লাল–নীল
 Reference Scale	রেফারেন্স স্কেল
 Reference scale	রেফারেন্স স্কেল
 Refine the search to see {n} more	আরও {n}টি দেখতে অনুসন্ধানটি পরিমার্জন করুন
+Reflect	প্রতিফলন
 Refresh	Refresh করুন
 Refresh every connection's lists	প্রতিটি connection-এর তালিকা refresh করুন
 Refresh Map Series	Map series refresh করুন
@@ -2404,6 +2686,7 @@ Reload Web Layers	Web layer পুনরায় লোড করুন
 Remember on this computer	এই কম্পিউটারে মনে রাখুন
 Remember the key on this computer	এই কম্পিউটারে key মনে রাখুন
 Remove	সরান
+Remove account	অ্যাকাউন্ট সরান
 Remove All	সব সরান
 Remove All Label Classes	সব label class সরান
 Remove an offline area.	একটি offline area সরান।
@@ -2420,6 +2703,7 @@ Remove Group	Group সরান
 Remove Keyframe	Keyframe সরান
 Remove Label Class	Label class সরান
 Remove Section	Section সরান
+Remove shortcut	শর্টকাট সরান
 Remove Table	Table সরান
 Remove the clause.	Clause সরান।
 Remove the last keyframe.	শেষ keyframe সরান।
@@ -2430,7 +2714,7 @@ Remove this stop	এই stop সরান
 Remove Tile Layer	Tile layer সরান
 Remove token	Token সরান
 Remove {name}	{name} সরান
-Removes the parts of polygon features that overlap erase polygons.	erase polygon-এর সঙ্গে overlap করা polygon feature-এর অংশ সরিয়ে দেয়।
+Removes the parts of input features that fall inside erase polygons.	Input feature-এর যে অংশ erase polygon-এর ভেতরে পড়ে তা সরিয়ে দেয়।
 Removes vertices that deviate less than a tolerance (Douglas–Peucker).	tolerance-এর চেয়ে কম বিচ্যুত vertex সরিয়ে দেয় (Douglas–Peucker)।
 Rename	নাম পরিবর্তন
 Rename Bookmark	Bookmark-এর নাম পরিবর্তন
@@ -2444,7 +2728,18 @@ Rename Project	Project-এর নাম পরিবর্তন
 Rename Service Group	Service group-এর নাম পরিবর্তন
 Rename…	নাম পরিবর্তন…
 Rendering	রেন্ডারিং
+Repair	মেরামত করুন
+Repair\nSource	উৎস\nমেরামত
+Repair Data Source	Data source মেরামত
+Repair Data Source…	Data source মেরামত…
+Repair is disabled while discovery is in flight	Repair is disabled while discovery is in flight
+Repair Tile Archive	টাইল আর্কাইভ মেরামত
+Repaired {name}	{name} মেরামত হয়েছে
+Repeat	পুনরাবৃত্তি
+Replace	প্রতিস্থাপন করুন
 Replace Web Layer	Web layer প্রতিস্থাপন
+Replacement	প্রতিস্থাপন
+Replaces the parts of input polygons that update polygons cover with the update polygons themselves.	Input polygon-এর যে অংশ update polygon ঢাকে তা update polygon দিয়েই প্রতিস্থাপন করে।
 Replay the route as a drive the map follows	ম্যাপ অনুসরণ করে এমন drive হিসেবে route পুনরায় চালান
 Report	প্রতিবেদন
 Report File	Report file
@@ -2459,11 +2754,14 @@ Resample	রিস্যাম্পল
 Resampling	রিস্যাম্পলিং
 Resampling Type	Resampling-এর ধরন
 Reset	রিসেট করুন
+Reset All	সব রিসেট করুন
 Reset brightness, contrast and gamma.	উজ্জ্বলতা, contrast ও gamma রিসেট করুন।
 Reset Default	ডিফল্টে রিসেট করুন
 Reset Effects	Effect রিসেট করুন
 Reset North	উত্তর দিক রিসেট করুন
 Reset north	উত্তর দিক রিসেট করুন
+Reset unreadable saved shortcuts before importing.	ইমপোর্টের আগে অপঠনযোগ্য সংরক্ষিত শর্টকাট রিসেট করুন।
+Reset {key}	{key} রিসেট করুন
 Resolution (0–30)	রেজোলিউশন (0–30)
 Response	উত্তর
 Restore	পুনরুদ্ধার করুন
@@ -2491,8 +2789,11 @@ Round	গোলাকার
 roundabout turn	roundabout-এ মোড় নিন
 Routes (name, surface, length)	Route (নাম, পৃষ্ঠ, দৈর্ঘ্য)
 Routes by Valhalla (FOSSGIS) on OpenStreetMap data. Travel times don't include live traffic.	OpenStreetMap ডেটায় Valhalla (FOSSGIS)-এর route। যাত্রার সময়ে সরাসরি ট্র্যাফিক অন্তর্ভুক্ত নয়।
+Row Fields	সারির field
 Rows	সারি
+Rows shifted	সরানো সারি
 Rule	নিয়ম
+Rule is not available for this field.	এই field-এর জন্য নিয়মটি উপলব্ধ নয়।
 Rule name	নিয়মের নাম
 Rulers	Ruler
 Run	চালান
@@ -2522,6 +2823,7 @@ RustGIS could not confirm that any previously saved key was deleted from the sys
 RustGIS couldn't reach the server.	RustGIS server-এ পৌঁছাতে পারেনি।
 RustGIS deep learning package	RustGIS ডিপ লার্নিং প্যাকেজ
 RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	গতবার RustGIS সঠিকভাবে বন্ধ হয়নি, তাই আপনার startup project-এর বদলে World Atlas দিয়ে শুরু হয়েছে। প্রস্তুত হলে Project menu থেকে project খুলুন।
+RustGIS didn't close properly last time.	গতবার RustGIS ঠিকমতো বন্ধ হয়নি।
 RustGIS doesn't have this tool. Install the tools it comes from, or delete the node.	RustGIS-এর কাছে এই tool নেই। যে package থেকে এটি এসেছে তার tool ইনস্টল করুন, অথবা node মুছুন।
 RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	RustGIS হলো Rust-এ লেখা একটি মুক্ত ও open-source GIS। এটি desktop ও browser-এ চলে, এবং প্রতিটি action এমন command যা command line থেকেও চালানো যায়।
 RustGIS layer file	RustGIS লেয়ার ফাইল
@@ -2538,6 +2840,7 @@ RustGIS ran into an internal error last time. The details are in {path}; please 
 RustGIS report or report template	RustGIS report বা report template
 RustGIS styles	RustGIS স্টাইল
 RustGIS task	RustGIS টাস্ক
+RustGIS was quit last time without saving your changes.	গতবার আপনার পরিবর্তন সংরক্ষণ না করেই RustGIS বন্ধ করা হয়েছিল।
 RustGIS {latest} is available.	RustGIS {latest} পাওয়া যাচ্ছে।
 RustGIS {version} is the latest version.	RustGIS {version} সর্বশেষ version।
 RUSTGIS_ASSISTANT_MODEL	RUSTGIS_ASSISTANT_MODEL
@@ -2556,6 +2859,8 @@ Satellite Embeddings	স্যাটেলাইট এমবেডিং
 Satellite Embeddings…	স্যাটেলাইট এমবেডিং…
 Saturation	স্যাচুরেশন
 Save	সংরক্ষণ করুন
+Save a GeoPackage layer's edits to its table in the file, unless rows changed there since.	একটি GeoPackage layer-এর edit ফাইলে তার টেবিলে সংরক্ষণ করুন, যদি না সেখানে এর মধ্যে সারি বদলে থাকে।
+Save a PostGIS layer's edits to its table, unless rows changed there since.	একটি PostGIS layer-এর edit তার টেবিলে সংরক্ষণ করুন, যদি না সেখানে এর মধ্যে সারি বদলে থাকে।
 Save As	নাম দিয়ে সংরক্ষণ করুন
 Save as Connection	Connection হিসেবে সংরক্ষণ করুন
 Save as Default	ডিফল্ট হিসেবে সংরক্ষণ করুন
@@ -2567,6 +2872,7 @@ Save As Report File…	Report file হিসেবে সংরক্ষণ ক�
 Save As Report Template…	Report template হিসেবে সংরক্ষণ করুন…
 Save as {name}	{name} হিসেবে সংরক্ষণ করুন
 Save As…	নাম দিয়ে সংরক্ষণ করুন…
+Save changes to {name}?	{name}-এ পরিবর্তন সংরক্ষণ করবেন?
 Save Color Ramps	Color ramp সংরক্ষণ করুন
 Save Data Source	Data source সংরক্ষণ করুন
 Save History As Python Script	History Python script হিসেবে সংরক্ষণ করুন
@@ -2598,6 +2904,10 @@ Save the project's setup, without its features, as a template.	Project-এর �
 Save the project's styles to a style file.	Project-এর style style file-এ সংরক্ষণ করুন।
 Save the raster as a GeoTIFF.	Raster GeoTIFF হিসেবে সংরক্ষণ করুন।
 Save the selected layer with its symbology as a layer file.	নির্বাচিত layer-এর symbology-সহ layer file হিসেবে সংরক্ষণ করুন।
+Save to GeoPackage	GeoPackage-এ সংরক্ষণ
+Save to GeoPackage…	GeoPackage-এ সংরক্ষণ…
+Save to PostGIS	PostGIS-এ সংরক্ষণ
+Save to PostGIS…	PostGIS-এ সংরক্ষণ…
 Save Web Link Chart	Web Link Chart সংরক্ষণ করুন
 Save Web Map	Web map সংরক্ষণ করুন
 Save Web Scene	Web scene সংরক্ষণ করুন
@@ -2609,16 +2919,20 @@ Saved keys	সংরক্ষিত key
 Saved keys are kept unencrypted in the browser's storage.	সংরক্ষিত key browser storage-এ এনক্রিপশন ছাড়া রাখা হয়।
 Saved keys unavailable	সংরক্ষিত key পাওয়া যাচ্ছে না
 Saved keys: leave the keys blank to log in with those this computer keeps.	সংরক্ষিত key: এই কম্পিউটারে রাখা key দিয়ে লগ ইন করতে key ফাঁকা রাখুন।
+Saved location	সংরক্ষিত অবস্থান
 Saved models	সংরক্ষিত model
 Saved password	সংরক্ষিত পাসওয়ার্ড
 Saved S3 keys are unavailable. Enter the keys for this session.	সংরক্ষিত S3 key পাওয়া যাচ্ছে না। এই সেশনের জন্য key দিন।
 Saved S3 keys could not be forgotten. The connection was not changed.	সংরক্ষিত S3 key ভুলে যাওয়া যায়নি। সংযোগ পরিবর্তন করা হয়নি।
 Saved S3 keys could not be used. Enter the keys again.	সংরক্ষিত S3 key ব্যবহার করা যায়নি। আবার key দিন।
+Saved shortcuts are unreadable or exceed the limit. Changes apply only to this session; Reset All replaces the saved shortcuts.	সংরক্ষিত শর্টকাট পড়া যাচ্ছে না বা সীমা ছাড়িয়েছে। পরিবর্তন শুধু এই সেশনে প্রযোজ্য; সব রিসেট করুন সংরক্ষিত শর্টকাট প্রতিস্থাপন করে।
 Saved symbology: apply it to the selected layer, or save the layer's.	সংরক্ষিত symbology: নির্বাচিত layer-এ প্রয়োগ করুন অথবা layer-এর symbology সংরক্ষণ করুন।
 Saved View	সংরক্ষিত view
 Saved {name}	{name} সংরক্ষিত
 Saved {name}.	{name} সংরক্ষণ করা হয়েছে।
 Saved {path}	{path} সংরক্ষিত
+Saves the layer's edits to its table in one transaction. When a row you changed or deleted was changed or deleted in the database since it was loaded, or a new row's key is taken, nothing is saved and the rows are listed.	Layer-এর edit এক transaction-এ তার টেবিলে সংরক্ষণ করে। আপনার বদলানো বা মোছা কোনো সারি লোডের পর ডেটাবেসে বদলে বা মুছে গেলে, অথবা নতুন সারির key আগেই নেওয়া থাকলে, কিছুই সংরক্ষিত হয় না এবং সারিগুলোর তালিকা দেখানো হয়।
+Saves the layer's edits to its table in the GeoPackage file in one transaction. When a row you changed or deleted was changed or deleted in the file since it was loaded, nothing is saved and the rows are listed. Saving the project keeps edits in the project only; exporting writes a new file.	Layer-এর edit এক transaction-এ GeoPackage ফাইলে তার টেবিলে সংরক্ষণ করে। আপনার বদলানো বা মোছা কোনো সারি লোডের পর ফাইলে বদলে বা মুছে গেলে, কিছুই সংরক্ষিত হয় না এবং সারিগুলোর তালিকা দেখানো হয়। প্রজেক্ট সংরক্ষণ করলে edit শুধু প্রজেক্টে থাকে; রপ্তানি একটি নতুন ফাইল লেখে।
 saving failed unexpectedly	সংরক্ষণ অপ্রত্যাশিতভাবে ব্যর্থ হয়েছে
 Scale	স্কেল
 Scale\nBar	Scale\nbar
@@ -2639,10 +2953,12 @@ Scroll the tabs right	Tab ডানে scroll করুন
 Search	অনুসন্ধান
 Search (this portal needs words)…	অনুসন্ধান (এই portal-এ শব্দ দরকার)…
 Search Catalogue	Catalog অনুসন্ধান
+Search commands	কমান্ড খুঁজুন
 Search commands — e.g. buffer, basemap, labels	Command খুঁজুন — যেমন buffer, basemap, label
 Search datasets, e.g. GEDI biomass	Dataset খুঁজুন, যেমন GEDI biomass
 Search Distance	অনুসন্ধানের দূরত্ব
 Search every command and its parameters	প্রতিটি command ও এর parameter খুঁজুন
+Search fields	Field খুঁজুন
 Search fonts	ফন্ট খুঁজুন
 Search layers (e.g. temperature)	Layer খুঁজুন (যেমন temperature)
 Search layers, places, lat/lon…	Layer, স্থান, lat/lon খুঁজুন…
@@ -2653,6 +2969,7 @@ Search Open Data	Open Data অনুসন্ধান
 Search Open Data…	Open Data অনুসন্ধান…
 Search places for “{query}”	“{query}”-এর জন্য স্থান খুঁজুন
 Search plugins	Plugin খুঁজুন
+Search Radius	অনুসন্ধানের ব্যাসার্ধ
 Search results © OpenStreetMap contributors	অনুসন্ধানের ফলাফল © OpenStreetMap contributors
 Search Satellite Embeddings	Satellite embedding খুঁজুন
 Search services and layers…	Service ও layer খুঁজুন…
@@ -2669,6 +2986,7 @@ Searching…	অনুসন্ধান চলছে…
 Searching… try again in a moment.	অনুসন্ধান চলছে… কিছুক্ষণ পর আবার চেষ্টা করুন।
 Seasonal Mann–Kendall	ঋতুভিত্তিক Mann–Kendall
 Seasons a year	বছরে ঋতুর সংখ্যা
+Second color	দ্বিতীয় রং
 Second raster	দ্বিতীয় raster
 Second standard parallel	দ্বিতীয় standard parallel
 Seconds	সেকেন্ড
@@ -2683,6 +3001,7 @@ Select	নির্বাচন
 Select (click)	নির্বাচন (ক্লিক)
 Select (rectangle)	নির্বাচন (আয়তক্ষেত্র)
 Select a direction…	একটি দিক নির্বাচন করুন…
+Select a feature layer in Layers to label it.	Label দিতে Layer-এ একটি feature layer নির্বাচন করুন।
 Select a feature layer in the Layers pane	Layer pane-এ একটি feature layer নির্বাচন করুন
 Select a field	একটি field নির্বাচন করুন
 Select a layer in Layers to style it.	Style দিতে Layer-এ একটি layer নির্বাচন করুন।
@@ -2705,6 +3024,7 @@ Select features with a SQL expression.	SQL expression দিয়ে feature �
 Select Layer	Layer নির্বাচন করুন
 Select Layer By Attribute	Attribute অনুযায়ী layer নির্বাচন
 Select Layer By Location	অবস্থান অনুযায়ী layer নির্বাচন
+Select None	কোনোটিই নির্বাচন নয়
 Select one text on the map, or a layout element, to format it.	Format করতে মানচিত্রের একটি text বা layout element নির্বাচন করুন।
 Select options	নির্বাচনের বিকল্প
 Select Related	সম্পর্কিত নির্বাচন করুন
@@ -2712,6 +3032,7 @@ Select Rows	সারি নির্বাচন করুন
 Select rows with a SQL expression.	SQL expression দিয়ে সারি নির্বাচন করুন।
 Select Subset From Current Selection	বর্তমান নির্বাচনের মধ্যে subset নির্বাচন করুন
 Select the rows related to the selection.	নির্বাচনের সঙ্গে সম্পর্কিত সারি নির্বাচন করুন।
+Select Tile Layer	Tile layer নির্বাচন করুন
 Selectable	নির্বাচনযোগ্য
 Selectable Layers	নির্বাচনযোগ্য layer
 Selectable on the map: the Select tool picks its features	মানচিত্রে নির্বাচনযোগ্য: Select tool এর feature বেছে নেয়
@@ -2729,7 +3050,9 @@ Selects features that intersect features in another layer.	অন্য layer-�
 Selects features with a SQL where clause, e.g. pop_est > 1000000.	SQL where clause দিয়ে feature নির্বাচন করে, যেমন pop_est > 1000000।
 Semicolon	সেমিকোলন
 Send	পাঠান
+Send Backward	এক ধাপ পেছনে পাঠান
 Send offline edits back and refresh.	অফলাইন edit পাঠিয়ে refresh করুন।
+Send to Back	সবার পেছনে পাঠান
 Sent as	যে হিসাবে পাঠানো হয়েছে
 Sentinel-2 Explorer	Sentinel-2 Explorer
 Sentinel-2 Explorer…	Sentinel-2 Explorer…
@@ -2739,10 +3062,12 @@ Sepia	সেপিয়া
 Sequential	ক্রমিক
 Serif	সেরিফ
 Server	সার্ভার
+Service	সার্ভিস
 Service Group	সার্ভিস গ্রুপ
 Service group data exceeds 64 MB.	Service group-এর ডেটা 64 MB ছাড়িয়ে গেছে।
 Service Import Requests	সার্ভিস ইমপোর্ট অনুরোধ
 Service Layers	সার্ভিস লেয়ার
+Session Log	সেশন লগ
 Session token	সেশন টোকেন
 Set	সেট করুন
 Set Cell Size	Cell size সেট করুন
@@ -2750,15 +3075,22 @@ Set Domain	Domain সেট করুন
 Set Filter	Filter সেট করুন
 Set Geometry	Geometry সেট করুন
 Set Map Tool	Map tool সেট করুন
+Set per feature from an expression, e.g. "pop" / 1e5 or CASE WHEN … END; colors as '#RRGGBB'. Empty: the symbol's own.	একটি এক্সপ্রেশন থেকে প্রতিটি feature-এর জন্য সেট হয়, যেমন "pop" / 1e5 বা CASE WHEN … END; রং '#RRGGBB' আকারে। ফাঁকা: প্রতীকের নিজস্ব মান।
 Set Scale	Scale সেট করুন
 Set Subtypes	Subtype সেট করুন
 Set the pixels inside a polygon	একটি polygon-এর ভেতরের pixel নির্ধারণ করুন
 Set the pixels inside a polygon.	একটি polygon-এর ভেতরের pixel নির্ধারণ করুন।
 Settings	সেটিংস
+Settings › Customize	সেটিংস › কাস্টমাইজ করুন
+Settings › Customize › Keyboard Shortcuts	সেটিংস › কাস্টমাইজ করুন › কীবোর্ড শর্টকাট
+Several places	একাধিক স্থান
+Shade from the outer edge alone	শুধু বাইরের ধার থেকে ছায়া দিন
+Shade to the point deepest inside	ভেতরের গভীরতম বিন্দু পর্যন্ত ছায়া দিন
 Shade walls by the way they face the light.	আলোর দিকে মুখ করার ভিত্তিতে দেয়াল ছায়ায় দেখান।
 Shaded	ছায়াযুক্ত
 Shaded Relief	ছায়াযুক্ত relief
 Shape	আকৃতি
+Shapeburst	শেপবার্স্ট
 Shapefile	Shapefile
 Shapes	আকৃতি
 Share	শেয়ার করুন
@@ -2773,13 +3105,22 @@ Share the selected layer's names as a place-search locator.	নির্বা�
 Share the selected layer's symbology as a MapLibre style.	নির্বাচিত layer-এর symbology MapLibre style হিসেবে শেয়ার করুন।
 Shared	শেয়ার করা
 Shared Items	শেয়ার করা item
+Shared Vertices	শেয়ার করা ভার্টেক্স
+Shared vertices must be on or off	শেয়ার করা ভার্টেক্স অবশ্যই চালু বা বন্ধ হতে হবে
 Shares made, with Manage tools to update them.	তৈরি করা share, আপডেট করার জন্য Manage tool-সহ।
 sharp left	তীব্র বাঁক বামে
 sharp right	তীব্র বাঁক ডানে
 Shift+	Shift+
 Shift+drag	Shift+টানুন
 Shift+Enter starts a new line.	Shift+Enter নতুন লাইন শুরু করে।
+Shifts the mark below the point (above when negative)	মার্ককে বিন্দুর নিচে সরায় (ঋণাত্মক হলে ওপরে)
+Shifts the mark right of the point (left when negative)	মার্ককে বিন্দুর ডানে সরায় (ঋণাত্মক হলে বামে)
 Shifts the stroke sideways: positive to the right of the line's direction, negative to the left	stroke পাশের দিকে সরায়: ধনাত্মক মান line-এর দিকের ডানে, ঋণাত্মক মান বামে
+Short labels	ছোট লেবেল
+Shortcut already assigned	শর্টকাট ইতিমধ্যে নির্ধারিত
+Shortcut file contains invalid or reserved bindings.	শর্টকাট ফাইলে অবৈধ বা সংরক্ষিত বাইন্ডিং আছে।
+Shortcut file exceeds the size limit.	শর্টকাট ফাইল আকারের সীমা ছাড়িয়ে গেছে।
+Shortcut keys are required.	শর্টকাট কী প্রয়োজন।
 Shortcuts	শর্টকাট
 Shortest route over a line network	line network-এ সবচেয়ে ছোট route
 Show	দেখান
@@ -2793,18 +3134,22 @@ Show labels	Label দেখান
 Show latitude/longitude lines on the basemap.	Basemap-এ অক্ষাংশ/দ্রাঘিমাংশের রেখা দেখান।
 Show Layers	Layer দেখান
 Show layers through time: only the features whose date falls in the slider's window, and dated imagery for its date.	সময়ের সঙ্গে layer দেখান: শুধু slider-এর window-এ পড়ে এমন তারিখের feature এবং slider-এর তারিখের imagery।
+Show legend	লেজেন্ড দেখান
+Show legend and source layers	লেজেন্ড ও source layer দেখান
 Show Map	মানচিত্র দেখান
 Show Me	আমাকে দেখান
 Show or hide	দেখান বা লুকান
 Show or hide the AI Assistant.	AI Assistant দেখান বা লুকান।
 Show or hide the Bookmarks pane: every map's bookmarks.	Bookmark pane দেখান বা লুকান: প্রতিটি মানচিত্রের bookmark।
 Show or hide the Browser pane.	Browser pane দেখান বা লুকান।
+Show or hide the Data Sources pane.	ডেটা সোর্স প্যান দেখান বা লুকান।
 Show or hide the Data Sources pane: favourites, recent data, saved services, databases and STAC APIs, and a library of public sources.	Data Sources pane দেখান বা লুকান: পছন্দের উৎস, সাম্প্রতিক ডেটা, সংরক্ষিত service, database, STAC API এবং public source-এর library।
 Show or hide the group's layers	Group-এর layer দেখান বা লুকান
 Show or hide the layer.	Layer দেখান বা লুকান।
 Show or hide the Layers pane.	Layer pane দেখান বা লুকান।
 Show or hide the Tools pane.	Tools pane দেখান বা লুকান।
 Show rulers. Drag from a ruler to add a guide; drag a guide back onto it to remove it.	Ruler দেখান। guide যোগ করতে ruler থেকে টানুন; সরাতে guide-টিকে ruler-এর ওপর ফিরিয়ে টানুন।
+Show source layers	Source layer দেখান
 Show the bands picked, read in place as the map needs them	নির্বাচিত band দেখান; map-এর প্রয়োজন অনুযায়ী একই জায়গায় পড়া হবে
 Show the description	বর্ণনা দেখান
 Show the Labeling pane for the selected layer.	নির্বাচিত layer-এর জন্য Labeling pane দেখান।
@@ -2836,21 +3181,29 @@ Showing {n} of {m} items (narrow the search for others)	{m}-এর মধ্য�
 Showing {n} of {total} on {portal}	{portal}-এ মোট {total}-এর মধ্যে {n}টি দেখানো হচ্ছে
 Side by Side	পাশাপাশি
 Side labels	পাশের label
+Sign in	সাইন ইন
+Sign In to ArcGIS	ArcGIS-এ সাইন ইন
 Sign in to choose a model.	Model বেছে নিতে সাইন ইন করুন।
 Sign in with your ChatGPT account.	আপনার ChatGPT account দিয়ে সাইন ইন করুন।
 Sign out	সাইন আউট
+Sign Out of ArcGIS	ArcGIS থেকে সাইন আউট
 Sign-in	সাইন ইন
 Sign-in cancelled.	সাইন-ইন বাতিল হয়েছে।
 Sign-in timed out. Start again and allow the browser to reach this computer's loopback address.	সাইন-ইনের সময় শেষ। আবার শুরু করুন এবং browser-কে এই কম্পিউটারের loopback address-এ পৌঁছাতে দিন।
 signed in	সাইন ইন করা
+Signed in to {portal}	{portal}-এ সাইন ইন করা
+Signed in to {portal} as {user}	{portal}-এ {user} হিসেবে সাইন ইন করা
 Signed out on this computer, but OpenAI didn't confirm it. You can disconnect RustGIS in ChatGPT's settings.	এই কম্পিউটারে সাইন আউট হয়েছে, কিন্তু OpenAI নিশ্চিত করেনি। ChatGPT-এর setting থেকে RustGIS সংযোগ বিচ্ছিন্ন করতে পারেন।
+Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect RustGIS in ChatGPT's settings.	এই কম্পিউটারে সাইন আউট হয়েছে, কিন্তু system keychain পড়া যায়নি, তাই OpenAI-কে সেশন শেষ করতে বলা হয়নি। ChatGPT-এর setting থেকে RustGIS সংযোগ বিচ্ছিন্ন করতে পারেন।
 Significance level	তাৎপর্য স্তর
 Signing in with ChatGPT works in the desktop app.	ChatGPT দিয়ে সাইন ইন desktop app-এ কাজ করে।
 Signing the asset (Planetary Computer)…	Asset-এ স্বাক্ষর করা হচ্ছে (Planetary Computer)…
+Signs this account out and forgets it on this computer, with its saved sign-in.	এই অ্যাকাউন্ট সাইন আউট করে এবং এই কম্পিউটারে সংরক্ষিত সাইন-ইনসহ এটি ভুলে যায়।
 Sill	সিল
 Simplify	সরল করুন
 Simulate the drive, or save the route as a layer.	যাত্রা simulate করুন, অথবা route layer হিসেবে সংরক্ষণ করুন।
 Simulation	সিমুলেশন
+Single image	একক ছবি
 Single line	একক লাইন
 Single Symbol	একক প্রতীক
 Size	আকার
@@ -2873,6 +3226,7 @@ Snapping	স্ন্যাপিং
 Snow	তুষার
 Socrata	Socrata
 Solid	নিরবচ্ছিন্ন
+Some images aren't shown: the notebook's images use all the memory set aside for them.	কিছু ছবি দেখানো হচ্ছে না: নোটবুকের ছবিগুলো তাদের জন্য রাখা সব মেমরি ব্যবহার করেছে।
 Some of the project's S3 sources wait for you to choose the saved connection that reads them	প্রজেক্টের কিছু S3 source সেগুলো পড়ার সংরক্ষিত সংযোগ বেছে নেওয়ার জন্য অপেক্ষা করছে
 Sort	সাজান
 Sort: {field}	সাজানো: {field}
@@ -2881,8 +3235,14 @@ Source Cooperative	Source Cooperative
 Source Cooperative…	Source Cooperative…
 Source coordinate system	উৎস স্থানাঙ্ক ব্যবস্থা
 Source coordinate system is required	উৎস স্থানাঙ্ক ব্যবস্থা আবশ্যক
+Source Key Field	Source key field
+Source Table / Layer	Source table / layer
+Source-layer Name	Source layer-এর নাম
 South	দক্ষিণ
 South Polar Stereographic	দক্ষিণ মেরু স্টেরিওগ্রাফিক
+Spacing	ব্যবধান
+Spacing across	আড়াআড়ি ব্যবধান
+Spacing down	নিচের দিকে ব্যবধান
 Spatial Join	স্থানিক Join
 Speaker notes	বক্তার নোট
 Spectral Analysis	বর্ণালি বিশ্লেষণ
@@ -2891,10 +3251,16 @@ Speed	গতি
 Speed Display	গতি প্রদর্শন
 Split	ভাগ করুন
 Split (click the line)	ভাগ করুন (line-এ ক্লিক)
+Split Features	Feature ভাগ করুন
+Split Field	Field ভাগ করুন
 Split the widest class	সবচেয়ে চওড়া শ্রেণি ভাগ করুন
+Splits input features by overlay polygons, keeping every part: those inside get the overlay's attributes.	Overlay polygon দিয়ে input feature ভাগ করে, সব অংশ রেখে: ভেতরের অংশ overlay-এর attribute পায়।
+Splits input features where they overlap overlay polygons, keeping both layers' attributes.	Overlay polygon-এর সঙ্গে যেখানে মিলে যায় সেখানে input feature ভাগ করে, দুই layer-এরই attribute রেখে।
+Spread	বিস্তার
 SQL	SQL
 SQL Pane	SQL pane
 SQL queries run through DuckDB, a program the desktop app calls: open this project in the desktop app to query it.	SQL query DuckDB-এর মাধ্যমে চলে, যা desktop app চালায়: query করার জন্য এই project desktop app-এ খুলুন।
+SQL Query	SQL কোয়েরি
 SQL Server	SQL Server
 SQL that must be true, e.g. pop > 0	সত্য হতে হবে এমন SQL, যেমন pop > 0
 Square	বর্গ
@@ -2940,6 +3306,8 @@ STAC APIs	STAC APIসমূহ
 STAC catalog	STAC ক্যাটালগ
 STAC Search	STAC অনুসন্ধান
 STAC Search…	STAC অনুসন্ধান…
+Stack another fill on top	উপরে আরেকটি পূরণ রাখুন
+Stack another marker on top	উপরে আরেকটি মার্কার রাখুন
 Stack another stroke on top	উপরে আরেকটি stroke রাখুন
 Stack on the current basemaps	বর্তমান basemap-এর ওপর স্তূপ করুন
 Standalone Tables	স্বতন্ত্র table
@@ -2955,8 +3323,11 @@ Start With	দিয়ে শুরু করুন
 Start-up	শুরু
 starting with a project file needs the desktop app	project file দিয়ে শুরু করতে desktop app দরকার
 Statistic	পরিসংখ্যান
+Statistic is already listed for this field.	এই field-এর জন্য পরিসংখ্যানটি ইতিমধ্যে তালিকাভুক্ত।
+Statistic is not available for this field.	এই field-এর জন্য পরিসংখ্যানটি উপলব্ধ নয়।
 Statistics	পরিসংখ্যান
 Statistics Field	পরিসংখ্যানের field
+Statistics of fields, for the whole table or for each group of records sharing the case fields' values.	Field-এর পরিসংখ্যান, পুরো টেবিলের জন্য বা case field-এর একই মানের প্রতিটি record group-এর জন্য।
 Status	অবস্থা
 Status Bar	Status bar
 Std. Dev.	প্রমিত বিচ্যুতি
@@ -2964,6 +3335,8 @@ Step	ধাপ
 Step back	এক ধাপ পেছনে
 Step forward	এক ধাপ সামনে
 Step through a task.	একটি task ধাপে ধাপে অনুসরণ করুন।
+Step through the days with the time slider (View › Time), which starts with the layer's days	Time slider (দেখুন › সময়) দিয়ে দিনগুলোর মধ্য দিয়ে ধাপে ধাপে যান, যা layer-এর দিনগুলো দিয়ে শুরু হয়
+Step through the layer's times with the time slider (View › Time), which starts with them	Time slider (দেখুন › সময়) দিয়ে layer-এর সময়গুলোর মধ্য দিয়ে ধাপে ধাপে যান, যা সেগুলো দিয়েই শুরু হয়
 Step Time	ধাপের সময়
 Step {n} done	ধাপ {n} সম্পন্ন
 Stepped line	সিঁড়ি-আকৃতির line
@@ -2974,6 +3347,7 @@ Stop MCP relay	MCP relay বন্ধ করুন
 Stop Recording	রেকর্ডিং বন্ধ করুন
 Stopped after {steps} steps; say "continue" to go on.	{steps} ধাপ পরে থেমেছে; চালিয়ে যেতে "continue" বলুন।
 Stopped.	থেমেছে।
+Straight across, in rings from its first point, or round its first point	সোজা আড়াআড়ি, প্রথম বিন্দু থেকে বলয়ে, বা প্রথম বিন্দুকে ঘিরে
 street, city, country	রাস্তা, শহর, দেশ
 Stretch	স্ট্রেচ
 Stretch\nType	Stretch-এর\nধরন
@@ -3019,13 +3393,16 @@ Switch Selection	নির্বাচন বদল করুন
 Switch selection	নির্বাচন বদল করুন
 Switch to a dark basemap	গাঢ় basemap-এ বদল করুন
 Symbol	প্রতীক
+Symbol by Expression	এক্সপ্রেশন দিয়ে প্রতীক
 Symbol Color	প্রতীকের রং
 Symbology	প্রতীকায়ন
 Symbology Pane	প্রতীকায়ন প্যান
 Symbology Pane…	প্রতীকায়ন প্যান…
+Symmetrical Difference	প্রতিসম পার্থক্য
 Sync	সিঙ্ক করুন
 Tab	ট্যাব
 tab is required	tab আবশ্যক
+Tab, Enter, Space and arrow key bindings can override keyboard navigation.	Tab, Enter, Space ও arrow key-এর binding কীবোর্ড নেভিগেশনকে override করতে পারে।
 Table	টেবিল
 Table Frame	Table frame
 Table or layer	Table বা layer
@@ -3034,7 +3411,9 @@ Tags	ট্যাগসমূহ
 Take the data in view offline, to edit and sync back later.	দৃশ্যমান ডেটা offline-এ নিন, পরে সম্পাদনা ও sync back করার জন্য।
 Take this bound out	এই সীমা সরিয়ে দিন
 Target Features	গন্তব্য feature
+Target Key Field	Target key field
 Target Records	গন্তব্য record
+Target Table / Layer	Target table / layer
 Task	কাজ
 Task Item	Task item
 Task name	Task-এর নাম
@@ -3055,19 +3434,26 @@ Text	টেক্সট
 Text Symbol	Text symbol
 That connection would create a loop.	এই সংযোগ একটি loop তৈরি করবে।
 The active project or map changed; reopen Define Projection for the intended layer.	সক্রিয় প্রজেক্ট বা মানচিত্র বদলে গেছে; কাঙ্ক্ষিত layer-এর জন্য অভিক্ষেপ নির্ধারণ আবার খুলুন।
+The active project or map changed; reopen the GeoPackage dialog for the intended layer.	সক্রিয় প্রজেক্ট বা মানচিত্র বদলে গেছে; কাঙ্ক্ষিত layer-এর জন্য GeoPackage dialog আবার খুলুন।
 The address fields are empty in every row.	প্রতিটি সারিতে ঠিকানার field ফাঁকা।
+The angles run counterclockwise, as in mathematics	কোণগুলো ঘড়ির কাঁটার বিপরীতে চলে, গণিতের মতো
 The answer isn't UTF-8 text	উত্তরটি UTF-8 text নয়
 the answer isn't UTF-8 text	উত্তরটি UTF-8 text নয়
 The assistant follows a skill's instructions when it uses it. Whatever they say, its commands that need your approval still ask.	Assistant কোনো skill ব্যবহার করলে তার নির্দেশনা অনুসরণ করে। নির্দেশনায় যা-ই থাকুক, অনুমোদন দরকার এমন command তবুও অনুমতি চাইবে।
 The assistant is busy; stop it or wait for it to finish.	Assistant ব্যস্ত; থামান অথবা শেষ হওয়া পর্যন্ত অপেক্ষা করুন।
 The assistant wants to run this, and {why}:	Assistant এটি চালাতে চায়, এবং {why}:
 The Basemaps plugin's tab of public basemaps.	Basemaps plugin-এর public basemap tab।
+The browser didn't give RustGIS the clipboard ({why}): paste with {keys}.	Browser RustGIS-কে ক্লিপবোর্ড দেয়নি ({why}): {keys} দিয়ে পেস্ট করুন।
 the capture failed unexpectedly	ক্যাপচার অপ্রত্যাশিতভাবে ব্যর্থ হয়েছে
+The class these label groups and the Labeling pane edit.	এই লেবেল group ও লেবেলিং প্যান যে শ্রেণি সম্পাদনা করে।
+The clipboard came after you moved on, so nothing was pasted: paste with {keys}.	আপনি এগিয়ে যাওয়ার পরে ক্লিপবোর্ড এসেছে, তাই কিছু পেস্ট হয়নি: {keys} দিয়ে পেস্ট করুন।
 The connection failed; trying again in {seconds} s.	সংযোগ ব্যর্থ; {seconds} সেকেন্ড পরে আবার চেষ্টা করা হবে।
 the connection has no id	সংযোগের কোনো ID নেই
 The country list couldn't be read ({e}): type a country's code	দেশের তালিকা পড়া যায়নি ({e}): একটি দেশের code লিখুন
 The current elevation stays in effect while you edit inputs. Click Apply elevation to apply the value and units.	input সম্পাদনা করার সময় বর্তমান elevation কার্যকর থাকে। মান ও একক প্রয়োগ করতে Apply elevation-এ ক্লিক করুন।
 The dataset has nothing RustGIS can add	Dataset-এ RustGIS যোগ করতে পারে এমন কিছু নেই
+The desktop app adds data cubes	Desktop app data cube যোগ করে
+The distance between two marks along the line	রেখা বরাবর দুটি মার্কের মধ্যে দূরত্ব
 The environment (AWS_ACCESS_KEY_ID…)	এনভায়রনমেন্ট (AWS_ACCESS_KEY_ID…)
 The features where the map is	মানচিত্র যেখানে আছে, সেখানকার feature
 The first 1,000 entries; narrow it down a folder at a time.	প্রথম ১,০০০টি entry; একবারে একটি folder ধরে অনুসন্ধান সীমিত করুন।
@@ -3083,20 +3469,28 @@ The key is saved in the system keychain.	Key system keychain-এ সংরক্
 the keychain backend stopped unexpectedly	keychain backend অপ্রত্যাশিতভাবে বন্ধ হয়ে গেছে
 the keychain worker stopped	keychain worker বন্ধ হয়ে গেছে
 The keys saved on this computer were forgotten; a login in this session keeps working.	এই কম্পিউটারে সংরক্ষিত key ভুলে যাওয়া হয়েছে; এই সেশনের লগ ইন কাজ করতে থাকবে।
+The kilometres' last two digits, as topographic maps print them: 43 for 543000.	কিলোমিটারের শেষ দুই অঙ্ক, যেমন টপোগ্রাফিক মানচিত্রে ছাপা হয়: 543000-এর জন্য 43।
 The layer shows the step the time slider is at, and turns the slider on over the variable's dates.	layer সময়ের slider যে ধাপে আছে তা দেখায় এবং variable-এর তারিখজুড়ে slider চালু করে।
 The layer's file couldn't be read: {error}	layer-এর file পড়া যায়নি: {error}
+The layer's fills	Layer-এর পূরণ
 The layer's strokes	Layer-এর stroke
 the layout export failed unexpectedly	layout export অপ্রত্যাশিতভাবে ব্যর্থ হয়েছে
 The link doesn't say its STAC API: Find Items searches {api}	link-এ STAC API উল্লেখ নেই: Find Items {api}-তে অনুসন্ধান করে
 The list of plugins to browse. Leave it empty for the RustGIS plugin registry.	ব্রাউজ করার plugin-এর তালিকা। RustGIS plugin registry ব্যবহার করতে ফাঁকা রাখুন।
+The map at the left; the title, locator, legend, sources and reference in a panel at the right.	বামে মানচিত্র; শিরোনাম, লোকেটর, লেজেন্ড, উৎস ও রেফারেন্স ডানের একটি প্যানেলে।
+the map has no GeoPackage layer loaded for editing (Home › Add Data › Edit GeoPackage Table…)	মানচিত্রে সম্পাদনার জন্য লোড করা কোনো GeoPackage layer নেই (হোম › ডেটা যোগ করুন › GeoPackage টেবিল সম্পাদনা…)
 the map has no layers	মানচিত্রে কোনো layer নেই
+the map has no PostGIS layer loaded for editing (Home › Add Data › Database…, Load for editing)	মানচিত্রে সম্পাদনার জন্য লোড করা কোনো PostGIS layer নেই (হোম › ডেটা যোগ করুন › ডেটাবেস…, সম্পাদনার জন্য লোড করুন)
+The map has no tile archive read from a file.	মানচিত্রে ফাইল থেকে পড়া কোনো tile archive নেই।
 The map is drawn in this coordinate system; layers are projected on the fly.	মানচিত্র এই coordinate system-এ আঁকা হয়; layer-গুলো তাৎক্ষণিকভাবে project করা হয়।
 the map isn't on screen in RustGIS (a layout or the catalog is shown), so it was drawn offscreen	মানচিত্রটি RustGIS-এর পর্দায় নেই (layout বা catalog দেখা যাচ্ছে), তাই এটি পর্দার বাইরে আঁকা হয়েছে
 The map view as it is now	এখনকার মানচিত্রের view
 The map's extent isn't known yet	মানচিত্রের extent এখনও জানা যায়নি
 The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	মানচিত্রের view-তে Overture-এর {ty} file-এর {n}টি আছে (সর্বোচ্চ {max}): zoom in করুন অথবা theme-টি map tile হিসেবে যোগ করুন
+The map's, else its UTM zone	মানচিত্রেরটি, নইলে তার UTM zone
 the MCP relay couldn't start	MCP relay শুরু করা যায়নি
 The MCP relay couldn't start; agents can still use the file bridge. Click to turn agents off	MCP relay শুরু করা যায়নি; agent-গুলো তবু file bridge ব্যবহার করতে পারে। Agent বন্ধ করতে ক্লিক করুন
+The menu bar keeps that key: choose another.	Menu bar সেই কী রাখে: অন্য একটি বেছে নিন।
 The model answering; click to change it	উত্তর দেওয়া model; বদলাতে ক্লিক করুন
 The model declined this request.	Model এই অনুরোধ প্রত্যাখ্যান করেছে।
 The model declined this request: {why}	Model এই অনুরোধ প্রত্যাখ্যান করেছে: {why}
@@ -3105,13 +3499,19 @@ The model sent an empty reply; ask again, or try another model.	Model ফাঁ�
 The National Map	The National Map
 The National Map…	The National Map…
 the NLDI's answer isn't UTF-8 text	NLDI-এর উত্তর UTF-8 text নয়
+the old file's list must disappear immediately	the old file's list must disappear immediately
+the open project has unsaved changes: save them before recovering other work	খোলা প্রজেক্টে অসংরক্ষিত পরিবর্তন আছে: অন্য কাজ পুনরুদ্ধারের আগে সেগুলো সংরক্ষণ করুন
+The open project has unsaved changes: save them, then recover this copy.	খোলা প্রজেক্টে অসংরক্ষিত পরিবর্তন আছে: সেগুলো সংরক্ষণ করুন, তারপর এই কপি পুনরুদ্ধার করুন।
+The page in colour, the title in light text and the map in a light card.	পৃষ্ঠাটি রঙিন, শিরোনাম হালকা টেক্সটে এবং মানচিত্র একটি হালকা কার্ডে।
 the page is too large to draw	পৃষ্ঠা আঁকার জন্য খুব বড়
 The password was refused. Type a password to try again.	পাসওয়ার্ড প্রত্যাখ্যাত হয়েছে। আবার চেষ্টা করতে একটি পাসওয়ার্ড লিখুন।
 the picture is too large to show	ছবিটি দেখানোর জন্য খুব বড়
 the picture is too large to show, or isn't one	ছবিটি দেখানোর জন্য খুব বড়, অথবা এটি ছবি নয়
 The places leave this device for the public Valhalla server at {server}, run by FOSSGIS. Don't continue if your project is bound by data privacy or data sovereignty rules.	স্থানগুলো এই ডিভাইস ছেড়ে FOSSGIS-চালিত {server} public Valhalla server-এ যাবে। আপনার project-এ data privacy বা sovereignty-র নিয়ম থাকলে এগোবেন না।
+The portal's OAuth app	পোর্টালের OAuth app
 the presentation export failed unexpectedly	presentation export অপ্রত্যাশিতভাবে ব্যর্থ হয়েছে
 the preview failed unexpectedly	preview অপ্রত্যাশিতভাবে ব্যর্থ হয়েছে
+The project changed while this was open: check the changes, then answer again.	এটি খোলা থাকাকালে প্রজেক্ট বদলে গেছে: পরিবর্তন দেখে আবার উত্তর দিন।
 The project downloads as this file, to the folder your browser saves downloads in.	Project এই file হিসেবে download হবে, আপনার browser-এর download folder-এ।
 The project's items in place of the map.	মানচিত্রের বদলে project-এর item-গুলো।
 The project's thumbnail, from an image.	ছবি থেকে নেওয়া project-এর thumbnail।
@@ -3122,6 +3522,9 @@ The public server is free and shared by many: it answers light use, and may ask 
 The range is two numbers, low and high (0, 0.9)	Range-এ দুটি সংখ্যা থাকে, নিম্ন ও উচ্চ (0, 0.9)
 The raster's data couldn't be read.	Raster-এর data পড়া যায়নি।
 The raster's data couldn't be read: {error}	Raster-এর ডেটা পড়া যায়নি: {error}
+the recovery copy is incomplete	পুনরুদ্ধার কপি অসম্পূর্ণ
+the recovery copy is too large	পুনরুদ্ধার কপি অনেক বড়
+the recovery copy isn't text	পুনরুদ্ধার কপি টেক্সট নয়
 the release isn't known	Release জানা নেই
 The reply reached its length limit.	উত্তরটি দৈর্ঘ্যের সীমায় পৌঁছেছে।
 The reply stopped before completion; no actions were run.	উত্তর সম্পূর্ণ হওয়ার আগে থেমেছে; কোনো action চালানো হয়নি।
@@ -3133,6 +3536,7 @@ The saved password could not be used. Type a password to try again; check Rememb
 The saved S3 connection no longer matches this source.	সংরক্ষিত S3 সংযোগ আর এই source-এর সাথে মেলে না।
 The saved sign-in changed. Select your account again.	সংরক্ষিত সাইন-ইন বদলেছে। আবার account বেছে নিন।
 The scale the layer's symbol and label sizes are set for. At other scales they grow and shrink with the map, as on paper.	যে স্কেলের জন্য layer-এর প্রতীক ও label-এর আকার নির্ধারিত। অন্য স্কেলে কাগজের মতোই মানচিত্রের সাথে এগুলো বড় ও ছোট হয়।
+The selected GeoPackage layer is no longer available; choose a layer	নির্বাচিত GeoPackage layer আর উপলব্ধ নয়; একটি layer বেছে নিন
 The server had a problem answering.	উত্তর দিতে server-এর সমস্যা হয়েছে।
 The server is limiting requests.	Server request সীমিত করছে।
 The server refused the request.	Server অনুরোধ প্রত্যাখ্যান করেছে।
@@ -3143,7 +3547,8 @@ The service's answer isn't UTF-8 text	Service-এর উত্তর UTF-8 text 
 The Shapefile's files download as one zip.	Shapefile-এর file-গুলো একটি zip হিসেবে download হয়।
 The share of each cell covered by fields, for the zoomed-out view	ছোট করে দেখা view-এর জন্য প্রতিটি cell-এর যে অংশ কৃষিজমি দিয়ে ঢাকা
 The sign-in expired or was revoked. Sign in again.	সাইন-ইনের মেয়াদ শেষ হয়েছে বা প্রত্যাহার করা হয়েছে। আবার সাইন ইন করুন।
-The sign-in is kept in the app's settings folder, for your user account only, and never in a project file.	সাইন-ইন app-এর settings folder-এ শুধু আপনার user account-এর জন্য রাখা হয়, কখনো project file-এ নয়।
+The sign-in is kept in the system keychain, never in the app's settings or a project file.	সাইন-ইন system keychain-এ রাখা হয়, কখনো app-এর setting বা project file-এ নয়।
+The sign-in is still kept in the app's settings folder, readable by your user account: the system keychain is unavailable, so it hasn't been moved there yet.	সাইন-ইন এখনও app-এর settings folder-এ রাখা আছে, আপনার user account পড়তে পারে: system keychain উপলব্ধ নেই, তাই এখনও সেখানে সরানো হয়নি।
 The significance level is a number, such as 0.05	Significance level একটি সংখ্যা, যেমন 0.05
 The start-up project {path} didn't open: {error}	Startup project {path} খোলা যায়নি: {error}
 The start-up project {path} isn't a RustGIS project file.	Startup project {path} RustGIS project file নয়।
@@ -3155,9 +3560,13 @@ The summary failed unexpectedly	Summary অপ্রত্যাশিতভা�
 The summary finished after another project was opened, so it wasn't added	অন্য project খোলার পর summary শেষ হয়েছে, তাই এটি যোগ করা হয়নি
 The system keychain could not complete the request.	System keychain অনুরোধটি সম্পন্ন করতে পারেনি।
 The system keychain is locked or access was refused.	System keychain লক করা আছে অথবা অ্যাক্সেস প্রত্যাখ্যাত হয়েছে।
+The system keychain is unavailable, so this sign-in won't be remembered: it lasts until RustGIS closes.	System keychain উপলব্ধ নেই, তাই এই সাইন-ইন মনে রাখা হবে না: এটি RustGIS বন্ধ হওয়া পর্যন্ত থাকবে।
 The system keychain is unavailable.	System keychain পাওয়া যাচ্ছে না।
 The task's steps changed, so the step being edited was closed: edit it again.	Task-এর ধাপ বদলেছে, তাই সম্পাদিত ধাপটি বন্ধ হয়েছে: আবার সম্পাদনা করুন।
 the time slider is off	time slider বন্ধ
+The title and subtitle in a band of colour across the top.	ওপরে রঙের একটি পট্টিতে শিরোনাম ও উপশিরোনাম।
+The title over the map, the sources and the reference in boxes under it.	মানচিত্রের ওপরে শিরোনাম, তার নিচে বাক্সে উৎস ও রেফারেন্স।
+The token expired and was forgotten. Paste a new one.	Token-এর মেয়াদ শেষ হয়েছে এবং ভুলে যাওয়া হয়েছে। একটি নতুন পেস্ট করুন।
 The token expires on {date}.	Token-এর মেয়াদ শেষ হবে {date}-এ।
 The trend couldn't start: {error}	Trend শুরু করা যায়নি: {error}
 The trend failed unexpectedly	Trend অপ্রত্যাশিতভাবে ব্যর্থ হয়েছে
@@ -3166,25 +3575,35 @@ The values shown from black to white, the same for every date and tile (the band
 the view has no extent	view-এর extent নেই
 The view is larger than one read: its centre was read (zoom in for the rest)	View একটি read-এর চেয়ে বড়: এর কেন্দ্র পড়া হয়েছে (বাকিটা দেখতে zoom in করুন)
 The web app always runs the latest release: reload the page to get it.	Web app সবসময় সর্বশেষ release চালায়: এটি পেতে page reload করুন।
+The web app can't link to files on this computer: add the file again with Add Data.	Web app এই কম্পিউটারের ফাইলে লিংক করতে পারে না: ডেটা যোগ করুন দিয়ে ফাইলটি আবার যোগ করুন।
 the window's screenshot didn't come back in time, so the map was drawn offscreen	window-এর screenshot সময়মতো আসেনি, তাই মানচিত্র পর্দার বাইরে আঁকা হয়েছে
 the window's screenshot didn't hold the map, so it was drawn offscreen	window-এর screenshot-এ মানচিত্র ছিল না, তাই এটি পর্দার বাইরে আঁকা হয়েছে
 Theme	থিম
 There is no expression defined.	কোনো expression নির্ধারিত নেই।
+there is no unsaved work to recover	পুনরুদ্ধারের জন্য কোনো অসংরক্ষিত কাজ নেই
 Thermal	তাপীয়
 Thesis figure, full page (160 × 225 mm)	থিসিসের চিত্র, পুরো পৃষ্ঠা (160 × 225 mm)
 Thesis figure, half page (160 × 110 mm)	থিসিসের চিত্র, অর্ধেক পৃষ্ঠা (160 × 110 mm)
+Thin	হালকা করুন
 Thinking…	ভাবছে…
 Third-party licences	তৃতীয় পক্ষের লাইসেন্স
 THIRD-PARTY-LICENSES.txt	THIRD-PARTY-LICENSES.txt
 this build can't download plugins	এই build plugin download করতে পারে না
 this build can't reach AI providers	এই build AI provider-এ পৌঁছাতে পারে না
+this build has no download service	এই build-এ কোনো download service নেই
 this build saves projects with Save As	এই build Save As দিয়ে project সংরক্ষণ করে
 This ChatGPT account was already saved. Next time, choose it in the list instead of adding it again.	এই ChatGPT account আগে থেকেই সংরক্ষিত। পরেরবার আবার যোগ না করে তালিকা থেকে বেছে নিন।
+This class is drawn with the layer's fills. Changing them here gives it its own.	এই class layer-এর পূরণ দিয়ে আঁকা হয়। এখানে বদলালে এর নিজস্ব পূরণ হবে।
+This class is drawn with the layer's marks. Changing them here gives it its own.	এই class layer-এর মার্ক দিয়ে আঁকা হয়। এখানে বদলালে এর নিজস্ব মার্ক হবে।
 This class is drawn with the layer's strokes. Changing them here gives it its own.	এই class layer-এর stroke দিয়ে আঁকা হয়। এখানে বদলালে এর নিজস্ব stroke হবে।
 This class is hidden, so it labels nothing.	এই class লুকানো, তাই কোনো label দেয় না।
 This clause no longer reads, so no feature is labelled: {error}	এই clause আর পড়া যায় না, তাই কোনো feature-এ label নেই: {error}
 This computer keeps keys for this connection: leave the keys blank to log in with them.	এই কম্পিউটারে এই সংযোগের key রাখা আছে: সেগুলো দিয়ে লগ ইন করতে key ফাঁকা রাখুন।
 This computer keeps this connection's keys: logging in reads them.	এই কম্পিউটারে এই সংযোগের key রাখা আছে: লগ ইন করলে সেগুলো পড়া হয়।
+This font isn't installed here, so the text is drawn in the sans-serif	এই font এখানে ইনস্টল নেই, তাই টেক্সট sans-serif font-এ আঁকা হচ্ছে
+This font isn't installed here, so the text is drawn in the serif	এই font এখানে ইনস্টল নেই, তাই টেক্সট serif font-এ আঁকা হচ্ছে
+This layer has no fields.	এই layer-এ কোনো field নেই।
+This layer's data is kept in the project or read from a database or web address: there's no file to repair.	এই layer-এর ডেটা project-এ রাখা বা ডেটাবেস বা web address থেকে পড়া: মেরামতের মতো কোনো ফাইল নেই।
 This map has no layers yet.	এই মানচিত্রে এখনো কোনো layer নেই।
 This map's thumbnail, from an image.	ছবি থেকে নেওয়া এই মানচিত্রের thumbnail।
 This map's thumbnail, from the view.	view থেকে নেওয়া এই মানচিত্রের thumbnail।
@@ -3197,6 +3616,7 @@ This run has no tool form to open	এই run-এ খোলার মতো tool 
 This S3 connection choice is no longer available.	এই S3 সংযোগের পছন্দটি আর উপলব্ধ নেই।
 This step	এই ধাপ
 This step names no tool to show.	এই ধাপে দেখানোর জন্য কোনো tool-এর নাম নেই।
+This value cannot be shown as a list. Edit its JSON below.	এই মান তালিকা হিসেবে দেখানো যায় না। নিচে এর JSON সম্পাদনা করুন।
 Thumbnail	থাম্বনেইল
 Tick length	Tick-এর দৈর্ঘ্য
 Ticks	Tick
@@ -3204,8 +3624,11 @@ Ticks only	শুধু tick
 Tile archive	টাইল আর্কাইভ
 Tile Archive File…	টাইল আর্কাইভ ফাইল…
 Tile layer has changed; search again	Tile layer বদলে গেছে; আবার খুঁজুন
+Tile layer not found	Tile layer পাওয়া যায়নি
 Tile Layer Properties	Tile layer-এর বৈশিষ্ট্য
 Tile Layers	Tile layer
+Tiles	টাইল
+Tiles of {size} px	{size} px-এর টাইল
 Tilt Map	মানচিত্র কাত করুন
 Tilt-shift	Tilt-shift
 Tilt-shift blur and film grain.	Tilt-shift blur ও film grain।
@@ -3225,10 +3648,12 @@ To	প্রতি
 Toggle Dark Mode	Dark mode চালু/বন্ধ করুন
 Toggle GPU Rendering	GPU rendering চালু/বন্ধ করুন
 Toggle Imperial Measurements	Imperial measurement চালু/বন্ধ করুন
+Token Required	Token আবশ্যক
 Tolerance (km)	সহনসীমা (কিমি)
 Tolls	টোল
+Too many shortcut changes to save.	সংরক্ষণের জন্য শর্টকাটের পরিবর্তন অত্যধিক।
+Too many shortcut changes to save. Changes apply only to this session.	সংরক্ষণের জন্য শর্টকাট পরিবর্তন অনেক বেশি। পরিবর্তন শুধু এই সেশনে প্রযোজ্য।
 Tool Gallery	টুল গ্যালারি
-Toolbox	টুলবক্স
 Toolboxes	Toolbox-সমূহ
 Tools	Tool
 Tools\nPane	টুলস\nপ্যান
@@ -3254,21 +3679,28 @@ Train And Classify	Train ও classify
 Train Deep Learning Model	Deep learning model train করুন
 Trained models	প্রশিক্ষিত model
 Training polygons	Training polygon
+Transfer Fields	Field স্থানান্তর
 Transparency	স্বচ্ছতা
 Traverse	ট্রাভার্স
 Trend Analysis	প্রবণতা বিশ্লেষণ
+Trend Analysis…	প্রবণতা বিশ্লেষণ…
 Trend over a series of rasters	Raster series জুড়ে trend
 Triangle	ত্রিভুজ
 TRUE	TRUE
 Try again in a moment.	একটু পরে আবার চেষ্টা করুন।
 Try again later.	পরে আবার চেষ্টা করুন।
+Try other places round the point	বিন্দুর চারপাশে অন্য স্থান চেষ্টা করুন
+Turn each mark with the line's direction	প্রতিটি মার্ক রেখার দিক অনুসারে ঘোরান
+Turn each point's marker by the angle in a field, in degrees	প্রতিটি বিন্দুর মার্কার একটি field-এর কোণ অনুসারে ঘোরান, ডিগ্রিতে
 Turn editing on or off for the map.	মানচিত্রের জন্য editing চালু বা বন্ধ করুন।
 Turn Labels Off	Label বন্ধ করুন
-Turn labels on or off for the selected layer.	নির্বাচিত layer-এর label চালু বা বন্ধ করুন।
 Turn labels on or off.	Label চালু বা বন্ধ করুন।
 Turn Off	বন্ধ করুন
 Turn on the Basemaps plugin	Basemaps plugin চালু করুন
+Turn the mark by the layer's rotation field, its offset with it	মার্ককে layer-এর ঘূর্ণন field অনুসারে ঘোরান, তার অফসেটসহ
 Turn the time slider off: every feature shows again.	Time slider বন্ধ করুন: সব feature আবার দেখা যাবে।
+Turned further, clockwise	আরও ঘোরানো, ঘড়ির কাঁটার দিকে
+Turns a field's values into fields: a row for each combination of the row fields' values, a column for each value of the pivot field.	একটি field-এর মানকে field-এ পরিণত করে: সারির field-এর মানের প্রতিটি সমন্বয়ের জন্য একটি সারি, pivot field-এর প্রতিটি মানের জন্য একটি কলাম।
 Turns a table's addresses into points: each row's address fields are joined with commas (such as street, city, country) and looked up. The public servers take up to 100 addresses a run, one a second; a server of your own takes more.	একটি table-এর address-কে point-এ রূপান্তর করে: প্রতিটি row-এর address field কমা দিয়ে যুক্ত হয় (যেমন রাস্তা, শহর, দেশ) এবং খোঁজা হয়। Public server প্রতি run-এ সর্বোচ্চ ১০০টি address, সেকেন্ডে একটি, নেয়; নিজের server আরও নিতে পারে।
 Two layers are named {name}: the step names it, so it replays on the first of them. Rename one to tell them apart.	দুটি layer-এর নাম {name}: ধাপটি নাম ব্যবহার করে, তাই দুটির প্রথমটিতে replay হয়। আলাদা করতে একটির নাম বদলান।
 Type	ধরন
@@ -3282,6 +3714,7 @@ Type the keys to log in for this session, then Save.	এই session-এ লগ �
 Type the password to remember it on this computer.	এই কম্পিউটারে মনে রাখতে পাসওয়ার্ড লিখুন।
 Type the password, then Save. Remember on this computer is optional.	পাসওয়ার্ড লিখুন, তারপর সংরক্ষণ করুন। এই কম্পিউটারে মনে রাখুন ঐচ্ছিক।
 Typed below	নিচে টাইপ করা হয়েছে
+typing must not start another lookup	typing must not start another lookup
 UM	UM
 Unavailable: {reason}	অনুপলব্ধ: {reason}
 Unbind From Time Slider	Time slider থেকে বিচ্ছিন্ন করুন
@@ -3296,22 +3729,29 @@ Uninstall	আনইনস্টল করুন
 Uninstall GeoLibre Tools	GeoLibre tool আনইনস্টল করুন
 Uninstall Plugin	Plugin আনইনস্টল করুন
 Uninstalled {id}.	{id} আনইনস্টল করা হয়েছে।
+Union	ইউনিয়ন
+Union Features	ইউনিয়ন feature
 Unique Values	অনন্য মান
 Unit	একক
 United States	যুক্তরাষ্ট্র
 Units	একক
 Units per step	প্রতি ধাপে একক
 unknown (an older project)	অজানা (পুরোনো প্রজেক্ট)
+Unknown shortcut binding field.	অজানা শর্টকাট বাইন্ডিং ক্ষেত্র।
+Unknown shortcut command.	অজানা শর্টকাট কমান্ড।
 UNKNOWN TOOL	অজানা টুল
 Unload the GeoLibre tools and stop loading them when RustGIS starts.	GeoLibre tool memory থেকে সরিয়ে দিন এবং RustGIS চালুর সময় সেগুলো লোড হওয়া বন্ধ করুন।
 Unsaved changes	অসংরক্ষিত পরিবর্তন
 Unsupervised classes (k-means)	অসুপারভাইজড class (k-means)
 Unsupervised classes (k-means).	অসুপারভাইজড class (k-means)।
+Unsupported shortcut file version.	অসমর্থিত শর্টকাট ফাইল সংস্করণ।
+Untitled	শিরোনামহীন
 Untitled model	শিরোনামহীন model
 Up	ওপরে
 Up a level	এক স্তর ওপরে
 Update	আপডেট করুন
 Update Bookmark	Bookmark আপডেট করুন
+Update Features	আপডেট feature
 Update Job	Job আপডেট করুন
 Update Label Class	Label class আপডেট করুন
 Update to {version}	{version}-এ আপডেট করুন
@@ -3327,12 +3767,16 @@ US State GIS	যুক্তরাষ্ট্রের রাজ্য GIS
 US State GIS…	যুক্তরাষ্ট্রের রাজ্য GIS…
 USA Contiguous Albers Equal Area	সংলগ্ন যুক্তরাষ্ট্রের Albers Equal Area
 Use	ব্যবহার করুন
+Use a browser download to export shortcuts.	শর্টকাট রপ্তানি করতে ব্রাউজার ডাউনলোড ব্যবহার করুন।
 Use a Single Stroke	একটি stroke ব্যবহার করুন
 Use another account	অন্য account ব্যবহার করুন
+Use ArcGIS Token	ArcGIS token ব্যবহার করুন
 Use Connection	সংযোগ ব্যবহার করুন
 Use Current View	বর্তমান view ব্যবহার করুন
+Use each feature's fill color	প্রতিটি feature-এর পূরণের রং ব্যবহার করুন
 Use each feature's line color	প্রতিটি feature-এর line-এর রং ব্যবহার করুন
 Use each feature's line width	প্রতিটি feature-এর line-এর প্রস্থ ব্যবহার করুন
+Use layers instead	পরিবর্তে layer ব্যবহার করুন
 Use the Layer's Strokes	Layer-এর stroke ব্যবহার করুন
 USERPROFILE	USERPROFILE
 USGS 3DEP DEM	USGS 3DEP DEM
@@ -3355,6 +3799,7 @@ Valid: {n} of {of} features match	বৈধ: {of}টি feature-এর মধ্
 Validate	যাচাই করুন
 Validate Model	Model যাচাই করুন
 value (empty: no-data)	মান (ফাঁকা: no-data)
+Value Field	মান field
 Values from −stretch to +stretch are shown from black to full colour	−stretch থেকে +stretch পর্যন্ত মান কালো থেকে পূর্ণ রঙে দেখানো হয়
 Vantor Open Data	Vantor Open Data
 Vantor's open imagery of disasters: pick an event and a phase (before or after it), then Find Items.	Vantor-এর উন্মুক্ত দুর্যোগ-ছবি: ঘটনা ও পর্যায় (আগে বা পরে) বেছে নিন, তারপর Find Items।
@@ -3365,9 +3810,11 @@ Vector and raster data	Vector ও raster data
 Vector Layer	ভেক্টর লেয়ার
 vector tiles	Vector tile
 Vector tiles (MVT)	ভেক্টর টাইল (MVT)
+Vector to PMTiles	ভেক্টর থেকে PMTiles
 Vectors a geospatial foundation model made for every pixel or image patch, found where the map is and shown as colours.	প্রতিটি pixel বা image patch-এর জন্য তৈরি geospatial foundation model-এর vector-গুলো মানচিত্র যেখানে আছে সেখানে পাওয়া যায় এবং রং হিসেবে দেখানো হয়।
 Version {version}	সংস্করণ {version}
 Vertex	ভার্টেক্স
+VERTEX_PART_INDEX	VERTEX_PART_INDEX
 Vertical	উল্লম্ব
 Via {roads}	{roads} দিয়ে
 Video	ভিডিও
@@ -3434,17 +3881,24 @@ What RustGIS opens with: the World Atlas sample or a blank map.	RustGIS কী �
 What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	RustGIS কী দিয়ে খুলবে: World Atlas sample, ফাঁকা মানচিত্র, আপনার বেছে নেওয়া project, অথবা সর্বশেষ খোলা বা সংরক্ষিত project।
 What to do, where to find it and why	কী করতে হবে, কোথায় পাবেন এবং কেন
 What's near a point	একটি বিন্দুর কাছে কী আছে
+When a file holds several layers, choose the ones to add instead of adding them all.	একটি ফাইলে একাধিক layer থাকলে, সব যোগ না করে কোনগুলো যোগ হবে বেছে নিন।
+When its place is taken, the label tries the other places round the point, corners first.	জায়গা না পেলে লেবেল বিন্দুর চারপাশের অন্য স্থান চেষ্টা করে, আগে কোণগুলো।
 WHERE	WHERE
 Where	যেখানে
 Where Clause	WHERE ক্লজ
 Where labels sit relative to their features.	feature-এর তুলনায় label কোথায় থাকবে।
 Where new features get their elevation (the z field).	নতুন feature কোথা থেকে elevation পাবে (z field)।
+Where the font isn't installed, the text is drawn in this family	যেখানে font ইনস্টল নেই, সেখানে টেক্সট এই family-তে আঁকা হয়
 Where the map opens: the full extent or a view you saved.	মানচিত্র কোথায় খুলবে: সম্পূর্ণ extent বা আপনার সংরক্ষিত view।
 Where tools work	Tool কোথায় কাজ করবে
 Whether the Select tool picks these layers' features on the map	Select tool মানচিত্রে এই layer-এর feature বেছে নেবে কি না
+Whether the service is asked for one picture of the view or for tiles.	Service-এর কাছে view-এর একটি ছবি চাওয়া হবে নাকি tile।
 Which 5 countries have the largest GDP?	কোন ৫টি দেশের GDP সবচেয়ে বড়?
+While typing, shortcuts without Ctrl/⌘ are paused. First-person navigation keeps Escape, Home and Delete.	টাইপ করার সময় Ctrl/⌘ ছাড়া শর্টকাট থেমে থাকে। প্রথম-ব্যক্তি নেভিগেশনে Escape, Home ও Delete থাকে।
+White behind dark text, dark behind light.	গাঢ় টেক্সটের পেছনে সাদা, হালকা টেক্সটের পেছনে গাঢ়।
 Whitebox and GeoLibre tools	Whitebox ও GeoLibre tool
 Whole map	সম্পূর্ণ মানচিত্র
+Whole shape	পুরো আকৃতি
 Whose borders the sample countries and the basemap outline show.	নমুনা দেশ ও basemap outline-এ কোন দেশের সীমানা দেখানো হবে।
 Wide (±1 step)	প্রশস্ত (±১ ধাপ)
 Wider (±3 steps)	আরও প্রশস্ত (±৩ ধাপ)
@@ -3453,6 +3907,9 @@ Width (mm)	প্রস্থ (mm)
 Windows	উইন্ডোসমূহ
 Winkel Tripel	Winkel Tripel
 Wireframe	ওয়্যারফ্রেম
+With no period, a cube is added over its last full calendar year.	সময়কাল না দিলে cube তার শেষ পূর্ণ পঞ্জিকা বছরের জন্য যোগ হয়।
+With the field	Field অনুসারে
+With the line	রেখা অনুসারে
 Withdrawn	প্রত্যাহৃত
 WKT column	WKT কলাম
 WMS	WMS
@@ -3482,8 +3939,11 @@ World, equal-area: true sizes with a Robinson-like look.	বিশ্ব, সম
 World, equal-area: true sizes with rounded poles.	বিশ্ব, সমক্ষেত্রফল: গোলাকার মেরুসহ প্রকৃত আকার।
 World, equal-area: true sizes, shapes bend towards the edges.	বিশ্ব, সমক্ষেত্রফল: প্রকৃত আকার, প্রান্তের দিকে আকৃতি বাঁকে।
 Worldview	বিশ্বদৃশ্য
+Wrap at	যেখানে ভাঙবে
+Wrap length	ভাঙার দৈর্ঘ্য
 Write a plugin	Plugin লিখুন
 Writes Sen's slope, the test's Z and p-value, and the slope where the trend is significant.	Sen-এর ঢাল, পরীক্ষার Z ও p-value, এবং trend তাৎপর্যপূর্ণ হলে সেই ঢাল লেখে।
+writing the copy failed unexpectedly	কপি লেখা অপ্রত্যাশিতভাবে ব্যর্থ হয়েছে
 X (mm)	X (mm)
 X column	X কলাম
 X Field	X field
@@ -3497,13 +3957,15 @@ Yes	হ্যাঁ
 You can undo this with {shortcut}.	{shortcut} দিয়ে এটি undo করতে পারেন।
 You have version {version}.	আপনার version {version}।
 You're using your ChatGPT plan	আপনি আপনার ChatGPT প্ল্যান ব্যবহার করছেন
+Your browser may reserve some shortcuts.	আপনার browser কিছু শর্টকাট সংরক্ষিত রাখতে পারে।
+Your changes will be lost if you don't save them.	সংরক্ষণ না করলে আপনার পরিবর্তন হারিয়ে যাবে।
 Your skills are kept in the skills folder of the app's settings folder. Shared skills (~/.agents/skills) are off until you turn them on.	আপনার skill-গুলো app-এর settings folder-এর skills folder-এ রাখা হয়। শেয়ার করা skill (~/.agents/skills) চালু না করা পর্যন্ত বন্ধ থাকে।
 Yours	আপনার
 YYYY-MM-DD	YYYY-MM-DD
-YYYY-MM-DD, for the layers that change with time	YYYY-MM-DD, সময়ের সঙ্গে বদলায় এমন layer-এর জন্য
 YYYY-MM-DD, for time layers	YYYY-MM-DD, time layer-এর জন্য
 Z factor	Z ফ্যাক্টর
 Zarr	Zarr
+Zarr URL is required	Zarr URL আবশ্যক
 Zarr Variables	Zarr ভেরিয়েবল
 Zarr…	Zarr…
 Zonal Statistics	জোনাল পরিসংখ্যান
@@ -3558,6 +4020,7 @@ Zoom: the map's zoom level, as web maps count it. Bearing: the direction the top
 © OpenStreetMap contributors	© OpenStreetMap অবদানকারীরা
 ±, dequantised	±, ডিকোয়ান্টাইজড
 — fps	— fps
+“{text}” isn't a {type} value: {field} is left as it was.	“{text}” একটি {type} মান নয়: {field} আগের মতোই রাখা হয়েছে।
 ⌘+Enter	⌘+Enter
 ⌘K	⌘K
 ▶ Simulate	▶ সিমুলেট করুন

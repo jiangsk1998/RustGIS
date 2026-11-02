@@ -2,7 +2,7 @@
 //! X/Y coordinate, calculated from its WGS84 geometry, in a field.
 use crate::{CmdResult, Session};
 use rustgis_data::{FieldType, Geometry, GeometryType, Value, raster::Crs};
-use rustgis_geom::{geodesic_length_m, geodesic_ring_area_m2, spherical_centre};
+use rustgis_geom::{spherical_centre, wgs84_length_m, wgs84_ring_perimeter_area_m2};
 use serde_json::{Value as Json, json};
 
 /// The properties a layer of `kind` can calculate, as `(key, label)` pairs.
@@ -32,25 +32,21 @@ pub fn units(property: &str) -> &'static [(&'static str, &'static str)] {
     }
 }
 
+/// Measures WGS 84 geometry in metres or square metres; holes subtract from polygon area.
 fn measure(g: &Geometry, property: &str) -> Option<f64> {
     match (g, property) {
+        // Full-turn and polar rings retain the documented exceptions to geoprocessing parity:
+        // docs/user-guide/analysis.md (Calculate Geometry Attributes).
         (Geometry::Polygon(polys), "area") => Some(
             polys
                 .iter()
-                .map(|rings| rings.iter().enumerate().map(|(i, r)| geodesic_ring_area_m2(r) * if i == 0 { 1.0 } else { -1.0 }).sum::<f64>())
-                .sum(),
-        ),
-        (Geometry::Polygon(polys), "perimeter") => Some(
-            polys
-                .iter()
-                .flatten()
-                .map(|r| {
-                    let closing = r.first().zip(r.last()).filter(|(a, b)| a != b).map(|(a, b)| geodesic_length_m(&[*b, *a])).unwrap_or(0.0);
-                    geodesic_length_m(r) + closing
+                .map(|rings| {
+                    rings.iter().enumerate().map(|(i, r)| wgs84_ring_perimeter_area_m2(r).1 * if i == 0 { 1.0 } else { -1.0 }).sum::<f64>()
                 })
                 .sum(),
         ),
-        (Geometry::Line(parts), "length") => Some(parts.iter().map(|r| geodesic_length_m(r)).sum()),
+        (Geometry::Polygon(polys), "perimeter") => Some(polys.iter().flatten().map(|r| wgs84_ring_perimeter_area_m2(r).0).sum()),
+        (Geometry::Line(parts), "length") => Some(parts.iter().map(|r| wgs84_length_m(r)).sum()),
         _ => None,
     }
 }

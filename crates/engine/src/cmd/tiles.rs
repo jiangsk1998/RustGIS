@@ -65,12 +65,12 @@ pub const NETWORK: &[&str] = &[
 pub fn commands() -> Vec<C> {
     vec![
         C::new("map.addTiles", "Add Tile Layer", "Home › Add", add).params(
-            r#"{"url": "https://…/{z}/{x}/{y}.png" | vector tiles ".pbf" or TileJSON | MapLibre style.json | a PMTiles archive (web address or file path) | an MBTiles file path, "kind"?: "raster"|"vector"|"style"|"pmtiles"|"mbtiles" (guessed from the url), "name"?: text, "bounds"?: [west, south, east, north] (longitude/latitude coverage, when known), "attribution"?: text, "minZoom"?: number, "maxZoom"?: number, "tileSize"?: 256|512, "tms"?: bool, "subdomains"?: [text], "layers"?: [vector tile layer names, drawn in colours of their own], "styleLayers"?: [MapLibre style layers drawing vector tiles instead (their source is the tiles')], "opacity"?: 0–1, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten"|"difference" (how it combines with what is beneath), "overlay"?: bool (on top of the map's layers, as every new layer goes; without it a basemap, under them; one with the same address and role is replaced when it has the same name or the same look), "top"?: bool (on top of the map's layers, as a layer added as data goes; by default an overlay's place), "replace"?: bool (removes the other tile basemaps, not overlays), "id"?: catalog id, "view"?: bool (a MapLibre style: go to the place, zoom, bearing and pitch its root properties give, once it loads), "start"?, "end"?: dates a url with date placeholders ({date:YYYY-MM-DD}, {YYYY}) spans, turning the time slider on (or, when it is on, setting its span), "unit"?, "interval"?, "dates"?: its steps (as in time.set), "legend"?: "the web address of its legend picture (PNG or JPEG)" | [address | {"url": address, "minScale"?: scale denominator, "maxScale"?: one (the scales it is for, from minScale up to below maxScale)}] (at most 16; the Layers pane shows the one for the map's scale under the layer; service.add gives a WMS or WMTS layer its service's)}"#,
+            r#"{"url": "https://…/{z}/{x}/{y}.png" | vector tiles ".pbf" or TileJSON | MapLibre style.json | a PMTiles archive (web address or file path) | an MBTiles file path, "kind"?: "raster"|"vector"|"style"|"pmtiles"|"mbtiles" (guessed from the url), "name"?: text, "bounds"?: [west, south, east, north] (longitude/latitude coverage, when known), "attribution"?: text, "minZoom"?: number, "maxZoom"?: number, "tileSize"?: 256|512 (1024 too for a WMS or map service asked for in Web Mercator by its tiles' box: their pictures are asked for that size), "singleImage"?: bool (a WMS or map service: one picture of the view instead of tiles, so symbols and labels aren't cut at tile edges; tiles on the globe, a tilted map or a projection the service doesn't offer; by default on for one, unless tileSize is given), "tms"?: bool, "subdomains"?: [text], "layers"?: [vector tile layer names, drawn in colours of their own], "styleLayers"?: [MapLibre style layers drawing vector tiles instead (their source is the tiles')], "opacity"?: 0–1, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten"|"difference" (how it combines with what is beneath), "overlay"?: bool (on top of the map's layers, as every new layer goes; without it a basemap, under them; one with the same address and role is replaced when it has the same name or the same look), "top"?: bool (on top of the map's layers, as a layer added as data goes; by default an overlay's place), "replace"?: bool (removes the other tile basemaps, not overlays), "id"?: catalog id, "view"?: bool (a MapLibre style: go to the place, zoom, bearing and pitch its root properties give, once it loads), "start"?, "end"?: dates a url with date placeholders ({date:YYYY-MM-DD}, {YYYY}) spans, turning the time slider on (or, when it is on, setting its span), "unit"?, "interval"?, "dates"?: its steps (as in time.set), "legend"?: "the web address of its legend picture (PNG or JPEG)" | [address | {"url": address, "minScale"?: scale denominator, "maxScale"?: one (the scales it is for, from minScale up to below maxScale)}] (at most 16; the Layers pane shows the one for the map's scale under the layer; service.add gives a WMS or WMTS layer its service's)}"#,
         ),
         C::new("map.removeTiles", "Remove Tile Layer", "Home › Add", remove)
             .params(r#"{"name"?: text, "index"?: number, "id"?: catalog id} (removes every tile layer when none is given)"#),
         C::new("map.setTiles", "Tile Layer Properties", "Home › Add", set).params(
-            r#"{"name"?: text | "index"?: number (0 = top) | "id"?: catalog id, "visible"?: bool, "opacity"?: 0–1, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten"|"difference", "move"?: "up"|"down"|"top"|"bottom" (past the next layer in the drawing order of all the map's layers, a feature or raster layer too), "to"?: number (its place in that order among the other layers, 0 = top; the Layers pane lists it), "rename"?: text, "bands"?: [red, green, blue] | [band] (a cloud-optimised GeoTIFF's bands shown, from 1; [] for its own), "range"?: [low, high] (the values shown from black to full colour; null: each band's 2nd–98th percentile), "dequantize"?: "aef" (AlphaEarth's quantised embeddings) | "none", "legend"?: as map.addTiles's, or null for none, "hiddenLayers"?: [source layer name] (vector tiles' source layers not drawn or identified, as map.tiles's sourceLayers names them; replaces the list, [] or null for none)}"#,
+            r#"{"name"?: text | "index"?: number (0 = top) | "id"?: catalog id, "visible"?: bool, "opacity"?: 0–1, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten"|"difference", "move"?: "up"|"down"|"top"|"bottom" (past the next layer in the drawing order of all the map's layers, a feature or raster layer too), "to"?: number (its place in that order among the other layers, 0 = top; the Layers pane lists it), "rename"?: text, "bands"?: [red, green, blue] | [band] (a cloud-optimised GeoTIFF's bands shown, from 1; [] for its own), "range"?: [low, high] (the values shown from black to full colour; null: each band's 2nd–98th percentile), "dequantize"?: "aef" (AlphaEarth's quantised embeddings) | "none", "legend"?: as map.addTiles's, or null for none, "hiddenLayers"?: [source layer name] (vector tiles' source layers not drawn or identified, as map.tiles's sourceLayers names them; replaces the list, [] or null for none), "singleImage"?: bool (as map.addTiles's), "tileSize"?: 256|512|1024 (a WMS or map service asked for in Web Mercator: its tiles' size)}"#,
         ),
         C::new("map.tiles", "Tile Layers", "Home › Add", |s, _| Ok(list(s, false))).view(),
         // As `layer.expand` for a layer's classes: what the pane shows, not an edit to undo.
@@ -160,6 +160,14 @@ pub(crate) fn list(s: &Session, redact: bool) -> Value {
                     "opacity": t.opacity, "blend": t.blend.code(), "overlay": t.overlay, "attribution": t.attribution, "minZoom": t.min_zoom, "maxZoom": t.max_zoom});
                 // Its place in the drawing order: over this map layer, or (none) under them all.
                 o["over"] = json!(s.map().tile_slot(t).and_then(|id| s.map().layer(id)).map(|l| l.name.clone()));
+                // A layer its service draws on request: one picture of the view, or tiles of a
+                // size (#1162).
+                if t.on_request() {
+                    o["singleImage"] = json!(t.single_image);
+                    if t.sized_tiles() {
+                        o["tileSize"] = json!(t.tile_size);
+                    }
+                }
                 // Its legends, for a layer that has them, and whether they show in the Layers pane.
                 if !t.legends.is_empty() {
                     let legends: Vec<_> = t
@@ -187,6 +195,9 @@ pub(crate) fn list(s: &Session, redact: bool) -> Value {
             .collect(),
     )
 }
+
+/// Refusing one picture of the view for a layer whose service doesn't draw on request.
+const NOT_ON_REQUEST: &str = "singleImage is for a layer its service draws on request (a WMS, an ArcGIS map or image service)";
 
 pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
     let url = ps(p, "url").map(str::trim).filter(|u| !u.is_empty()).ok_or("url is required")?;
@@ -264,6 +275,17 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         t.legends = legends(v)?;
     }
     t.repair()?;
+    // A layer its service draws on request: one picture of the view, or tiles of the size given
+    // (#1162). Added by its address as from its service: one picture unless tiles are asked for
+    // (`singleImage: false`, or a tile size).
+    match b(p, "singleImage") {
+        Some(true) if !t.on_request() => return Err(NOT_ON_REQUEST.into()),
+        Some(single) => t.single_image = single,
+        None => t.single_image = t.on_request() && p.get("tileSize").is_none_or(Value::is_null),
+    }
+    if f(p, "tileSize").is_some() && t.sized_tiles() {
+        t.size_tiles();
+    }
     let replace = b(p, "replace").unwrap_or(false);
     let view = b(p, "view").unwrap_or(false);
     if view && t.kind != TileKind::Style {
@@ -492,10 +514,14 @@ fn remove(s: &mut Session, p: &Value) -> CmdResult {
     match find(s, p)? {
         Some(i) => {
             let t = s.map_mut().tiles.remove(i);
+            super::layer::legends_follow_layer(s, &t.name, None);
             Ok(json!({"removed": [t.name]}))
         }
         None => {
             let gone: Vec<String> = s.map_mut().tiles.drain(..).map(|t| t.name).collect();
+            for n in &gone {
+                super::layer::legends_follow_layer(s, n, None);
+            }
             Ok(json!({"removed": gone}))
         }
     }
@@ -605,6 +631,7 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
         Some(v) => Some(legends(v)?),
     };
     let hidden = hidden_layers(p)?;
+    let old_name = s.map().tiles.get(i).map(|t| t.name.clone());
     let m = s.map_mut();
     let Some(t) = m.tiles.get_mut(i) else { return Err("no tile layer at that index".into()) };
     // Refused before anything changes.
@@ -614,6 +641,18 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
     if hidden.as_ref().is_some_and(|h| !h.is_empty()) && matches!(t.kind, TileKind::Raster | TileKind::Cog) {
         return Err("hiddenLayers is for vector tiles' source layers".into());
     }
+    let single = b(p, "singleImage");
+    if single == Some(true) && !t.on_request() {
+        return Err(NOT_ON_REQUEST.into());
+    }
+    let side = match p.get("tileSize").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => match v.as_f64().filter(|n| [256.0, 512.0, 1024.0].contains(n)) {
+            Some(n) if t.sized_tiles() => Some(n as u32),
+            Some(_) => return Err("tileSize is for a WMS or map service layer asked for in Web Mercator".into()),
+            None => return Err("tileSize is 256, 512 or 1024".into()),
+        },
+    };
     let new_url = match look {
         Some(look) => {
             let new = look(cog::split(&t.url).1);
@@ -629,6 +668,13 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
     };
     if let Some(v) = b(p, "visible") {
         t.visible = v;
+    }
+    if let Some(single) = single {
+        t.single_image = single;
+    }
+    if let Some(side) = side {
+        t.tile_size = side;
+        t.size_tiles();
     }
     if let Some(l) = new_legends {
         t.legends = l;
@@ -652,6 +698,7 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
         }
         t.url = url;
     }
+    let new_name = t.name.clone();
     // In the drawing order of all the map's layers: past the next layer, a map layer too (#808).
     match (ps(p, "move"), p.get("to").filter(|v| !v.is_null())) {
         (Some(_), Some(_)) => return Err("give move or to, not both".into()),
@@ -663,6 +710,10 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
             m.place_tile(i, usize::try_from(to).unwrap_or(usize::MAX))?;
         }
         (None, None) => {}
+    }
+    // Legends that leave it out follow it to its new name.
+    if let Some(old) = old_name.filter(|o| *o != new_name) {
+        super::layer::legends_follow_layer(s, &old, Some(&new_name));
     }
     Ok(list(s, false))
 }

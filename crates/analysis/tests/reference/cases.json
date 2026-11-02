@@ -823,6 +823,161 @@
      ]
     ]
    }
+  },
+  {
+   "name": "calculate geometry of polygons",
+   "tool": "calculateGeometry",
+   "params": {
+    "input": "parcels"
+   },
+   "expect": {
+    "numbers": {
+     "P1": {
+      "area_km2": 2142.9014346907043,
+      "perimeter_km": 188.26902009420115
+     },
+     "P2": {
+      "area_km2": 2142.9014346907043,
+      "perimeter_km": 188.26902009420115
+     },
+     "P3": {
+      "area_km2": 4276.106225418961,
+      "perimeter_km": 376.190902817091
+     },
+     "P4": {
+      "area_km2": 1054.4549335005493,
+      "perimeter_km": 187.0515006282173
+     },
+     "P5": {
+      "area_km2": 2675.6497232515258,
+      "perimeter_km": 282.49450131967257
+     },
+     "P6": {
+      "area_km2": 2133.2384831005247,
+      "perimeter_km": 187.92281234029284
+     },
+     "P7": {
+      "area_km2": 529.6692329796753,
+      "perimeter_km": 93.70069202485611
+     },
+     "P8": {
+      "area_km2": 1583.696140549286,
+      "perimeter_km": 183.01313638356189
+     }
+    },
+    "tolerance": 1e-09
+   }
+  },
+  {
+   "name": "calculate geometry of lines",
+   "tool": "calculateGeometry",
+   "params": {
+    "input": "roads"
+   },
+   "expect": {
+    "numbers": {
+     "r1": {
+      "length_km": 96.39110939930937
+     },
+     "r2": {
+      "length_km": 41.68357565234254
+     },
+     "r3": {
+      "length_km": 16.898473598058803
+     },
+     "r4": {
+      "length_km": 38.381232507640796
+     },
+     "r5": {
+      "length_km": 66.46247586628047
+     },
+     "r6": {
+      "length_km": 112.61723325001898
+     },
+     "r7": {
+      "length_km": 67.3206905295313
+     }
+    },
+    "tolerance": 1e-09
+   }
+  },
+  {
+   "name": "buffer points",
+   "tool": "buffer",
+   "params": {
+    "input": "points",
+    "distance": 1,
+    "units": "Kilometers"
+   },
+   "expect": {
+    "features": "expected/buffer_points_1km.geojson",
+    "tolerance": 0.001
+   }
+  },
+  {
+   "name": "buffer points far",
+   "tool": "buffer",
+   "params": {
+    "input": "stations",
+    "distance": 120,
+    "units": "Kilometers"
+   },
+   "expect": {
+    "features": "expected/buffer_stations_120km.geojson",
+    "tolerance": 0.001
+   }
+  },
+  {
+   "name": "buffer lines",
+   "tool": "buffer",
+   "params": {
+    "input": "roads",
+    "distance": 2000,
+    "units": "Meters"
+   },
+   "expect": {
+    "features": "expected/buffer_roads_2km.geojson",
+    "tolerance": 0.001
+   }
+  },
+  {
+   "name": "buffer a long line",
+   "tool": "buffer",
+   "params": {
+    "input": "long",
+    "distance": 5,
+    "units": "Kilometers"
+   },
+   "expect": {
+    "features": "expected/buffer_long_5km.geojson",
+    "tolerance": 0.001
+   }
+  },
+  {
+   "name": "buffer polygons",
+   "tool": "buffer",
+   "params": {
+    "input": "parcels",
+    "distance": 1,
+    "units": "Kilometers"
+   },
+   "expect": {
+    "features": "expected/buffer_parcels_1km.geojson",
+    "tolerance": 0.001
+   }
+  },
+  {
+   "name": "buffer polygons inward",
+   "tool": "buffer",
+   "params": {
+    "input": "parcels",
+    "distance": -2,
+    "units": "Kilometers"
+   },
+   "expect": {
+    "features": "expected/buffer_parcels_-2km.geojson",
+    "tolerance": 0.001
+   }
   }
  ]
 }

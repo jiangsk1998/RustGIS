@@ -134,6 +134,31 @@ fn inputs_of_several_layers_are_layer_lists() {
 }
 
 #[test]
+fn field_suggestions_keep_categorical_values_and_plural_lists() {
+    let manifest = json!({"id": "field_forms", "params": [
+        {"name": "input", "io_role": "input", "data_kind": "vector"},
+        {"name": "value_field", "data_kind": "string"},
+        {"name": "denominator_weight_field", "data_kind": "string"},
+        {"name": "fields", "data_kind": "string"},
+        {"name": "predictor_fields", "data_kind": "string"},
+        {"name": "output_field", "data_kind": "string"},
+        {"name": "field", "data_kind": "string", "schema": {"kind": "enum", "options": [{"value": "all"}]}},
+        {"name": "number_field", "data_kind": "number"},
+        {"name": "drop_fields", "data_kind": "bool"}
+    ]});
+    let (spec, _) = spec_of(&manifest).unwrap();
+    let kind = |name| spec.params.iter().find(|p| p.name == name).unwrap().kind;
+    assert_eq!(kind("value_field"), ParamKind::Field, "categorical values must remain selectable");
+    assert_eq!(kind("denominator_weight_field"), ParamKind::NumericField);
+    assert_eq!(kind("fields"), ParamKind::FieldNames);
+    assert_eq!(kind("predictor_fields"), ParamKind::FieldNames);
+    assert_eq!(kind("output_field"), ParamKind::Field, "the form must allow a new column name");
+    assert_eq!(kind("field"), ParamKind::Choice(&["all"]), "explicit schema wins over naming");
+    assert_eq!(kind("number_field"), ParamKind::Number);
+    assert_eq!(kind("drop_fields"), ParamKind::Bool);
+}
+
+#[test]
 fn slope_runs_on_a_raster_layer() {
     let Some(f) = setup() else { return };
     let r = rustgis_analysis::run("geolibre:slope", &f, &json!({"input": "dem", "units": "degrees"})).unwrap();

@@ -754,6 +754,7 @@ impl MysqlSource {
                 crs: if srid == 0 { "EPSG:4326".into() } else { format!("EPSG:{srid}") },
                 indexed: false,
                 notes,
+                zm_dropped: false,
             },
             conn,
             table,

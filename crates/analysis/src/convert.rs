@@ -4,6 +4,8 @@ use geo::{Coord as GC, LineString, MultiLineString, MultiPoint, MultiPolygon, Po
 use rustgis_data::Geometry;
 use rustgis_geom::{Coord, lonlat_to_merc, merc_to_lonlat};
 
+/// Projects without folding the longitude: a ring kept unwrapped across the antimeridian (as a
+/// geodesic buffer is) stays one piece, rather than folding its far vertex across the world.
 fn gc(c: Coord) -> GC<f64> {
     let m = lonlat_to_merc(c);
     GC { x: m.x, y: m.y }
@@ -78,4 +80,25 @@ pub fn from_line(ml: &MultiLineString<f64>) -> Option<Geometry> {
 
 pub fn from_point(p: &Point<f64>) -> Geometry {
     Geometry::Point(back(&p.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_antimeridian_ring_stays_a_sliver_through_geo() {
+        // Unwrapped across the antimeridian (179.9° to 180.1°): about 22 km wide in Mercator, not
+        // a band folded to the far west, and it comes back to the same longitudes.
+        let ring =
+            vec![Coord::new(179.9, 0.0), Coord::new(180.1, 0.0), Coord::new(180.1, 1.0), Coord::new(179.9, 1.0), Coord::new(179.9, 0.0)];
+        let mp = to_multipolygon(&Geometry::Polygon(vec![vec![ring.clone()]])).unwrap();
+        let xs: Vec<f64> = mp.0.iter().flat_map(|p| p.exterior().0.iter().map(|c| c.x)).collect();
+        let width = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max) - xs.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(width > 20_000.0 && width < 25_000.0, "{width}");
+        let back: Vec<Coord> = mp.0.iter().flat_map(|p| p.exterior().0.iter().map(|c| merc_to_lonlat(Coord::new(c.x, c.y)))).collect();
+        for (a, b) in ring.iter().zip(back.iter()) {
+            assert!((a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9, "{a:?} → {b:?}");
+        }
+    }
 }

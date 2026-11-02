@@ -1,0 +1,32 @@
+name: Reference answers
+
+# The analysis reference test (crates/analysis/tests/reference.rs) compares the tools with answers
+# that generate.py works out with GEOS and GeographicLib. This checks that the committed answers
+# are exactly what the script writes, so none can be edited by hand to make a case pass. It runs
+# only when the corpus changes; the Rust test itself runs with every other test.
+
+on:
+  push:
+    branches: [main]
+    paths: ["crates/analysis/tests/reference/**"]
+  pull_request:
+    paths: ["crates/analysis/tests/reference/**", ".github/workflows/reference.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Reference answers match generate.py
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - name: Regenerate and compare
+        working-directory: crates/analysis/tests/reference
+        run: uv run generate.py --check

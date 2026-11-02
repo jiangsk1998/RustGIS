@@ -23,15 +23,18 @@ pub struct Editor {
     notice_clipboard: bool,
     /// A key the menu bar keeps was pressed.
     notice_reserved: bool,
+    pub(crate) import: Option<crate::shortcutfile::Preview>,
 }
 
 impl Editor {
+    /// Hold off global shortcuts while capturing a key or confirming a change.
     pub fn capturing(&self) -> bool {
-        self.capture.is_some() || self.pending.is_some()
+        self.capture.is_some() || self.pending.is_some() || self.import.is_some()
     }
 }
 
-fn save(app: &mut RustGisApp) {
+/// Persist only valid differences, preserving unreadable preferences until an explicit reset.
+pub(crate) fn save(app: &mut RustGisApp) {
     if app.ui.shortcut_preferences_blocked {
         return;
     }
@@ -153,6 +156,7 @@ pub fn show(app: &mut RustGisApp, ctx: &Context) {
     let mut restore = None;
     let mut reset_all = false;
     let mut assign_escape = false;
+    let mut file_command = None;
     let defaults = Keymap::new(&app.session.registry);
     let rows = rows(app, cfg!(target_arch = "wasm32"));
     egui::Window::new(tl!("Keyboard Shortcuts")).id(egui::Id::unique("shortcut_editor")).open(&mut open).default_width(620.0).default_height(500.0).resizable(true).show(
@@ -163,6 +167,14 @@ pub fn show(app: &mut RustGisApp, ctx: &Context) {
                 ui.add_enabled(!editor.capturing(), egui::TextEdit::singleline(&mut editor.filter)).labelled_by(label.id);
                 if ui.button(tl!("Reset All")).clicked() {
                     reset_all = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!editor.capturing(), egui::Button::new(tl!("Import…"))).clicked() {
+                    file_command = Some("ui.shortcuts.import");
+                }
+                if ui.add_enabled(!editor.capturing(), egui::Button::new(tl!("Export…"))).clicked() {
+                    file_command = Some("ui.shortcuts.export");
                 }
             });
             if app.ui.shortcut_preferences_blocked {
@@ -283,7 +295,47 @@ pub fn show(app: &mut RustGisApp, ctx: &Context) {
             });
         });
     }
+    let mut confirm_import = None;
+    let mut cancel_import = false;
+    if let Some(preview) = &editor.import {
+        egui::Modal::new(egui::Id::unique("shortcut_import")).show(ctx, |ui| {
+            ui.heading(tl!("Import Keyboard Shortcuts"));
+            ui.label(crate::i18n::fmt(
+                "Bindings: {bindings} · Conflicts: {conflicts} · Unknown commands: {unknown}",
+                &[
+                    ("bindings", &preview.summary.get("bindings").unwrap_or(&Value::Null).to_string()),
+                    ("conflicts", &preview.summary.get("conflicts").unwrap_or(&Value::Null).to_string()),
+                    ("unknown", &preview.summary.get("unknown_commands").unwrap_or(&Value::Null).to_string()),
+                ],
+            ));
+            ui.label(tl!("Imported bindings replace conflicting keys. Unknown commands are kept for later use."));
+            if app.ui.shortcut_preferences_blocked {
+                ui.label(tl!("Reset unreadable saved shortcuts before importing."));
+            }
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!app.ui.shortcut_preferences_blocked, egui::Button::new(tl!("Import"))).clicked() {
+                    confirm_import = Some(preview.text.clone());
+                }
+                if ui.button(tl!("Cancel")).clicked() {
+                    cancel_import = true;
+                }
+            });
+        });
+    }
+    if cancel_import {
+        editor.import = None;
+    }
     app.ui.shortcut_editor = editor;
+    let result = if let Some(text) = confirm_import {
+        app.run("ui.shortcuts.import", json!({"text":text, "confirm":true}))
+    } else if let Some(id) = file_command {
+        app.run(id, Value::Null)
+    } else {
+        Ok(Value::Null)
+    };
+    if let Err(error) = result {
+        app.session.notify(error, true);
+    }
 }
 
 #[cfg(test)]

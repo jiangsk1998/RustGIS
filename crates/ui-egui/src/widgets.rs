@@ -49,6 +49,16 @@ impl<T: Copy + Default + PartialEq + Send + Sync + 'static> Dragged<T> {
     }
 }
 
+/// Makes the command the caller runs next, for a change of `r`, part of the undo step of the
+/// pointer press making it: a number dragged, or a colour picked in its picker, is one step to
+/// undo however many changes it makes (#1194). A change from the keyboard is a step of its own.
+/// Called just before the command runs, so the merge can't reach another command.
+pub(crate) fn one_step_per_press(app: &mut RustGisApp, r: &Response) {
+    if let Some(t) = r.ctx.input(|i| i.pointer.press_start_time()) {
+        app.session.merge_undo(format!("press {:?} {t}", r.id));
+    }
+}
+
 pub fn text_w(ui: &Ui, s: &str, font: egui::FontId) -> f32 {
     ui.ctx().fonts_mut(|f| f.layout_no_wrap(s.to_string(), font, egui::Color32::WHITE).size().x)
 }

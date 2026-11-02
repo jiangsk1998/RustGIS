@@ -206,11 +206,13 @@ fn draw_page(
                 }
             }
             ElementKind::Legend { frame: f, title, all_classes, hide_other, exclude } => {
-                if let Some(&(_, mi, ..)) = frame(*f)
+                if let Some(&(_, mi, cam, ..)) = frame(*f)
                     && let Some(map) = maps.get(mi)
                 {
                     let drawn = (!*all_classes).then(|| shown.iter().find(|(id, _)| id == f).map(|(_, v)| v.as_slice()).unwrap_or(&[]));
-                    legend(&mut pm, r, map, title, drawn, LegendOptions { hide_other: *hide_other, exclude }, ppp);
+                    let scale = map.ground_res_at(&cam) / rustgis_geom::PIXEL_M;
+                    wait_for_tile_legends(map, scale, exclude);
+                    legend(&mut pm, r, map, title, drawn, LegendOptions { hide_other: *hide_other, exclude, scale }, ppp);
                 }
             }
             ElementKind::Colorbar { frame: f, layer, title, orientation, ticks, tick_side, reverse } => {
@@ -1120,19 +1122,112 @@ fn complete_shown_legends(map: &mut Map, scale: f64) -> Option<Vec<(u32, Vec<Leg
     Some(out)
 }
 
-/// What a legend leaves out: `<all other values>`, and layers by name.
+/// What a legend leaves out: `<all other values>`, and layers by name; and the scale denominator
+/// whose legend pictures a WMS or WMTS layer shows.
+#[derive(Clone, Copy)]
 struct LegendOptions<'a> {
     hide_other: bool,
     exclude: &'a [String],
+    scale: f64,
 }
 
 /// A row of a legend: a layer drawn in one symbol (its swatch and name), a layer's name over its
-/// classes, or one of them.
+/// classes, or one of them, or a WMS or WMTS layer's legend picture (under its name).
 enum LegendRow<'a> {
     Plain(&'a rustgis_map::Layer),
     Head(&'a str),
     Class(GeometryType, LegendEntry),
+    Picture(std::sync::Arc<rustgis_tiles::cache::Payload>),
 }
+
+impl LegendRow<'_> {
+    /// Its height, in points: a picture's a pixel a point, as the Layers pane shows it.
+    fn height(&self) -> f32 {
+        match self {
+            LegendRow::Picture(p) => picture_size(p).1,
+            _ => LEGEND_ROW,
+        }
+    }
+}
+
+/// A legend picture's size in points (a pixel a point).
+fn picture_size(p: &rustgis_tiles::cache::Payload) -> (f32, f32) {
+    match p {
+        rustgis_tiles::cache::Payload::Image(pm) => (pm.width() as f32, pm.height() as f32),
+        _ => (0.0, 0.0),
+    }
+}
+
+/// Whether a legend lists a WMS or WMTS layer: drawn, and with a legend.
+fn tile_listed(t: &rustgis_map::TileLayer) -> bool {
+    t.draws() && t.opacity > 0.0 && !t.legends.is_empty()
+}
+
+/// A WMS or WMTS layer's legend picture for the map at 1:`scale`, as the Layers pane shows it:
+/// the first of its legends there that is a picture. `None` while the one to show is still on
+/// its way (`pending` then set), or when none can be shown. The addresses come from a service or
+/// a project, so they are checked as the layer's own are.
+fn tile_legend(t: &rustgis_map::TileLayer, scale: f64, pending: &mut bool) -> Option<std::sync::Arc<rustgis_tiles::cache::Payload>> {
+    use rustgis_tiles::cache::{self, Payload, State, Want};
+    for l in rustgis_data::ogc::legends_at(&t.legends, scale) {
+        if rustgis_tiles::address::check(&l.url, Some(&t.url)).is_err() {
+            continue;
+        }
+        match cache::get(&l.url, Want::Image) {
+            // No larger than the Layers pane shows one.
+            State::Ready(p) if matches!(&*p, Payload::Image(pm) if pm.width() <= MAX_LEGEND_SIDE && pm.height() <= MAX_LEGEND_SIDE) => {
+                return Some(p);
+            }
+            State::Pending => {
+                *pending = true;
+                return None;
+            }
+            // The next, if there is one.
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether a legend picture `map`'s WMS and WMTS layers show at 1:`scale` is still on its way
+/// (asking for those not yet asked for); those `exclude` names aren't listed, so aren't waited for.
+pub fn tile_legends_pending(map: &Map, scale: f64, exclude: &[String]) -> bool {
+    let mut pending = false;
+    for t in map.tiles.iter().filter(|t| tile_listed(t) && !exclude.iter().any(|n| n.eq_ignore_ascii_case(&t.name))) {
+        let _ = tile_legend(t, scale, &mut pending);
+    }
+    pending
+}
+
+/// Whether a legend on the page `layout` lists a WMS or WMTS layer whose legend picture is still
+/// on its way, at its frame's scale: in the browser, which doesn't wait for them, the page is
+/// drawn again once it lands.
+pub fn legends_pending(layout: &Layout, maps: &[Map]) -> bool {
+    layout.elements.iter().filter(|e| e.visible).any(|e| {
+        let ElementKind::Legend { frame, exclude, .. } = &e.kind else { return false };
+        let Some(ElementKind::MapFrame { map, center, scale, bearing, pitch, .. }) = layout.element(*frame).map(|f| &f.kind) else {
+            return false;
+        };
+        let Some(m) = maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)) else { return false };
+        let cam = frame_camera(m, *center, *scale, *bearing, *pitch);
+        tile_legends_pending(m, m.ground_res_at(&cam) / rustgis_geom::PIXEL_M, exclude)
+    })
+}
+
+/// Waits (natively, up to half a minute) for the legend pictures a legend of `map` at 1:`scale`
+/// shows, as a frame waits for its tiles: a page needs them all. Only for those: not for the
+/// cache's other fetches, nor for a layer the legend leaves out (`exclude`).
+fn wait_for_tile_legends(map: &Map, scale: f64, exclude: &[String]) {
+    let start = web_time::Instant::now();
+    let budget = web_time::Duration::from_secs(30);
+    // In the browser, which can't wait, the page draws what has arrived.
+    while cfg!(not(target_arch = "wasm32")) && tile_legends_pending(map, scale, exclude) && start.elapsed() < budget {
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+}
+
+/// The widest and tallest legend picture shown, in pixels, as in the Layers pane.
+const MAX_LEGEND_SIDE: u32 = 2048;
 
 /// A legend row's height, in points.
 const LEGEND_ROW: f32 = 15.0;
@@ -1145,7 +1240,27 @@ const LEGEND_SWATCH: f32 = 16.0;
 fn legend_rows<'a>(map: &'a Map, drawn: Option<&[(u32, Vec<LegendEntry>)]>, opts: &LegendOptions) -> Vec<LegendRow<'a>> {
     let excluded = |name: &str| opts.exclude.iter().any(|n| n.eq_ignore_ascii_case(name));
     let mut rows = Vec::new();
-    for l in map.layers.iter().filter(|l| map.shows(l) && !l.graphics && !l.is_raster() && !excluded(&l.name)) {
+    // In the order the map draws them and the Layers pane lists them, top first.
+    for item in map.stack() {
+        let l = match item {
+            rustgis_map::Drawn::Layer(i) => match map.layers.get(i) {
+                Some(l) => l,
+                None => continue,
+            },
+            // A WMS or WMTS layer's legend is its service's picture, whatever the frame draws of it.
+            rustgis_map::Drawn::Tile(i) => {
+                if let Some(t) = map.tiles.get(i).filter(|t| tile_listed(t) && !excluded(&t.name))
+                    && let Some(p) = tile_legend(t, opts.scale, &mut false)
+                {
+                    rows.push(LegendRow::Head(&t.name));
+                    rows.push(LegendRow::Picture(p));
+                }
+                continue;
+            }
+        };
+        if !(map.shows(l) && !l.graphics && !l.is_raster() && !excluded(&l.name)) {
+            continue;
+        }
         let mut entries = match drawn {
             Some(d) => match d.iter().find(|(id, _)| *id == l.id) {
                 Some((_, entries)) => entries.clone(),
@@ -1186,10 +1301,29 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32
         y += line * 1.3;
     }
     let sw = LEGEND_SWATCH * ppp;
-    for row in legend_rows(map, drawn, &opts) {
+    let mut rows = legend_rows(map, drawn, &opts).into_iter().peekable();
+    while let Some(row) = rows.next() {
+        if let LegendRow::Picture(p) = &row {
+            match &**p {
+                rustgis_tiles::cache::Payload::Image(pic) => match legend_picture(pm, r, y, pic, ppp) {
+                    Some((h, true)) => y += h,
+                    // Cut at the bottom, or no room for it.
+                    _ => break,
+                },
+                _ => continue,
+            }
+            continue;
+        }
         // The rectangle's own bottom, which a sum of its top and height can miss by a rounding,
         // and a thousandth of a row's slack: a legend sized to its rows keeps the last one.
         if y + line > r.bottom() + line * 1e-3 {
+            break;
+        }
+        // A WMS or WMTS layer's name only with room for some of its picture under it.
+        if let (LegendRow::Head(_), Some(LegendRow::Picture(p))) = (&row, rows.peek())
+            && let rustgis_tiles::cache::Payload::Image(pic) = &**p
+            && y + line + picture_scale(r, pic, ppp) > r.bottom() + line * 1e-3
+        {
             break;
         }
         match row {
@@ -1214,29 +1348,70 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32
                     false,
                 );
             }
+            LegendRow::Picture(_) => {}
         }
         y += line;
     }
+}
+
+/// The pixels a legend picture's pixel takes in the legend `r`: a pixel a point, narrowed to fit
+/// across after its indent.
+fn picture_scale(r: Rect, pic: &Pixmap, ppp: f32) -> f32 {
+    ppp.min((r.right() - r.x() - 6.0 * ppp).max(0.0) / pic.width().max(1) as f32)
+}
+
+/// Draws a WMS or WMTS layer's legend picture at `y` in the legend `r`, indented as a layer's
+/// classes, a pixel a point, narrowed to fit across ([`picture_scale`]). One taller than the room
+/// left is cut at the bottom. The height drawn and whether it all fitted; `None` when none of it
+/// did.
+fn legend_picture(pm: &mut Pixmap, r: Rect, y: f32, pic: &Pixmap, ppp: f32) -> Option<(f32, bool)> {
+    let x = r.x() + 6.0 * ppp;
+    let k = picture_scale(r, pic, ppp);
+    let room = r.bottom() - y;
+    // The source rows that fit, a thousandth of a row's slack, as the rows have.
+    let rows = if k > 0.0 { ((room + LEGEND_ROW * ppp * 1e-3) / k).floor().min(pic.height() as f32) } else { 0.0 };
+    if rows < 1.0 {
+        return None;
+    }
+    let shown;
+    let src = if (rows as u32) < pic.height() {
+        shown = tiny_skia::IntRect::from_xywh(0, 0, pic.width(), rows as u32).and_then(|c| pic.clone_rect(c))?;
+        &shown
+    } else {
+        pic
+    };
+    pm.draw_pixmap(
+        0,
+        0,
+        src.as_ref(),
+        &PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..PixmapPaint::default() },
+        Transform::from_row(k, 0.0, 0.0, k, x, y),
+        None,
+    );
+    Some((rows * k, (rows as u32) == pic.height()))
 }
 
 /// The size a legend with no title takes, in mm (width, height): its rows as [`legend`] draws
 /// them, the classes a frame shows at the renderer's scale denominator `scale` (as the layout
 /// finds it for a frame, a complete source read through as [`render`] reads it), or every class
 /// with `all_classes`. For sizing a legend to its content. `None` when a complete source can't be
-/// read, as [`render`] then draws no page.
+/// read, as [`render`] then draws no page. A WMS or WMTS layer's legend picture still on its way
+/// isn't waited for, nor counted ([`tile_legends_pending`] says whether one is).
 pub fn legend_size_mm(map: &mut Map, scale: f64, all_classes: bool, hide_other: bool, exclude: &[String]) -> Option<(f64, f64)> {
     let drawn = if all_classes { None } else { Some(complete_shown_legends(map, scale)?) };
-    let rows = legend_rows(map, drawn.as_deref(), &LegendOptions { hide_other, exclude });
+    let rows = legend_rows(map, drawn.as_deref(), &LegendOptions { hide_other, exclude, scale });
     let width = rows
         .iter()
         .map(|row| match row {
             LegendRow::Plain(l) => LEGEND_SWATCH + 6.0 + text::measure(&l.name, 9.0, false),
             LegendRow::Head(name) => text::measure(name, 9.0, true),
             LegendRow::Class(_, en) => LEGEND_SWATCH + 12.0 + text::measure(&en.label, 8.5, false),
+            LegendRow::Picture(p) => 6.0 + picture_size(p).0,
         })
         .fold(0.0f32, f32::max);
     let mm = 25.4 / 96.0;
-    Some((f64::from(width) * mm, rows.len() as f64 * f64::from(LEGEND_ROW) * mm))
+    let height: f32 = rows.iter().map(LegendRow::height).sum();
+    Some((f64::from(width) * mm, f64::from(height) * mm))
 }
 
 /// The renderer's scale denominator for a frame showing `map` at paper scale 1:`scale` (the one
@@ -1654,6 +1829,92 @@ mod tests {
         assert_eq!(expand("{page} of {pages}, {pageName} · {layout}", &layout, &info, None), "2 of 5, North · Atlas");
     }
 
+    /// A WMS or WMTS layer's legend is its service's picture under its name, as the Layers pane
+    /// shows it, narrowed to fit across and sized for; left out by name, hidden, or with none at
+    /// the frame's scale, it isn't listed.
+    #[test]
+    fn a_web_layers_legend_is_its_services_picture() {
+        crate::tiles::tests::serve();
+        let mut map = Map::new("m");
+        let mut t = rustgis_map::TileLayer::new("Walls", rustgis_map::TileKind::Raster, "https://tiles.test/red/{z}/{x}/{y}.png");
+        t.legends = vec![rustgis_data::ogc::Legend { url: "https://tiles.test/red/legend.png".into(), ..Default::default() }];
+        map.tiles.push(t);
+        // The red drawn (the picture is red; the name is dark) and how far right, in pixels.
+        let red = |map: &Map, width: f32, exclude: &[String], scale: f64| {
+            let mut pm = Pixmap::new(300, 400).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            let opts = LegendOptions { hide_other: false, exclude, scale };
+            legend(&mut pm, Rect::from_xywh(0.0, 0.0, width, 400.0).unwrap(), map, "", None, opts, 1.0);
+            let hits: Vec<u32> = (0..pm.height())
+                .flat_map(|y| (0..pm.width()).map(move |x| (x, y)))
+                .filter(|&(x, y)| pm.pixel(x, y).is_some_and(|p| p.red() > 200 && p.green() < 60))
+                .map(|(x, _)| x)
+                .collect();
+            (hits.len(), hits.iter().max().copied().unwrap_or(0))
+        };
+        wait_for_tile_legends(&map, 1e6, &[]);
+        let (ink, right) = red(&map, 300.0, &[], 1e6);
+        assert!(ink > 200 * 200, "the picture is drawn: {ink} px");
+        assert!(right < 6 + 256, "a pixel a point: {right}");
+        // Its name's row and the picture, 256 points down and 6 + 256 across.
+        let (w, h) = legend_size_mm(&mut map, 1e6, false, false, &[]).unwrap();
+        let mm = 25.4 / 96.0;
+        assert!((w - 262.0 * mm).abs() < 1e-6 && (h - (f64::from(LEGEND_ROW) + 256.0) * mm).abs() < 1e-6, "{w} × {h} mm");
+        let (_, right) = red(&map, 100.0, &[], 1e6);
+        assert!(right < 100, "narrowed to fit: {right}");
+        assert_eq!(red(&map, 300.0, &["WALLS".into()], 1e6).0, 0, "left out by name");
+        map.tiles[0].legends[0].max_scale = Some(1e5);
+        assert_eq!(red(&map, 300.0, &[], 1e6).0, 0, "none at this scale");
+        map.tiles[0].legends[0].max_scale = None;
+        // Narrowed, a picture takes only the height it's drawn at: a second layer's fits under it
+        // (a 70-point legend: 64 points across, so 64 down), and the drawing order is the map's.
+        let mut second = map.tiles[0].clone();
+        second.name = "Floors".into();
+        map.tiles.push(second);
+        let mut pm = Pixmap::new(70, 200).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let opts = LegendOptions { hide_other: false, exclude: &[], scale: 1e6 };
+        legend(&mut pm, Rect::from_xywh(0.0, 0.0, 70.0, 200.0).unwrap(), &map, "", None, opts, 1.0);
+        let red_rows =
+            (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| pm.pixel(x, y).is_some_and(|p| p.red() > 200 && p.green() < 60))).count();
+        assert!(red_rows >= 2 * 63, "both pictures, {red_rows} rows");
+        let names: Vec<&str> = legend_rows(&map, None, &opts)
+            .iter()
+            .filter_map(|r| match r {
+                LegendRow::Head(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["Walls", "Floors"]);
+        // Among the map's layers where the map draws them: a web layer placed over a feature
+        // layer is listed just above it, under the feature layers above.
+        let lower = map.add_dataset(rustgis_data::Dataset::new("Lower", GeometryType::Point, vec![]));
+        map.add_dataset(rustgis_data::Dataset::new("Upper", GeometryType::Point, vec![]));
+        map.tiles[1].over = Some(lower);
+        let listed: Vec<&str> = legend_rows(&map, None, &opts)
+            .iter()
+            .filter_map(|r| match r {
+                LegendRow::Head(n) => Some(*n),
+                LegendRow::Plain(l) => Some(l.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let feature_order: Vec<&str> = map.layers.iter().map(|l| l.name.as_str()).collect();
+        let expected: Vec<&str> =
+            feature_order.iter().flat_map(|n| if *n == "Lower" { vec!["Floors", "Lower"] } else { vec![*n] }).chain(["Walls"]).collect();
+        assert_eq!(listed, expected, "layers top first: {feature_order:?}");
+        // A heading with no room for any of its picture under it isn't drawn: a legend one row
+        // tall stays blank (the map's layers set aside, whose rows would fit).
+        map.layers.clear();
+        let mut pm = Pixmap::new(300, 15).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        legend(&mut pm, Rect::from_xywh(0.0, 0.0, 300.0, LEGEND_ROW).unwrap(), &map, "", None, opts, 1.0);
+        assert!(pm.pixels().iter().all(|p| p.red() > 200 && p.green() > 200), "no heading alone");
+        map.tiles.truncate(1);
+        map.tiles[0].visible = false;
+        assert_eq!(red(&map, 300.0, &[], 1e6).0, 0, "hidden");
+    }
+
     #[test]
     fn legends_leave_out_what_the_frame_does_not_draw() {
         use rustgis_data::{Dataset, Field, FieldType, Geometry, Value};
@@ -1683,7 +1944,7 @@ mod tests {
         let depth_without = |map: &Map, drawn: Option<&[(u32, Vec<LegendEntry>)]>, hide_other: bool, exclude: &[String]| {
             let mut pm = Pixmap::new(300, 400).unwrap();
             pm.fill(tiny_skia::Color::WHITE);
-            let opts = LegendOptions { hide_other, exclude };
+            let opts = LegendOptions { hide_other, exclude, scale: 1e6 };
             legend(&mut pm, Rect::from_xywh(0.0, 0.0, 300.0, 400.0).unwrap(), map, "", drawn, opts, 1.0);
             (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| pm.pixel(x, y).is_some_and(|p| p.red() < 200))).max().unwrap_or(0)
         };
@@ -1709,7 +1970,7 @@ mod tests {
                 map,
                 "",
                 drawn,
-                LegendOptions { hide_other: false, exclude: &[] },
+                LegendOptions { hide_other: false, exclude: &[], scale: 1e6 },
                 1.0,
             );
             (0..pm.width()).filter(|&x| (0..pm.height()).any(|y| pm.pixel(x, y).is_some_and(|p| p.red() < 200))).max().unwrap_or(0)

@@ -35,6 +35,8 @@ pub struct FgbSource {
     info: SourceInfo,
     input: Input,
     reproject: Reproject,
+    /// The field each of the header's columns is read into, `None` for one left out (binary).
+    slots: Vec<Option<usize>>,
 }
 
 impl FgbSource {
@@ -63,6 +65,8 @@ impl FgbSource {
         Ok(src)
     }
 
+    /// Opens a FlatGeobuf from its header: schema, extent, coordinate system, and notes (including
+    /// Z or M values, which reading drops).
     fn new<R: Read + Seek>(r: R, input: Input, name: &str) -> Result<Self> {
         let reader = open_reader(r)?;
         let h = reader.header();
@@ -78,10 +82,21 @@ impl FgbSource {
             notes.push("its coordinate system has no EPSG code; read as longitude/latitude".into());
         }
         let reproject = Reproject::from_epsg(code, &mut notes);
-        let fields = h
-            .columns()
-            .map(|cols| cols.iter().map(|c| Field::new(c.name().to_string(), field_type(c.type_()))).collect())
-            .unwrap_or_default();
+        let mut fields = Vec::new();
+        let mut slots = Vec::new();
+        let mut left_out = Vec::new();
+        for c in h.columns().iter().flat_map(|cols| cols.iter()) {
+            match field_type(c.type_()) {
+                Some(ty) => {
+                    slots.push(Some(fields.len()));
+                    fields.push(Field::new(c.name().to_string(), ty));
+                }
+                None => {
+                    slots.push(None);
+                    left_out.push((c.name().to_string(), "binary".to_string()));
+                }
+            }
+        }
         let geometry_type = {
             use flatgeobuf::GeometryType as G;
             match h.geometry_type() {
@@ -99,7 +114,7 @@ impl FgbSource {
             })
             .unwrap_or(Extent::EMPTY);
         let count = h.features_count();
-        let info = SourceInfo {
+        let mut info = SourceInfo {
             name: h.name().filter(|n| !n.trim().is_empty()).unwrap_or(name).to_string(),
             format: "FlatGeobuf",
             geometry_type,
@@ -110,8 +125,16 @@ impl FgbSource {
             // The crate's index search assumes the default node size; other files are scanned.
             indexed: h.index_node_size() == flatgeobuf::packed_r_tree::PackedRTree::DEFAULT_NODE_SIZE && count > 0,
             notes,
+            zm_dropped: false,
         };
-        let mut src = FgbSource { info, input, reproject };
+        info.note_columns(
+            &left_out,
+            ["of a type RustGIS has no field for was left out", "of types RustGIS has no field for were left out"],
+        );
+        if h.has_z() || h.has_m() {
+            info.drop_zm((count > 0).then_some(count));
+        }
+        let mut src = FgbSource { info, input, reproject, slots };
         if src.info.geometry_type == GeometryType::None {
             src.info.geometry_type = src.peek_kind();
         }
@@ -162,7 +185,7 @@ impl FgbSource {
             if !in_request(&geometry, req) || (late && !sample.wants()) {
                 continue;
             }
-            let mut props = Props { fields: &self.info.fields, values: vec![Value::Null; self.info.fields.len()] };
+            let mut props = Props { fields: &self.info.fields, slots: &self.slots, values: vec![Value::Null; self.info.fields.len()] };
             if f.process_properties(&mut props).is_err() {
                 out.skipped += 1;
                 continue;
@@ -172,6 +195,59 @@ impl FgbSource {
         out.matched = if late || matched == 0 { sample.seen() } else { matched };
         out.complete = sample.complete();
         out.features = sample.items;
+        Ok(out)
+    }
+
+    /// Visits the features a complete [`FgbSource::read_with`] of `extent` gives, in the same
+    /// order and with the same ids, a chunk at a time. An extent read through the index holds
+    /// the feature numbers it finds (8 bytes each) for the ids, as a read does.
+    fn visit_with<R: Read + Seek>(
+        &self,
+        open: &impl Fn() -> Result<R>,
+        extent: Option<Extent>,
+        chunks: &mut super::chunk_memory::Chunker<'_>,
+    ) -> Result<Batch> {
+        let req = Request { extent, limit: usize::MAX };
+        let reader = open_reader(open()?)?;
+        let native = extent.map(|e| self.reproject.extent_from_lonlat(&e));
+        let indexed = native.filter(|_| self.info.indexed);
+        let mut numbers: Option<Vec<u64>> = match indexed {
+            Some(e) => Some(self.search(open()?, &e)?),
+            None => None,
+        };
+        let mut iter = match indexed {
+            Some(e) => reader.select_bbox(e.min_x, e.min_y, e.max_x, e.max_y).map_err(err)?,
+            None => reader.select_all().map_err(err)?,
+        };
+        // As in a read: an index walk that disagrees with the selection is not trusted for ids.
+        if let Some(nums) = &numbers
+            && iter.features_count() != Some(nums.len())
+        {
+            numbers = None;
+            iter = open_reader(open()?)?.select_all().map_err(err)?;
+        }
+        let mut out = Batch { complete: true, ..Batch::default() };
+        let mut n = 0u64;
+        while let Some(f) = iter.next().map_err(err)? {
+            n += 1;
+            let id = numbers.as_ref().and_then(|v| v.get(usize::try_from(n - 1).unwrap_or(usize::MAX)).copied()).unwrap_or(n);
+            let geometry = f.to_wkb(CoordDimensions::xy()).ok().as_deref().and_then(wkb::decode).and_then(|g| self.reproject.geometry(g));
+            let Some(geometry) = geometry else {
+                out.skipped += 1;
+                continue;
+            };
+            if !in_request(&geometry, &req) {
+                continue;
+            }
+            let mut props = Props { fields: &self.info.fields, slots: &self.slots, values: vec![Value::Null; self.info.fields.len()] };
+            if f.process_properties(&mut props).is_err() {
+                out.skipped += 1;
+                continue;
+            }
+            out.matched += 1;
+            chunks.push(Feature { id, geometry: Some(geometry), attrs: props.values })?;
+        }
+        chunks.flush()?;
         Ok(out)
     }
 
@@ -445,7 +521,7 @@ impl FgbSource {
             if !in_request(&geometry, req) {
                 continue;
             }
-            let mut props = Props { fields: &self.info.fields, values: vec![Value::Null; self.info.fields.len()] };
+            let mut props = Props { fields: &self.info.fields, slots: &self.slots, values: vec![Value::Null; self.info.fields.len()] };
             if feat.process_properties(&mut props).is_err() {
                 out.skipped += 1;
                 continue;
@@ -480,6 +556,22 @@ impl FeatureSource for FgbSource {
             _ => None,
         }
     }
+
+    /// A file or an upload; a file by its web address is read a view at a time, not in full.
+    fn visits_chunks(&self) -> bool {
+        !matches!(self.input, Input::Remote(_))
+    }
+
+    /// In file order, or the index's order for an extent, as a read; one feature decoded at a
+    /// time from the file or upload.
+    fn visit_chunks(&self, extent: Option<Extent>, bytes: usize, visit: &mut dyn FnMut(Vec<Feature>) -> Result<()>) -> Result<Batch> {
+        let mut chunks = super::chunk_memory::Chunker::new(bytes, visit)?;
+        match &self.input {
+            Input::Path(p) => self.visit_with(&|| Ok(BufReader::new(std::fs::File::open(p)?)), extent, &mut chunks),
+            Input::Bytes(b) => self.visit_with(&|| Ok(Cursor::new(b.clone())), extent, &mut chunks),
+            Input::Remote(_) => Err(DataError::Unsupported("a whole FlatGeobuf by its web address read a chunk at a time".into())),
+        }
+    }
 }
 
 /// FlatBuffers verifies the header's layout, not the index arithmetic it advertises.
@@ -501,8 +593,9 @@ fn err(e: flatgeobuf::Error) -> DataError {
     DataError::Format(format!("FlatGeobuf: {e}"))
 }
 
-fn field_type(t: ColumnType) -> FieldType {
-    match t {
+/// The field type a column is read as; `None` for binary, which RustGIS has no field type for.
+fn field_type(t: ColumnType) -> Option<FieldType> {
+    Some(match t {
         ColumnType::Byte
         | ColumnType::UByte
         | ColumnType::Short
@@ -513,18 +606,23 @@ fn field_type(t: ColumnType) -> FieldType {
         | ColumnType::ULong => FieldType::Integer,
         ColumnType::Float | ColumnType::Double => FieldType::Double,
         ColumnType::Bool => FieldType::Boolean,
+        ColumnType::Binary => return None,
         _ => FieldType::Text,
-    }
+    })
 }
 
 /// Collects a feature's properties into values in field order.
 struct Props<'a> {
     fields: &'a [Field],
+    /// The field of each header column (see [`FgbSource::slots`]).
+    slots: &'a [Option<usize>],
     values: Vec<Value>,
 }
 
 impl PropertyProcessor for Props<'_> {
     fn property(&mut self, idx: usize, _name: &str, v: &ColumnValue) -> flatgeobuf::geozero::error::Result<bool> {
+        // A column left out (binary), or past the header's.
+        let Some(&Some(idx)) = self.slots.get(idx) else { return Ok(false) };
         let value = match v {
             ColumnValue::Byte(x) => Value::Int(i64::from(*x)),
             ColumnValue::UByte(x) => Value::Int(i64::from(*x)),
@@ -560,9 +658,39 @@ pub fn write(ds: &crate::Dataset) -> Result<Vec<u8>> {
 /// Writes a dataset whose geometry is in `crs`'s coordinates as FlatGeobuf, with a spatial index,
 /// the file saying `crs`.
 pub fn write_in(ds: &crate::Dataset, crs: Crs) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    write_features(&ds.name, ds.geometry_type, &ds.fields, crs, &mut out, &mut |add| add(&ds.features))?;
+    Ok(out)
+}
+
+/// Refuses to write FlatGeobuf in the browser, before the writer is made: its temporary file
+/// would reach `std::env::temp_dir`, which aborts the web app. (A flag rather than `#[cfg]`, so
+/// both cases are tested natively.)
+fn writable(browser: bool) -> Result<()> {
+    if browser {
+        return Err(DataError::Unsupported("FlatGeobuf in the browser".into()));
+    }
+    Ok(())
+}
+
+/// Writes FlatGeobuf with a spatial index to `out`, in `crs`'s coordinates: the features `feed`
+/// hands to the function it is given, a run at a time, their attributes named by `fields`.
+/// Returns how many were left out for having no geometry. The writer keeps each feature in a
+/// temporary file and only its index entry in memory, so a whole layer needn't be held. The
+/// writer needs that file whether or not it writes an index, and the web app has no files, so
+/// there a FlatGeobuf is refused rather than written.
+pub(crate) fn write_features(
+    name: &str,
+    geometry_type: GeometryType,
+    fields: &[Field],
+    crs: Crs,
+    out: &mut dyn std::io::Write,
+    feed: &mut dyn FnMut(&mut dyn FnMut(&[Feature]) -> Result<()>) -> Result<()>,
+) -> Result<usize> {
     use flatgeobuf::geozero::wkb::Wkb;
     use flatgeobuf::{FgbCrs, FgbWriter, FgbWriterOptions, GeometryType as G};
-    let ty = match ds.geometry_type {
+    writable(cfg!(target_arch = "wasm32"))?;
+    let ty = match geometry_type {
         GeometryType::Point => G::Unknown,
         GeometryType::Polyline => G::MultiLineString,
         GeometryType::Polygon => G::MultiPolygon,
@@ -574,8 +702,8 @@ pub fn write_in(ds: &crate::Dataset, crs: Crs) -> Result<Vec<u8>> {
         crs: FgbCrs { org: (code > 0).then_some("EPSG"), code, wkt: wkt.as_deref(), ..Default::default() },
         ..Default::default()
     };
-    let mut w = FgbWriter::create_with_options(&ds.name, ty, options).map_err(err)?;
-    for f in &ds.fields {
+    let mut w = FgbWriter::create_with_options(name, ty, options).map_err(err)?;
+    for f in fields {
         let t = match f.ty {
             FieldType::Integer => ColumnType::Long,
             FieldType::Double => ColumnType::Double,
@@ -584,30 +712,49 @@ pub fn write_in(ds: &crate::Dataset, crs: Crs) -> Result<Vec<u8>> {
         };
         w.add_column(&f.name, t, |_, c| c.nullable = true);
     }
-    for feat in &ds.features {
-        let Some(g) = &feat.geometry else { continue };
-        let mut failed = None;
-        w.add_feature_geom(Wkb(wkb::encode(g)), |out| {
-            use flatgeobuf::geozero::PropertyProcessor;
-            for (i, (f, v)) in ds.fields.iter().zip(&feat.attrs).enumerate() {
-                let r = match v {
-                    Value::Null => continue,
-                    Value::Int(x) => out.property(i, &f.name, &ColumnValue::Long(*x)),
-                    Value::Float(x) => out.property(i, &f.name, &ColumnValue::Double(*x)),
-                    Value::Bool(x) => out.property(i, &f.name, &ColumnValue::Bool(*x)),
-                    Value::Text(x) => out.property(i, &f.name, &ColumnValue::String(x)),
-                };
-                if let Err(e) = r {
-                    failed = Some(e.to_string());
+    let mut left_out = 0;
+    feed(&mut |features| {
+        for feat in features {
+            let Some(g) = &feat.geometry else {
+                left_out += 1;
+                continue;
+            };
+            let mut failed = None;
+            w.add_feature_geom(Wkb(wkb::encode(g)), |out| {
+                use flatgeobuf::geozero::PropertyProcessor;
+                for (i, (f, v)) in fields.iter().zip(&feat.attrs).enumerate() {
+                    let r = match v {
+                        Value::Null => continue,
+                        Value::Int(x) => out.property(i, &f.name, &ColumnValue::Long(*x)),
+                        Value::Float(x) => out.property(i, &f.name, &ColumnValue::Double(*x)),
+                        Value::Bool(x) => out.property(i, &f.name, &ColumnValue::Bool(*x)),
+                        Value::Text(x) => out.property(i, &f.name, &ColumnValue::String(x)),
+                    };
+                    if let Err(e) = r {
+                        failed = Some(e.to_string());
+                    }
                 }
+            })
+            .map_err(|e| DataError::Format(format!("FlatGeobuf: {e}")))?;
+            if let Some(e) = failed {
+                return Err(DataError::Format(format!("FlatGeobuf: {e}")));
             }
-        })
-        .map_err(|e| DataError::Format(format!("FlatGeobuf: {e}")))?;
-        if let Some(e) = failed {
-            return Err(DataError::Format(format!("FlatGeobuf: {e}")));
         }
+        Ok(())
+    })?;
+    w.write(out).map_err(err)?;
+    Ok(left_out)
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    /// The browser refuses FlatGeobuf before the writer, whose temporary file aborted the web
+    /// app, is made; the desktop writes it.
+    #[test]
+    fn flatgeobuf_is_refused_in_the_browser_and_written_on_the_desktop() {
+        assert!(matches!(writable(true), Err(DataError::Unsupported(m)) if m.contains("browser")));
+        assert!(writable(false).is_ok());
     }
-    let mut out = Vec::new();
-    w.write(&mut out).map_err(err)?;
-    Ok(out)
 }

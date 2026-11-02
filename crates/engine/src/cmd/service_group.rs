@@ -295,7 +295,7 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
             layer.display_filters.retain(|f| rustgis_data::query::parse(&f.where_, &layer.dataset).is_ok());
             layer.touch_geometry();
             child.layer = layer.id;
-            // Locked labels name rows of the old features.
+            // Locked labels name the old features by id, and the new ones are numbered afresh.
             if let Some(lock) = &mut s.map_mut().label_lock {
                 lock.retain(|((id, _, _, _), _)| *id != child.layer);
             }

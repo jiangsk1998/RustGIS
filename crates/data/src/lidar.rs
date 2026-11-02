@@ -1,6 +1,6 @@
 //! LiDAR point clouds: LAS 1.0–1.4 (point formats 0–10) and LAZ (COPC included), read as a
-//! point layer of an evenly spread sample, with each point's elevation, intensity,
-//! classification, return number and colour.
+//! point layer with each point's elevation, intensity, classification, return number and colour.
+//! Oversized clouds are sampled only for display; whole reads are refused.
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -8,7 +8,7 @@ use crate::raster::Crs;
 use crate::{DataError, Dataset, Feature, Field, FieldType, Geometry, GeometryType, ReadReport, Result, Value};
 use rustgis_geom::Coord;
 
-/// Most points a layer holds: past it, an evenly spread sample.
+/// Most points read whole; larger files are sampled only for display.
 pub const MAX_POINTS: usize = if cfg!(target_arch = "wasm32") { 500_000 } else { 2_000_000 };
 
 /// Most points decompressed from a LAZ file (each is read to reach the next sampled one).
@@ -228,14 +228,35 @@ fn point(h: &Header, rec: &[u8]) -> Option<Point> {
     Some(Point { x, y, z, intensity, class, ret, rgb })
 }
 
-/// Reads a LAS or LAZ file: an evenly spread sample of at most [`MAX_POINTS`] points, in
-/// longitude/latitude when the file says its coordinate system (or `crs` gives it).
-pub fn read<R: Read + Seek + Send + Sync>(mut r: R, name: &str, crs: Option<Crs>) -> Result<(Dataset, ReadReport)> {
+/// Reads a LAS or LAZ file in longitude/latitude when the file says its coordinate system
+/// (or `crs` gives it). Refuses files over [`MAX_POINTS`] or missing records; coordinate
+/// conversion failures remain counted skips.
+pub fn read<R: Read + Seek + Send + Sync>(r: R, name: &str, crs: Option<Crs>) -> Result<(Dataset, ReadReport)> {
+    let (ds, report, count) = read_points(r, name, crs, false)?;
+    let read = (ds.features.len() as u64).saturating_add(report.skipped as u64);
+    if read < count {
+        return Err(DataError::Format(format!(
+            "{name}: could not read the whole cloud ({read} of {count} points; a damaged or cut-off file)"
+        )));
+    }
+    Ok((ds, report))
+}
+
+/// Reads a display sample, retaining the header's original point count for whole-read checks.
+pub(crate) fn read_sample<R: Read + Seek + Send + Sync>(r: R, name: &str) -> Result<(Dataset, ReadReport, u64)> {
+    read_points(r, name, None, true)
+}
+
+/// Shared decoder; only a display read may sample an oversized cloud.
+fn read_points<R: Read + Seek + Send + Sync>(mut r: R, name: &str, crs: Option<Crs>, sample: bool) -> Result<(Dataset, ReadReport, u64)> {
     let mut head = vec![0u8; 375];
     r.seek(SeekFrom::Start(0))?;
     let got = read_up_to(&mut r, &mut head)?;
     head.truncate(got);
     let h = header(&head)?;
+    if !sample && h.count > MAX_POINTS as u64 {
+        return Err(DataError::Format(format!("{name}: the file has {} points, more than the {MAX_POINTS} read at once", h.count)));
+    }
     let mut report = ReadReport::default();
     let n_vlrs = u32_at(&head, 100).unwrap_or(0);
     let mut vlrs = read_vlrs(&mut r, u64::from(h.header_size), n_vlrs, false, Some(u64::from(h.point_offset)))?;
@@ -293,7 +314,7 @@ pub fn read<R: Read + Seek + Send + Sync>(mut r: R, name: &str, crs: Option<Crs>
     let mut ds = Dataset::new(name, GeometryType::Point, fields);
     let total = h.count;
     if total == 0 {
-        return Ok((ds, report));
+        return Ok((ds, report, total));
     }
     // A LAZ file is decompressed point by point: past MAX_DECOMPRESSED only its first points are
     // read (and sampled), with a notice.
@@ -356,20 +377,21 @@ pub fn read<R: Read + Seek + Send + Sync>(mut r: R, name: &str, crs: Option<Crs>
     let mut lost = 0usize;
     for (id, p) in points.into_iter().enumerate() {
         let c = Coord::new(p.x, p.y);
+        if !c.is_finite() {
+            lost += 1;
+            continue;
+        }
         let c = match &transform {
             Some(t) => match t.to_lonlat(c) {
                 Some(c) => c,
                 None => {
                     lost += 1;
+                    ds.crs_incomplete = true;
                     continue;
                 }
             },
             None => c,
         };
-        if !c.x.is_finite() || !c.y.is_finite() {
-            lost += 1;
-            continue;
-        }
         let mut attrs =
             vec![Value::Float(p.z), Value::Int(i64::from(p.intensity)), Value::Int(i64::from(p.class)), Value::Int(i64::from(p.ret))];
         if has_rgb {
@@ -384,7 +406,7 @@ pub fn read<R: Read + Seek + Send + Sync>(mut r: R, name: &str, crs: Option<Crs>
         report.skipped += lost;
         report.messages.push(format!("{name}: {lost} points couldn't be converted to longitude/latitude"));
     }
-    Ok((ds, report))
+    Ok((ds, report, total))
 }
 
 fn read_up_to<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<usize> {
@@ -566,6 +588,84 @@ mod tests {
         assert!(matches!(ds.features[0].geometry, Some(Geometry::Point(c)) if (c.x - 9.0).abs() < 1e-6));
     }
 
+    /// Oversized legacy and LAS 1.4 counts are refused before records or LAZ metadata are needed.
+    #[test]
+    fn oversized_whole_reads_are_refused() {
+        let count = MAX_POINTS as u64 + 1;
+        for minor in [2, 4] {
+            let mut bytes = las(minor, 0, &[(1.0, 2.0, 3.0, 2)], None);
+            bytes[107..111].copy_from_slice(&(count as u32).to_le_bytes());
+            if minor == 4 {
+                bytes[247..255].copy_from_slice(&count.to_le_bytes());
+            }
+            for compressed in [false, true] {
+                bytes[104] = if compressed { 0x80 } else { 0 };
+                let err = read_bytes(&bytes, "oversized", None).unwrap_err().to_string();
+                assert!(err.contains(&count.to_string()) && err.contains(&MAX_POINTS.to_string()), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn sampled_source_keeps_original_count_and_refuses_materialization() {
+        let count = MAX_POINTS as u64 + 1;
+        let mut bytes = las(4, 0, &[(1.0, 2.0, 3.0, 2), (1.5, 2.5, 4.0, 2)], None);
+        let clean = crate::source::open_bytes("clean.las", bytes.clone(), None).unwrap();
+        let (ds, report) = crate::source::materialize(clean.as_ref()).unwrap();
+        assert_eq!(ds.features.len(), 2);
+        assert!(report.messages.is_empty());
+        bytes[247..255].copy_from_slice(&count.to_le_bytes());
+        let src = crate::source::open_bytes("oversized.las", bytes.clone(), None).unwrap();
+        assert_eq!(src.info().count, Some(count));
+        let batch = src.read(&crate::source::Request::all()).unwrap();
+        assert!(!batch.complete);
+        assert_eq!(batch.matched, count);
+        assert!(!batch.features.is_empty());
+        assert!(src.info().notes.iter().any(|m| m.contains("points") && m.contains(&count.to_string())));
+        assert!(crate::source::materialize(src.as_ref()).is_err());
+        assert!(crate::io::read_bytes("oversized.las", &bytes).is_err());
+        assert!(crate::io::read_owned("oversized.las", bytes).is_err());
+    }
+
+    /// Conversion losses are disclosed skips, while missing records still prevent a whole read.
+    #[test]
+    fn source_materializes_with_counted_conversion_losses() {
+        let mut bytes = las(2, 0, &[(0.0, 0.0, 3.0, 2), (1.0, 0.0, 4.0, 2)], Some("EPSG:32632"));
+        // A finite scale overflows only the second point's X during coordinate decoding.
+        bytes[131..139].copy_from_slice(&f64::MAX.to_le_bytes());
+        let (direct, report) = read_bytes(&bytes, "lossy", None).unwrap();
+        assert_eq!(direct.features.len(), 1);
+        assert!(!direct.crs_incomplete);
+        assert_eq!(report.skipped, 1);
+        let src = crate::source::open_bytes("lossy.las", bytes.clone(), None).unwrap();
+        assert_eq!(src.info().count, Some(2));
+        let (ds, report) = crate::source::materialize(src.as_ref()).unwrap();
+        assert_eq!(ds.features, direct.features);
+        assert!(!ds.crs_incomplete);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.messages.len(), 1);
+        assert!(report.messages[0].contains("1 points couldn't be converted"));
+        bytes.truncate(bytes.len() - usize::from(RECORD_LEN[0]));
+        assert!(crate::io::read_bytes("truncated.las", &bytes).is_err());
+        let truncated = crate::source::open_bytes("truncated.las", bytes, None).unwrap();
+        assert!(crate::source::materialize(truncated.as_ref()).is_err());
+    }
+
+    /// Projection repairs must re-read the original cloud if a transform already lost points.
+    #[test]
+    fn transform_losses_block_projection_redefinition() {
+        let bytes = las(2, 0, &[(500_000.0, 5_000_000.0, 3.0, 2), (20_000_000.0, 0.0, 4.0, 2)], Some("EPSG:32632"));
+        let direct = crate::io::read_bytes("transform.las", &bytes).unwrap();
+        let src = crate::source::open_bytes("transform.las", bytes, None).unwrap();
+        let materialized = crate::source::materialize(src.as_ref()).unwrap();
+        for (ds, report) in [direct, materialized] {
+            assert_eq!(ds.features.len(), 1);
+            assert_eq!(report.skipped, 1);
+            assert!(crate::io::define_projection(&ds, Crs::LonLat).is_err());
+            assert!(ds.crs_incomplete);
+        }
+    }
+
     #[test]
     fn hostile_files_never_panic() {
         let b = las(4, 7, &[(1.0, 2.0, 3.0, 2), (1.5, 2.5, 3.5, 5), (1.2, 2.2, 3.2, 9)], Some("GEOGCS[\"x\"]"));
@@ -575,8 +675,10 @@ mod tests {
         // Lies in the header: a huge count, a zero scale, a short record.
         let mut lie = b.clone();
         lie[247..255].copy_from_slice(&u64::MAX.to_le_bytes());
-        let (ds, report) = read_bytes(&lie, "t", None).unwrap();
-        assert!(ds.features.len() <= MAX_POINTS && !report.messages.is_empty());
+        assert!(read_bytes(&lie, "t", None).is_err());
+        let shown = crate::source::open_bytes("lie.las", lie, None).unwrap();
+        assert_eq!(shown.info().count, Some(u64::MAX));
+        assert!(crate::source::materialize(shown.as_ref()).is_err());
         let mut zero = b.clone();
         zero[131..139].copy_from_slice(&0f64.to_le_bytes());
         assert!(read_bytes(&zero, "t", None).is_err());

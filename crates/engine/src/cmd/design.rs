@@ -120,7 +120,7 @@ pub(crate) fn apply(s: &mut Session, id: u32, changes: Vec<Change>) -> Result<()
         let ty = l.dataset.fields.get(fi).map(|f| f.ty).unwrap_or(FieldType::Text);
         // A rule that no longer reads (its field was removed, or a hand-edited file) is skipped
         // rather than blocking every edit.
-        let Ok(calc) = super::edit::Calc::parse(&rule.expression, &l.dataset) else { continue };
+        let Ok(calc) = super::edit::Calculation::parse(&rule.expression, &l.dataset) else { continue };
         for r in &rows {
             let v = super::edit::coerce(calc.eval(&l.dataset, *r), ty);
             if let Some(cell) = l.dataset.features.get_mut(*r).and_then(|f| f.attrs.get_mut(fi)) {
@@ -827,7 +827,7 @@ fn attribute_rule(s: &mut Session, p: &Json) -> CmdResult {
     let field = match kind {
         RuleKind::Calculation => {
             let fl = ps(p, "field").ok_or("a calculation rule sets a field")?;
-            super::edit::Calc::parse(&expression, &l.dataset)?;
+            super::edit::Calculation::parse(&expression, &l.dataset)?;
             l.dataset
                 .field_index(fl)
                 .and_then(|i| l.dataset.fields.get(i))

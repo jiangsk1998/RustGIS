@@ -403,15 +403,13 @@ pub fn sourcecoop(app: &mut RustGisApp, ui: &mut egui::Ui) {
     let mut more = false;
     match app.ui.catalogs.product.clone() {
         None => {
-            egui::ScrollArea::vertical().max_height(300.0).id_salt("sc_products").show(ui, |ui| {
-                for p in &app.ui.catalogs.products {
-                    let r = ui.add(egui::Button::new(&p.title).wrap().min_size(vec2(ui.available_width(), 0.0)));
-                    let r = r.on_hover_text(format!("{}/{}\n{}", p.account, p.id, p.description));
-                    if r.clicked() {
-                        open_product = Some((p.account.clone(), p.id.clone()));
-                    }
+            for p in &app.ui.catalogs.products {
+                let r = ui.add(egui::Button::new(&p.title).wrap().min_size(vec2(ui.available_width(), 0.0)));
+                let r = r.on_hover_text(format!("{}/{}\n{}", p.account, p.id, p.description));
+                if r.clicked() {
+                    open_product = Some((p.account.clone(), p.id.clone()));
                 }
-            });
+            }
         }
         Some((account, product)) => {
             ui.horizontal(|ui| {
@@ -424,33 +422,31 @@ pub fn sourcecoop(app: &mut RustGisApp, ui: &mut egui::Ui) {
                 ui.label(egui::RichText::new(format!("{account}/{product}/{}", app.ui.catalogs.path)).monospace());
             });
             let base = format!("{product}/");
-            egui::ScrollArea::vertical().max_height(300.0).id_salt("sc_files").show(ui, |ui| {
-                for p in &app.ui.catalogs.listing.prefixes {
-                    let label = p.strip_prefix(&base).unwrap_or(p).strip_prefix(app.ui.catalogs.path.as_str()).unwrap_or(p);
-                    // A folder: the folder icon (drawn) and its name.
-                    let clicked = ui
-                        .horizontal(|ui| {
-                            let t = crate::theme::Tokens::get(ui.ctx());
-                            let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
-                            crate::icons::paint(ui.painter(), r, "open", t.icon, t.accent);
-                            ui.selectable_label(false, label).clicked()
-                        })
-                        .inner;
-                    if clicked {
-                        into = Some(p.strip_prefix(&base).unwrap_or(p).to_string());
+            for p in &app.ui.catalogs.listing.prefixes {
+                let label = p.strip_prefix(&base).unwrap_or(p).strip_prefix(app.ui.catalogs.path.as_str()).unwrap_or(p);
+                // A folder: the folder icon (drawn) and its name.
+                let clicked = ui
+                    .horizontal(|ui| {
+                        let t = crate::theme::Tokens::get(ui.ctx());
+                        let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
+                        crate::icons::paint(ui.painter(), r, "open", t.icon, t.accent);
+                        ui.selectable_label(false, label).clicked()
+                    })
+                    .inner;
+                if clicked {
+                    into = Some(p.strip_prefix(&base).unwrap_or(p).to_string());
+                }
+            }
+            for o in &app.ui.catalogs.listing.objects {
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!busy, egui::Button::new(tl!("Add")).small()).clicked() {
+                        add = Some((account.clone(), o.key.clone()));
                     }
-                }
-                for o in &app.ui.catalogs.listing.objects {
-                    ui.horizontal(|ui| {
-                        if ui.add_enabled(!busy, egui::Button::new(tl!("Add")).small()).clicked() {
-                            add = Some((account.clone(), o.key.clone()));
-                        }
-                        let name = o.key.rsplit('/').next().unwrap_or(&o.key);
-                        ui.label(name);
-                        ui.label(egui::RichText::new(size_text(o.size)).small().weak());
-                    });
-                }
-            });
+                    let name = o.key.rsplit('/').next().unwrap_or(&o.key);
+                    ui.label(name);
+                    ui.label(egui::RichText::new(size_text(o.size)).small().weak());
+                });
+            }
             // Past the first page (1000 entries): what is shown, and the next page on request.
             if app.ui.catalogs.listing.next.is_some() {
                 ui.horizontal(|ui| {

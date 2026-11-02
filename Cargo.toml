@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/rustgis", "apps/rustgis-cli", "xtask"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.90"
@@ -27,7 +27,7 @@ rustgis-keychain = { path = "crates/keychain" }
 
 # foundation
 thiserror = "2"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 # float_roundtrip: projects must read back the exact coordinates they wrote, or source-edit
 # baselines (row hashes) see every reopened row as changed.
 serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
@@ -80,7 +80,7 @@ arrow-schema = { version = "60", default-features = false }
 bytes = "1"
 flatgeobuf = { version = "6", default-features = false }
 geozero = { version = "0.15", default-features = false, features = ["with-wkb"] }
-rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+rusqlite = { version = "0.41", features = ["bundled", "functions"] }
 # PostgreSQL/PostGIS, in pure Rust: the client, and TLS through rustls (ring, as ureq has it).
 postgres = { version = "0.19", default-features = false }
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }

@@ -168,12 +168,21 @@ pub(crate) fn forget() {
     s.bytes = 0;
 }
 
-/// Whether the style draws shapes from vector tiles at `zoom`.
+/// Whether the style draws shapes from vector tiles, or relief or hillshading from elevation
+/// tiles (as costly, a pixel at a time), at `zoom`.
 fn draws_shapes(r: &Resolved, zoom: f32) -> bool {
     r.style.layers.iter().any(|l| {
-        matches!(l.kind, LayerKind::Fill | LayerKind::FillExtrusion | LayerKind::Line | LayerKind::Circle)
-            && l.visible_at(zoom)
-            && l.source.as_deref().is_some_and(|id| r.style.sources.iter().any(|(s, src)| s == id && matches!(src, Source::Vector { .. })))
+        let source = || l.source.as_deref().and_then(|id| r.style.source(id));
+        l.visible_at(zoom)
+            && match l.kind {
+                LayerKind::Fill | LayerKind::FillExtrusion | LayerKind::Line | LayerKind::Circle => {
+                    matches!(source(), Some(Source::Vector { .. }))
+                }
+                LayerKind::Hillshade => matches!(source(), Some(Source::RasterDem { .. })),
+                // A colour ramp it can't draw is no reason for a picture.
+                LayerKind::ColorRelief => matches!(source(), Some(Source::RasterDem { .. })) && l.color_relief_ramp(zoom).is_some(),
+                _ => false,
+            }
     })
 }
 

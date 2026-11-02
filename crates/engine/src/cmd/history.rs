@@ -112,7 +112,7 @@ pub fn tool_of(r: &GpRecord) -> Option<String> {
 /// `password`, an `api_token`; a plain `key` when it reads as one or sits beside a web address,
 /// as `sources::holds_secret` judges it), left empty. An object's keys too: the file may put
 /// anything there.
-fn redacted(v: &Value) -> Value {
+pub(crate) fn redacted(v: &Value) -> Value {
     use crate::sources::looks_like_a_key;
     use rustgis_data::source::credentials::secret_key;
     match v {
@@ -139,7 +139,7 @@ fn redacted(v: &Value) -> Value {
 /// name addresses among its words; a single word may be one. Any text may still be a connection
 /// in a form `redact` doesn't read (libpq's words alone, GDAL's `MYSQL:db,user=…,password=…`,
 /// ODBC's `UID=…;PWD=…`): its secret-named values go too.
-fn redacted_text(t: &str) -> String {
+pub(crate) fn redacted_text(t: &str) -> String {
     let r = if connection(t) || !t.contains(char::is_whitespace) { crate::sources::redact(t) } else { crate::sources::redact_text(t) };
     // After `redact` too: a prefix it knows may come in a form it doesn't (GDAL's `MYSQL:`).
     query_pairs_emptied(&private_keys_removed(&r))

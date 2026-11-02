@@ -528,8 +528,8 @@ fn signed_area(r: &[(f32, f32)]) -> f32 {
 }
 
 /// The point inside a polygon (outer ring, then holes) farthest from its edges, to within
-/// `precision` (Mapbox's polylabel): where a label sits best in an area. `None` for a polygon
-/// with no area.
+/// `precision` (after Mapbox's polylabel, ISC; see `INCLUDED` in `xtask/src/notices.rs`): where a
+/// label sits best in an area. `None` for a polygon with no area.
 pub(crate) fn pole_of_inaccessibility(poly: &[Vec<(f32, f32)>], precision: f32) -> Option<(f32, f32)> {
     let outer = poly.first()?;
     let (mut x0, mut y0, mut x1, mut y1) = (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);

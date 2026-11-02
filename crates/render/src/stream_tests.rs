@@ -80,6 +80,7 @@ fn streamed_kind(layer: &Layer, size: usize, native: bool) -> Layer {
         crs: if native { "EPSG:3857".into() } else { "EPSG:4326".into() },
         indexed: true,
         notes: Vec::new(),
+        zm_dropped: false,
     };
     let mut l = layer.clone();
     l.dataset.features = ds.features.iter().take(1).cloned().collect::<Vec<_>>().into();
@@ -424,6 +425,8 @@ fn perspective_uses_complete_isolated_fallback() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn actual_shapefile_export_is_complete_despite_one_row_interaction_limit() {
+    // Keep this Shapefile's index out of the user's cache (#1230).
+    rustgis_data::source::shp::use_temporary_index_dir();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("complete.shp");
     let mut ds =
@@ -1214,4 +1217,155 @@ fn gpu_mesh_limit_spans_a_streamed_layers_batches() {
     assert!(!meshed.is_empty(), "the first batches still mesh");
     assert!(meshed.iter().sum::<usize>() <= mesh::MAX_LAYER_VERTICES, "the layer's meshes: {meshed:?}");
     assert!(scene.cmds.iter().any(|c| matches!(c, gpu_scene::DrawCmd::Image { .. })), "the rest drawn on the CPU");
+}
+
+/// Counts full render traversals independently of interaction-window reads.
+struct CountedLod {
+    chunks: Chunks,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FeatureSource for CountedLod {
+    /// Preserves the source metadata used to choose the streamed render path.
+    fn info(&self) -> &SourceInfo {
+        self.chunks.info()
+    }
+    /// Interaction-window reads do not count as full render traversals.
+    fn read(&self, request: &Request) -> rustgis_data::Result<Batch> {
+        self.chunks.read(request)
+    }
+    /// Advertises the same complete traversal capability as the wrapped source.
+    fn streams_chunks(&self) -> bool {
+        true
+    }
+    /// Counts each complete render request, including failed traversals.
+    fn visit_chunks(
+        &self,
+        extent: Option<Extent>,
+        bytes: usize,
+        visit: &mut dyn FnMut(Vec<Feature>) -> rustgis_data::Result<()>,
+    ) -> rustgis_data::Result<Batch> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.chunks.visit_chunks(extent, bytes, visit)
+    }
+}
+
+/// Wraps the whole dataset while leaving only its interaction sample on the layer.
+fn counted_lod(layer: &Layer, size: usize) -> (Layer, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let ds = layer.dataset.clone();
+    let mut layer = streamed(layer, size);
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let info = layer.source.as_ref().unwrap().info().unwrap().clone();
+    let chunks = Chunks { info, ds, size };
+    layer.source = Some(SourceLayer::from_path("counted.shp", None, Box::new(CountedLod { chunks, calls: calls.clone() })));
+    (layer, calls)
+}
+
+/// Independent worker snapshots share both useful and ineffective thinning decisions while panning.
+#[test]
+fn streamed_lod_reuses_decisions_across_render_snapshots_and_pans() {
+    use std::sync::atomic::Ordering;
+    for detailed in [false, true] {
+        let mut ds = Dataset::new("LOD visits", GeometryType::Polyline, vec![]);
+        let n = if detailed { 210_001 } else { 101 };
+        ds.push(Some(Geometry::Line(vec![(0..n).map(|i| Coord::new(i as f64 / n as f64 * 0.2 - 0.1, 0.0)).collect()])), vec![]);
+        let mut base = Map::new("LOD visits");
+        base.basemap = rustgis_map::Basemap::Blank;
+        base.add_dataset(ds);
+        let (layer, calls) = counted_lod(&base.layers[0], 1);
+        let mut actual = base.clone();
+        actual.layers[0] = layer;
+        let mut view =
+            View { width: 120.0, height: 90.0, pixels_per_point: 1.0, camera: Camera::new(Coord::new(0.0, 0.0), 80.0), sky: false };
+        for frame in 0..3 {
+            // A fresh worker snapshot each time must still reuse the source's decision.
+            let got = render(&mut actual.clone(), &view).unwrap();
+            let expected = render(&mut base.clone(), &view).unwrap();
+            assert_eq!(got.pixmap.data(), expected.pixmap.data());
+            assert_eq!(calls.load(Ordering::Relaxed), frame + 2, "detailed={detailed} frame={frame}");
+            view.camera.center.x += 100.0;
+        }
+    }
+}
+
+/// Density and projection changes select separate decisions; refresh and replacement invalidate them.
+#[test]
+fn streamed_lod_separates_levels_projections_and_source_resets() {
+    use std::sync::atomic::Ordering;
+    let mut ds = Dataset::new("LOD invalidation", GeometryType::Polyline, vec![]);
+    ds.push(Some(Geometry::Line(vec![vec![Coord::new(-0.1, 0.0), Coord::new(0.1, 0.0)]])), vec![]);
+    let mut base = Map::new("LOD invalidation");
+    base.basemap = rustgis_map::Basemap::Blank;
+    base.add_dataset(ds);
+    let (layer, calls) = counted_lod(&base.layers[0], 1);
+    let mut actual = base.clone();
+    actual.layers[0] = layer;
+    let mut view = View { width: 120.0, height: 90.0, pixels_per_point: 1.0, camera: Camera::new(Coord::new(0.0, 0.0), 80.0), sky: false };
+    let mut total = 0;
+    // Resolutions 80 and 90 share a level. Density 2 selects the next finer level;
+    // a different projection needs its own counts, even at the same tolerance.
+    for (res, ppp, projection, visits) in [
+        (80.0, 1.0, rustgis_map::Projection::default(), 2),
+        (90.0, 1.0, rustgis_map::Projection::default(), 1),
+        (80.0, 2.0, rustgis_map::Projection::default(), 2),
+        (80.0, 2.0, rustgis_map::Projection::Custom("robinson".into()), 2),
+        (80.0, 2.0, rustgis_map::Projection::default(), 1),
+    ] {
+        view.camera.res = res;
+        view.pixels_per_point = ppp;
+        base.projection = projection.clone();
+        actual.projection = projection;
+        let got = render(&mut actual, &view).unwrap();
+        let expected = render(&mut base.clone(), &view).unwrap();
+        assert_eq!(got.pixmap.data(), expected.pixmap.data());
+        total += visits;
+        assert_eq!(calls.load(Ordering::Relaxed), total);
+    }
+    // Re-evaluate after a refresh even if the open handle and projection stay the same.
+    actual.layers[0].source.as_mut().unwrap().reset();
+    assert!(render(&mut actual, &view).is_some());
+    total += 2;
+    assert_eq!(calls.load(Ordering::Relaxed), total);
+    // A newly opened source at the same path must not inherit the old decision.
+    let (replacement, replacement_calls) = counted_lod(&base.layers[0], 1);
+    actual.layers[0].replace_source(replacement.source.unwrap());
+    assert!(render(&mut actual, &view).is_some());
+    assert_eq!(replacement_calls.load(Ordering::Relaxed), 2);
+}
+
+/// Failed fills stay retryable, negative results are cached, and LRU hits refresh recency.
+#[test]
+fn streamed_lod_retries_failed_decisions_and_bounds_retained_levels() {
+    let mut ds = Dataset::new("cache", GeometryType::Polyline, vec![]);
+    ds.push(Some(Geometry::Line(vec![vec![Coord::new(0.0, 0.0), Coord::new(1.0, 1.0)]])), vec![]);
+    let (layer, _) = counted_lod(&Layer::new(1, ds), 1);
+    let source = layer.source.as_ref().unwrap();
+    for _ in 0..2 {
+        assert!(source.cached_thinning("mercator", 0, || Err(rustgis_data::DataError::Format("incomplete".into()))).is_err());
+    }
+    assert!(!source.cached_thinning("mercator", 0, || Ok(false)).unwrap());
+    assert!(!source.cached_thinning("mercator", 0, || panic!("negative decisions must be cached")).unwrap());
+    for level in 1..=rustgis_map::lod::LEVELS_KEPT as i32 {
+        assert!(source.cached_thinning("mercator", level, || Ok(true)).unwrap());
+    }
+    // The oldest negative entry was evicted; recomputation may now return a different value.
+    assert!(source.cached_thinning("mercator", 0, || Ok(true)).unwrap());
+    // Keep recently reused levels, rather than evicting in insertion order.
+    assert!(source.cached_thinning("mercator", 2, || panic!("recent level should remain")).unwrap());
+    assert!(source.cached_thinning("mercator", 4, || Ok(true)).unwrap());
+    assert!(source.cached_thinning("mercator", 2, || panic!("hit must refresh recency")).unwrap());
+}
+
+/// A source panic must not disable caching for later successful frames in the same session.
+#[test]
+fn streamed_lod_recovers_caching_after_an_escaped_source_panic() {
+    let ds = Dataset::new("panic recovery", GeometryType::Polyline, vec![]);
+    let (layer, _) = counted_lod(&Layer::new(1, ds), 1);
+    let source = layer.source.as_ref().unwrap();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        source.cached_thinning("mercator", 0, || panic!("injected source panic"))
+    }));
+    assert!(failed.is_err());
+    assert!(source.cached_thinning("mercator", 0, || Ok(true)).unwrap());
+    assert!(source.cached_thinning("mercator", 0, || panic!("recovered decision must be cached")).unwrap());
 }

@@ -215,6 +215,7 @@ pub fn read_bytes(file_name: &str, bytes: &[u8]) -> Result<(Dataset, ReadReport)
         }
         // The first layer (`read_layers` reads them all), saying what else the file holds.
         "zip" | "kml" | "kmz" | "gpx" | "gml" | "dxf" | "pbf" | "topojson" => return first_layer(file_name, bytes),
+        "las" | "laz" => crate::lidar::read_bytes(bytes, &name, None)?,
         // A copy, since only borrowed bytes are given; `read_owned` takes them without one.
         e if crate::source::EXTENSIONS.contains(&e) => return read_owned(file_name, bytes.to_vec()),
         other => return Err(DataError::Unsupported(other.to_string())),
@@ -223,8 +224,8 @@ pub fn read_bytes(file_name: &str, bytes: &[u8]) -> Result<(Dataset, ReadReport)
     Ok(out)
 }
 
-/// Reads a GeoPackage, GeoParquet or FlatGeobuf held in memory without copying it (other types go
-/// to [`read_bytes`]).
+/// Reads a GeoPackage, GeoParquet, FlatGeobuf or LAS/LAZ held in memory without copying it
+/// (other types go to [`read_bytes`]).
 pub fn read_owned(file_name: &str, bytes: Vec<u8>) -> Result<(Dataset, ReadReport)> {
     if !crate::source::is_source_name(file_name) {
         return read_bytes(file_name, &bytes);
@@ -232,7 +233,12 @@ pub fn read_owned(file_name: &str, bytes: Vec<u8>) -> Result<(Dataset, ReadRepor
     if bytes.len() as u64 > MAX_BYTES {
         return Err(DataError::Format(format!("file is too large ({} bytes)", bytes.len())));
     }
-    let mut out = crate::source::materialize(crate::source::open_bytes(file_name, bytes, None)?.as_ref())?;
+    let mut out = if crate::lidar::is_lidar_name(file_name) {
+        let name = Path::new(file_name).file_stem().and_then(|s| s.to_str()).unwrap_or("layer");
+        crate::lidar::read_bytes(&bytes, name, None)?
+    } else {
+        crate::source::materialize(crate::source::open_bytes(file_name, bytes, None)?.as_ref())?
+    };
     out.0.source = Some(file_name.to_string());
     Ok(out)
 }
@@ -282,6 +288,7 @@ pub fn read_path(path: &Path) -> Result<(Dataset, ReadReport)> {
             };
             crate::mapinfo::read_bytes(&std::fs::read(path)?, mid.as_deref(), &name)?
         }
+        "las" | "laz" => crate::lidar::read(std::io::BufReader::new(std::fs::File::open(path)?), &name, None)?,
         // Read in place by a provider, so there's no size cap on the file, only on the features.
         e if crate::source::EXTENSIONS.contains(&e) => crate::source::materialize(crate::source::open_path(path, None)?.as_ref())?,
         other => return Err(DataError::Unsupported(other.to_string())),
@@ -338,7 +345,14 @@ pub fn project(ds: &Dataset, crs: Crs) -> Result<Dataset> {
     }
     let mut out = ds.clone();
     let t = crs.transformer().map_err(DataError::Format)?;
-    for f in &mut out.features {
+    project_features(&mut out.features, &t, crs)?;
+    Ok(out)
+}
+
+/// Converts features' longitude/latitude geometry in place to the coordinates of `crs`, through
+/// its transformer `t`. Fails on a coordinate the system can't hold, naming its feature.
+pub(crate) fn project_features(features: &mut [crate::Feature], t: &crate::raster::Transformer, crs: Crs) -> Result<()> {
+    for f in features {
         if let Some(g) = f.geometry.take() {
             let mut ok = true;
             let p = g.map_coords(&|c| t.from_lonlat(c).unwrap_or(Coord::new(f64::NAN, f64::NAN)));
@@ -349,7 +363,7 @@ pub fn project(ds: &Dataset, crs: Crs) -> Result<Dataset> {
             f.geometry = Some(p);
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Defines the CRS of the dataset's native coordinates without changing those numeric values.
@@ -385,7 +399,7 @@ pub fn define_projection(ds: &Dataset, crs: Crs) -> Result<Dataset> {
 
 /// Refuses a system without an EPSG code for a GeoPackage or FlatGeobuf: their readers (RustGIS's
 /// among them) go by the code, and would read the file as longitude/latitude.
-fn check_projected(ext: &str, crs: Crs) -> Result<()> {
+pub(crate) fn check_projected(ext: &str, crs: Crs) -> Result<()> {
     if crs.epsg() == 0 && matches!(ext, "gpkg" | "fgb") {
         return Err(DataError::Unsupported(format!(".{ext} in {}: give the system as an EPSG code", crs.label())));
     }
@@ -408,9 +422,12 @@ pub fn write_bytes_in(ds: &Dataset, ext: &str, crs: Crs) -> Result<(Vec<u8>, usi
 
 /// [`write_bytes_in`] for a dataset already in `crs`'s coordinates.
 fn projected_bytes(ds: &Dataset, ext: &str, crs: Crs) -> Result<(Vec<u8>, usize)> {
-    let fmt = |e: serde_json::Error| DataError::Format(e.to_string());
     Ok(match ext {
-        "geojson" | "json" => (serde_json::to_vec(&to_geojson(ds)).map_err(fmt)?, 0),
+        "geojson" | "json" => {
+            let mut w = GeoJsonWriter::new(Vec::new(), &ds.name, &ds.fields)?;
+            w.write(&ds.features)?;
+            (w.finish()?, 0)
+        }
         "csv" => (to_csv(ds)?.into_bytes(), 0),
         "fgb" => (crate::source::fgb::write_in(ds, crs)?, without_geometry(ds)),
         "parquet" | "geoparquet" => (crate::source::parquet::write(ds)?, 0),
@@ -560,10 +577,18 @@ pub(crate) fn temp_beside(path: &Path) -> std::io::Result<std::path::PathBuf> {
 /// Writes and syncs a new file (`create_new`, so an existing file or symlink is never followed);
 /// removes it on failure.
 fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_new_with(path, |w| w.write_all(bytes))
+}
+
+/// [`write_new`] with the content written by `write`, through a buffer, as it goes.
+fn write_new_with(path: &Path, write: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>) -> std::io::Result<()> {
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    let f = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
     let res = (|| {
-        f.write_all(bytes)?;
+        let mut w = std::io::BufWriter::new(&f);
+        write(&mut w)?;
+        w.flush()?;
+        drop(w);
         f.sync_all()
     })();
     // Close before removing a failed write, including on Windows.
@@ -577,13 +602,42 @@ fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Writes through a temporary file that is synced and renamed into place, so an interrupted
 /// write never truncates an existing file. The temporary file is removed on failure.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    write_atomic_with(path, |w| w.write_all(bytes))
+}
+
+/// [`write_atomic`] with the content written by `write` as it goes, so a long text or a layer
+/// written a chunk at a time needn't be held whole first. A failure in `write` leaves an existing
+/// file as it was. Returns what `write` returns.
+pub fn write_atomic_with<T, E: From<std::io::Error>>(
+    path: &Path,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    use std::io::Write;
     let tmp = temp_beside(path)?;
-    write_new(&tmp, bytes)?;
-    let res = std::fs::rename(&tmp, path);
-    if res.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    // Opened before the guard, so a name already taken is never removed.
+    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    // Removes the file on an error and on a panic in `write` alike, unless it was moved into place.
+    let staged = Staged(&tmp);
+    let mut out = std::io::BufWriter::new(file);
+    let value = write(&mut out)?;
+    out.flush()?;
+    out.get_ref().sync_all()?;
+    // Closed before the rename, including on Windows.
+    drop(out);
+    std::fs::rename(&tmp, path)?;
+    std::mem::forget(staged);
+    Ok(value)
+}
+
+/// A file being written beside its destination: removed when dropped, as an export that
+/// failed or panicked leaves it. A finished export forgets it once the file is renamed.
+struct Staged<'a>(&'a Path);
+
+impl Drop for Staged<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
     }
-    res
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -603,8 +657,16 @@ fn rings(v: &Json) -> Option<Vec<Vec<Coord>>> {
     v.as_array()?.iter().map(coords).collect()
 }
 
-/// Parses a GeoJSON geometry object (GeometryCollection keeps its first member).
-pub fn geometry_from_geojson(g: &Json) -> Option<Geometry> {
+/// Parses a GeoJSON geometry object. Collections must contain exactly one member, since
+/// `Geometry` cannot represent a collection. Unwraps nested single-member collections without
+/// recursion; rejects empty or multi-member collections rather than retaining partial geometry.
+pub fn geometry_from_geojson(mut g: &Json) -> Option<Geometry> {
+    while g.get("type")?.as_str()? == "GeometryCollection" {
+        let [only] = g.get("geometries")?.as_array()?.as_slice() else {
+            return None;
+        };
+        g = only;
+    }
     let c = g.get("coordinates");
     match g.get("type")?.as_str()? {
         "Point" => coord(c?).map(Geometry::Point),
@@ -613,7 +675,6 @@ pub fn geometry_from_geojson(g: &Json) -> Option<Geometry> {
         "MultiLineString" => rings(c?).map(Geometry::Line),
         "Polygon" => rings(c?).map(|r| Geometry::Polygon(vec![r])),
         "MultiPolygon" => c?.as_array()?.iter().map(rings).collect::<Option<Vec<_>>>().map(Geometry::Polygon),
-        "GeometryCollection" => g.get("geometries")?.as_array()?.iter().find_map(geometry_from_geojson),
         _ => None,
     }
 }
@@ -887,6 +948,28 @@ pub(crate) fn geojson_attrs(f: &Json, fields: &[Field]) -> Vec<Value> {
         .collect()
 }
 
+/// Whether a feature's geometry has a third value in any position (a height, which reading drops),
+/// a GeometryCollection's members included.
+pub(crate) fn geojson_has_z(f: &Json) -> bool {
+    /// Any position under `v` (nested arrays, ending in arrays of numbers) has a number beyond its
+    /// first two values: a height or measure (a `null` there isn't one).
+    fn positions(v: &Json) -> bool {
+        match v.as_array() {
+            Some(a) if a.first().is_some_and(Json::is_number) => a.iter().skip(2).any(Json::is_number),
+            Some(a) => a.iter().any(positions),
+            None => false,
+        }
+    }
+    /// A geometry object, or a collection's members, has such a position.
+    fn has_z(g: &Json) -> bool {
+        match g.get("type").and_then(Json::as_str) {
+            Some("GeometryCollection") => g.get("geometries").and_then(Json::as_array).is_some_and(|m| m.iter().any(has_z)),
+            _ => g.get("coordinates").is_some_and(positions),
+        }
+    }
+    f.get("geometry").is_some_and(has_z)
+}
+
 /// A feature's geometry: `Ok(None)` for none, `Err` for one that can't be read.
 pub(crate) fn geojson_geometry(f: &Json) -> std::result::Result<Option<Geometry>, ()> {
     match f.get("geometry").filter(|g| !g.is_null()) {
@@ -899,8 +982,9 @@ pub(crate) fn geojson_geometry(f: &Json) -> std::result::Result<Option<Geometry>
 #[derive(Default)]
 struct Collector {
     schema: Schema,
-    /// Each feature's geometry and its values by field, typed once every feature is in.
-    features: Vec<(Option<Geometry>, Vec<(usize, Value)>)>,
+    /// Each feature's geometry, its values by field (typed once every feature is in) and whether
+    /// its geometry had heights, which are dropped.
+    features: Vec<(Option<Geometry>, Vec<(usize, Value)>, bool)>,
     skipped: usize,
 }
 
@@ -919,12 +1003,17 @@ impl FeatureSink for Collector {
 }
 
 impl Collector {
+    /// Takes one feature: its properties into the schema, its geometry (or counts it unreadable),
+    /// and whether it had heights.
     fn add(&mut self, f: &Json) {
         let props = f.get("properties").and_then(Json::as_object);
         // Every feature's properties count in the schema, those with unreadable geometry too.
         let attrs: Vec<(usize, Value)> = props.into_iter().flatten().map(|(k, v)| (self.schema.see(k, v), Value::from_json(v))).collect();
         match geojson_geometry(f) {
-            Ok(geom) => self.features.push((geom, attrs)),
+            Ok(geom) => {
+                let zm = geom.is_some() && geojson_has_z(f);
+                self.features.push((geom, attrs, zm));
+            }
             Err(()) => self.skipped += 1,
         }
     }
@@ -939,7 +1028,9 @@ impl Collector {
         }
         let declared = declared_crs(root, &mut report.messages);
         let mut unconverted = 0usize;
-        for (n, (geom, values)) in self.features.into_iter().enumerate() {
+        // Only features kept count toward the heights dropped.
+        let mut zm = 0usize;
+        for (n, (geom, values, had_z)) in self.features.into_iter().enumerate() {
             // A feature that can't be converted is dropped, and its id is not reused, as when the
             // file is read in place.
             let geom = match (&declared, geom) {
@@ -958,6 +1049,7 @@ impl Collector {
                     *slot = coerce(v, field.ty);
                 }
             }
+            zm += usize::from(had_z);
             ds.features.push(crate::Feature { id: n as u64 + 1, geometry: geom, attrs });
         }
         ds.geometry_type = dominant_type(&ds);
@@ -973,6 +1065,8 @@ impl Collector {
             // What couldn't be converted can't come back by defining the projection again.
             ds.crs_incomplete = unconverted > 0;
         }
+        // Last, as a source read in place notes it.
+        ds.drop_zm(&mut report, zm);
         (ds, report)
     }
 }
@@ -1045,19 +1139,55 @@ pub(crate) fn dominant_type(ds: &Dataset) -> GeometryType {
     }
 }
 
+/// A dataset as a GeoJSON FeatureCollection value, in longitude/latitude.
 pub fn to_geojson(ds: &Dataset) -> Json {
-    let features: Vec<Json> = ds
-        .features
-        .iter()
-        .map(|f| {
-            let mut props = Map::new();
-            for (field, v) in ds.fields.iter().zip(&f.attrs) {
-                props.insert(field.name.clone(), v.to_json());
-            }
-            json!({"type": "Feature", "id": f.id, "properties": props, "geometry": f.geometry.as_ref().map(geometry_to_geojson)})
-        })
-        .collect();
+    let features: Vec<Json> = ds.features.iter().map(|f| feature_to_geojson(&ds.fields, f)).collect();
     json!({"type": "FeatureCollection", "name": ds.name, "features": features})
+}
+
+/// A feature as a GeoJSON Feature, its attributes named by `fields`.
+fn feature_to_geojson(fields: &[Field], f: &crate::Feature) -> Json {
+    let mut props = Map::new();
+    for (field, v) in fields.iter().zip(&f.attrs) {
+        props.insert(field.name.clone(), v.to_json());
+    }
+    json!({"type": "Feature", "id": f.id, "properties": props, "geometry": f.geometry.as_ref().map(geometry_to_geojson)})
+}
+
+/// Writes a GeoJSON FeatureCollection a run of features at a time, for exports that never hold
+/// the whole layer: the same collection as [`to_geojson`] for the same features, its members
+/// written in the order `type`, `name`, `features` (a serialized [`to_geojson`] sorts them).
+pub(crate) struct GeoJsonWriter<W: std::io::Write> {
+    out: W,
+    fields: Vec<Field>,
+    first: bool,
+}
+
+impl<W: std::io::Write> GeoJsonWriter<W> {
+    /// Starts the collection named `name`, its features' attributes named by `fields`.
+    pub(crate) fn new(mut out: W, name: &str, fields: &[Field]) -> Result<Self> {
+        out.write_all(br#"{"type":"FeatureCollection","name":"#)?;
+        serde_json::to_writer(&mut out, name).map_err(|e| DataError::Format(e.to_string()))?;
+        out.write_all(br#","features":["#)?;
+        Ok(GeoJsonWriter { out, fields: fields.to_vec(), first: true })
+    }
+
+    /// Writes the next features.
+    pub(crate) fn write(&mut self, features: &[crate::Feature]) -> Result<()> {
+        for f in features {
+            if !std::mem::take(&mut self.first) {
+                self.out.write_all(b",")?;
+            }
+            serde_json::to_writer(&mut self.out, &feature_to_geojson(&self.fields, f)).map_err(|e| DataError::Format(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Closes the collection and gives the writer back.
+    pub(crate) fn finish(mut self) -> Result<W> {
+        self.out.write_all(b"]}")?;
+        Ok(self.out)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1257,7 +1387,7 @@ pub(crate) fn read_rows(
     let gt = if xy.is_some() { GeometryType::Point } else { GeometryType::None };
     let mut ds = Dataset::new(name, gt, fields);
     let mut srid: Option<u32> = None;
-    let mut bad_wkt = 0usize;
+    let (mut bad_wkt, mut zm_rows) = (0usize, 0usize);
     for r in rows {
         let cell = |i: usize| r.get(i).map(|s| s.trim()).unwrap_or("");
         let geom = if let Some((x, y)) = xy {
@@ -1271,9 +1401,10 @@ pub(crate) fn read_rows(
         } else if let Some(w) = wkt {
             match cell(w) {
                 "" => None,
-                t => match crate::interop::parse_wkt(t) {
-                    Ok((g, s)) => {
+                t => match crate::interop::parse_wkt_zm(t) {
+                    Ok((g, s, zm)) => {
                         srid = srid.or(s);
+                        zm_rows += usize::from(zm);
                         g
                     }
                     Err(_) => {
@@ -1292,6 +1423,7 @@ pub(crate) fn read_rows(
             .collect();
         ds.push_next(geom, attrs);
     }
+    ds.drop_zm(&mut report, zm_rows);
     if report.skipped > malformed {
         report.messages.push(format!("{} rows had no usable coordinates", report.skipped - malformed));
     }
@@ -1439,34 +1571,60 @@ fn csv_cell(v: &Value) -> String {
     }
 }
 
+/// A dataset as CSV text: its fields, and a point layer's longitude and latitude ([`CsvWriter`]).
 pub fn to_csv(ds: &Dataset) -> Result<String> {
-    let mut w = csv::Writer::from_writer(Vec::new());
-    let point = ds.geometry_type == GeometryType::Point;
-    let mut head: Vec<String> = ds.fields.iter().map(|f| f.name.clone()).collect();
-    if point {
-        // Coordinate columns get names that don't collide with existing fields.
-        for base in ["longitude", "latitude"] {
-            let mut name = base.to_string();
-            let mut i = 1;
-            while head.iter().any(|h| h.eq_ignore_ascii_case(&name)) {
-                name = format!("{base}_{i}");
-                i += 1;
-            }
-            head.push(name);
-        }
-    }
-    w.write_record(&head).map_err(|e| DataError::Format(e.to_string()))?;
-    for f in &ds.features {
-        let mut row: Vec<String> = f.attrs.iter().map(csv_cell).collect();
+    let mut w = CsvWriter::new(Vec::new(), &ds.fields, ds.geometry_type)?;
+    w.write(&ds.features)?;
+    String::from_utf8(w.finish()?).map_err(|e| DataError::Format(e.to_string()))
+}
+
+/// Writes CSV a run of features at a time: a header of the fields, and for a point layer
+/// longitude and latitude columns after them.
+pub(crate) struct CsvWriter<W: std::io::Write> {
+    w: csv::Writer<W>,
+    point: bool,
+}
+
+impl<W: std::io::Write> CsvWriter<W> {
+    /// Writes the header for `fields`, with coordinate columns for a point layer.
+    pub(crate) fn new(out: W, fields: &[Field], geometry_type: GeometryType) -> Result<Self> {
+        let mut w = csv::Writer::from_writer(out);
+        let point = geometry_type == GeometryType::Point;
+        let mut head: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
         if point {
-            let c = f.geometry.as_ref().and_then(|g| g.label_point());
-            row.push(c.map(|c| c.x.to_string()).unwrap_or_default());
-            row.push(c.map(|c| c.y.to_string()).unwrap_or_default());
+            // Coordinate columns get names that don't collide with existing fields.
+            for base in ["longitude", "latitude"] {
+                let mut name = base.to_string();
+                let mut i = 1;
+                while head.iter().any(|h| h.eq_ignore_ascii_case(&name)) {
+                    name = format!("{base}_{i}");
+                    i += 1;
+                }
+                head.push(name);
+            }
         }
-        w.write_record(&row).map_err(|e| DataError::Format(e.to_string()))?;
+        w.write_record(&head).map_err(|e| DataError::Format(e.to_string()))?;
+        Ok(CsvWriter { w, point })
     }
-    let bytes = w.into_inner().map_err(|e| DataError::Format(e.to_string()))?;
-    String::from_utf8(bytes).map_err(|e| DataError::Format(e.to_string()))
+
+    /// Writes the next features, a row each.
+    pub(crate) fn write(&mut self, features: &[crate::Feature]) -> Result<()> {
+        for f in features {
+            let mut row: Vec<String> = f.attrs.iter().map(csv_cell).collect();
+            if self.point {
+                let c = f.geometry.as_ref().and_then(|g| g.label_point());
+                row.push(c.map(|c| c.x.to_string()).unwrap_or_default());
+                row.push(c.map(|c| c.y.to_string()).unwrap_or_default());
+            }
+            self.w.write_record(&row).map_err(|e| DataError::Format(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Flushes the rows and gives the writer back.
+    pub(crate) fn finish(self) -> Result<W> {
+        self.w.into_inner().map_err(|e| DataError::Format(e.to_string()))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1742,7 +1900,7 @@ fn read_shapefile_parts(parts: ShapefileParts, name: &str, crs: Option<Crs>) -> 
             t
         }),
     };
-    let (mut converted, mut unconverted) = (0usize, 0usize);
+    let (mut converted, mut unconverted, mut zm_shapes) = (0usize, 0usize, 0usize);
     let mut source_kind = GeometryType::None;
     let pt = |x: f64, y: f64| Coord::new(x, y);
     for item in reader.iter_shapes_and_records() {
@@ -1750,6 +1908,10 @@ fn read_shapefile_parts(parts: ShapefileParts, name: &str, crs: Option<Crs>) -> 
             report.skipped += 1;
             continue;
         };
+        zm_shapes += usize::from(!matches!(
+            shape,
+            Shape::NullShape | Shape::Point(_) | Shape::Multipoint(_) | Shape::Polyline(_) | Shape::Polygon(_) | Shape::Multipatch(_)
+        ));
         let geom = match shape {
             Shape::NullShape => None,
             Shape::Point(p) => Some(Geometry::Point(pt(p.x, p.y))),
@@ -1809,6 +1971,7 @@ fn read_shapefile_parts(parts: ShapefileParts, name: &str, crs: Option<Crs>) -> 
             .collect();
         ds.push_next(geom, attrs);
     }
+    ds.drop_zm(&mut report, zm_shapes);
     ds.geometry_type = dominant_type(&ds);
     // A bad .prj must not turn a spatial layer into an attribute-only table and hide the
     // conversion warning. Its shapes can be recovered by importing with an override.
@@ -2092,6 +2255,7 @@ pub(crate) fn group_rings(rings: Vec<(Vec<Coord>, bool)>) -> Geometry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     /// Exercises caller cleanup through the public Shapefile writer, one fresh process per collision.
     #[cfg(not(target_arch = "wasm32"))]
@@ -2283,6 +2447,37 @@ mod tests {
     }
 
     #[test]
+    fn geojson_collection_never_exports_only_a_member() {
+        let point = json!({"type":"Point", "coordinates":[1,2]});
+        let polygon = json!({"type":"Polygon", "coordinates":[[[0,0],[4,0],[4,4],[0,0]]]});
+        let collection = json!({"type":"GeometryCollection", "geometries":[point, polygon]});
+        let nested = json!({"type":"GeometryCollection", "geometries":[collection]});
+        for geometry in [collection, nested] {
+            let feature = json!({"type":"Feature", "properties":{}, "geometry":geometry});
+            let fc = json!({"type":"FeatureCollection", "features":[feature]});
+            for root in [&geometry, &feature, &fc] {
+                let (ds, report) = read_geojson(&root.to_string(), "collection").unwrap();
+                assert!(ds.features.is_empty(), "must not retain a partial collection: {root}");
+                assert_eq!(report.skipped, 1);
+                assert_eq!(report.messages, ["1 features had unreadable geometry"]);
+                assert!(to_geojson(&ds)["features"].as_array().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn geojson_single_member_collection_is_lossless_and_quiet() {
+        let geometry = json!({"type":"GeometryCollection", "geometries":[
+            {"type":"GeometryCollection", "geometries":[{"type":"Point", "coordinates":[1,2]}]}
+        ]});
+        let (ds, report) = read_geojson(&geometry.to_string(), "single").unwrap();
+        assert_eq!(ds.features.len(), 1);
+        assert_eq!(ds.features[0].geometry, Some(Geometry::Point(Coord::new(1.0, 2.0))));
+        assert_eq!(report.skipped, 0);
+        assert!(report.messages.is_empty());
+    }
+
+    #[test]
     fn geojson_null_first_keeps_numeric_type() {
         let text = r#"{"type":"FeatureCollection","features":[
             {"type":"Feature","properties":{"v":null,"n":null},"geometry":null},
@@ -2305,6 +2500,16 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"two");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temp files left behind");
         assert!(write_atomic(Path::new("/"), b"x").is_err());
+        // Written as it goes: a failure part way leaves the file as it was, and no temp file.
+        let failed = write_atomic_with(&p, |w| {
+            w.write_all(b"half")?;
+            Err::<(), _>(std::io::Error::other("stopped"))
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), b"two");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temp files left behind");
+        write_atomic_with(&p, |w| w.write_all(b"th").and_then(|()| w.write_all(b"ree"))).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"three");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2360,7 +2565,11 @@ mod tests {
         assert!(ds.features[3].geometry.is_none());
         assert_eq!(
             rep.messages,
-            ["1 rows had geometry that isn't readable WKT", "1 rows have another kind of geometry than the layer's polyline"]
+            [
+                crate::zm_note(Some(1)).as_str(),
+                "1 rows had geometry that isn't readable WKT",
+                "1 rows have another kind of geometry than the layer's polyline"
+            ]
         );
         // A named WKT column with a given system.
         let opts = CsvOptions { wkt: Some("g".into()), crs: Some(Crs::WebMercator), ..CsvOptions::default() };
@@ -2368,6 +2577,177 @@ mod tests {
             read_csv_with("g|v\nPOLYGON ((0 0, 1000 0, 1000 1000, 0 0))|1\n", "t", &CsvOptions { delimiter: Some(b'|'), ..opts }).unwrap();
         assert_eq!(ds.geometry_type, GeometryType::Polygon);
         assert_eq!(ds.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["v"]);
+    }
+
+    /// Z and M values RustGIS doesn't keep are said when read, whole or in place, and the mark
+    /// that exports will lack them survives a project save; 2D data says nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dropped_z_and_m_values_are_said() {
+        use crate::source::FeatureSource;
+        use shapefile::dbase::{Record, TableWriterBuilder};
+        let said = |r: &ReadReport| r.messages.iter().any(|m| m.contains("Z or M values"));
+        let dir = tempfile::tempdir().unwrap();
+        let shp = |name: &str, z: bool| {
+            let path = dir.path().join(name);
+            let mut w = shapefile::Writer::from_path(&path, TableWriterBuilder::new()).unwrap();
+            if z {
+                w.write_shape_and_record(&shapefile::PointZ::new(1.0, 2.0, 30.0, 0.0), &Record::default()).unwrap();
+            } else {
+                w.write_shape_and_record(&shapefile::Point::new(1.0, 2.0), &Record::default()).unwrap();
+            }
+            path
+        };
+        let (wells, flat) = (shp("wells.shp", true), shp("flat.shp", false));
+        let (ds, rep) = read_path(&wells).unwrap();
+        assert!(ds.zm_dropped && rep.messages.contains(&crate::zm_note(Some(1))), "{:?}", rep.messages);
+        assert_eq!(ds.features[0].geometry, Some(Geometry::Point(Coord::new(1.0, 2.0))));
+        let (ds, rep) = read_path(&flat).unwrap();
+        assert!(!ds.zm_dropped && !said(&rep));
+        let src = crate::source::shp::ShpSource::open_path(&wells, "wells").unwrap();
+        assert!(src.info().zm_dropped);
+        let (ds, rep) = crate::source::materialize(&src).unwrap();
+        assert!(ds.zm_dropped && rep.messages.iter().any(|m| m.ends_with(&crate::zm_note(Some(1)))), "{:?}", rep.messages);
+        assert!(!crate::source::shp::ShpSource::open_path(&flat, "flat").unwrap().info().zm_dropped);
+        // A source declaring Z or M but holding no features (an empty PointZ file) loses nothing.
+        let mut empty = crate::source::shp::ShpSource::open_path(&flat, "flat").unwrap().info().clone();
+        empty.drop_zm(Some(0));
+        assert!(!empty.zm_dropped && !empty.notes.iter().any(|n| n.contains("Z or M")));
+        // The same through a real zero-record PointZ file, built from the wells' headers (the
+        // exporter refuses an empty layer).
+        let none = dir.path().join("none.shp");
+        for ext in ["shp", "shx"] {
+            let mut header = std::fs::read(wells.with_extension(ext)).unwrap();
+            header.truncate(100);
+            header[24..28].copy_from_slice(&50i32.to_be_bytes());
+            std::fs::write(none.with_extension(ext), header).unwrap();
+        }
+        let mut header = std::fs::read(wells.with_extension("dbf")).unwrap();
+        let len = u16::from_le_bytes([header[8], header[9]]) as usize;
+        header.truncate(len);
+        header[4..8].copy_from_slice(&0u32.to_le_bytes());
+        header.push(0x1a);
+        std::fs::write(none.with_extension("dbf"), header).unwrap();
+        assert!(!crate::source::shp::ShpSource::open_path(&none, "none").unwrap().info().zm_dropped);
+        let (ds, rep) = read_path(&none).unwrap();
+        assert!(!ds.zm_dropped && !said(&rep), "{:?}", rep.messages);
+
+        // GeoJSON: a third position value, whole or in place, in a collection's member too.
+        let doc = |pos: &str| {
+            format!(
+                r#"{{"type":"FeatureCollection","features":[{{"type":"Feature","properties":{{}},"geometry":{{"type":"GeometryCollection","geometries":[{{"type":"LineString","coordinates":[{pos},[3,4]]}}]}}}}]}}"#
+            )
+        };
+        let (ds, rep) = read_geojson(&doc("[1,2,9]"), "track").unwrap();
+        assert!(ds.zm_dropped && said(&rep));
+        let (ds, rep) = read_geojson(&doc("[1,2]"), "track").unwrap();
+        assert!(!ds.zm_dropped && !said(&rep));
+        let path = dir.path().join("track.geojson");
+        std::fs::write(&path, doc("[1,2,9]")).unwrap();
+        assert!(crate::source::geojson::GeoJsonSource::open_path(&path, "track").unwrap().info().zm_dropped);
+        // A height past the first position counts; one only in a geometry that isn't read doesn't.
+        let line = r#"{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[1,2],[3,4,5]]}}"#;
+        assert!(read_geojson(line, "line").unwrap().0.zm_dropped);
+        // A `null` third value isn't a height, but a measure after it counts.
+        let null_z = r#"{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[1,2,null],[3,4]]}}"#;
+        assert!(!read_geojson(null_z, "line").unwrap().0.zm_dropped);
+        let null_z_m = r#"{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[1,2,null,7],[3,4]]}}"#;
+        assert!(read_geojson(null_z_m, "line").unwrap().0.zm_dropped);
+        // A stray `geometries` on another type isn't read, so its heights don't count.
+        let stray = r#"{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[1,2],"geometries":[{"type":"Point","coordinates":[1,2,3]}]}}"#;
+        assert!(!read_geojson(stray, "pt").unwrap().0.zm_dropped);
+        // A rejected collection loses the whole feature, not just its heights.
+        let mixed = r#"{"type":"Feature","properties":{},"geometry":{"type":"GeometryCollection","geometries":[{"type":"LineString","coordinates":[[1,2],[3,4]]},{"type":"Point","coordinates":[5,6,7]}]}}"#;
+        let (ds, rep) = read_geojson(mixed, "mixed").unwrap();
+        assert!(ds.features.is_empty() && !ds.zm_dropped && !said(&rep));
+        assert_eq!(rep.skipped, 1);
+        assert_eq!(rep.messages, ["1 features had unreadable geometry"]);
+        let curve = r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Curve","coordinates":[[1,2,3]]}},{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[1,2]}}]}"#;
+        let (ds, rep) = read_geojson(curve, "curve").unwrap();
+        assert!(!ds.zm_dropped && !said(&rep) && rep.skipped == 1, "{rep:?}");
+        std::fs::write(&path, curve).unwrap();
+        assert!(!crate::source::geojson::GeoJsonSource::open_path(&path, "curve").unwrap().info().zm_dropped);
+
+        // KML marks each kind's layer by its own altitudes: a 3D point beside a flat polygon.
+        let kml = r#"<kml><Placemark><MultiGeometry><Point><coordinates>1,2,30</coordinates></Point><Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 1,0 1,1 0,0</coordinates></LinearRing></outerBoundaryIs></Polygon></MultiGeometry></Placemark></kml>"#;
+        let layers = crate::kml::read("site.kml", kml.as_bytes()).unwrap();
+        let marked: Vec<bool> = layers.iter().map(|l| l.dataset.zm_dropped).collect();
+        assert_eq!(marked, [true, false]);
+        // A point keeps its first tuple, and only that tuple's altitude counts.
+        let kml = r#"<kml><Placemark><Point><coordinates>1,2 3,4,30</coordinates></Point></Placemark></kml>"#;
+        assert!(!crate::kml::read("pt.kml", kml.as_bytes()).unwrap()[0].dataset.zm_dropped);
+        // A one-point line or track (left out) doesn't mark the line kept beside it.
+        let kml = r#"<kml xmlns:gx="http://www.google.com/kml/ext/2.2"><Placemark><MultiGeometry><LineString><coordinates>1,2,30</coordinates></LineString><gx:Track><gx:coord>1 2 30</gx:coord></gx:Track><LineString><coordinates>0,0 1,1</coordinates></LineString></MultiGeometry></Placemark></kml>"#;
+        let layers = crate::kml::read("site.kml", kml.as_bytes()).unwrap();
+        assert!(!layers[0].dataset.zm_dropped);
+
+        // A WKT column with Z.
+        let (ds, rep) = read_csv("wkt,n\n\"POINT Z (1 2 3)\",1\n", "pts").unwrap();
+        assert!(ds.zm_dropped && said(&rep));
+
+        // Exporting several marked layers together says it once, counting and naming them.
+        let mut other = ds.clone();
+        other.name = "wells".into();
+        let flat = Dataset::new("roads", GeometryType::Polyline, vec![]);
+        assert_eq!(
+            crate::zm_export_note([&ds, &flat, &other], "site.zip").as_deref(),
+            Some("site.zip: its geometry has no Z or M values for 2 layers (pts, wells), which were dropped when they were read")
+        );
+        assert_eq!(crate::zm_export_note([&flat], "roads.zip"), None);
+
+        // Saved and opened again, the mark stays; an unmarked dataset doesn't write it.
+        let back: Dataset = serde_json::from_value(serde_json::to_value(&ds).unwrap()).unwrap();
+        assert!(back.zm_dropped);
+        assert!(serde_json::to_value(Dataset::new("x", GeometryType::Point, vec![])).unwrap().get("zm_dropped").is_none());
+    }
+
+    /// An export says when a layer's positions are approximate (its datum had no shift to WGS 84)
+    /// unless it is written back in its own system, and when its coordinates aren't longitude/
+    /// latitude; once per kind, counting layers. Clean layers give no notice.
+    #[test]
+    fn exports_say_when_positions_are_approximate_or_not_longitude_latitude() {
+        let ext = |ds: &Dataset| ds.extent();
+        // A CSV of projected coordinates without its "crs" is read as they are, with a notice.
+        let (utm, rep) = read_csv("id,x,y\n1,500000,3800000\n", "utm").unwrap();
+        assert!(rep.messages.iter().any(|m| m.contains("aren't longitude/latitude")));
+        let (lonlat, rep) = read_csv("id,x,y\n1,-89.9,35.1\n", "lonlat").unwrap();
+        assert!(rep.messages.is_empty(), "{:?}", rep.messages);
+        assert_eq!(
+            crate::export_notes([(&utm, ext(&utm)), (&lonlat, ext(&lonlat))], "out.geojson", Crs::LonLat),
+            [
+                "out.geojson: the coordinates of utm aren't longitude/latitude, so they're out of place: define its projection and export again"
+            ]
+        );
+        assert!(crate::export_notes([(&lonlat, ext(&lonlat))], "out.geojson", Crs::LonLat).is_empty());
+
+        // NAD 27 without TOWGS84, as its WKT is kept with the layer and saved with the project.
+        let wkt = r#"PROJCS["NAD_1927_UTM_Zone_16N",GEOGCS["GCS_North_American_1927",DATUM["D_North_American_1927",SPHEROID["Clarke_1866",6378206.4,294.9786982]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["False_Easting",500000.0],PARAMETER["False_Northing",0.0],PARAMETER["Central_Meridian",-87.0],PARAMETER["Scale_Factor",0.9996],PARAMETER["Latitude_Of_Origin",0.0],UNIT["Meter",1.0]]"#;
+        let (nad27, note) = crate::raster::wkt::read_wkt(wkt).unwrap();
+        assert!(note.is_some());
+        let mut parcels = lonlat.clone();
+        parcels.name = "parcels".into();
+        parcels.crs = Some(nad27);
+        let saved: Dataset = serde_json::from_value(serde_json::to_value(&parcels).unwrap()).unwrap();
+        assert_eq!(
+            crate::export_notes([(&saved, ext(&saved))], "parcels.geojson", Crs::LonLat),
+            [format!(
+                "parcels.geojson: the positions of parcels are approximate, possibly a few hundred metres off: its coordinate system ({}) has no shift to WGS 84",
+                nad27.label()
+            )]
+        );
+        // Written back in NAD 27, the positions come back as they were read.
+        assert!(crate::export_notes([(&saved, ext(&saved))], "parcels.shp", nad27).is_empty());
+        // Several layers: one notice, counting them; a layer with its shift says nothing.
+        let mut roads = parcels.clone();
+        roads.name = "roads".into();
+        let mut shifted = lonlat.clone();
+        shifted.crs = Some(Crs::Epsg(26716));
+        assert_eq!(
+            crate::export_notes([&parcels, &roads, &shifted].map(|ds| (ds, ext(ds))), "map.json", Crs::LonLat),
+            [
+                "map.json: the positions of 2 layers (parcels, roads) are approximate, possibly a few hundred metres off: their coordinate systems have no shift to WGS 84"
+            ]
+        );
     }
 
     #[test]

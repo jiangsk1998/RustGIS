@@ -21,6 +21,36 @@ use crate::raster::{Crs, Transformer};
 /// Marks a layer address drawn in another coordinate system (see the module docs).
 pub const MARK: &str = "#rustgis-warp=";
 
+/// An address drawn on request with its pictures' size, `w` × `h` (numbers or placeholders): a
+/// map service export's `size` (an ArcGIS `…/export` or `…/exportImage` address), else a WMS's
+/// `WIDTH` and `HEIGHT` (keys in any letter case). Values that are placeholders already
+/// (`{nw}`) and anything after a `#` are kept.
+pub fn sized(url: &str, w: &str, h: &str) -> String {
+    let (main, fragment) = match url.split_once('#') {
+        Some((m, f)) => (m, Some(f)),
+        None => (url, None),
+    };
+    let Some((path, query)) = main.split_once('?') else { return url.to_string() };
+    let lower = path.to_ascii_lowercase();
+    let export = lower.ends_with("/export") || lower.ends_with("/exportimage");
+    let parts: Vec<String> = query
+        .split('&')
+        .map(|part| match part.split_once('=') {
+            Some((k, v)) if v.contains('{') => format!("{k}={v}"),
+            Some((k, _)) if export && k.eq_ignore_ascii_case("size") => format!("{k}={w},{h}"),
+            Some((k, _)) if !export && k.eq_ignore_ascii_case("width") => format!("{k}={w}"),
+            Some((k, _)) if !export && k.eq_ignore_ascii_case("height") => format!("{k}={h}"),
+            _ => part.to_string(),
+        })
+        .collect();
+    let mut out = format!("{path}?{}", parts.join("&"));
+    if let Some(f) = fragment {
+        out.push('#');
+        out.push_str(f);
+    }
+    out
+}
+
 /// Points along each side of a map tile at which its place in the layer's system is worked out;
 /// pixels between them are interpolated.
 pub const GRID: usize = 16;
@@ -352,9 +382,12 @@ impl Warp {
     /// `{nw}`, `{nh}`), from the layer's address before it is filled in for a tile: a WMS layer
     /// drawn in Web Mercator asks with `EPSG:3857` and `{bbox-epsg-3857}`, which become those.
     pub fn map_template(base: &str) -> String {
-        base.replace("CRS=EPSG:3857&", "CRS={ncrs}&")
-            .replace("SRS=EPSG:3857&", "SRS={ncrs}&")
-            .replace("BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256", "BBOX={nbbox}&WIDTH={nw}&HEIGHT={nh}")
+        // Its pictures' size whatever its tiles' (256 pixels, or another the layer was given).
+        let base = base.replace("CRS=EPSG:3857&", "CRS={ncrs}&").replace("SRS=EPSG:3857&", "SRS={ncrs}&");
+        if !base.contains("BBOX={bbox-epsg-3857}") {
+            return base;
+        }
+        sized(&base, "{nw}", "{nh}").replace("BBOX={bbox-epsg-3857}", "BBOX={nbbox}")
     }
 
     /// What the map tile over `merc` (west, south, east, north in Web Mercator metres) is made
@@ -537,6 +570,27 @@ pub fn corner_north_first(pair: (f64, f64), span: (f64, f64), area: Option<[f64;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A WMS's size is its WIDTH and HEIGHT (a vendor `size` kept), a map service export's its
+    /// `size`; placeholders and the warp mark are kept; a WMS address of any tile size is a
+    /// template for any picture.
+    #[test]
+    fn addresses_sized() {
+        let wms = "https://m.org/wms?LAYERS=a&width=256&HEIGHT=256&size=big&BBOX={bbox-epsg-3857}#rustgis-warp={z}/{x}/{y};crs=3857";
+        assert_eq!(
+            sized(wms, "1024", "1024"),
+            "https://m.org/wms?LAYERS=a&width=1024&HEIGHT=1024&size=big&BBOX={bbox-epsg-3857}#rustgis-warp={z}/{x}/{y};crs=3857"
+        );
+        let export = "https://s.org/arcgis/rest/services/x/MapServer/export?bbox={bbox-epsg-3857}&size=256,256&width=9";
+        assert_eq!(
+            sized(export, "512", "512"),
+            "https://s.org/arcgis/rest/services/x/MapServer/export?bbox={bbox-epsg-3857}&size=512,512&width=9"
+        );
+        assert_eq!(sized("https://m.org/wms?WIDTH={width}", "1", "2"), "https://m.org/wms?WIDTH={width}");
+        assert_eq!(sized("https://m.org/tile.png", "1", "2"), "https://m.org/tile.png");
+        let big = "https://m.org/wms?CRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=1024&HEIGHT=1024&FORMAT=image%2Fpng";
+        assert_eq!(Warp::map_template(big), "https://m.org/wms?CRS={ncrs}&BBOX={nbbox}&WIDTH={nw}&HEIGHT={nh}&FORMAT=image%2Fpng");
+    }
 
     #[test]
     fn names_of_systems() {

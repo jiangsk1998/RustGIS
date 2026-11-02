@@ -500,9 +500,19 @@ fn build_library() -> Vec<(&'static str, Source)> {
             "Maps",
             s(
                 "service",
-                "swisstopo (geo.admin.ch)",
+                "swisstopo WMTS (geo.admin.ch)",
                 "https://wmts.geo.admin.ch/EPSG/3857/1.0.0/WMTSCapabilities.xml",
                 json!({"type": "wmts"}),
+            ),
+        ),
+        // The same maps as images drawn on request: unlike the tiles, most layers answer Identify.
+        (
+            "Maps",
+            s(
+                "service",
+                "swisstopo WMS (geo.admin.ch)",
+                "https://wms.geo.admin.ch/?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.0",
+                json!({"type": "wms"}),
             ),
         ),
         ("Catalogs", s("stac", "Earth Search (AWS)", "https://earth-search.aws.element84.com/v1", json!({"api": "true"}))),

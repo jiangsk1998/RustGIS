@@ -11,3 +11,7 @@ PYO3_BUILD_EXTENSION_MODULE = "1"
 # this, so the Windows CI tests (.github/workflows/test-rust.yml) repeat the flag in theirs.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# The same for Windows on ARM64 (Snapdragon and other ARM PCs, #1143).
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

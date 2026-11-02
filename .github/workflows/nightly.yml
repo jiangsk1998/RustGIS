@@ -53,28 +53,76 @@ jobs:
     if: needs.changed.outputs.run == 'true'
     uses: ./.github/workflows/test-rust.yml
     with:
-      os: '["ubuntu-latest", "macos-latest", "windows-latest"]'
+      os: '["ubuntu-latest", "macos-latest", "windows-latest", "windows-11-arm"]'
       release-build: true
+
+  # Everyday jobs on real data: the Census Bureau's tracts for Shelby County, Tennessee, checked
+  # against the areas it publishes (crates/engine/tests/workflows.rs). The files are public domain
+  # and pinned by checksum; a changed file fails the run, a download that fails skips the tests
+  # (`tested` tells the report, which then neither opens nor closes an issue).
+  workflows:
+    name: Workflows on real data
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      tested: ${{ steps.data.outputs.ok }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - uses: actions/cache@v6
+        with:
+          path: workflow-data
+          key: workflow-data-census-2024-1
+      - id: data
+        name: Download the Census files
+        run: |
+          set -uo pipefail
+          mkdir -p workflow-data
+          cd workflow-data
+          ok=true
+          while read -r sum url; do
+            file="${url##*/}"
+            if ! echo "$sum  $file" | sha256sum -c --status 2>/dev/null; then
+              curl -sSfL --retry 3 -o "$file" "$url" || { echo "::warning::could not download $url"; ok=false; continue; }
+              echo "$sum  $file" | sha256sum -c || { echo "::error::$file has changed: update its checksum and check the test"; exit 1; }
+            fi
+          done <<'LIST'
+          e635ccb4f3035f8fa19b76352a63c89b893f57d0b96ecd5b713754141184bd3d https://www2.census.gov/geo/tiger/TIGER2024/TRACT/tl_2024_47_tract.zip
+          38cdd818f50248f67fabf4baf4b82df4ed6110dcaafebcbe4d4f9a389bb47ab8 https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2024_Gazetteer/2024_gaz_tracts_47.txt
+          LIST
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+      - name: Run the workflow tests on them
+        if: steps.data.outputs.ok == 'true'
+        env:
+          RUSTGIS_WORKFLOW_DATA: ${{ github.workspace }}/workflow-data
+        run: cargo test --locked -p rustgis-engine --test workflows -- --ignored
 
   report:
     name: Report
-    needs: [changed, rust]
+    needs: [changed, rust, workflows]
     # A cancelled run is neither a failure nor a fix.
-    if: always() && github.event_name == 'schedule' && needs.changed.outputs.run == 'true' && needs.rust.result != 'cancelled'
+    if: always() && github.event_name == 'schedule' && needs.changed.outputs.run == 'true' && needs.rust.result != 'cancelled' && needs.workflows.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       issues: write
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
-          RESULT: ${{ needs.rust.result }}
+          # "incomplete": everything ran passed, but the real-data tests couldn't download their files.
+          RESULT: ${{ (needs.rust.result != 'success' || needs.workflows.result != 'success') && 'failure' || (needs.workflows.outputs.tested == 'true' && 'success' || 'incomplete') }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           title="Nightly build failed"
           open="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" \
             --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // \"\"")"
-          if [ "$RESULT" = success ]; then
+          if [ "$RESULT" = incomplete ]; then
+            echo "The real-data tests didn't run (download failed): leaving the nightly issue as it is."
+          elif [ "$RESULT" = success ]; then
             if [ -n "$open" ]; then
               gh issue close "$open" -R "$GITHUB_REPOSITORY" --comment "Fixed: the nightly run on $GITHUB_SHA passed ($RUN)."
             fi

@@ -319,6 +319,7 @@ fn share(s: &mut Session, p: &Value, kind: &str) -> CmdResult {
     s.notify(format!("Shared {name} to {path}"), false);
     // After it, so the status bar, which shows the last notice, keeps saying it.
     note_label_classes(s, kind, p);
+    note_export(s, kind, p, &path);
     Ok(json!({"item": id, "path": path, "bytes": bytes.len()}))
 }
 
@@ -445,6 +446,8 @@ fn styled_features(l: &Layer, budget: &mut usize) -> Vec<Value> {
     let rows = l.visible_rows();
     let opacity = 1.0 - f64::from(l.transparency.clamp(0.0, 100.0)) / 100.0;
     let mut out = Vec::new();
+    // Its symbol by expression (no map scale: the page zooms on its own).
+    let styler = l.styler(None);
     for (row, ft) in l.dataset.features.iter().enumerate() {
         if *budget == 0 {
             break;
@@ -453,7 +456,7 @@ fn styled_features(l: &Layer, budget: &mut usize) -> Vec<Value> {
             continue;
         }
         let Some(g) = &ft.geometry else { continue };
-        let sym = l.symbol(row);
+        let sym = styler.symbol(row);
         let props: serde_json::Map<String, Value> =
             l.dataset.fields.iter().enumerate().map(|(i, f)| (f.name.clone(), json!(l.dataset.value(row, i).to_string()))).collect();
         out.push(json!({
@@ -545,6 +548,37 @@ onresize=draw;draw();
         res = if m.camera.res.is_finite() && m.camera.res > 0.0 { m.camera.res } else { 40_000.0 },
         bg = bg
     ))
+}
+
+/// Says, when a shared web map, web layer or OGC API Features item has layers that lost Z or M
+/// values on import, or whose positions are approximate or aren't longitude/latitude, what
+/// `target` lacks: one notice per kind, counting them ([`rustgis_data::export_notes`]). Run once
+/// the item is made, as [`note_label_classes`] is.
+pub(crate) fn note_export(s: &mut Session, kind: &str, p: &Value, target: &str) {
+    // Shared items are GeoJSON, longitude/latitude.
+    let notes = match kind {
+        "webLayer" => s
+            .layer_id(p)
+            .ok()
+            .and_then(|id| s.map().layer(id))
+            .map(|l| rustgis_data::export_notes([(&l.dataset, l.extent())], target, rustgis_data::raster::Crs::LonLat))
+            .unwrap_or_default(),
+        "webMap" | "geodataService" => map_of(s, p)
+            .ok()
+            .map(|m| {
+                let shared = |l: &&Layer| if kind == "webMap" { l.visible } else { !l.is_raster() && !l.graphics };
+                rustgis_data::export_notes(
+                    m.layers.iter().filter(shared).map(|l| (&l.dataset, l.extent())),
+                    target,
+                    rustgis_data::raster::Crs::LonLat,
+                )
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    for note in notes {
+        s.notify(note, false);
+    }
 }
 
 /// Says what a web layer or style (`kind`) leaves out of the labels: it labels every feature with
@@ -879,6 +913,7 @@ fn gltf(m: &Map, view: (f64, f64)) -> Result<Vec<u8>, String> {
         let hf = ex.and_then(|e| e.field.as_deref()).and_then(|f| l.dataset.field_index(f));
         let (base_h, factor) = ex.map_or((0.0, 0.0), |e| (e.height, e.factor));
         let rows = l.visible_rows();
+        let styler = l.styler(Some(m.scale()));
         // The bytes built so far: a feature only adds to its own colour, so each step adds what
         // the last feature's colour grew by.
         let size = |tri: &std::collections::BTreeMap<[u8; 4], (Vec<[f32; 3]>, Vec<u32>)>,
@@ -901,7 +936,7 @@ fn gltf(m: &Map, view: (f64, f64)) -> Result<Vec<u8>, String> {
             if buffer.len() + built > MAX_SCENE_BYTES {
                 return Err("the scene would be too large; share fewer features".into());
             }
-            let sym = l.symbol(row);
+            let sym = styler.symbol(row);
             let h = (hf.and_then(|fi| l.dataset.value(row, fi).as_f64()).filter(|v| v.is_finite()).unwrap_or(base_h) * factor)
                 .clamp(0.0, 1e6) as f32;
             let key = [sym.fill.r(), sym.fill.g(), sym.fill.b(), sym.fill.a()];
