@@ -37,18 +37,39 @@ impl Drop for Scratch {
 }
 
 /// The files in `dir` that aren't staged inputs, by file name.
-fn new_files(dir: &Path, job: &Job) -> Vec<(String, Vec<u8>)> {
+fn new_files(dir: &Path, inputs: &[(String, Vec<u8>)]) -> Vec<(String, Vec<u8>)> {
     let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
     rd.filter_map(|e| e.ok())
         .filter(|e| e.path().is_file())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            if job.files.iter().any(|(f, _)| *f == name) {
+            if inputs.iter().any(|(f, _)| *f == name) {
                 return None;
             }
             std::fs::read(e.path()).ok().map(|b| (name, b))
         })
         .collect()
+}
+
+/// Stages `files` in a scratch folder, `argv` pointing at it rather than `/work`, and runs the
+/// tool there: the new files and what it printed. `finish` then turns them into layers, on the
+/// session they were prepared for (the desktop app runs this on a thread of its own).
+pub(crate) fn run_staged(
+    tool: &str,
+    argv: &[String],
+    files: &[(String, Vec<u8>)],
+) -> Result<(Vec<(String, Vec<u8>)>, Vec<String>), String> {
+    let scratch = Scratch::new()?;
+    for (name, bytes) in files {
+        let path = scratch.0.join(name);
+        std::fs::write(&path, bytes).map_err(|e| format!("can't write {}: {e}", path.display()))?;
+    }
+    let dir = scratch.0.display().to_string();
+    // `/work` is the working folder the browser's runner mounts: an argument naming a staged
+    // file there names the scratch folder here.
+    let argv: Vec<String> = argv.iter().map(|a| a.replace("/work/", &format!("{dir}/"))).collect();
+    let lines = runner::run(tool, &argv, &scratch.0)?;
+    Ok((new_files(&scratch.0, files), lines))
 }
 
 pub(crate) fn run(job: &Job) -> Result<ToolResult, String> {
@@ -58,6 +79,6 @@ pub(crate) fn run(job: &Job) -> Result<ToolResult, String> {
         std::fs::write(&path, bytes).map_err(|e| format!("can't write {}: {e}", path.display()))?;
     }
     let lines = runner::run(&job.tool, &job.argv(&scratch.0.display().to_string()), &scratch.0)?;
-    let files = new_files(&scratch.0, job);
+    let files = new_files(&scratch.0, &job.files);
     Ok(finish(job, &files, &lines, Some(&scratch.0)))
 }

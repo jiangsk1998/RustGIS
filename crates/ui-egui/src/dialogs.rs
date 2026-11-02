@@ -1793,6 +1793,70 @@ pub fn pick_save(name: &str, exts: &[&str], label: &str) -> Option<String> {
     rfd::FileDialog::new().set_file_name(name).add_filter(label, exts).save_file().map(|p| p.display().to_string())
 }
 
+/// Asks for a file to open off the frame: on Linux the system's dialog is drawn by the desktop
+/// portal in another process, so it runs on a thread of its own and the window keeps answering
+/// while it is open. The answer arrives in the slot, which the caller polls each frame (asking
+/// for a repaint while it waits). Elsewhere the system needs the dialog on this thread, so it
+/// runs here and the slot is already filled when this returns.
+#[cfg(all(not(target_arch = "wasm32"), not(test)))]
+pub fn pick_open_off_frame(exts: &'static [&'static str], label: &'static str, ctx: &egui::Context) -> crate::Slot<Option<String>> {
+    ask_off_frame(ctx, move || pick_open(exts, label))
+}
+
+/// Asks for a folder off the frame; see [`pick_open_off_frame`].
+#[cfg(all(not(target_arch = "wasm32"), not(test)))]
+pub fn pick_folder_off_frame(ctx: &egui::Context) -> crate::Slot<Option<String>> {
+    ask_off_frame(ctx, pick_folder)
+}
+
+/// Runs `ask` off the frame where the platform can (Linux), and fills the returned slot with
+/// what it answers.
+#[cfg(all(not(target_arch = "wasm32"), not(test)))]
+fn ask_off_frame<T: Send + 'static>(ctx: &egui::Context, ask: impl Fn() -> T + Send + Sync + Clone + 'static) -> crate::Slot<T> {
+    let slot: crate::Slot<T> = Default::default();
+    #[cfg(target_os = "linux")]
+    {
+        let (out, call, ctx) = (slot.clone(), ask.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new().name("file dialog".into()).spawn(move || {
+            let answer = call();
+            // Filled even when poisoned, or the caller would wait for it forever.
+            *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
+            // The pane may be idle: wake it for the answer.
+            ctx.request_repaint();
+        });
+        if spawned.is_err() {
+            // No thread to be had: ask here, as before, rather than never answering.
+            *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ask());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = ctx;
+        *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ask());
+    }
+    slot
+}
+
+/// In a unit test: the path the test put in [`PICKED`], or cancelled, already answered.
+#[cfg(all(not(target_arch = "wasm32"), test))]
+pub fn pick_open_off_frame(exts: &'static [&'static str], label: &'static str, _: &egui::Context) -> crate::Slot<Option<String>> {
+    answered(pick_open(exts, label))
+}
+
+/// In a unit test: the path the test put in [`PICKED`], or cancelled, already answered.
+#[cfg(all(not(target_arch = "wasm32"), test))]
+pub fn pick_folder_off_frame(_: &egui::Context) -> crate::Slot<Option<String>> {
+    answered(PICKED.with(|p| p.borrow_mut().take()))
+}
+
+/// A slot holding `answer` already, for a dialog that ran on this thread.
+#[cfg(test)]
+fn answered<T>(answer: T) -> crate::Slot<T> {
+    let slot: crate::Slot<T> = Default::default();
+    *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
+    slot
+}
+
 // Unit tests can't answer the system's file dialogs: a picker answers what the test put in
 // `PICKED` instead, once, and is cancelled when it holds nothing.
 #[cfg(test)]

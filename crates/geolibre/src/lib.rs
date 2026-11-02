@@ -719,6 +719,16 @@ pub fn finish(job: &Job, files: &[(String, Vec<u8>)], lines: &[String], dir: Opt
     ToolResult { output: Output::Layers(layers), messages }
 }
 
+/// Runs a staged run to completion, natively, without its output layers: the new files in the
+/// working folder and what the runner printed (both go to [`finish`]). The arguments name the
+/// staged files under `/work`, the working folder the browser's runner mounts; they are pointed
+/// at a scratch folder here instead. This blocks, so the desktop app runs it on a thread of its
+/// own.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_staged(tool: &str, argv: &[String], files: &[(String, Vec<u8>)]) -> Result<(Vec<(String, Vec<u8>)>, Vec<String>), String> {
+    native::run_staged(tool, argv, files)
+}
+
 /// Runs a tool to completion: natively through the `geolibre` program; in the browser the
 /// runner is asynchronous, so the app uses [`prepare`] and [`finish`] around it instead.
 fn run(spec: &ToolSpec, inputs: &dyn Inputs, params: &Value) -> Result<ToolResult, String> {

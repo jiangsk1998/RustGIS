@@ -104,10 +104,19 @@ pub struct AssistantState {
     /// What the last change to the skills did: whether it worked, and what to say.
     #[cfg(not(target_arch = "wasm32"))]
     skills_message: Option<(bool, String)>,
+    /// A skill file or folder the system's dialog is choosing, off the frame: its answer, once
+    /// there is one.
+    #[cfg(not(target_arch = "wasm32"))]
+    skills_pick: Option<crate::Slot<Option<String>>>,
     /// The agents on this computer, looked for when the settings open (a search of `PATH`, not
     /// every frame) and again when the switch changes.
     #[cfg(not(target_arch = "wasm32"))]
     agents_found: Option<rustgis_assistant::acp::Installed>,
+    /// A GeoLibre tool the assistant runs: the run, the call it answers, and where its files
+    /// land. It runs on a thread of its own (a tool may take minutes), so the window stays
+    /// responsive.
+    #[cfg(not(target_arch = "wasm32"))]
+    external: Option<(rustgis_assistant::tools::ExternalStart, provider::ToolCall, crate::Slot<rustgis_engine::cmd::gp::ExternalOutput>)>,
 }
 
 /// The settings fields typed into (saved when none has focus).
@@ -571,8 +580,83 @@ fn with_agent(app: &mut RustGisApp, f: impl FnOnce(&mut Agent, &mut rustgis_engi
     Some(step)
 }
 
+/// Whether the call waiting for approval runs a GeoLibre tool, which runs off the frame.
+#[cfg(not(target_arch = "wasm32"))]
+fn waits_for_external(app: &RustGisApp) -> bool {
+    app.assistant
+        .agent
+        .as_ref()
+        .and_then(|a| a.approval_call(&app.session))
+        .is_some_and(|c| rustgis_assistant::tools::geolibre_run(c).is_some())
+}
+
+/// Starts the GeoLibre tool the waiting call names on a thread of its own, so the window stays
+/// responsive while it runs (a step on a large image takes minutes); [`poll_external`] applies
+/// what it returns. `Some(step)`: the call was answered at once (it couldn't run), and the caller
+/// carries on with what the step says.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_external(app: &mut RustGisApp, always: bool, ctx: &egui::Context) -> Option<Step> {
+    app.assistant.agent.as_ref()?.approval_call(&app.session)?;
+    let tokens = app.assistant.agent.as_ref()?.config.tool_output_token_limit;
+    let agent = app.assistant.agent.as_mut()?;
+    let call = agent.take_call(true, always, &mut app.session)?;
+    let started = match rustgis_assistant::tools::start_geolibre(&mut app.session, &call) {
+        Some(Ok(started)) => started,
+        Some(Err(e)) => {
+            let content = rustgis_assistant::tools::bounded_json(&serde_json::json!({"error": e}), tokens);
+            return Some(agent.record_call(call, content.clone(), content, true, &mut app.session));
+        }
+        // Its parameters changed into something else between the check and the take: run it here.
+        None => return Some(agent.run_call(call, &mut app.session)),
+    };
+    let slot: crate::Slot<rustgis_engine::cmd::gp::ExternalOutput> = crate::Slot::default();
+    let (out, run, name, ctx2) = (slot.clone(), started.run.clone(), started.name.clone(), ctx.clone());
+    let spawned = std::thread::Builder::new().name(name).spawn(move || {
+        let r = rustgis_engine::cmd::gp::external_run_here(&run);
+        // Filled even when poisoned, or the poll would wait for it forever.
+        *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(r);
+        ctx2.request_repaint();
+    });
+    match spawned {
+        Ok(_) => {
+            app.assistant.external = Some((started, call, slot));
+            None
+        }
+        Err(e) => {
+            rustgis_engine::cmd::gp::external_abandon(&mut app.session, started.id);
+            let content = rustgis_assistant::tools::bounded_json(&serde_json::json!({"error": e.to_string()}), tokens);
+            Some(agent.record_call(call, content.clone(), content, true, &mut app.session))
+        }
+    }
+}
+
+/// Per-frame: applies a GeoLibre run that finished on its thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn poll_external(app: &mut RustGisApp, ctx: &egui::Context) {
+    let Some((_, _, slot)) = &app.assistant.external else { return };
+    let Some(ran) = slot.lock().ok().and_then(|mut s| s.take()) else {
+        ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        return;
+    };
+    let Some((started, call, _)) = app.assistant.external.take() else { return };
+    // The user stopped the assistant while it ran: its output isn't applied to the project.
+    if !app.assistant.agent.as_ref().is_some_and(|a| a.owns_call()) {
+        rustgis_engine::cmd::gp::external_abandon(&mut app.session, started.id);
+        app.map.invalidate();
+        return;
+    }
+    let Some(agent) = app.assistant.agent.as_mut() else { return };
+    let tokens = agent.config.tool_output_token_limit;
+    let (content, error) = rustgis_assistant::tools::finish_geolibre(&mut app.session, &started, ran, tokens);
+    let shown = content.clone();
+    let step = agent.record_call(call, content, shown, error, &mut app.session);
+    follow(app, step, ctx);
+}
+
 /// Per-frame: responses that arrived, a message queued by a command, and settings to save.
 pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
+    #[cfg(not(target_arch = "wasm32"))]
+    poll_external(app, ctx);
     #[cfg(not(target_arch = "wasm32"))]
     poll_keys(app, ctx);
     #[cfg(not(target_arch = "wasm32"))]
@@ -1367,22 +1451,33 @@ fn skills_setting(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         for p in &problems {
             ui.label(RichText::new(p).small().color(t.red));
         }
+        // The system's dialog for a skill file or folder runs off the frame (Linux's portal draws
+        // it in another process), so the window keeps answering while it is open; its answer is
+        // read here, once it has one.
+        let mut picked: Option<std::path::PathBuf> = None;
+        let mut waiting = false;
+        if let Some(pick) = app.assistant.skills_pick.take() {
+            let answer = pick.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            match answer {
+                Some(answer) => picked = answer.map(std::path::PathBuf::from),
+                None => {
+                    waiting = true;
+                    app.assistant.skills_pick = Some(pick);
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                }
+            }
+        }
         // Wrapped, so the buttons never widen the settings past the pane.
         ui.horizontal_wrapped(|ui| {
-            let mut picked = None;
-            if ui.button(tl!("Add skill…")).clicked() {
-                picked = rfd::FileDialog::new()
-                    .set_title(tl!("Add skill…"))
-                    .add_filter(tl!("Skill (SKILL.md or .zip)"), &["md", "zip"])
-                    .pick_file();
+            if ui.add_enabled(!waiting, egui::Button::new(tl!("Add skill…"))).clicked() {
+                app.assistant.skills_pick =
+                    Some(crate::dialogs::pick_open_off_frame(&["md", "zip"], tl!("Skill (SKILL.md or .zip)"), ui.ctx()));
             }
-            if ui.button(tl!("Add folder…")).clicked() {
-                picked = rfd::FileDialog::new().set_title(tl!("Add folder…")).pick_folder();
+            if ui.add_enabled(!waiting, egui::Button::new(tl!("Add folder…"))).clicked() {
+                app.assistant.skills_pick = Some(crate::dialogs::pick_folder_off_frame(ui.ctx()));
             }
-            if let Some(path) = picked {
-                done = Some(
-                    skills::add(&Places::here(), &path).map(|names| crate::i18n::fmt("Added: {names}", &[("names", &names.join(", "))])),
-                );
+            if waiting {
+                ui.spinner();
             }
             if ui.button(tl!("Open folder")).clicked()
                 && let Some(dir) = Places::here().user
@@ -1397,6 +1492,11 @@ fn skills_setting(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 done = Some(Ok(String::new()));
             }
         });
+        if let Some(path) = picked {
+            done = Some(
+                skills::add(&Places::here(), &path).map(|names| crate::i18n::fmt("Added: {names}", &[("names", &names.join(", "))])),
+            );
+        }
         ui.label(
             RichText::new(tl!(
                 "Your skills are kept in the skills folder of the app's settings folder. Shared skills (~/.agents/skills) are off until you turn them on."
@@ -1480,8 +1580,29 @@ fn composer(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx: &egu
     // Agent threads on this computer, working or waiting for a follow-up.
     #[cfg(not(target_arch = "wasm32"))]
     crate::agentthreads::list(app, ui, t);
+    // A GeoLibre tool runs off the frame, for minutes: show it, and keep the next action's card
+    // back until it's done (the calls behind it are not ready to run yet).
+    #[cfg(not(target_arch = "wasm32"))]
+    let external = app.assistant.external.as_ref().map(|(started, ..)| started.name.clone());
+    #[cfg(target_arch = "wasm32")]
+    let external: Option<String> = None;
+    if let Some(name) = &external {
+        egui::Frame::NONE
+            .fill(t.accent.gamma_multiply(0.12))
+            .corner_radius(6)
+            .inner_margin(8)
+            .stroke(egui::Stroke::new(1.0, t.accent))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new(crate::i18n::fmt("Running {name}…", &[("name", tl_raw!(name.as_str()))])).small());
+                });
+            });
+        ui.add_space(6.0);
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    }
     // An action waiting for approval comes first.
-    let pending = app.assistant.agent.as_ref().and_then(|a| a.pending(&app.session));
+    let pending = if external.is_some() { None } else { app.assistant.agent.as_ref().and_then(|a| a.pending(&app.session)) };
     if let Some((what, why, can_always)) = pending {
         egui::Frame::NONE.fill(t.amber.gamma_multiply(0.15)).corner_radius(6).inner_margin(8).stroke(egui::Stroke::new(1.0, t.amber)).show(
             ui,
@@ -1500,6 +1621,15 @@ fn composer(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx: &egu
                     let deny = ui.button(tl!("Decline")).clicked();
                     if allow || deny {
                         let always = app.assistant.always;
+                        // A GeoLibre tool runs off the frame: the window stays responsive while it
+                        // works (a step on a large image takes minutes).
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if allow && waits_for_external(app) {
+                            if let Some(step) = start_external(app, always, ctx) {
+                                follow(app, step, ctx);
+                            }
+                            return;
+                        }
                         if let Some(step) = with_agent(app, |a, s| a.decide(allow, always, s)) {
                             follow(app, step, ctx);
                         }

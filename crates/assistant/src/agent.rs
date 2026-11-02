@@ -339,6 +339,12 @@ impl Agent {
         !matches!(self.state, State::Idle)
     }
 
+    /// Whether a call taken by [`Agent::take_call`] is still this run's to answer: the
+    /// conversation wasn't stopped (or restarted) while the caller ran it.
+    pub fn owns_call(&self) -> bool {
+        self.child.is_none() && matches!(self.state, State::Calls(..))
+    }
+
     pub fn waiting(&self) -> bool {
         match &self.child {
             Some(child) => child.waiting(),
@@ -373,6 +379,52 @@ impl Agent {
     /// Whether the user allowed calls like this one for the rest of the conversation.
     fn approved(&self, s: &Session, call: &ToolCall) -> bool {
         tools::approval_key(s, call).is_some_and(|k| self.always.contains(&k))
+    }
+
+    /// The call waiting for the user's approval, for a caller that runs it itself (a GeoLibre
+    /// tool, off the frame): none while a subagent waits for it, or when it needs none.
+    pub fn approval_call(&self, s: &Session) -> Option<&ToolCall> {
+        if self.child.is_some() {
+            return None;
+        }
+        let State::Calls(q, _) = &self.state else { return None };
+        let call = q.front()?;
+        (tools::gate(s, call).is_some() && !self.approved(s, call)).then_some(call)
+    }
+
+    /// Takes the first waiting call off the queue, recording "always" for it, so the caller can
+    /// run it elsewhere; [`Agent::record_call`] then records what it returned.
+    pub fn take_call(&mut self, allow: bool, always: bool, s: &mut Session) -> Option<ToolCall> {
+        if self.child.is_some() {
+            return None;
+        }
+        if allow
+            && always
+            && let State::Calls(q, _) = &self.state
+            && let Some(key) = q.front().and_then(|c| tools::approval_key(s, c))
+        {
+            self.always.push(key);
+        }
+        let State::Calls(q, _) = &mut self.state else { return None };
+        q.pop_front()
+    }
+
+    /// Records the result of a call taken by [`Agent::take_call`] (with what the transcript
+    /// shows), then carries on with the calls waiting behind it.
+    pub fn record_call(&mut self, call: ToolCall, content: String, shown: String, error: bool, s: &mut Session) -> Step {
+        self.guard(|a| {
+            a.record(call, content, shown, error);
+            a.drain(s)
+        })
+    }
+
+    /// Runs a call taken by [`Agent::take_call`] on this thread and records its result, then
+    /// carries on with the calls waiting behind it.
+    pub fn run_call(&mut self, call: ToolCall, s: &mut Session) -> Step {
+        self.guard(|a| {
+            a.run_popped(call, true, s);
+            a.drain(s)
+        })
     }
 
     /// Changes in the generation tell a caller its response is stale.
@@ -754,10 +806,15 @@ impl Agent {
 
     /// Runs (or declines) the first waiting call and records its result.
     fn run_front(&mut self, s: &mut Session, allow: bool) {
-        let tokens = self.config.tool_output_token_limit;
         // Off the queue before it runs: a call that panics is interrupted, not left to run.
         let State::Calls(q, _) = &mut self.state else { return };
         let Some(call) = q.pop_front() else { return };
+        self.run_popped(call, allow, s);
+    }
+
+    /// Runs (or declines) a call already taken off the queue and records its result.
+    fn run_popped(&mut self, call: ToolCall, allow: bool, s: &mut Session) {
+        let tokens = self.config.tool_output_token_limit;
         let (content, error) = if allow {
             match self.run_tool(s, &call, tokens) {
                 Ok(c) => (c, false),

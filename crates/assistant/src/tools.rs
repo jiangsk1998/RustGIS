@@ -235,6 +235,57 @@ pub fn approval_key(s: &Session, call: &ToolCall) -> Option<String> {
     Some(format!("{key} {params}"))
 }
 
+/// The GeoLibre tool a call runs and its parameters, if it runs one: those run a program for
+/// minutes, so the desktop app runs them off the frame (see [`start_geolibre`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn geolibre_run(call: &ToolCall) -> Option<(&'static str, Value)> {
+    let (id, params) = target(call)?;
+    if id != "gp.run" {
+        return None;
+    }
+    let tool = params.get("tool").and_then(Value::as_str)?;
+    analysis::tool(tool).filter(|t| rustgis_engine::cmd::gp::is_geolibre_tool(t)).map(|t| (t.id, obj_arg(&params, "params")))
+}
+
+/// A GeoLibre run started for the app to carry out off the frame.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct ExternalStart {
+    /// The session's run id, for [`finish_geolibre`].
+    pub id: u64,
+    /// The tool's name, for the app to show while it runs.
+    pub name: String,
+    /// The run: the arguments and files to stage.
+    pub run: rustgis_engine::cmd::gp::ExternalRun,
+    before: Vec<(String, Vec<u32>)>,
+    mark: u64,
+}
+
+/// Starts the GeoLibre run `call` names, checking its parameters as `gp.run` does. `None` when
+/// it runs no GeoLibre tool: the call runs as any other.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_geolibre(s: &mut Session, call: &ToolCall) -> Option<Result<ExternalStart, String>> {
+    let (tool, params) = geolibre_run(call)?;
+    let name = analysis::tool(tool).map_or_else(|| tool.to_string(), |t| t.name.to_string());
+    let (before, mark) = (layer_snap(s), s.notice_mark());
+    Some(rustgis_engine::cmd::gp::external_start(s, tool, &params).map(|run| ExternalStart { id: run.id, name, run, before, mark }))
+}
+
+/// Records a finished GeoLibre run started by [`start_geolibre`]: its result as the tool call's
+/// answer, and whether it failed.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn finish_geolibre(
+    s: &mut Session,
+    started: &ExternalStart,
+    ran: rustgis_engine::cmd::gp::ExternalOutput,
+    tokens: usize,
+) -> (String, bool) {
+    let r = rustgis_engine::cmd::gp::external_complete(s, started.id, ran).and_then(|_| s.run("gp.finish", &json!({"id": started.id})));
+    match r {
+        Ok(v) => (bounded_json(&with_notices(with_new_layers(v, s, &started.before), s, started.mark), tokens), false),
+        Err(e) => (bounded_json(&json!({"error": error_with_notices(e, s, started.mark)}), tokens), true),
+    }
+}
+
 /// A one-line description of a call for the transcript and the approval prompt.
 pub fn summary(call: &ToolCall) -> String {
     let short = |v: Value| {

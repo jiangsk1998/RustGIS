@@ -215,6 +215,35 @@ pub fn external_start(s: &mut Session, tool: &str, params: &Value) -> Result<Ext
     }
 }
 
+/// Carries out a run from [`external_start`] on this thread, blocking until the runner ends: the
+/// desktop app runs it on a thread of its own, so a tool that takes minutes leaves the window
+/// responsive, then hands the result to [`external_complete`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn external_run_here(run: &ExternalRun) -> ExternalOutput {
+    #[cfg(feature = "geolibre")]
+    {
+        rustgis_geolibre::run_staged(&run.tool, &run.argv, &run.files)
+    }
+    #[cfg(not(feature = "geolibre"))]
+    {
+        let _ = run;
+        Err("this build doesn't include the GeoLibre tools".into())
+    }
+}
+
+/// Drops a run from [`external_start`] that won't be completed (its user stopped it): its files
+/// are released, and nothing is applied.
+pub fn external_abandon(s: &mut Session, id: u64) {
+    #[cfg(feature = "geolibre")]
+    if let Some(i) = s.started.iter().position(|(n, ..)| *n == id) {
+        s.started.remove(i);
+    }
+    #[cfg(not(feature = "geolibre"))]
+    {
+        let _ = (s, id);
+    }
+}
+
 /// Finishes a run from [`external_start`]: turns the runner's files and lines into a result
 /// that `gp.finish {"id"}` then applies like `gp.run` would, with undo and history.
 pub fn external_complete(s: &mut Session, id: u64, ran: ExternalOutput) -> Result<(), String> {
