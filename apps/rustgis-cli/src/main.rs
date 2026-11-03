@@ -436,6 +436,8 @@ fn ask(s: &mut Session, args: &[String], saved: Option<&Saved>, env: &Environmen
                 }
                 Entry::Error(e) => eprintln!("rustgis-cli: {e}"),
                 Entry::Note(n) => eprintln!("({n})"),
+                // The CLI can't draw a picture's thumbnail: say which one was read.
+                Entry::Image { summary, .. } => eprintln!("  image {summary}"),
             }
         }
         shown = a.transcript.len();
