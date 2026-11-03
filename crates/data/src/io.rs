@@ -43,6 +43,9 @@ pub const READ_EXTENSIONS: &[&str] = &[
     "topojson",
     "las",
     "laz",
+    "sqlite",
+    "sqlite3",
+    "db",
 ];
 
 /// Most XML nodes parsed from one document (KML, GPX): each costs tens of bytes, and the
@@ -130,6 +133,15 @@ pub fn read_layers(file_name: &str, bytes: &[u8]) -> Result<Vec<LayerRead>> {
     Ok(out)
 }
 
+/// Whether an SQLite file is a GeoPackage: it declares its contents in `gpkg_contents`. The
+/// database is read with the pure-Rust reader, which never panics on a malformed file.
+fn is_geopackage(bytes: &[u8]) -> bool {
+    crate::sqlite::Db::open(bytes)
+        .ok()
+        .and_then(|db| db.tables().ok())
+        .is_some_and(|tables| tables.iter().any(|t| t.name.eq_ignore_ascii_case("gpkg_contents")))
+}
+
 /// The extension of a file from its first bytes, for a download whose address doesn't say:
 /// GeoParquet, FlatGeobuf, GeoTIFF, a zip, a GeoPackage, KML, GPX, GeoJSON, delimited text or
 /// JPEG 2000 (`None` for anything else, such as a web page).
@@ -155,7 +167,14 @@ pub fn sniff_extension(bytes: &[u8]) -> Option<&'static str> {
         [b'f', b'g', b'b', ..] => "fgb",
         [b'I', b'I', 42 | 43, 0, ..] | [b'M', b'M', 0, 42 | 43, ..] => "tif",
         [b'P', b'K', 3, 4, ..] => "zip",
-        _ if bytes.starts_with(b"SQLite format 3\0") => "gpkg",
+        // A GeoPackage declares its contents; any other SQLite database is a plain one.
+        _ if bytes.starts_with(b"SQLite format 3\0") => {
+            if is_geopackage(bytes) {
+                "gpkg"
+            } else {
+                "sqlite"
+            }
+        }
         // LiDAR: LAZ marks its point format's top bits.
         _ if crate::lidar::looks_like_las(bytes) => {
             if bytes.get(104).is_some_and(|f| f & 0xC0 != 0) {
@@ -2498,7 +2517,7 @@ mod tests {
             (b"fgb\x03fgb\0", Some("fgb")),
             (b"II*\0\x08\0", Some("tif")),
             (b"PK\x03\x04", Some("zip")),
-            (b"SQLite format 3\0", Some("gpkg")),
+            (b"SQLite format 3\0", Some("sqlite")),
             (b"\xef\xbb\xbf  {\"type\":\"FeatureCollection\"}", Some("geojson")),
             (b"<?xml version=\"1.0\"?><kml xmlns=\"\">", Some("kml")),
             (b"name;lon;lat\r\nA;7;45\r\n", Some("csv")),

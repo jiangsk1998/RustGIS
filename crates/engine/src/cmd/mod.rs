@@ -46,6 +46,7 @@ pub mod share;
 pub mod sharing;
 pub mod sources;
 pub mod sql;
+pub mod sqlite;
 pub mod stac;
 pub mod tiles;
 pub mod time;
@@ -105,6 +106,7 @@ pub fn all() -> Vec<CommandSpec> {
     v.extend(sql::commands());
     v.extend(pg::commands());
     v.extend(gpkg::commands());
+    v.extend(sqlite::commands());
     v.extend(plugins::commands());
     v.extend(sharing::commands());
     v.extend(stac::commands());

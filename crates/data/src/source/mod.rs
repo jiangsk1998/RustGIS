@@ -36,6 +36,11 @@ pub mod remote;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shp;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod sqlite;
+pub(crate) mod sqlite_blob;
+pub(crate) mod sqlite_detect;
+pub mod sqlite_mem;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod sqlserver;
 
 use crate::raster::{Crs, Transformer};
@@ -103,7 +108,7 @@ impl Family {
 }
 
 /// File types read through a provider.
-pub const EXTENSIONS: &[&str] = &["gpkg", "parquet", "geoparquet", "fgb", "las", "laz"];
+pub const EXTENSIONS: &[&str] = &["gpkg", "parquet", "geoparquet", "fgb", "las", "laz", "sqlite", "sqlite3", "db"];
 
 /// The most features one read returns, whatever the request asks for. A whole read of a source
 /// read a chunk at a time is bounded by [`MAX_READ_BYTES`] instead.
@@ -359,6 +364,9 @@ pub fn open_path(path: &Path, layer: Option<&str>) -> Result<Box<dyn FeatureSour
         "las" | "laz" => Ok(Box::new(lidar::LidarSource::open_path(path, &name)?)),
         #[cfg(not(target_arch = "wasm32"))]
         "gpkg" => Ok(Box::new(gpkg::GpkgSource::open(path, layer)?)),
+        // A plain SQLite database: read with SQLite on the desktop, which edits it in place.
+        #[cfg(not(target_arch = "wasm32"))]
+        "sqlite" | "sqlite3" | "db" => Ok(Box::new(sqlite::SqliteSource::open(path, layer)?)),
         // Only large GeoJSON files are read in place (see `geojson`); `is_source_name` leaves
         // them out.
         #[cfg(not(target_arch = "wasm32"))]
@@ -403,6 +411,11 @@ pub fn open_shared(file_name: &str, bytes: std::sync::Arc<Vec<u8>>, layer: Optio
         "gpkg" => Ok(Box::new(gpkg::GpkgSource::open_bytes(bytes.as_ref(), layer)?)),
         #[cfg(target_arch = "wasm32")]
         "gpkg" => Ok(Box::new(gpkg_mem::GpkgMemSource::open_shared(bytes, layer)?)),
+        // SQLite is C: the browser reads the file with the pure-Rust reader.
+        #[cfg(not(target_arch = "wasm32"))]
+        "sqlite" | "sqlite3" | "db" => Ok(Box::new(sqlite::SqliteSource::open_bytes(bytes.as_ref(), layer)?)),
+        #[cfg(target_arch = "wasm32")]
+        "sqlite" | "sqlite3" | "db" => Ok(Box::new(sqlite_mem::SqliteMemSource::open_shared(bytes, layer)?)),
         other => {
             let _ = layer;
             Err(DataError::Unsupported(other.to_string()))
@@ -558,6 +571,8 @@ pub fn layers(path: &Path) -> Result<Vec<String>> {
     match ext(path).as_str() {
         #[cfg(not(target_arch = "wasm32"))]
         "gpkg" => gpkg::layers(path),
+        #[cfg(not(target_arch = "wasm32"))]
+        "sqlite" | "sqlite3" | "db" => sqlite::tables(path),
         _ => Ok(vec![open_path(path, None)?.info().name.clone()]),
     }
 }

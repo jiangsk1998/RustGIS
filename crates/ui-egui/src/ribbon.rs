@@ -474,6 +474,8 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 menu_item(ui, app, "", "Database…", "ui.dialog", json!({"name": "addDatabase"}));
                 #[cfg(not(target_arch = "wasm32"))]
                 menu_item(ui, app, "", "Edit GeoPackage Table…", "ui.dialog", json!({"name": "gpkgAddLayer"}));
+                #[cfg(not(target_arch = "wasm32"))]
+                menu_item(ui, app, "", "Edit SQLite Table…", "ui.dialog", json!({"name": "sqliteAddLayer"}));
                 menu_item(ui, app, "", "S3…", "ui.dialog", json!({"name": "s3"}));
                 submenu_row(ui, "", tl!("New Connection"), |ui| {
                     for (kind, label) in crate::connectionui::KINDS {
@@ -2451,6 +2453,31 @@ fn edit_tab(app: &mut RustGisApp, ui: &mut Ui) {
                     "Load a GeoPackage layer's rows again as they are in the file, dropping its edits.",
                     "ui.dialog",
                     json!({"name": "gpkgDiscard"}),
+                    false,
+                );
+            });
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if app.session.map().layers.iter().any(|l| l.sqlite.is_some()) {
+            col(ui, |ui| {
+                small(
+                    ui,
+                    app,
+                    "save",
+                    "Save to SQLite…",
+                    "Save a SQLite layer's edits to its table in the file, unless rows changed there since.",
+                    "ui.dialog",
+                    json!({"name": "sqliteSave"}),
+                    false,
+                );
+                small(
+                    ui,
+                    app,
+                    "update",
+                    "Discard SQLite Edits…",
+                    "Load a SQLite layer's rows again as they are in the file, dropping its edits.",
+                    "ui.dialog",
+                    json!({"name": "sqliteDiscard"}),
                     false,
                 );
             });

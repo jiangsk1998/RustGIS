@@ -211,6 +211,9 @@ pub struct Layer {
     /// The GeoPackage table this layer's edits save to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpkg: Option<source::GpkgEdit>,
+    /// The ordinary SQLite table this layer's edits save to (desktop only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sqlite: Option<source::SqliteEdit>,
     /// Where a layer loaded whole reads a feature's image field from: its file or table, kept out
     /// of the dataset. The project keeps what names it (a path and table), not its uploaded bytes.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "source::image_source_serde")]
@@ -280,7 +283,11 @@ impl Layer {
 
     /// Baseline rows for a layer loaded for source editing.
     pub fn edit_versions(&self) -> Option<&source::Versions> {
-        self.postgis.as_ref().map(|e| &e.versions).or_else(|| self.gpkg.as_ref().map(|e| &e.versions))
+        self.postgis
+            .as_ref()
+            .map(|e| &e.versions)
+            .or_else(|| self.gpkg.as_ref().map(|e| &e.versions))
+            .or_else(|| self.sqlite.as_ref().map(|e| &e.versions))
     }
 
     /// What reads a feature's image field: the layer's source, the source it was loaded whole
@@ -295,7 +302,10 @@ impl Layer {
         if let Some(e) = &self.postgis {
             return Some(source::ImageJob::Postgis(e.clone()));
         }
-        self.gpkg.clone().map(source::ImageJob::Gpkg)
+        if let Some(e) = &self.gpkg {
+            return Some(source::ImageJob::Gpkg(e.clone()));
+        }
+        self.sqlite.clone().map(source::ImageJob::Sqlite)
     }
 
     /// The original bytes of one feature's image field, read on demand.
@@ -308,7 +318,7 @@ impl Layer {
 
     /// Local linked paths, followed by the dataset's record-only provenance.
     pub fn file_paths_mut(&mut self) -> Vec<(&mut String, bool)> {
-        let Layer { dataset, source, raster, gpkg, image_source, .. } = self;
+        let Layer { dataset, source, raster, gpkg, sqlite, image_source, .. } = self;
         let mut paths = Vec::new();
         if let Some(src) = source {
             if let Some(g) = &mut src.gdal {
@@ -338,6 +348,9 @@ impl Layer {
         }
         if let Some(g) = gpkg {
             paths.push((&mut g.path, false));
+        }
+        if let Some(e) = sqlite {
+            paths.push((&mut e.path, false));
         }
         if let Some(p) = image_source.as_mut().and_then(|s| s.path.as_mut()) {
             paths.push((p, false));
@@ -440,6 +453,7 @@ impl Layer {
             source: None,
             postgis: None,
             gpkg: None,
+            sqlite: None,
             image_source: None,
             projected: Default::default(),
             display: None,

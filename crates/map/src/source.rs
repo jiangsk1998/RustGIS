@@ -184,6 +184,38 @@ pub struct GpkgEdit {
     pub versions: Versions,
 }
 
+/// An ordinary SQLite table loaded whole for desktop editing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SqliteEdit {
+    /// Absolute when loaded; relative to a project saved beside it.
+    pub path: String,
+    pub table: String,
+    /// Its INTEGER PRIMARY KEY column, or `rowid` for a table without one.
+    pub key: String,
+    /// The geometry column, when the table has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<String>,
+    /// The storage the geometry had when these rows were loaded: `gpkg`, `spatialite` or `wkb`.
+    #[serde(default)]
+    pub format: String,
+    /// The stored shape (`point`… or `multipoint`…) when these rows were loaded.
+    #[serde(default)]
+    pub shape: String,
+    /// The SRID the geometry declared (0 when none).
+    #[serde(default)]
+    pub srid: i32,
+    /// Whether the stored geometry carried Z or M values.
+    #[serde(default)]
+    pub zm: bool,
+    /// The database file's size and modification time, checked before saving pending inserts.
+    pub revision: String,
+    pub writable: bool,
+    #[serde(default)]
+    pub limit: usize,
+    /// Every stored row's fingerprint and the loaded feature's hash, by key.
+    pub versions: Versions,
+}
+
 /// Where a feature's image field is read from: the layer's open source, or the table a layer
 /// loaded whole saves its edits to (which has no open source of its own).
 #[derive(Clone)]
@@ -191,6 +223,7 @@ pub enum ImageJob {
     Source(Box<SourceLayer>),
     Postgis(PostgisEdit),
     Gpkg(GpkgEdit),
+    Sqlite(SqliteEdit),
 }
 
 impl ImageJob {
@@ -236,6 +269,19 @@ impl ImageJob {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let src = rustgis_data::source::gpkg::GpkgSource::open(std::path::Path::new(&e.path), Some(&e.table))
+                        .map_err(|e| e.to_string())?;
+                    src.image(fid, field).map_err(|e| e.to_string())
+                }
+            }
+            ImageJob::Sqlite(e) => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (e, fid, field);
+                    Err("SQLite databases are opened in the desktop app".into())
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let src = rustgis_data::source::sqlite::SqliteSource::open(std::path::Path::new(&e.path), Some(&e.table))
                         .map_err(|e| e.to_string())?;
                     src.image(fid, field).map_err(|e| e.to_string())
                 }

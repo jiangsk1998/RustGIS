@@ -204,6 +204,32 @@ fn write_picture_gpkg(path: &Path) {
     tx.commit().unwrap();
 }
 
+/// A plain SQLite database (no GeoPackage or SpatiaLite metadata), as the reader takes it: a
+/// geometry column of plain WKB, and binary columns holding pictures and other data.
+fn write_picture_sqlite(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let c = rusqlite::Connection::open(path).unwrap();
+    c.execute_batch("CREATE TABLE shots (id INTEGER PRIMARY KEY, geom BLOB, name TEXT, photo BLOB, payload BLOB, mixed BLOB);").unwrap();
+    let (big, small) = (test_png(4, 3), test_png(2, 2));
+    let tx = c.unchecked_transaction().unwrap();
+    for (i, (photo, payload, mixed)) in [
+        (big.clone(), b"PK\x03\x04 not an image".to_vec(), small.clone()),
+        (small.clone(), b"not an image either".to_vec(), b"neither is this".to_vec()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = i as i64 + 1;
+        let geom = wkb::encode(&Geometry::Point(Coord::new(i as f64 + 1.0, i as f64 + 2.0)));
+        tx.execute(
+            "INSERT INTO shots VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, geom, format!("r{i}"), photo, payload, mixed],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+}
+
 /// A FlatGeobuf whose binary columns hold pictures and other data, as the GeoPackage fixture does.
 fn write_picture_fgb(path: &Path) {
     use flatgeobuf::geozero::{ColumnValue, PropertyProcessor};
@@ -330,6 +356,36 @@ fn gpkg_binary_columns_are_pictures_only_when_their_values_are() {
     for src in [&desktop as &dyn FeatureSource, &mem] {
         check_picture_fields(src);
     }
+}
+
+#[test]
+fn sqlite_binary_columns_are_pictures_only_when_their_values_are() {
+    let path = dir().join("shots.sqlite");
+    write_picture_sqlite(&path);
+    assert_eq!(layers(&path).unwrap(), ["shots"]);
+    let desktop = sqlite::SqliteSource::open(&path, None).unwrap();
+    let mem = sqlite_mem::SqliteMemSource::open_shared(Shared(Arc::new(std::fs::read(&path).unwrap())), None).unwrap();
+    for src in [&desktop as &dyn FeatureSource, &mem] {
+        check_picture_fields(src);
+        // Neither the file nor the table declares a coordinate system, so reading says what it
+        // assumes.
+        assert!(src.info().notes.iter().any(|n| n.contains("no coordinate system")), "{:?}", src.info().notes);
+        let all = src.read(&Request::all()).unwrap();
+        assert_eq!(all.matched, 2, "{}", src.info().format);
+        assert!(all.complete);
+    }
+}
+
+#[test]
+fn a_sqlite_file_is_read_as_data() {
+    let path = dir().join("upload.sqlite");
+    write_picture_sqlite(&path);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(crate::io::sniff_extension(&bytes), Some("sqlite"));
+    let (ds, report) = crate::io::read_bytes("upload.sqlite", &bytes).unwrap();
+    assert_eq!(ds.features.len(), 2);
+    assert_eq!(ds.geometry_type, GeometryType::Point);
+    assert!(report.messages.iter().any(|m| m.contains("no coordinate system")), "{:?}", report.messages);
 }
 
 /// The same checks for every provider.

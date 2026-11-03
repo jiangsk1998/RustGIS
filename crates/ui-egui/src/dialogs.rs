@@ -24,6 +24,10 @@ pub struct Dialogs {
     pub gpkg_instance: Option<u64>,
     /// Layer IDs are map-local; source writes must stay in the captured project and map.
     pub gpkg_map: Option<(u64, usize, String)>,
+    /// SQLite save/discard targets, captured like the GeoPackage ones.
+    pub sqlite_layer: Option<u32>,
+    pub sqlite_instance: Option<u64>,
+    pub sqlite_map: Option<(u64, usize, String)>,
     /// The source-backed layer last counted: its name for PostGIS, numeric ID for GeoPackage.
     pub counted: String,
     /// Revision after the last count command, which itself advances the session revision.
@@ -105,6 +109,9 @@ impl Dialogs {
             "gpkgAddLayer" => "gpkgAddLayer",
             "gpkgSave" => "gpkgSave",
             "gpkgDiscard" => "gpkgDiscard",
+            "sqliteAddLayer" => "sqliteAddLayer",
+            "sqliteSave" => "sqliteSave",
+            "sqliteDiscard" => "sqliteDiscard",
             "chooseConnection" => "chooseConnection",
             "s3" => "s3",
             "zarr" => "zarr",
@@ -125,6 +132,9 @@ impl Dialogs {
         }
         if matches!(name, "gpkgSave" | "gpkgDiscard") && !s.map().layers.iter().any(|l| l.gpkg.is_some()) {
             return Err(tl!("the map has no GeoPackage layer loaded for editing (Home › Add Data › Edit GeoPackage Table…)").into());
+        }
+        if matches!(name, "sqliteSave" | "sqliteDiscard") && !s.map().layers.iter().any(|l| l.sqlite.is_some()) {
+            return Err(tl!("the map has no SQLite layer loaded for editing (Home › Add Data › Edit SQLite Table…)").into());
         }
         if name == "selectByAttributes" && s.map().layers.is_empty() {
             return Err("the map has no layers".into());
@@ -177,6 +187,13 @@ impl Dialogs {
                 self.gpkg_instance = layer.map(|l| l.instance_id());
                 self.gpkg_map = Some((s.opened, s.project.active_map, s.map().name.clone()));
             }
+            "sqliteSave" | "sqliteDiscard" => {
+                let sqlite = |l: &&rustgis_engine::map::Layer| l.sqlite.is_some();
+                let layer = active.filter(sqlite).or_else(|| s.map().layers.iter().find(sqlite));
+                self.sqlite_layer = layer.map(|l| l.id);
+                self.sqlite_instance = layer.map(|l| l.instance_id());
+                self.sqlite_map = Some((s.opened, s.project.active_map, s.map().name.clone()));
+            }
             // A table of addresses is what's usually geocoded: picked by its id (`flag` says the
             // choice is a table), since names can repeat.
             "geocode" => {
@@ -208,15 +225,39 @@ impl Dialogs {
         }
         Ok(id)
     }
+
+    fn sqlite_owner(&self, s: &Session) -> Result<(), String> {
+        if !self
+            .sqlite_map
+            .as_ref()
+            .is_some_and(|(project, index, name)| *project == s.opened && *index == s.project.active_map && *name == s.map().name)
+        {
+            return Err(tl!("The active project or map changed; reopen the SQLite dialog for the intended layer.").into());
+        }
+        Ok(())
+    }
+
+    fn sqlite_target(&self, s: &Session) -> Result<u32, String> {
+        self.sqlite_owner(s)?;
+        let id = self.sqlite_layer.ok_or_else(|| tl!("Choose a SQLite layer").to_string())?;
+        if !s.map().layer(id).is_some_and(|l| l.sqlite.is_some() && Some(l.instance_id()) == self.sqlite_instance) {
+            return Err(tl!("The selected SQLite layer is no longer available; choose a layer").to_string());
+        }
+        Ok(id)
+    }
 }
 
-/// Whether `error` is a target refusal from [`Dialogs::gpkg_target`], which a later valid
-/// target (Redo restoring the layer) makes stale. Save failures and other errors aren't.
-fn is_gpkg_target_error(error: &str) -> bool {
+/// Whether `error` is a target refusal from [`Dialogs::gpkg_target`] or [`Dialogs::sqlite_target`],
+/// which a later valid target (Redo restoring the layer) makes stale. Save failures and other
+/// errors aren't.
+fn is_source_target_error(error: &str) -> bool {
     [
         tl!("The active project or map changed; reopen the GeoPackage dialog for the intended layer."),
         tl!("Choose a GeoPackage layer"),
         tl!("The selected GeoPackage layer is no longer available; choose a layer"),
+        tl!("The active project or map changed; reopen the SQLite dialog for the intended layer."),
+        tl!("Choose a SQLite layer"),
+        tl!("The selected SQLite layer is no longer available; choose a layer"),
     ]
     .contains(&error)
 }
@@ -260,6 +301,9 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "gpkgAddLayer" => "Edit GeoPackage Table",
         "gpkgSave" => "Save to GeoPackage",
         "gpkgDiscard" => "Discard GeoPackage Edits",
+        "sqliteAddLayer" => "Edit SQLite Table",
+        "sqliteSave" => "Save to SQLite",
+        "sqliteDiscard" => "Discard SQLite Edits",
         "newConnection" => "New Connection",
         "editConnection" => "Edit Connection",
         "chooseConnection" => "Choose Connection",
@@ -405,6 +449,9 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
             "gpkgAddLayer" => close = gpkg_add_layer(app, ui),
             "gpkgSave" => close = gpkg_save(app, ui),
             "gpkgDiscard" => close = gpkg_discard(app, ui),
+            "sqliteAddLayer" => close = sqlite_add_layer(app, ui),
+            "sqliteSave" => close = sqlite_save(app, ui),
+            "sqliteDiscard" => close = sqlite_discard(app, ui),
             "newConnection" | "editConnection" => close = crate::connectionui::dialog(app, ui),
             "chooseConnection" => close = crate::connectionui::chooser(app, ui),
             "s3" => crate::s3ui::dialog(app, ui),
@@ -1443,69 +1490,88 @@ fn gpkg_add_layer(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
 /// A source-backed layer to save or discard the edits of, and what changed in it: its table
 /// and how many rows are new, changed and deleted (cached until the selection or session changes).
 fn source_layer_edits(app: &mut RustGisApp, ui: &mut egui::Ui, prefix: &'static str) {
-    if prefix == "gpkg"
-        && let Err(error) = app.dialogs.gpkg_owner(&app.session)
-    {
+    let owner_error = match prefix {
+        "gpkg" => app.dialogs.gpkg_owner(&app.session).err(),
+        "sqlite" => app.dialogs.sqlite_owner(&app.session).err(),
+        _ => None,
+    };
+    if let Some(error) = owner_error {
         app.dialogs.list.clear();
         app.dialogs.counted.clear();
         app.dialogs.error = Some(error);
         return;
     }
-    let layers: Vec<(u32, u64, String)> = app
-        .session
-        .map()
-        .layers
-        .iter()
-        .filter(|l| if prefix == "pg" { l.postgis.is_some() } else { l.gpkg.is_some() })
-        .map(|l| (l.id, l.instance_id(), l.name.clone()))
-        .collect();
+    let has = |l: &&rustgis_engine::map::Layer| match prefix {
+        "pg" => l.postgis.is_some(),
+        "gpkg" => l.gpkg.is_some(),
+        _ => l.sqlite.is_some(),
+    };
+    let layers: Vec<(u32, u64, String)> =
+        app.session.map().layers.iter().filter(has).map(|l| (l.id, l.instance_id(), l.name.clone())).collect();
+    let previous = match prefix {
+        "gpkg" => app.dialogs.gpkg_layer.zip(app.dialogs.gpkg_instance),
+        "sqlite" => app.dialogs.sqlite_layer.zip(app.dialogs.sqlite_instance),
+        _ => None,
+    };
     egui::Grid::new(("source_edits", prefix)).num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
         ui.label(tl!("Layer"));
-        let selected = if prefix == "gpkg" {
+        let selected = if prefix == "pg" {
+            app.dialogs.layer.clone()
+        } else {
             layers
                 .iter()
-                .find(|(id, instance, _)| Some(*id) == app.dialogs.gpkg_layer && Some(*instance) == app.dialogs.gpkg_instance)
+                .find(|(id, instance, _)| Some((*id, *instance)) == previous)
                 .map(|(id, _, name)| format!("{name} (#{id})"))
                 .unwrap_or_else(|| tl!("Choose a layer").to_string())
-        } else {
-            app.dialogs.layer.clone()
         };
-        let previous = app.dialogs.gpkg_layer.zip(app.dialogs.gpkg_instance);
         let mut selected_instance = previous;
         egui::ComboBox::from_id_salt(("source_edit_layer", prefix)).selected_text(selected).width(260.0).show_ui(ui, |ui| {
             for (id, instance, name) in &layers {
-                if prefix == "gpkg" {
-                    ui.selectable_value(&mut selected_instance, Some((*id, *instance)), format!("{name} (#{id})"));
-                } else {
+                if prefix == "pg" {
                     ui.selectable_value(&mut app.dialogs.layer, name.clone(), name);
+                } else {
+                    ui.selectable_value(&mut selected_instance, Some((*id, *instance)), format!("{name} (#{id})"));
                 }
             }
         });
-        if prefix == "gpkg" && selected_instance != previous {
-            app.dialogs.gpkg_layer = selected_instance.map(|(id, _)| id);
-            app.dialogs.gpkg_instance = selected_instance.map(|(_, instance)| instance);
+        if prefix != "pg" && selected_instance != previous {
+            if prefix == "gpkg" {
+                app.dialogs.gpkg_layer = selected_instance.map(|(id, _)| id);
+                app.dialogs.gpkg_instance = selected_instance.map(|(_, instance)| instance);
+            } else {
+                app.dialogs.sqlite_layer = selected_instance.map(|(id, _)| id);
+                app.dialogs.sqlite_instance = selected_instance.map(|(_, instance)| instance);
+            }
             app.dialogs.error = None;
         }
         ui.end_row();
-        let counted =
-            if prefix == "gpkg" { app.dialogs.gpkg_layer.map(|id| id.to_string()).unwrap_or_default() } else { app.dialogs.layer.clone() };
-        let invalid = if prefix == "gpkg" { app.dialogs.gpkg_target(&app.session).err() } else { None };
+        let target = match prefix {
+            "gpkg" => app.dialogs.gpkg_layer.zip(app.dialogs.gpkg_instance),
+            "sqlite" => app.dialogs.sqlite_layer.zip(app.dialogs.sqlite_instance),
+            _ => None,
+        };
+        let counted = if prefix == "pg" { app.dialogs.layer.clone() } else { target.map(|(id, _)| id.to_string()).unwrap_or_default() };
+        let invalid = match prefix {
+            "gpkg" => app.dialogs.gpkg_target(&app.session).err(),
+            "sqlite" => app.dialogs.sqlite_target(&app.session).err(),
+            _ => None,
+        };
         if invalid.is_some()
             || app.dialogs.counted != counted
-            || (prefix == "gpkg" && app.dialogs.counted_revision != Some(app.session.revision))
-            || (prefix == "gpkg" && app.dialogs.counted_instance != app.dialogs.gpkg_instance)
+            || (prefix != "pg" && app.dialogs.counted_revision != Some(app.session.revision))
+            || (prefix != "pg" && app.dialogs.counted_instance != target.map(|(_, instance)| instance))
         {
             app.dialogs.counted = counted;
-            app.dialogs.counted_instance = app.dialogs.gpkg_instance;
+            app.dialogs.counted_instance = target.map(|(_, instance)| instance);
             let result = if let Some(error) = invalid {
                 Err(error)
             } else {
-                let target = if prefix == "gpkg" { json!(app.dialogs.gpkg_layer) } else { json!(app.dialogs.layer) };
-                app.run(&format!("{prefix}.pendingEdits"), json!({"layer": target}))
+                let layer = if prefix == "pg" { json!(app.dialogs.layer) } else { json!(target.map(|(id, _)| id)) };
+                app.run(&format!("{prefix}.pendingEdits"), json!({"layer": layer}))
             };
             app.dialogs.list = match result {
                 Ok(v) => {
-                    if prefix == "gpkg" && app.dialogs.error.as_deref().is_some_and(is_gpkg_target_error) {
+                    if prefix != "pg" && app.dialogs.error.as_deref().is_some_and(is_source_target_error) {
                         app.dialogs.error = None;
                     }
                     vec![
@@ -1586,6 +1652,117 @@ fn gpkg_discard(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
     buttons(app, ui, "Discard", |app| {
         let id = app.dialogs.gpkg_target(&app.session)?;
         app.run("gpkg.discardEdits", json!({"layer": id})).map(|_| ())
+    })
+}
+
+/// Add an ordinary SQLite table, loaded whole for editing and saved back to it.
+fn sqlite_add_layer(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
+    ui.label(egui::RichText::new(tl!("Loads one table of an SQLite database on this computer (up to 100,000 rows) so its edits can be saved back to that table with Edit › Save to SQLite. Its geometry keeps the table's own storage; image fields are read from the file and never written. It needs an INTEGER PRIMARY KEY, or uses its rowid.")).weak());
+    let mut list = false;
+    egui::Grid::new("sqlite_add_layer").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+        let input_label = ui.label(tl!("File"));
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut app.dialogs.a).desired_width(260.0)).labelled_by(input_label.id);
+            #[cfg(not(target_arch = "wasm32"))]
+            if ui.button(tl!("Browse…")).clicked()
+                && let Some(path) = pick_open(&["sqlite", "sqlite3", "db"], tl!("SQLite database"))
+            {
+                app.dialogs.a = path;
+            }
+        });
+        ui.end_row();
+        let input_label = ui.label(tl!("Table"));
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("sqlite_table")
+                .selected_text(app.dialogs.c.clone())
+                .width(190.0)
+                .show_ui(ui, |ui| {
+                    for table in app.dialogs.list.clone() {
+                        ui.selectable_value(&mut app.dialogs.c, table.clone(), table);
+                    }
+                })
+                .response
+                .labelled_by(input_label.id);
+            list = ui.button(tl!("List Tables")).clicked();
+        });
+        ui.end_row();
+        let input_label = ui.label(tl!("Most rows"));
+        ui.add(egui::TextEdit::singleline(&mut app.dialogs.e).hint_text("100000").desired_width(280.0)).labelled_by(input_label.id);
+        ui.end_row();
+    });
+    if app.dialogs.listed.as_deref().is_some_and(|path| path != app.dialogs.a) {
+        app.dialogs.listed = None;
+        app.dialogs.list.clear();
+        app.dialogs.c.clear();
+        app.dialogs.info = None;
+    }
+    if list {
+        match app.run("info.fileLayers", json!({"path": app.dialogs.a})) {
+            Ok(v) => {
+                app.dialogs.list = v["layers"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(str::to_string)).collect();
+                app.dialogs.listed = Some(app.dialogs.a.clone());
+                app.dialogs.error = None;
+                app.dialogs.info = Some(crate::i18n::fmt("{n} tables", &[("n", &app.dialogs.list.len().to_string())]));
+            }
+            Err(e) => {
+                app.dialogs.listed = None;
+                app.dialogs.list.clear();
+                app.dialogs.c.clear();
+                app.dialogs.info = None;
+                app.dialogs.error = Some(e);
+            }
+        }
+    }
+    buttons(app, ui, "Load", |app| {
+        let mut p = json!({"path": app.dialogs.a.trim()});
+        if !app.dialogs.c.trim().is_empty() {
+            p["table"] = json!(app.dialogs.c.trim());
+        }
+        if !app.dialogs.e.trim().is_empty() {
+            let input = app.dialogs.e.trim();
+            let mut groups = input.split(',');
+            let first = groups.next().unwrap_or_default();
+            let grouped = first.len() != input.len();
+            if grouped
+                && (first.is_empty()
+                    || first.len() > 3
+                    || !first.bytes().all(|b| b.is_ascii_digit())
+                    || !groups.all(|group| group.len() == 3 && group.bytes().all(|b| b.is_ascii_digit())))
+            {
+                return Err(tl!("Most rows: a whole number").to_string());
+            }
+            let n: u64 = if grouped { input.replace(',', "").parse() } else { input.parse() }
+                .map_err(|_| tl!("Most rows: a whole number").to_string())?;
+            p["limit"] = json!(n);
+        }
+        app.run("sqlite.addLayer", p).map(|_| ())
+    })
+}
+
+/// Save a SQLite layer's edits to its table in one transaction.
+fn sqlite_save(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
+    ui.label(egui::RichText::new(tl!("Saves the layer's edits to its table in the SQLite file in one transaction. When a row you changed or deleted was changed or deleted in the file since it was loaded, nothing is saved and the rows are listed. Image fields stay as they are.")).weak());
+    source_layer_edits(app, ui, "sqlite");
+    buttons(app, ui, "Save", |app| {
+        let id = app.dialogs.sqlite_target(&app.session)?;
+        let r = app.run("sqlite.saveEdits", json!({"layer": id})).map(|_| ());
+        app.dialogs.counted.clear();
+        r
+    })
+}
+
+/// Reload a SQLite layer's rows as they are in the file.
+fn sqlite_discard(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
+    ui.label(
+        egui::RichText::new(tl!(
+            "Loads the layer's rows again as they are in the file now. Its edits that weren't saved are dropped (Undo brings them back)."
+        ))
+        .weak(),
+    );
+    source_layer_edits(app, ui, "sqlite");
+    buttons(app, ui, "Discard", |app| {
+        let id = app.dialogs.sqlite_target(&app.session)?;
+        app.run("sqlite.discardEdits", json!({"layer": id})).map(|_| ())
     })
 }
 

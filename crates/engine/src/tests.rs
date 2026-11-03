@@ -9041,6 +9041,158 @@ fn a_layer_loaded_whole_reads_pictures_from_its_file() {
     assert!(u.map().layer(id).unwrap().image(2, "photo").is_err());
 }
 
+/// An ordinary SQLite table of two points whose `photo` column holds a PNG (4×3): geometry in
+/// plain WKB, no metadata saying what it is.
+#[cfg(not(target_arch = "wasm32"))]
+fn picture_sqlite() -> (std::path::PathBuf, Vec<u8>) {
+    use image::ImageEncoder;
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png).write_image(&[0u8; 4 * 3 * 3], 4, 3, image::ExtendedColorType::Rgb8).unwrap();
+    let path = std::env::temp_dir().join(format!("rustgis-engine-sqlite-pictures-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.execute_batch("CREATE TABLE shots (id INTEGER PRIMARY KEY, geom BLOB, name TEXT, photo BLOB);").unwrap();
+    let tx = c.unchecked_transaction().unwrap();
+    for i in 1..=2 {
+        let geom = rustgis_data::wkb::encode(&rustgis_data::Geometry::Point(rustgis_geom::Coord::new(i as f64, 2.0)));
+        tx.execute("INSERT INTO shots VALUES (?1, ?2, ?3, ?4)", rusqlite::params![i, geom, format!("r{i}"), png]).unwrap();
+    }
+    tx.commit().unwrap();
+    (path, png)
+}
+
+/// A plain SQLite file is a data source like a GeoPackage: its first table loads, its picture
+/// column becomes an image field read from the file on demand, and the project keeps the file.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_sqlite_layer_reads_pictures_from_its_file() {
+    let (path, png) = picture_sqlite();
+    let mut s = Session::new(Project::default());
+    let r = s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    assert_eq!(r["streamed"], false, "{r}");
+    let id = r["layer"].as_u64().unwrap() as u32;
+    let l = s.map().layer(id).unwrap();
+    assert!(l.dataset.fields.iter().any(|f| f.ty == rustgis_data::FieldType::Image && f.name == "photo"));
+    assert_eq!(l.image(1, "photo").unwrap(), png);
+    assert_eq!(l.image(2, "photo").unwrap(), png);
+    // Saved, the file and table are kept (not the bytes): the pictures read again when asked.
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text})).unwrap();
+    assert_eq!(t.map().layer(id).unwrap().image(2, "photo").unwrap(), png);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// An ordinary SQLite table loaded for editing: new rows insert, changed rows update, deleted
+/// rows delete, images stay in the file, and rows changed elsewhere are conflicts, not
+/// overwritten.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn sqlite_edits_save_inserts_updates_and_deletes() {
+    use image::ImageEncoder;
+    use rustgis_data::{Coord, Geometry};
+
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png).write_image(&[0u8; 4 * 3 * 3], 4, 3, image::ExtendedColorType::Rgb8).unwrap();
+    let path = std::env::temp_dir().join(format!("rustgis-engine-sqlite-edit-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let db = {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch("CREATE TABLE places (id INTEGER PRIMARY KEY, name TEXT, lanes INTEGER, photo BLOB, geom BLOB);").unwrap();
+        let tx = c.unchecked_transaction().unwrap();
+        for i in 1..=3 {
+            let geom = rustgis_data::wkb::encode_single(&Geometry::Point(Coord::new(i as f64, 2.0))).unwrap();
+            tx.execute("INSERT INTO places VALUES (?1, ?2, ?3, ?4, ?5)", rusqlite::params![i, format!("n{i}"), i, png, geom]).unwrap();
+        }
+        tx.commit().unwrap();
+        c
+    };
+    let p = json!({"layer": "P"});
+    let mut s = Session::new(Project::default());
+    let loaded = s.run("sqlite.addLayer", &json!({"path": path.display().to_string(), "table": "places", "name": "P"})).unwrap();
+    assert_eq!(
+        (loaded["features"].as_u64(), loaded["matched"].as_u64(), loaded["skipped"].as_u64()),
+        (Some(3), Some(3), Some(0)),
+        "{loaded}"
+    );
+    assert_eq!(loaded["writable"], true);
+    let id = loaded["layer"].as_u64().unwrap() as u32;
+    let row_of = |s: &Session, key: u64| s.map().layer(id).unwrap().dataset.features.iter().position(|f| f.id == key).unwrap();
+    let counts = |s: &mut Session| {
+        let r = s.run("sqlite.pendingEdits", &p).unwrap();
+        (r["inserts"].as_u64().unwrap(), r["updates"].as_u64().unwrap(), r["deletes"].as_u64().unwrap())
+    };
+    assert_eq!(counts(&mut s), (0, 0, 0));
+    assert_eq!(s.run("sqlite.saveEdits", &p).unwrap()["saved"], false);
+    s.map_mut().editing.settings.enabled = true;
+
+    let r1 = row_of(&s, 1);
+    s.run("edit.setValue", &json!({"layer": "P", "row": r1, "field": "name", "value": "renamed"})).unwrap();
+    {
+        let r2 = row_of(&s, 2);
+        let l = s.map_mut().layer_mut(id).unwrap();
+        l.dataset.features[r2].geometry = Some(Geometry::Point(Coord::new(15.0, 25.0)));
+        l.touch_geometry();
+    }
+    let r3 = row_of(&s, 3);
+    s.map_mut().layer_mut(id).unwrap().selection = vec![r3];
+    s.active_layer = Some(id);
+    s.run("edit.delete", &json!({})).unwrap();
+    s.run(
+        "edit.addFeature",
+        &json!({"layer": "P", "geometry": {"type": "Point", "coordinates": [13, 22]},
+        "attributes": {"name": "new", "lanes": 4}}),
+    )
+    .unwrap();
+    assert_eq!(counts(&mut s), (1, 2, 1));
+
+    let r = s.run("sqlite.saveEdits", &p).unwrap();
+    assert_eq!((r["inserted"].as_u64(), r["updated"].as_u64(), r["deleted"].as_u64()), (Some(1), Some(2), Some(1)), "{r}");
+    assert_eq!(r["keys"], json!([4]));
+    assert_eq!(r["readOnly"], json!(["photo"]));
+    assert_eq!(counts(&mut s), (0, 0, 0));
+    let (name, lanes, photo): (String, i64, Vec<u8>) =
+        db.query_row("SELECT name, lanes, photo FROM places WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+    assert_eq!((name.as_str(), lanes, photo.as_slice()), ("renamed", 1, png.as_slice()));
+    let geom: Vec<u8> = db.query_row("SELECT geom FROM places WHERE id = 2", [], |r| r.get(0)).unwrap();
+    match rustgis_data::wkb::decode(&geom) {
+        Some(Geometry::Point(c)) => assert!((c.x - 15.0).abs() < 1e-9 && (c.y - 25.0).abs() < 1e-9, "{c:?}"),
+        other => panic!("reopened point: {other:?}"),
+    }
+    assert_eq!(db.query_row("SELECT count(*) FROM places WHERE id = 3", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    let (name, lanes): (String, i64) =
+        db.query_row("SELECT name, lanes FROM places WHERE id = 4", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!((name.as_str(), lanes), ("new", 4));
+    assert_eq!(db.query_row("SELECT count(*) FROM places", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+    // Images stay in the file and are read from it on demand, even for a loaded-for-editing layer.
+    assert_eq!(s.map().layer(id).unwrap().image(1, "photo").unwrap(), png);
+    assert!(s.map().layer(id).unwrap().image(4, "photo").is_err());
+
+    // A row changed by someone else is a conflict, never overwritten.
+    db.execute("UPDATE places SET name = 'theirs' WHERE id = 1", []).unwrap();
+    let r1 = row_of(&s, 1);
+    s.run("edit.setValue", &json!({"layer": "P", "row": r1, "field": "name", "value": "mine"})).unwrap();
+    let e = s.run("sqlite.saveEdits", &p).unwrap_err();
+    assert!(e.contains("row 1 was changed"), "{e}");
+    assert_eq!(db.query_row("SELECT name FROM places WHERE id = 1", [], |r| r.get::<_, String>(0)).unwrap(), "theirs");
+    assert_eq!(counts(&mut s), (0, 1, 0));
+    s.run("sqlite.discardEdits", &p).unwrap();
+    assert_eq!(counts(&mut s), (0, 0, 0));
+
+    // Pending inserts require the database file to be as it was loaded.
+    db.execute("UPDATE places SET name = 'again' WHERE id = 1", []).unwrap();
+    s.run(
+        "edit.addFeature",
+        &json!({"layer": "P", "geometry": {"type": "Point", "coordinates": [14, 23]},
+        "attributes": {"name": "fresh", "lanes": 5}}),
+    )
+    .unwrap();
+    let e = s.run("sqlite.saveEdits", &p).unwrap_err();
+    assert!(e.contains("changed since it was loaded"), "{e}");
+    assert_eq!(db.query_row("SELECT count(*) FROM places", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn tools_read_streamed_layers_whole() {
     let path = grid_fgb("tools", 50);

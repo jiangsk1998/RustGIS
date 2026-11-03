@@ -956,7 +956,7 @@ fn finish(conn: &Connection, layout: &Layout, extent: Extent) -> Result<()> {
     Ok(())
 }
 
-fn sql_value(v: &Value, ty: FieldType) -> rusqlite::types::Value {
+pub(crate) fn sql_value(v: &Value, ty: FieldType) -> rusqlite::types::Value {
     use rusqlite::types::Value as Sql;
     match (v, ty) {
         (Value::Null, _) => Sql::Null,
@@ -976,7 +976,7 @@ fn sql_value(v: &Value, ty: FieldType) -> rusqlite::types::Value {
 
 /// Pictures and other values among a column's first few non-NULL values (at most 64): whether a
 /// declared binary column really holds pictures.
-fn probe_pictures(conn: &Connection, table: &str, field: &str) -> (usize, usize) {
+pub(crate) fn probe_pictures(conn: &Connection, table: &str, field: &str) -> (usize, usize) {
     let sql = format!("SELECT {} FROM {} WHERE {} IS NOT NULL LIMIT 64", quote(field), quote(table), quote(field));
     let Ok(mut st) = conn.prepare(&sql) else { return (0, 0) };
     let Ok(rows) = st.query_map([], |r| {
@@ -994,7 +994,7 @@ fn probe_pictures(conn: &Connection, table: &str, field: &str) -> (usize, usize)
     (pictured, others)
 }
 
-fn value(v: ValueRef<'_>, ty: FieldType) -> Value {
+pub(crate) fn value(v: ValueRef<'_>, ty: FieldType) -> Value {
     match (v, ty) {
         (ValueRef::Null, _) => Value::Null,
         (ValueRef::Integer(i), FieldType::Boolean) => Value::Bool(i != 0),
@@ -1011,7 +1011,7 @@ fn value(v: ValueRef<'_>, ty: FieldType) -> Value {
 }
 
 /// An SQL identifier, quoted.
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
