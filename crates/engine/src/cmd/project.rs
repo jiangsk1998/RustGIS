@@ -204,6 +204,40 @@ fn reset(s: &mut Session, p: Project) {
     // nothing of the new project is fetched before.
     s.s3_pending.clear();
     crate::s3_connections::resolve_project_s3(s);
+    // A terrain saved on a DEM name two layers share draws the first of them: said, as the
+    // project opens (its layers keep their names).
+    let shared: Vec<(String, String)> = s
+        .project
+        .maps
+        .iter()
+        .filter_map(|m| match &m.view.terrain {
+            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer(n), .. })
+                if m.layers.iter().filter(|l| l.name.eq_ignore_ascii_case(n)).count() > 1 =>
+            {
+                Some((m.name.clone(), n.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    // One notice, with a count when several maps are so.
+    match shared.as_slice() {
+        [] => {}
+        [(map, dem)] => s.notify(
+            format!("{map}: its terrain's DEM name '{dem}' is shared by two layers, so the first of them gives the heights; rename one and turn Terrain on again"),
+            false,
+        ),
+        _ => {
+            let maps: Vec<String> = shared.iter().map(|(map, dem)| format!("{map} ('{dem}')")).collect();
+            s.notify(
+                format!(
+                    "{} maps have a terrain whose DEM name is shared by two layers, so the first of them gives the heights: {}; rename one and turn Terrain on again",
+                    shared.len(),
+                    maps.join(", ")
+                ),
+                false,
+            );
+        }
+    }
 }
 
 fn new(s: &mut Session, p: &Value) -> CmdResult {
@@ -411,9 +445,14 @@ fn info(s: &mut Session, p: &Value) -> CmdResult {
                     "id": l.id, "name": l.name, "type": l.geometry_type().label(), "features": l.dataset.features.len(),
                     "visible": l.visible, "renderer": l.renderer.kind_label(), "selected": l.selection.len(),
                     "definitionQuery": l.definition_query.as_deref().filter(|q| !q.trim().is_empty()),
-                    "labels": (l.labels.enabled && !l.labels.default.field.is_empty()).then_some(l.labels.default.field.as_str()),
+                    // The text expression it labels by while that reads, as the map draws, else its field.
+                    "labels": l.labels.enabled.then(|| {
+                        let d = &l.labels.default;
+                        d.by.text.as_deref().filter(|t| rustgis_data::query::parse(t, &l.dataset).is_ok())
+                            .or(Some(d.field.as_str()).filter(|f| !f.is_empty()))
+                    }).flatten(),
                     "labelClasses": label_classes_set(&l.labels)
-                        .then(|| l.labels.in_order().map(|c| json!({"name": c.name, "where": c.where_, "field": c.field, "visible": c.visible})).collect::<Vec<_>>()),
+                        .then(|| l.labels.in_order().map(|c| json!({"name": c.name, "where": c.where_, "field": c.field, "text": c.by.text, "visible": c.visible})).collect::<Vec<_>>()),
                     "fields": field_list(&l.dataset.fields),
                 }),
             };

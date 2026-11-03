@@ -11,6 +11,7 @@ pub mod geolibre;
 mod geometry_kinds;
 pub mod globe;
 pub mod graphics;
+pub mod label_by;
 pub mod layout;
 pub mod lod;
 pub mod palette;
@@ -35,8 +36,8 @@ pub use color::{Ramp, RampGroup, Rgba};
 pub use globe::{Globe, Projection};
 pub use raster::{RasterDefaults, RasterLayer, RasterRenderer, RasterStyle, Resampling, Stretch};
 pub use symbology::{
-    ClassMethod, FontName, Glyph, LabelBackground, LabelClass, LabelKey, LabelMatcher, LabelPlacement, Labeling, LineCap, LineJoin,
-    LineMark, LineMarkers, LineStroke, Marker, MarkerRotation, Placements, Renderer, Symbol,
+    ClassMethod, Classer, FontName, Glyph, LabelBackground, LabelClass, LabelKey, LabelMatcher, LabelPlacement, Labeling, LineCap,
+    LineJoin, LineMark, LineMarkers, LineStroke, Marker, MarkerRotation, Placements, Renderer, Symbol,
 };
 pub use tiles::{TileKind, TileLayer};
 
@@ -96,6 +97,16 @@ impl Basemap {
             Basemap::Blank => (Rgba::rgb(0xFF, 0xFF, 0xFF), Rgba::rgb(0xFF, 0xFF, 0xFF), Rgba::new(0, 0, 0, 0), Rgba::new(0, 0, 0, 0)),
         }
     }
+}
+
+/// How No Fill hid a layer's polygon fills ([`Layer::no_fill`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoFill {
+    /// One transparent fill over every symbol: on streamed layers and layers with points or lines,
+    /// whose symbols those share.
+    Override,
+    /// Every symbol's fill made transparent.
+    Symbols,
 }
 
 /// A layer: a dataset drawn with a renderer and labels.
@@ -158,6 +169,10 @@ pub struct Layer {
     /// [`fills::FillLayer`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "fills::de_fills")]
     pub fill_layers: Vec<fills::FillLayer>,
+    /// How No Fill hides the polygon fills, while it is on: a new symbology, a fill colour or a
+    /// fill in the symbol's colour shows them again. A fill colour chosen transparent isn't this.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "de_no_fill")]
+    pub no_fill: Option<NoFill>,
     /// Draws the stacked strokes in levels (symbol levels): every feature's strokes of one
     /// [`LineStroke::level`] before any of the next, so road casings join under the cores
     /// instead of cutting across them where lines meet.
@@ -414,6 +429,7 @@ impl Layer {
             extrusion: None,
             line_strokes: Vec::new(),
             fill_layers: Vec::new(),
+            no_fill: None,
             stroke_levels: false,
             marker_rotation: None,
             symbol_by: Default::default(),
@@ -729,6 +745,16 @@ impl Layer {
         (symbol, strokes.unwrap_or(&self.line_strokes), fills.unwrap_or(&self.fill_layers))
     }
 
+    /// [`Layer::style_and_fills`] with its renderer's class expression compiled (`c`, from
+    /// [`Renderer::classer`]), as a drawing of many features takes it.
+    pub fn style_and_fills_with(&self, row: usize, c: &Classer) -> (Symbol, &[LineStroke], &[fills::FillLayer]) {
+        if self.graphics || self.renderer.expression().is_none() {
+            return self.style_and_fills(row);
+        }
+        let (symbol, strokes, fills) = self.renderer.style_fills_with(&self.dataset, row, c);
+        (symbol, strokes.unwrap_or(&self.line_strokes), fills.unwrap_or(&self.fill_layers))
+    }
+
     /// Whether some feature may be drawn with stacked fills ([`Layer::fills`]).
     pub fn has_fills(&self) -> bool {
         !self.graphics && (!self.fill_layers.is_empty() || self.renderer.has_class_fills())
@@ -1030,10 +1056,10 @@ impl Layer {
         let query = self.definition_query.as_deref().is_some_and(|q| !q.trim().is_empty());
         let timed = self.time.as_ref().is_some_and(|t| t.window.is_some());
         if !query && !timed && self.display_filters.is_empty() {
-            return (!self.dataset.features.is_empty()).then(|| self.renderer.legend_for(&self.dataset, &[]));
+            return (!self.dataset.features.is_empty()).then(|| self.renderer.legend_at(&self.dataset, &[], Some(scale)));
         }
         let rows = self.drawn_rows(scale);
-        rows.contains(&true).then(|| self.renderer.legend_for(&self.dataset, &rows))
+        rows.contains(&true).then(|| self.renderer.legend_at(&self.dataset, &rows, Some(scale)))
     }
 
     /// Rows passing the definition query (all rows when none or invalid).
@@ -1266,6 +1292,9 @@ pub struct Map {
     pub body: String,
     #[serde(default)]
     next_layer_id: u32,
+    /// Process-local identity, kept by undo snapshots but never stored in a project.
+    #[serde(skip, default = "next_layer_instance")]
+    instance_id: u64,
 }
 
 fn earth() -> String {
@@ -1372,7 +1401,18 @@ impl Map {
             time: None,
             body: earth(),
             next_layer_id: 1,
+            instance_id: next_layer_instance(),
         }
+    }
+
+    /// Identifies this live map, whatever its name or place among the project's maps.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
+    /// Starts a distinct live map after copying one. Undo snapshots keep the original identity.
+    pub fn renew_instance_id(&mut self) {
+        self.instance_id = next_layer_instance();
     }
 
     /// Every address the map keeps to read its data again (service groups and their layers'
@@ -2665,6 +2705,21 @@ pub const REFERENCE_SCALES: (f64, f64) = (1.0, 1e9);
 /// far in, its lines would otherwise be drawn thousands of pixels wide.
 pub const SIZE_FACTORS: (f64, f64) = (0.01, 32.0);
 
+/// A [`Layer::no_fill`] this version doesn't know (a later variant, another type, or edited by
+/// hand) reads as off, rather than failing the whole project.
+fn de_no_fill<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<NoFill>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Read {
+        Known(NoFill),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Option::<Read>::deserialize(d)? {
+        Some(Read::Known(how)) => Some(how),
+        Some(Read::Other(_)) | None => None,
+    })
+}
+
 /// Reads a layer's reference scale as `layer.referenceScale` would leave it: one out of
 /// [`REFERENCE_SCALES`] (or not a number) is none. A project file is hostile input.
 fn de_reference_scale<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
@@ -2929,6 +2984,28 @@ mod tests {
     }
 
     #[test]
+    fn no_fill_is_saved_only_when_on_and_an_unknown_one_reads_as_off() {
+        let mut l = Layer::new(1, Dataset::new("parcels", GeometryType::Polygon, vec![]));
+        assert!(!serde_json::to_string(&l).unwrap().contains("no_fill"));
+        for how in [NoFill::Override, NoFill::Symbols] {
+            l.no_fill = Some(how);
+            let text = serde_json::to_string(&l).unwrap();
+            assert_eq!(serde_json::from_str::<Layer>(&text).unwrap().no_fill, Some(how));
+        }
+        let mut v = serde_json::to_value(&l).unwrap();
+        for unknown in [
+            serde_json::json!("Later"),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!({"Override": 1}),
+            serde_json::Value::Null,
+        ] {
+            v["no_fill"] = unknown.clone();
+            assert_eq!(serde_json::from_value::<Layer>(v.clone()).unwrap().no_fill, None, "{unknown}");
+        }
+    }
+
+    #[test]
     fn hostile_class_strokes_in_a_project_are_brought_into_range() {
         // The same for a class's own strokes, Unique Values' (and <all other values>') and
         // Graduated Colors'; a class listed with none is dropped.
@@ -2950,6 +3027,7 @@ mod tests {
             other_strokes: wild.clone(),
             class_fills: Default::default(),
             other_fills: Vec::new(),
+            expression: None,
         };
         let back: Layer = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         let Renderer::Unique { class_strokes, other_strokes, .. } = &back.renderer else { panic!("unique renderer expected") };
@@ -3426,6 +3504,7 @@ mod tests {
             other_strokes: Vec::new(),
             class_fills: Default::default(),
             other_fills: Vec::new(),
+            expression: None,
         };
         let labels = |l: &Layer, scale| l.shown_legend(scale).map(|v| v.into_iter().map(|e| e.label).collect::<Vec<_>>());
         assert_eq!(labels(l, 1e6), Some(vec!["1".to_string(), "2".to_string()]), "no 9, no <all other values>");

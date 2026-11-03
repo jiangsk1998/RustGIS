@@ -1930,6 +1930,25 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
         });
     });
     group(ui, "Scene", |ui| {
+        let on = v.terrain.is_some();
+        // The active DEM by name, so a recorded step replays on it, not on whatever is active then.
+        let dem =
+            app.session.active_layer.and_then(|id| app.session.map().layer(id)).filter(|l| l.raster.is_some()).map(|l| l.name.clone());
+        big(
+            ui,
+            app,
+            "relief",
+            "Terrain",
+            "Drape the map over the heights of the active raster layer (a DEM, in metres), and tilt the map to see the relief. Click again to flatten it.",
+            "map.terrain",
+            match (on, dem) {
+                (true, _) => json!({"off": true}),
+                (false, Some(layer)) => json!({"layer": layer}),
+                (false, None) => json!({}),
+            },
+            on,
+            false,
+        );
         col(ui, |ui| {
             small(
                 ui,
@@ -2101,16 +2120,28 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 app.ui.right == Some(RightPane::Labeling),
             );
         });
-        small(
-            ui,
-            app,
-            "table",
-            "Attribute Table",
-            "Open the selected layer's table.",
-            "table.open",
-            Value::Null,
-            app.session.table_layer.is_some(),
-        );
+        col(ui, |ui| {
+            small(
+                ui,
+                app,
+                "table",
+                "Attribute Table",
+                "Open the selected layer's table.",
+                "table.open",
+                Value::Null,
+                app.session.table_layer.is_some(),
+            );
+            small(
+                ui,
+                app,
+                "identify",
+                "Diagnostics",
+                "Review errors, warnings, information and failed network requests from this session.",
+                "ui.pane.diagnosticLog",
+                Value::Null,
+                app.ui.right == Some(RightPane::DiagnosticLog),
+            );
+        });
     });
     group(ui, "Navigation", |ui| {
         big(ui, app, "zoom_world", "World", "Zoom to the whole world.", "map.zoomWorld", Value::Null, false, false);

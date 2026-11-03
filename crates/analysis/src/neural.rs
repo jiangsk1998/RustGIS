@@ -260,7 +260,12 @@ pub fn train(
     let epochs = epochs.clamp(1, MAX_EPOCHS).min(((MAX_WORK / per_epoch) as usize).max(1));
     let (lr, momentum, batch) = (0.05f32, 0.9f32, 32usize);
     let mut vel: Vec<(Vec<f32>, Vec<f32>)> = layers.iter().map(|l| (vec![0.0; l.w.len()], vec![0.0; l.b.len()])).collect();
-    for _ in 0..epochs {
+    crate::control::begin(epochs);
+    for epoch in 0..epochs {
+        if crate::control::cancelled() {
+            break;
+        }
+        crate::control::reached(epoch);
         for i in (1..fit.len()).rev() {
             let j = rng.below(i + 1);
             fit.swap(i, j);
@@ -354,11 +359,12 @@ pub fn classify(r: &Raster, model: &Mlp, nodata: f32) -> Result<(Vec<f32>, Vec<f
         return Err(format!("{} has no band {}", r.name, b + 1));
     }
     let (w, h) = (r.width as i64, r.height as i64);
-    let n = (w * h).max(0) as usize;
-    let mut class = Vec::with_capacity(n);
-    let mut prob = Vec::with_capacity(n);
+    let (mut class, mut prob) = (crate::rasterops::grid(w as usize, h as usize)?, crate::rasterops::grid(w as usize, h as usize)?);
     let mut x = vec![0.0f32; model.bands.len()];
+    crate::control::begin(h as usize);
     for row in 0..h {
+        crate::control::check()?;
+        crate::control::reached(row as usize);
         for col in 0..w {
             // A non-finite value is treated as no data.
             let ok = model.bands.iter().zip(x.iter_mut()).all(|(b, xv)| match r.value(*b, col, row).filter(|v| v.is_finite()) {

@@ -9,6 +9,10 @@ One expression language serves every place that reads values from features:
   the field after conversion to the field's type.
 - [Symbols by expression](cartography.md#symbols-by-expression) take a value per feature: a
   marker's size, the fill and outline colours, the outline width and a marker's angle.
+- [Labels by expression](cartography.md#labeling) take a label class's text, size, colour and
+  angle per feature.
+- [Unique Values](cartography.md) can class features by an expression's value instead of a
+  field's.
 
 ```sql
 pop_est > 100000000 AND continent = 'Asia'
@@ -16,6 +20,7 @@ name LIKE 'S%' OR iso_a3 IN ('FRA', 'DEU', 'ITA')
 "name" || ' (' || to_string(round(pop_est / 1e6)) || ' M)'
 CASE WHEN pop_est > 1e8 THEN 'large' WHEN pop_est > 1e7 THEN 'medium' ELSE 'small' END
 scale_linear(pop_est, 0, 1e9, 2, 12)
+area('ac') BETWEEN 1 AND 5 AND zoning = 'R-1'
 ```
 
 ## Grammar
@@ -67,9 +72,11 @@ operator: write `a < b AND b < c`, not `a < b < c`.
 | `'text'`, `'it''s'` | Text in single quotes; two quotes stand for one |
 | `TRUE`, `FALSE`, `NULL` | Booleans and the missing value |
 | `pop_est`, `"Pop Est"`, `!Pop Est!` | A field, by name, ignoring letter case; quote a name with spaces, punctuation or the name of a keyword (`"OR"`, `"null"`) |
-| `@map_scale`, `$scale` | The scale denominator of the map being drawn: set in [symbols by expression](cartography.md#symbols-by-expression), null in queries and Calculate Field |
+| `@map_scale`, `$scale` | The scale denominator of the map being drawn: set in [symbols](cartography.md#symbols-by-expression), [labels](cartography.md#labeling) and Unique Values classes by expression, null in queries and Calculate Field |
 | `@row_number` | The feature's position in the layer, from 1 |
 | `$id` | The feature's id |
+| `$area`, `$perimeter` | A polygon's area in square metres (holes subtract) and the length of its rings in metres |
+| `$length` | A line's length in metres |
 
 An unknown field, variable or function is an error that names it.
 
@@ -130,6 +137,17 @@ Rules shared by all of them:
 | `replace(s, find, with)` | Every `find` in `s` replaced by `with` |
 | `concat(a, b, …)` | The values joined as text, nulls skipped |
 | `color_rgb(r, g, b)`, `color_rgba(r, g, b, a)` | A colour as the text `'r,g,b'` or `'r,g,b,a'`, each channel 0–255 |
+| `area([unit])` | A polygon's area in `'m2'` (the default), `'km2'`, `'ha'`, `'ac'`, `'ft2'` or `'mi2'` |
+| `perimeter([unit])` | The length of a polygon's rings in `'m'` (the default), `'km'`, `'ft'` or `'mi'` |
+| `line_length([unit])` | A line's length, in the same units as `perimeter` |
+
+Areas and lengths are measured on the WGS 84 ellipsoid, as
+[Calculate Geometry](editing.md) in the attribute table measures them, whatever
+the layer's coordinate system (with the same
+[two exceptions](analysis.md#geoprocessing-tools), a ring with a full-turn edge and one
+winding around a pole). On a feature with no geometry, or coordinates that aren't
+longitudes and latitudes, they are null. Measuring another kind of layer (`$area` on lines), or a
+unit that isn't one of those, is an error.
 
 ## Limits
 

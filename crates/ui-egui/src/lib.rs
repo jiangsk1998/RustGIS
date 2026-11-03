@@ -27,6 +27,7 @@ mod connectionui;
 mod connectui;
 mod cswui;
 mod cubesui;
+mod diagnosticlog;
 mod dialogs;
 mod docpanes;
 mod earthaccessui;
@@ -487,6 +488,8 @@ pub enum RightPane {
     /// A Zarr variable's time series at points clicked on the map (#555).
     TimeSeries,
     Diagnostics,
+    /// Session-local troubleshooting messages, separate from the performance monitor.
+    DiagnosticLog,
     Infographics,
     Report,
     Presentation,
@@ -545,6 +548,9 @@ pub struct UiState {
     pub right: Option<RightPane>,
     /// The right panes open as tabs, in the order they were opened (#303).
     pub right_open: Vec<RightPane>,
+    /// The Diagnostics pane's filter (it also picks what **Copy diagnostics** copies).
+    pub diagnostic_filter: rustgis_engine::data::diagnostics::Filter,
+    diagnostic_snapshot: Option<(u64, Vec<rustgis_engine::data::diagnostics::Record>)>,
     /// The Web Data service the Web Data pane shows (a `ui.dialog` name, see
     /// `panes::web_data_name`).
     pub web_data: &'static str,
@@ -777,6 +783,8 @@ impl Default for UiState {
             left: Some(LeftPane::Contents),
             right: None,
             right_open: Vec::new(),
+            diagnostic_filter: rustgis_engine::data::diagnostics::Filter::All,
+            diagnostic_snapshot: None,
             web_data: "opendata",
             dark: false,
             measurement_imperial: false,
@@ -1179,7 +1187,12 @@ impl RustGisApp {
             panes::start_geolibre_load(&mut self);
         }
         // Plugins the web app installed in earlier visits (the desktop loads its plugins folder).
-        pluginsui::restore(&mut self);
+        // Their fetches (the blocklist, each plugin) are this session's: a failure is recorded
+        // in its Diagnostics.
+        {
+            let _diagnostics = self.session.diagnostics.enter();
+            pluginsui::restore(&mut self);
+        }
         // A GeoLibre runner located earlier (Locate… in the Tools pane).
         if let Some(path) = self.services.load_pref.as_ref().and_then(|load| load("geolibre_runner")).filter(|p| !p.is_empty())
             && let Err(e) = self.session.run("gp.setGeolibre", &json!({"path": path}))
@@ -1730,6 +1743,7 @@ impl RustGisApp {
 
     /// Runs a command by id: `ui.*` here, everything else in the engine.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        let _diagnostics = self.session.diagnostics.enter();
         if !matches!(id, "ui.menu" | "ui.ribbon" | "ui.language" | "ui.worldview") {
             self.ui.ribbon_peek = false;
         }
@@ -1749,6 +1763,7 @@ impl RustGisApp {
         // of another, so it ends when the open layout changes (or layouts come and go).
         let open_layout = |app: &Self| (app.session.active_layout, app.session.project.layouts.len());
         let layout_before = open_layout(self);
+        let notice_mark = self.session.notice_mark();
         // A plugin's command that adds data by address doesn't freeze the app: the download is
         // left for the frame loop (`ui.addUrl`), as in the browser.
         let mut r = if id.starts_with("ui.") {
@@ -1764,6 +1779,11 @@ impl RustGisApp {
         }
         if let Err(e) = &r {
             log::info!("{id}: {e}");
+            // UI-only failures can return before an engine command emits a notice.
+            let text = rustgis_engine::data::diagnostics::Redacted::new(e);
+            if !self.session.notices_since(notice_mark).iter().any(|notice| notice.error && notice.text == text.as_str()) {
+                self.session.notify_redacted(text, true);
+            }
         }
         // Commands can replace the project, switch maps or change the renderer while the pane
         // is closed. A field picked for the old context must not overwrite the new renderer.
@@ -1851,6 +1871,19 @@ impl RustGisApp {
     /// layer for Add Data, a service's), and a layer the command names is its own.
     /// Also whether another layer has that name, so the step would replay on the first of them.
     fn layer_acted_on(&mut self, id: &str, params: &Value) -> Option<(String, bool)> {
+        // Terrain with nothing named, while none is on, takes the active raster: named, so the
+        // step replays on that DEM (a change of exaggeration on a terrain already on names none).
+        if id == "map.terrain" {
+            let named = ["layer", "tiles"].iter().any(|k| params.get(*k).is_some_and(|v| !v.is_null()))
+                || params.get("off").and_then(serde_json::Value::as_bool) == Some(true);
+            let map = self.session.map();
+            if named || map.view.terrain.is_some() {
+                return None;
+            }
+            let name = self.session.active_layer.and_then(|l| map.layer(l)).filter(|l| l.raster.is_some()).map(|l| l.name.clone())?;
+            let shared = map.layers.iter().filter(|l| l.name.eq_ignore_ascii_case(&name)).count() > 1;
+            return Some((name, shared));
+        }
         let spec = self.session.registry.get(id).filter(|c| c.mutates && params.get("layer").is_none_or(Value::is_null)).copied()?;
         if !spec.param_keys().is_some_and(|k| k.contains(&"layer")) {
             return None;
@@ -1874,6 +1907,20 @@ impl RustGisApp {
     /// made.
     /// `active` is the active layer's name from [`Self::layer_acted_on`], read before it ran.
     fn record_step(&mut self, id: &str, params: &Value, active: Option<(String, bool)>) {
+        if self.ws.recording.is_none() {
+            return;
+        }
+        // A tool run in the background is applied by `gp.finish`, whose run id means nothing to a
+        // replay: the step is the run itself, `gp.run` with its tool and parameters, from the
+        // history entry it has just added.
+        let finished;
+        let (id, params) = if id == "gp.finish" {
+            let Some(h) = self.session.project.gp_history.last().filter(|h| !h.id.is_empty()) else { return };
+            finished = json!({"tool": h.id, "params": h.params});
+            ("gp.run", &finished)
+        } else {
+            (id, params)
+        };
         let Some(steps) = self.ws.recording.as_mut() else { return };
         // Undo doesn't take back a recorded step (the undo history and the recording don't line
         // up step for step): say how to.
@@ -2991,6 +3038,7 @@ impl RustGisApp {
             "ui.pane.profile" => toggle_right(&mut self.ui, RightPane::Profile),
             "ui.pane.timeSeries" => toggle_right(&mut self.ui, RightPane::TimeSeries),
             "ui.pane.diagnostics" => toggle_right(&mut self.ui, RightPane::Diagnostics),
+            "ui.pane.diagnosticLog" => toggle_right(&mut self.ui, RightPane::DiagnosticLog),
             "ui.pane.infographics" => toggle_right(&mut self.ui, RightPane::Infographics),
             "ui.pane.report" => toggle_right(&mut self.ui, RightPane::Report),
             "ui.pane.presentation" => toggle_right(&mut self.ui, RightPane::Presentation),
@@ -3240,6 +3288,7 @@ impl RustGisApp {
                 let ext = if ext == "shp" { "zip".to_string() } else { ext };
                 let name = format!("{}.{ext}", l.name);
                 let notes = rustgis_engine::data::export_notes([(ds, l.extent())], &name, crs);
+                let names_note = if ext == "zip" { io::shapefile_names_note(&ds.fields, &name) } else { None };
                 if left_out > 0 {
                     self.session.notify(format!("{name}: {left_out} features without drawable geometry were left out"), false);
                 }
@@ -3247,7 +3296,7 @@ impl RustGisApp {
                     self.session.notify(format!("{name}: no .prj written, as {} has no WKT form", crs.label()), false);
                 }
                 if self.download(&name, bytes) {
-                    for note in notes {
+                    for note in notes.into_iter().chain(names_note) {
                         self.session.notify(note, false);
                     }
                 }
@@ -3708,6 +3757,7 @@ impl RustGisApp {
 
     /// Per-frame work that doesn't draw (theme, fonts, files that arrived).
     pub fn logic(&mut self, ctx: &egui::Context) {
+        let _diagnostics = self.session.diagnostics.enter();
         // The MCP relay: what attached agents sent runs here, on this session, before the frame
         // draws (Session lives on this thread; the listener only queues messages).
         #[cfg(not(target_arch = "wasm32"))]
@@ -3754,6 +3804,8 @@ impl RustGisApp {
         rustgis_engine::plugins::set_language(self.lang().code());
         panes::poll_geolibre(self, ctx);
         panes::poll_plugin_run(self, ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        panes::poll_tool_run(self, ctx);
         self.poll_downloads();
         let _ = self.deliver_gp_files(Ok(Value::Null));
         // A value picked under Dynamic Text lasts while the text tool does, however the tool
@@ -3959,6 +4011,7 @@ impl RustGisApp {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        let _diagnostics = self.session.diagnostics.enter();
         let ctx = ui.ctx().clone();
         // Fonts installed by `logic` take effect on the next frame.
         if self.fonts_frames < 2 {
@@ -4159,6 +4212,24 @@ mod record_tests {
     use super::{DEFAULTS_TO_ACTIVE_LAYER, RustGisApp};
     use serde_json::json;
 
+    /// Terrain run with nothing named (from command search) records the DEM it took, so the
+    /// step replays on it; a change of exaggeration on a terrain already on records none.
+    #[test]
+    fn a_terrain_step_names_the_dem_it_took() {
+        let mut app = RustGisApp::with_sample();
+        let grid = "bmNvbHMgMgpucm93cyAyCnhsbGNvcm5lciAwCnlsbGNvcm5lciAwCmNlbGxzaXplIDEKTk9EQVRBX3ZhbHVlIC05OTk5CjEgMgozIDQK";
+        app.session.run("layer.addDataBytes", &json!({"fileName": "grid.asc", "data": grid})).unwrap();
+        let dem = app.session.map().layers.iter().find(|l| l.raster.is_some()).map(|l| (l.id, l.name.clone())).unwrap();
+        app.session.active_layer = Some(dem.0);
+        app.ws.recording = Some(Vec::new());
+        app.run("map.terrain", serde_json::Value::Null).unwrap();
+        app.run("map.terrain", json!({"exaggeration": 2})).unwrap();
+        let steps = app.ws.recording.clone().unwrap();
+        let layers: Vec<Option<&serde_json::Value>> =
+            steps.iter().filter(|s| s.command == "map.terrain").map(|s| s.params.get("layer")).collect();
+        assert_eq!(layers, [Some(&json!(dem.1)), None]);
+    }
+
     /// Every command with an optional `layer` either needs an active layer to be enabled, defaults
     /// to it (`DEFAULTS_TO_ACTIVE_LAYER`), or reads `layer` as something else: a recorded step
     /// names the active layer for the first two only.
@@ -4248,6 +4319,30 @@ mod record_tests {
         assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
     }
 
+    /// A background run's `gp.finish` is recorded as the `gp.run` it finished.
+    #[test]
+    fn a_tool_finished_in_the_background_is_recorded_as_its_run() {
+        let mut app = RustGisApp::with_sample();
+        app.ws.recording = Some(Vec::new());
+        app.session.project.gp_history.push(rustgis_engine::GpRecord {
+            tool: "Buffer".into(),
+            id: "buffer".into(),
+            params: json!({"input": "Cities", "distance": 50}),
+            command: None,
+            at: 0,
+            ok: true,
+            messages: Vec::new(),
+            millis: 0,
+            outputs: Vec::new(),
+        });
+        app.record_step("gp.finish", &json!({"id": 7}), None);
+        let steps = app.ws.recording.as_deref().unwrap_or_default();
+        assert_eq!(
+            steps.iter().map(|s| (s.command.as_str(), s.params.clone())).collect::<Vec<_>>(),
+            [("gp.run", json!({"tool": "buffer", "params": {"input": "Cities", "distance": 50}}))]
+        );
+    }
+
     /// A step keeping a plain `key` is recorded, and that is said once a recording.
     #[test]
     fn a_kept_key_is_said_once() {
@@ -4334,6 +4429,42 @@ mod download_service_tests {
         assert!(!app.download("archive.pmtiles", vec![1, 2, 3]));
         assert!(app.session.notices.iter().any(|n| n.error && n.text.contains("browser rejected download")));
         assert!(!app.session.notices.iter().any(|n| n.text.contains("Downloaded")));
+    }
+
+    /// The web app's Shapefile download says which field names it changed, once the browser takes
+    /// the file; names that fit, other formats and a refused download say nothing of them.
+    #[test]
+    fn shapefile_download_says_which_field_names_it_changed() {
+        use rustgis_engine::data::{Dataset, Field, FieldType, Geometry, GeometryType, Value};
+        use rustgis_engine::geom::Coord;
+        let changed = |app: &RustGisApp| app.session.notices.iter().filter(|n| n.text.contains("changed to fit a Shapefile")).count();
+        let with = |accept: bool| {
+            let download: Box<dyn Fn(&str, Vec<u8>) -> Result<(), String>> =
+                if accept { Box::new(|_, _| Ok(())) } else { Box::new(|_, _| Err("browser rejected download".into())) };
+            let mut app = RustGisApp::with_sample().with_services(Services { download: Some(download), ..Default::default() });
+            let mut ds = Dataset::new("Sites", GeometryType::Point, vec![Field::new("population_2020", FieldType::Integer)]);
+            ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Int(1)]);
+            let id = app.session.map_mut().add_dataset(ds);
+            app.session.active_layer = Some(id);
+            app
+        };
+        let mut app = with(true);
+        app.run("ui.exportLayer", json!({"format": "shp"})).unwrap();
+        assert_eq!(changed(&app), 1);
+        assert!(app.session.notices.iter().any(|n| n.text
+            == "Sites.zip: 1 field name was changed to fit a Shapefile (10 bytes at most, unique ignoring case): \
+                'population_2020' → 'population'"));
+        app.run("ui.exportLayer", json!({"format": "geojson"})).unwrap();
+        assert_eq!(changed(&app), 1, "GeoJSON keeps the name");
+        let mut app = with(false);
+        let _ = app.run("ui.exportLayer", json!({"format": "shp"}));
+        assert!(app.session.notices.iter().any(|n| n.error && n.text.contains("browser rejected download")));
+        assert_eq!(changed(&app), 0, "nothing was downloaded");
+        let mut app = with(true);
+        let countries = app.session.map().layers.iter().find(|l| l.name == "Countries").map(|l| l.id);
+        app.session.active_layer = countries;
+        app.run("ui.exportLayer", json!({"format": "shp"})).unwrap();
+        assert_eq!(changed(&app), 0, "the sample's names fit");
     }
 
     #[test]

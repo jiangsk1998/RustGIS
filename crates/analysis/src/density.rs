@@ -167,7 +167,12 @@ fn accumulate_density<F>(
 ) where
     F: Fn(f64, f64) -> f64,
 {
-    for &(p, wgt) in points {
+    crate::control::begin(points.len());
+    for (i, &(p, wgt)) in points.iter().enumerate() {
+        if crate::control::cancelled() {
+            return;
+        }
+        crate::control::reached(i);
         if wgt <= 0.0 || !wgt.is_finite() || !p.is_finite() {
             continue;
         }
@@ -277,7 +282,9 @@ pub fn kernel_density(
     let gt = GeoTransform { origin_x, origin_y, pixel_width: cell_size, pixel_height: -cell_size };
 
     // Accumulate in f64 to avoid precision loss when many point contributions overlap
-    let mut grid = vec![0.0f64; total_cells];
+    let mut grid = crate::rasterops::new_band(w, h_rows, 0.0f64)?;
+    // (The output's room too, before the work: a grid that can't be held fails first.)
+    let mut grid_f32 = crate::rasterops::grid(w, h_rows)?;
 
     match kernel {
         KernelType::Quartic => {
@@ -308,7 +315,6 @@ pub fn kernel_density(
         }
     }
 
-    let mut grid_f32 = Vec::with_capacity(total_cells);
     for d in grid {
         let val = d as f32;
         if !val.is_finite() {

@@ -57,6 +57,19 @@ Open a tool from **Analyze › Portal › Feature Analysis** or **Raster Analysi
 which searches every tool) or Command Search. Fill in its parameters and click **Run**: new
 layers or tables are added to the project; selection tools select existing rows and Calculate
 Geometry Attributes updates the input layer. Each run is listed under **Analyze › History**.
+
+In the desktop app a tool runs in the background, so the map and the rest of the window stay in
+use. While it runs, the Tools pane shows its name, a **Cancel** button and, for the tools that
+count their work (Viewshed, IDW Interpolation, Kriging, Kernel Density, Buffer, Select Layer By
+Location and others), a progress bar. One tool runs at a time. A cancelled run adds nothing, and
+for a tool that counts its work, its message says how far through its current step it got. Edits
+made to its input layers while it runs are kept: a selection it makes selects the same features
+where they now are (and says how many are gone), and a result that would replace an edited
+layer, or one loaded whole meanwhile, is refused. Renaming the map while it runs is fine; after
+switching to another map, a result that adds to or changes the map is refused (one made only of
+tables or a file is still made). Opening another project drops the run. Scripts, models, the AI
+Assistant, the command line and the web app wait for each tool to finish.
+
 From the command line or a script (`gp.run`), a built-in tool's parameter with a list of choices, such as Buffer's
 units, takes one of them in any letter case (`"meters"` for `Meters`); any other value is an error
 that names the choices (Buffer's units no longer take the abbreviations `m`, `mi` or `metres`).
@@ -103,6 +116,10 @@ Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available too
 | Feature To Point | `featureToPoint` | Data Management › Features |
 | Merge | `merge` | Data Management › General |
 | Feature Vertices To Points | `featureVerticesToPoints` | Data Management › Features |
+| Polygon To Line | `polygonToLine` | Data Management › Features |
+| Split Line At Vertices | `splitLineAtVertices` | Data Management › Features |
+| Feature Envelope To Polygon | `featureEnvelopeToPolygon` | Data Management › Features |
+| Unsplit Line | `unsplitLine` | Data Management › Features |
 | XY Table To Point | `xyTableToPoint` | Data Management › Features |
 | Calculate Geometry Attributes | `calculateGeometry` | Data Management › Features |
 | Simplify | `simplify` | Cartography › Generalization |
@@ -114,6 +131,7 @@ Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available too
 | Summarize Within | `countPoints` | Analysis › Summarize |
 | Summary Statistics | `summaryStatistics` | Analysis › Statistics |
 | Pivot Table | `pivotTable` | Analysis › Statistics |
+| Tabulate Intersection | `tabulateIntersection` | Analysis › Statistics |
 | Export Features | `exportFeatures` | Conversion |
 | Vector to PMTiles | `vectorToPmtiles` | Analyze › Tools |
 | Raster to PMTiles | `rasterToPmtiles` | Analyze › Tools |
@@ -220,12 +238,22 @@ to a point's circle, 64 to a semicircular line end). Between vertices, those edg
 to 0.031 % of the distance inside the true curve in the projection plane, and up to 0.125 % at
 polygon corners and line joins, in addition to the projection error. Negative Buffer
 distances shrink polygons. Buffer and Select Layer By Location limit distances to 5,000 km.
-Buffer limits retained outlines to 2,000,000 vertices before dissolving and checks the dissolved
-result too. Multipoint discs count before union even when they overlap, cumulatively across features. A request that exceeds
-the budget fails with an error; split large features or select fewer features and run smaller batches. This limits retained
-geometry, not every temporary allocation inside a complex polygon operation. Select Layer By
-Location applies the same shared budget to its distance-buffered selector outlines; selection at
-zero distance uses the original geometries without this buffer limit.
+Ordinary Buffer limits each feature to 2,000,000 outline vertices. Its retained output has a
+separate memory budget: 512 MiB on desktop, 128 MiB in the browser, including geometry
+allocations, copied attributes and spare row capacity. Features are processed in bounded
+batches, in input order. Many small buffers can therefore exceed 2,000,000 vertices together.
+Dissolve All retains the shared 2,000,000-vertex limit before union and checks the dissolved
+result too. Multipoint discs count before their union even when they overlap; for Dissolve All
+their charges also accumulate across features.
+Distance-based Select Layer By Location uses the same per-selector complexity limit and
+memory budget for retained selector geometries, row capacity and a conservative spatial-index
+storage allowance. With more than 16 distance selectors, selection stops with an error after
+50,000,000 actual candidate checks across all target features, on both the grid and fallback
+paths. Early matches stop their scan, so large input counts alone do not refuse a request.
+Smaller selector sets keep their bounded-width linear scan. Selection at zero distance keeps
+its existing behavior without these buffer limits. An excessive request fails with an error, never partial output; select fewer features
+or split complex features. These budgets cover retained results, not total process memory:
+the input layers, temporary geometry on active workers and polygon-overlay scratch are additional.
 **Calculate Geometry Attributes** measures polygon areas and perimeters, and line lengths,
 on the WGS 84 ellipsoid, independently of the map's display projection. Holes are subtracted
 regardless of ring winding, and multipart measurements are summed. Ring directions are
@@ -236,7 +264,8 @@ complement. Edges follow the shortest geodesics between vertices. The output fie
 `area_km2`, `perimeter_km` and `length_km`; point coordinates are unchanged.
 Spatial Join's **Largest overlap** still measures area on a sphere of radius 6,371 km; it can
 differ from the ellipsoid by up to about 0.9 % (a small area near a pole). The same WGS 84
-measure backs the attribute table's **Calculate Geometry** (`edit.calculateGeometry`), the map's
+measure backs the attribute table's **Calculate Geometry** (`edit.calculateGeometry`), the
+[expressions](expressions.md#values)' `$area`, `$perimeter` and `$length`, the map's
 **Measure** tools on the Earth, and every network tool's edge and route lengths, so all of these
 read the same number for the same geometry, with two exceptions. A polygon ring with a full-turn
 (-180° to 180°) edge, such as a globe-wide band, is measured on the sphere by the attribute table
@@ -506,10 +535,46 @@ Every statistic but `NULLS` leaves out empty values. A text field takes `COUNT`,
 `FIRST`, `LAST`, `UNIQUE`, `CONCATENATE`, `MODE`, `MINORITY` and `NULLS`; the rest need a numeric
 field. A group with no values gets empty statistics, except a `COUNT` and `UNIQUE` of 0 (its
 `NULLS` is its `FREQUENCY`). Two output fields can't share a name, so a case field can't be called
-`FREQUENCY` or `<STAT>_<field>` for a statistic asked for. Counts
-are whole numbers, `CONCATENATE` and the statistics of a text field are text, and the others are
-decimal. Without `statistics`, `field` gives that field's `COUNT`, `SUM`, `MEAN`, `MIN`, `MAX` and
-`STD`, reading its values as numbers.
+`FREQUENCY` or `<STAT>_<field>` for a statistic asked for. Counts are whole numbers, `CONCATENATE`
+and the statistics of a text field are text, and the others are decimal. A decimal holds whole
+numbers exactly only up to 2^53 (9,007,199,254,740,992): a statistic that should be a whole number
+past it (a `SUM`, `RANGE` or evenly dividing `MEAN` of whole numbers, the `MIN`, `MAX`, `FIRST`,
+`LAST`, `MODE` or `MINORITY` picked, or a whole `MEDIAN`, percentile or `IQR`) is rounded, and the
+tool says how many results were rounded and in which fields. The whole numbers are an Integer
+field's values and whole numbers written as text in a numeric field, which these checks and
+`UNIQUE`, `MODE`, `MINORITY` and `CONCATENATE` take exactly up to the 64-bit integer range. A
+longer one written in digits is read as a decimal, and its statistics aren't checked: the tool
+says how many such values it read and in which fields, as statistics of them may be rounded. A
+number written with a decimal point or an exponent (`6.02e23`) asks for a decimal and gets no
+notice. A Double field's values are decimals already, rounded as decimal arithmetic rounds, and
+get no notice. Without `statistics`, `field` gives that field's `COUNT`, `SUM`, `MEAN`, `MIN`,
+`MAX` and `STD`, reading its values as numbers.
+
+**Dissolve** (`dissolve`) merges the polygons sharing a value of `field` into one feature for
+each value, or all of them into one without a field. Each feature has the value and `count`, the
+polygons merged; records with no value form a feature of their own. **Summarize Within**
+(`countPoints`) copies the polygons and adds `point_count`, the points inside each polygon or on
+its edge; a point where polygons overlap counts in each of them.
+
+Both tools take `statistics` to add summary fields: the list Summary Statistics takes, with the
+same statistics, rules for text fields, empty values and output types (above), and `separator`
+for `CONCATENATE`. Each pair adds a field `<STAT>_<field>` after the tool's own fields:
+
+```text
+gp.run={"tool":"dissolve","params":{"input":"parcels","field":"county","statistics":[{"field":"pop","statistic":"SUM"},{"field":"owner","statistic":"FIRST"}]}}
+gp.run={"tool":"countPoints","params":{"polygons":"districts","points":"schools","statistics":[{"field":"pupils","statistic":"MEAN"}]}}
+```
+
+The first adds `SUM_pop` and `FIRST_owner` after `county` and `count`; the second adds
+`MEAN_pupils` after the districts' fields and `point_count`. Dissolve's statistics are of the
+input's fields, over exactly the records merged into each feature: a record without a polygon is
+left out of them, as it is of `count`. Summarize Within's are of the point layer's fields, over
+the points `point_count` counts; a polygon with no points (or no geometry) gets a `COUNT`,
+`UNIQUE` and `NULLS` of 0 and empty other statistics. Both use only the selected records or
+points when there is a selection, taken in record order for `FIRST`, `LAST` and `CONCATENATE`. A
+summary field can't share a name, in any case, with another output field: Dissolve's dissolve
+field, a field of Summarize Within's polygons, or another summary field. In the Tools pane, use
+**Add statistic** as in Summary Statistics. Without `statistics`, neither tool adds fields.
 
 **Pivot Table** (`pivotTable`) turns the values of one field into fields of their own. It makes a
 standalone table with a row for each combination of values of the row `fields` (one field, or
@@ -555,6 +620,59 @@ output is named `<input>_Pivot` unless `output` names it.
 The AI Assistant uses Pivot Table for questions such as "mean household income by county and year":
 it runs the tool with `county` as the row field, `year` as the pivot field and `MEAN`, then reads
 the table it names with `read_features`, a row per county.
+
+**Tabulate Intersection** (`tabulateIntersection`) measures how much of each zone each class of
+polygons covers, and shares the classes' totals out to the zones by area. Both layers are polygon
+layers. Zone features sharing the values of the `zoneFields` (one field, or several as a list) make
+one zone, and class features sharing the values of the `classFields` make one class; with no class
+fields, all the class features are one class. The tool makes a standalone table with a row for each
+zone and class that overlap (pairs that only touch get none), sorted by the zone fields' values,
+then the class fields', with empty values first, as Summary Statistics sorts its rows:
+
+| Field | Holds |
+| --- | --- |
+| The zone fields | The zone's values |
+| The class fields | The class's values |
+| `area_km2` | The ground area of the class in the zone, in km², where class features overlap each other counted once |
+| `percentage` | The class's area in the zone as a percentage of the zone's area, both measured as the map draws them (below; empty for a zone with no area) |
+| Each of `sumFields` | The sum, over the class's features, of the field's value times the part of the feature's area inside the zone |
+
+A field name already used in the table, ignoring case, gets `_2` (`_3` and so on), as when a
+class field and a zone field are both called `name`.
+
+The sum fields share a total out by area, as for population counted by census block and wanted by
+school district: a block half inside a district gives it half its population. They must be numeric,
+and can't also be class fields. Zones that overlap each other each get their share, so a value can
+be shared out more than once; the value of a feature's part outside every zone isn't shared out.
+
+`area_km2` is measured on the ellipsoid, as Calculate Geometry Attributes measures it. The
+percentages and shares compare areas measured on a sphere with each edge as the map draws it (a
+straight line on the map), the lines the tool cuts along, so the shares of a feature that zones
+cover without overlapping each other add up to its whole value, up to the overlay's rounding of the
+cut. The overlay rounds coordinates to a grid (the size of the zones near a feature over about a
+billion), so a part that leaves nothing outside its zone wider than that grid is the whole feature,
+and only parts outside every zone wider than the grid are reported. A feature so narrow next to its
+zones that the rounding can move its area by more than 1% is measured only roughly, unless it lies
+wholly inside a zone, and the tool says how many there are. The percentages of classes that overlap
+each other can add up to more than 100. Like the other overlay tools, it works on the map, which
+ends at 85.05° north and south: parts of polygons beyond that are taken as lying along it, so
+overlaps there have no area ([#1033](https://github.com/opengeos/RustGIS/issues/1033)); the tool
+says how many features reach beyond it.
+
+The tool says how many zone and class features have no polygon (no geometry, an empty one, a line or
+point, or a ring collapsed to no area; they are left out), how many cross the antimeridian without
+being split there (the map, and with it the percentages and shares, takes them the long way round,
+while area_km2 takes their ground shape), how many zones overlap no class feature and so have no
+rows, how many class features have no value in a sum field (they add nothing to its shares) and,
+with sum fields, how many class features lie partly or wholly outside the zones. Only selected
+features are used when a layer has a selection, and the table is named `<zones>_Tabulate` unless
+`output` names it.
+
+```text
+gp.run={"tool":"tabulateIntersection","params":{"zones":"districts","zoneFields":"district","classes":"blocks","sumFields":["population"]}}
+gp.run={"tool":"tabulateIntersection","params":{"zones":"counties","zoneFields":"county","classes":"landcover","classFields":"class"}}
+```
+
 <figure markdown="span">
   ![Tissot's indicatrix on the Robinson projection: circles of 800 km every 30°, stretched and sheared toward the poles](https://assets.rustgis.app/images/tissot.webp)
   <figcaption>Tissot's indicatrix on Robinson: equal circles, stretched and sheared by the projection.</figcaption>
@@ -589,6 +707,39 @@ with latitude or the map's projection.
 - Both write `a5` (the cell's 64-bit id in hex, as other A5 tools read it: DuckDB, PostgreSQL,
   Python's `pya5`, R), `resolution` and `area_km2`. A cell across the antimeridian, or round a pole, is
   split at ±180° into two parts of one polygon, each within −180° to 180°.
+
+### Geometry conversions
+
+These tools write new layers, honor selected features, and retain source fields, attributes and
+CRS metadata. Coordinates are used directly, without projection or snapping.
+
+- **Polygon To Line** (`polygonToLine`) makes one multipart line feature per polygon feature,
+  including every outer and inner ring. Open rings are closed. Shared boundaries remain in both
+  features; the tool does not build a shared-edge topology.
+- **Split Line At Vertices** (`splitLineAtVertices`) writes one two-vertex feature for every
+  consecutive pair in every line part, with the source attributes. Repeated vertices produce
+  zero-length segments; parts are never connected across gaps. The browser checks the estimated
+  output memory, including repeated text attributes, before building the segments; unavailable
+  memory returns an error.
+- **Feature Envelope To Polygon** (`featureEnvelopeToPolygon`) writes one axis-aligned rectangle
+  around all coordinates of each feature in stored longitude/latitude axes. Point features and
+  horizontal or vertical lines have zero-area envelopes and are skipped with a count. Longitude
+  bounds are literal, including for features spanning the antimeridian.
+- **Unsplit Line** (`unsplitLine`) joins line parts at exactly equal endpoints where precisely
+  two part ends meet and all attribute values agree. Reversed parts and closed cycles are
+  supported. Branches, attribute changes, and intersections away from endpoints stay separate.
+  Every output chain retains its common attributes; no field values are discarded.
+
+Missing geometries and empty or too-short parts are skipped with a count. If skipping leaves
+no usable output, the tool returns an error. Non-finite coordinates and malformed rows with
+more attribute values than schema fields are errors; missing attribute values become null.
+
+```text
+gp.run={"tool":"polygonToLine","params":{"input":"Regions","output":"Boundaries"}}
+gp.run={"tool":"splitLineAtVertices","params":{"input":"Rivers"}}
+gp.run={"tool":"featureEnvelopeToPolygon","params":{"input":"Regions"}}
+gp.run={"tool":"unsplitLine","params":{"input":"Rivers"}}
+```
 
 ## GeoLibre tools
 
@@ -665,8 +816,9 @@ next visit. The runner's code comes from jsDelivr, pinned to one geolibre-wasm r
 same trust as installing that package. Tools that read files by path (LiDAR files, for instance) need the desktop app,
 since a web page has no file system.
 
-In the desktop app and on the command line, RustGIS waits while a tool runs, so a long run on
-a large raster or point cloud keeps the window busy until it finishes. In the web app the run
+In the desktop app the Tools pane runs a GeoLibre tool in the background like any other; its
+**Cancel** takes effect when the GeoLibre program ends, and the result is then dropped. On the
+command line RustGIS waits while a tool runs. In the web app the run
 is started in the background and the result is added when it ends, but the tool itself runs
 in the page, so the page is busy while it computes.
 
@@ -1052,9 +1204,10 @@ data is unavailable, shows the available band range for invalid band input, and 
 only selected polygons will appear in the output. Both tools report parts omitted during raster-grid
 projection while retaining the valid parts.
 
-Field parameters in Dissolve, XY Table to Point, IDW, Kriging, Summary Statistics and Pivot Table accept
-case-insensitive names. An exact spelling takes precedence; otherwise a name matching several
-fields is rejected as ambiguous. This prevents silently using the wrong field.
+Field parameters in Dissolve, Summarize Within, XY Table to Point, IDW, Kriging, Summary
+Statistics and Pivot Table accept case-insensitive names. An exact spelling takes precedence;
+otherwise a name matching several fields is rejected as ambiguous. This prevents silently using
+the wrong field.
 
 ## Deep learning and hosted imagery
 

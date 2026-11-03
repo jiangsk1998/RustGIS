@@ -12,6 +12,18 @@ pub const NODATA: f32 = -3.4e38;
 /// Largest output raster built (pixels).
 pub const MAX_PIXELS: usize = 64_000_000;
 
+/// Room for a grid of `w × h` cells of `T` (an output band, or a working grid of one), empty: a
+/// grid the machine can't hold is an error saying so, instead of ending the program
+/// ([`rustgis_data::raster::grid`]).
+pub fn grid<T>(w: usize, h: usize) -> Result<Vec<T>, String> {
+    rustgis_data::raster::grid(w, h).map_err(|e| e.to_string())
+}
+
+/// A `w × h` band filled with `fill` ([`grid`]).
+pub fn new_band<T: Clone>(w: usize, h: usize, fill: T) -> Result<Vec<T>, String> {
+    rustgis_data::raster::filled(w, h, fill).map_err(|e| e.to_string())
+}
+
 /// A new single- or multi-band raster on `r`'s grid.
 pub fn derive(r: &Raster, name: &str, bands: Vec<Vec<f32>>) -> Result<Raster, String> {
     r.require_coordinates()?;
@@ -43,18 +55,18 @@ fn gradient(r: &Raster, data: &[f32], col: i64, row: i64, zf: f64, (cx, cy): (f6
     Some((dzdx * r.transform.pixel_width.signum(), dzdy * -r.transform.pixel_height.signum()))
 }
 
-fn per_cell(r: &Raster, f: impl Fn(i64, i64) -> Option<f64>) -> Vec<f32> {
-    let mut out = Vec::with_capacity(r.width as usize * r.height as usize);
+fn per_cell(r: &Raster, f: impl Fn(i64, i64) -> Option<f64>) -> Result<Vec<f32>, String> {
+    let mut out = grid(r.width as usize, r.height as usize)?;
     for row in 0..r.height as i64 {
         for col in 0..r.width as i64 {
             out.push(f(col, row).filter(|v| v.is_finite()).map(|v| v as f32).unwrap_or(NODATA));
         }
     }
-    out
+    Ok(out)
 }
 
 /// Draw the interior from three borrowed rows; edges and no-data keep the scalar path.
-fn terrain(r: &Raster, data: &[f32], zf: f64, f: impl Fn(f64, f64) -> f64) -> Vec<f32> {
+fn terrain(r: &Raster, data: &[f32], zf: f64, f: impl Fn(f64, f64) -> f64) -> Result<Vec<f32>, String> {
     let (w, h) = (r.width as usize, r.height as usize);
     let cell = r.cell_size_m();
     let scalar = |c, row| {
@@ -67,7 +79,7 @@ fn terrain(r: &Raster, data: &[f32], zf: f64, f: impl Fn(f64, f64) -> f64) -> Ve
         return per_cell(r, scalar);
     }
     let value = |v: Option<f64>| v.filter(|v| v.is_finite()).map(|v| v as f32).unwrap_or(NODATA);
-    let mut out = Vec::with_capacity(len);
+    let mut out = grid(w, h)?;
     out.extend((0..w).map(|c| value(scalar(c as i64, 0))));
     for (row, ((top, mid), bottom)) in data.chunks_exact(w).zip(data.chunks_exact(w).skip(1)).zip(data.chunks_exact(w).skip(2)).enumerate()
     {
@@ -89,26 +101,19 @@ fn terrain(r: &Raster, data: &[f32], zf: f64, f: impl Fn(f64, f64) -> f64) -> Ve
         out.push(value(scalar((w - 1) as i64, row as i64)));
     }
     out.extend((0..w).map(|c| value(scalar(c as i64, (h - 1) as i64))));
-    out
+    Ok(out)
 }
 
 /// Slope in degrees.
 pub fn slope(r: &Raster, b: usize, zf: f64) -> Result<Vec<f32>, String> {
     let d = band(r, b)?;
-    Ok(terrain(r, d, zf, |gx, gy| gx.hypot(gy).atan().to_degrees()))
+    terrain(r, d, zf, |gx, gy| gx.hypot(gy).atan().to_degrees())
 }
 
 /// Aspect: the compass direction the slope faces, in degrees (flat cells are -1).
 pub fn aspect(r: &Raster, b: usize) -> Result<Vec<f32>, String> {
     let d = band(r, b)?;
-    Ok(terrain(
-        r,
-        d,
-        1.0,
-        |gx, gy| {
-            if gx.abs() < 1e-12 && gy.abs() < 1e-12 { -1.0 } else { (-gx).atan2(-gy).to_degrees().rem_euclid(360.0) }
-        },
-    ))
+    terrain(r, d, 1.0, |gx, gy| if gx.abs() < 1e-12 && gy.abs() < 1e-12 { -1.0 } else { (-gx).atan2(-gy).to_degrees().rem_euclid(360.0) })
 }
 
 /// Hillshade (0–255) lit from `azimuth` and `altitude` degrees.
@@ -116,12 +121,12 @@ pub fn hillshade(r: &Raster, b: usize, azimuth: f64, altitude: f64, zf: f64) -> 
     let d = band(r, b)?;
     let (zen, az) = ((90.0 - altitude).to_radians(), azimuth.to_radians());
     let (cos_zen, sin_zen) = (zen.cos(), zen.sin());
-    Ok(terrain(r, d, zf, |gx, gy| {
+    terrain(r, d, zf, |gx, gy| {
         let slope = gx.hypot(gy).atan();
         let aspect = (-gx).atan2(-gy);
         let v = cos_zen * slope.cos() + sin_zen * slope.sin() * (az - aspect).cos();
         (v.max(0.0) * 255.0).round()
-    }))
+    })
 }
 
 /// A band arithmetic expression over `b1`, `b2`… (+ - * / and parentheses, numbers).
@@ -129,7 +134,7 @@ pub fn band_math(r: &Raster, expr: &str) -> Result<Vec<f32>, String> {
     let e = Expr::parse(expr, r.band_count())?;
     let n = r.width as usize * r.height as usize;
     let mut vals = vec![0.0f64; r.band_count()];
-    let mut out = Vec::with_capacity(n);
+    let mut out = grid(r.width as usize, r.height as usize)?;
     for i in 0..n {
         let mut ok = true;
         for (bi, b) in r.bands.iter().enumerate() {
@@ -151,19 +156,19 @@ pub fn band_math(r: &Raster, expr: &str) -> Result<Vec<f32>, String> {
 /// Remaps value ranges `[lo, hi)` to new values; other values become no-data unless `keep`.
 pub fn remap(r: &Raster, b: usize, ranges: &[(f64, f64, f64)], keep: bool) -> Result<Vec<f32>, String> {
     let d = band(r, b)?;
-    Ok(d.iter()
-        .map(|v| {
-            if !r.is_valid(*v) {
-                return NODATA;
-            }
-            let x = *v as f64;
-            match ranges.iter().find(|(lo, hi, _)| x >= *lo && x < *hi) {
-                Some((_, _, new)) => *new as f32,
-                None if keep => *v,
-                None => NODATA,
-            }
-        })
-        .collect())
+    let mut out = grid(r.width as usize, r.height as usize)?;
+    out.extend(d.iter().map(|v| {
+        if !r.is_valid(*v) {
+            return NODATA;
+        }
+        let x = *v as f64;
+        match ranges.iter().find(|(lo, hi, _)| x >= *lo && x < *hi) {
+            Some((_, _, new)) => *new as f32,
+            None if keep => *v,
+            None => NODATA,
+        }
+    }));
+    Ok(out)
 }
 
 /// `band`'s values resampled (nearest neighbour) onto `target`'s grid, through longitude/latitude.
@@ -172,14 +177,17 @@ pub fn resample_to(src: &Raster, b: usize, target: &Raster) -> Result<Vec<f32>, 
     target.require_coordinates()?;
     band(src, b)?;
     if src.width == target.width && src.height == target.height && src.transform == target.transform && src.crs == target.crs {
-        return Ok(band(src, b)?.iter().map(|v| if src.is_valid(*v) { *v } else { NODATA }).collect());
+        let d = band(src, b)?;
+        let mut out = grid(src.width as usize, src.height as usize)?;
+        out.extend(d.iter().map(|v| if src.is_valid(*v) { *v } else { NODATA }));
+        return Ok(out);
     }
-    Ok(per_cell(target, |c, row| {
+    per_cell(target, |c, row| {
         let w = target.transform.to_world(c as f64 + 0.5, row as f64 + 0.5);
         let ll = target.transformer().to_lonlat(w)?;
         let (sc, sr) = src.pixel_at(ll)?;
         src.value(b, sc, sr).map(f64::from)
-    }))
+    })
 }
 
 /// A weighted sum of criteria (each already scored, e.g. 1–10) on one grid; no-data anywhere
@@ -194,19 +202,19 @@ pub fn weighted_overlay(criteria: &[(Vec<f32>, f64)]) -> Result<Vec<f32>, String
     if total <= 0.0 {
         return Err("the weights must add up to more than zero".into());
     }
-    Ok((0..n)
-        .map(|i| {
-            let mut s = 0.0;
-            for (vals, w) in criteria {
-                let v = vals.get(i).copied().unwrap_or(NODATA);
-                if v == NODATA || !v.is_finite() {
-                    return NODATA;
-                }
-                s += v as f64 * w.max(0.0) / total;
+    let mut out = grid(n, 1)?;
+    out.extend((0..n).map(|i| {
+        let mut s = 0.0;
+        for (vals, w) in criteria {
+            let v = vals.get(i).copied().unwrap_or(NODATA);
+            if v == NODATA || !v.is_finite() {
+                return NODATA;
             }
-            s as f32
-        })
-        .collect())
+            s += v as f64 * w.max(0.0) / total;
+        }
+        s as f32
+    }));
+    Ok(out)
 }
 
 /// Metres between two longitude/latitude points.
@@ -338,7 +346,7 @@ fn viewshed_on(threads: Option<usize>, r: &Raster, b: usize, observer: Coord, he
         return Err("the radius covers too many cells; use a smaller radius".into());
     }
     let w = r.width as usize;
-    let mut out = vec![NODATA; w * r.height as usize];
+    let mut out = new_band(w, r.height as usize, NODATA)?;
     const R: f64 = 6_371_000.0 * 4.0 / 3.0;
     // Each cell walks its own ray and writes only itself, so the rows within the radius are made
     // on several threads when the work is large (#1252).
@@ -346,6 +354,7 @@ fn viewshed_on(threads: Option<usize>, r: &Raster, b: usize, observer: Coord, he
     let rows = usize::try_from(last - first + 1).unwrap_or(0);
     let threads = threads.unwrap_or_else(|| crate::parallel::threads_for_rows(rows, usize::try_from(ray_work).unwrap_or(usize::MAX), 0));
     let window = out.chunks_mut(w).skip(usize::try_from(first).unwrap_or(0)).take(rows);
+    crate::control::begin(rows);
     crate::parallel::for_each_row(
         window,
         threads,
@@ -384,7 +393,7 @@ fn viewshed_on(threads: Option<usize>, r: &Raster, b: usize, observer: Coord, he
                 }
             }
         },
-    );
+    )?;
     Ok(out)
 }
 
@@ -430,7 +439,8 @@ fn idw_on(
     let scratch_bytes = points.len().saturating_mul(std::mem::size_of::<(f64, f64)>());
     let threads =
         threads.unwrap_or_else(|| crate::parallel::threads_for_rows(h, w.saturating_mul(h).saturating_mul(points.len()), scratch_bytes));
-    let mut data = vec![NODATA; w * h];
+    let mut data = new_band(w, h, NODATA)?;
+    crate::control::begin(h);
     crate::parallel::for_each_row(
         data.chunks_mut(w),
         threads,
@@ -464,7 +474,7 @@ fn idw_on(
                 *o = if v.is_finite() { v as f32 } else { NODATA };
             }
         },
-    );
+    )?;
     let gt = GeoTransform { origin_x: extent.min_x, origin_y: extent.max_y, pixel_width: cell_deg, pixel_height: -cell_deg };
     Raster::new(name, w as u32, h as u32, vec![data], gt, Crs::LonLat, Some(NODATA as f64), ColorHint::Gray, "Float32")
         .map_err(|e| e.to_string())
@@ -537,9 +547,11 @@ pub fn kmeans(r: &Raster, bands: &[usize], k: usize, iterations: usize) -> Resul
     });
     let rank: Vec<usize> = (0..centres.len()).map(|c| order.iter().position(|o| *o == c).unwrap_or(0)).collect();
     let mut p = Vec::with_capacity(data.len());
-    Ok((0..n)
-        .map(|i| if pixel_into(i, &mut p) { (rank.get(nearest(&p, &centres)).copied().unwrap_or(0) + 1) as f32 } else { NODATA })
-        .collect())
+    let mut out = grid(r.width as usize, r.height as usize)?;
+    out.extend(
+        (0..n).map(|i| if pixel_into(i, &mut p) { (rank.get(nearest(&p, &centres)).copied().unwrap_or(0) + 1) as f32 } else { NODATA }),
+    );
+    Ok(out)
 }
 
 /// Minimum-distance classification: each pixel takes the class whose training mean is closest.
@@ -550,22 +562,22 @@ pub fn classify_min_distance(r: &Raster, bands: &[usize], means: &[(f32, Vec<f64
     }
     let n = r.width as usize * r.height as usize;
     let mut p: Vec<f64> = Vec::with_capacity(data.len());
-    Ok((0..n)
-        .map(|i| {
-            p.clear();
-            for d in &data {
-                match d.get(i).copied().filter(|v| r.is_valid(*v)) {
-                    Some(v) => p.push(f64::from(v)),
-                    None => return NODATA,
-                }
+    let mut out = grid(r.width as usize, r.height as usize)?;
+    out.extend((0..n).map(|i| {
+        p.clear();
+        for d in &data {
+            match d.get(i).copied().filter(|v| r.is_valid(*v)) {
+                Some(v) => p.push(f64::from(v)),
+                None => return NODATA,
             }
-            means
-                .iter()
-                .map(|(c, m)| (*c, m.iter().zip(&p).map(|(a, b)| (a - b).powi(2)).sum::<f64>()))
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map_or(NODATA, |x| x.0)
-        })
-        .collect())
+        }
+        means
+            .iter()
+            .map(|(c, m)| (*c, m.iter().zip(&p).map(|(a, b)| (a - b).powi(2)).sum::<f64>()))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map_or(NODATA, |x| x.0)
+    }));
+    Ok(out)
 }
 
 /// The mean of each band over the pixels whose centres fall in a polygon (lon/lat rings).
@@ -794,7 +806,7 @@ fn project_ring(r: &Raster, ring: &[Coord]) -> Option<Vec<(f64, f64)>> {
 /// The rings are projected onto the raster's own grid once and filled by scanline, so a large
 /// raster costs a pass over the polygon edges per row rather than a point test per cell.
 /// A malformed ring or a failed projection rejects the entire polygon part, including its holes.
-pub fn polygon_mask(r: &Raster, polygons: &[Vec<Vec<Coord>>]) -> Option<(Range<u32>, Range<u32>, Vec<bool>)> {
+pub fn polygon_mask(r: &Raster, polygons: &[Vec<Vec<Coord>>]) -> Result<Option<(Range<u32>, Range<u32>, Vec<bool>)>, String> {
     polygon_mask_with_failures(r, polygons, &mut Vec::new())
 }
 
@@ -804,7 +816,7 @@ pub fn polygon_mask_with_failures(
     r: &Raster,
     polygons: &[Vec<Vec<Coord>>],
     failed_parts: &mut Vec<usize>,
-) -> Option<(Range<u32>, Range<u32>, Vec<bool>)> {
+) -> Result<Option<(Range<u32>, Range<u32>, Vec<bool>)>, String> {
     let projected: Vec<Vec<Vec<(f64, f64)>>> = polygons
         .iter()
         .enumerate()
@@ -822,16 +834,16 @@ pub fn polygon_mask_with_failures(
         (c0, r0, c1, r1) = (c0.min(x), r0.min(y), c1.max(x), r1.max(y));
     }
     if !(c0.is_finite() && r0.is_finite() && c1.is_finite() && r1.is_finite()) {
-        return None;
+        return Ok(None);
     }
     let clamp = |v: f64, n: u32| v.clamp(0.0, f64::from(n)) as u32;
     let cols = clamp(c0.floor(), r.width)..clamp(c1.ceil(), r.width);
     let rows = clamp(r0.floor(), r.height)..clamp(r1.ceil(), r.height);
     if cols.is_empty() || rows.is_empty() {
-        return None;
+        return Ok(None);
     }
     let w = (cols.end - cols.start) as usize;
-    let mut mask = vec![false; w * (rows.end - rows.start) as usize];
+    let mut mask = new_band(w, (rows.end - rows.start) as usize, false)?;
     let mut xs: Vec<f64> = Vec::new();
     for (ri, row) in rows.clone().enumerate() {
         let y = f64::from(row) + 0.5;
@@ -867,13 +879,14 @@ pub fn polygon_mask_with_failures(
         (tc0, tr0, tc1, tr1) = (tc0.min(c), tr0.min(rr), tc1.max(c + 1), tr1.max(rr + 1));
     }
     if tc0 >= tc1 || tr0 >= tr1 {
-        return None;
+        return Ok(None);
     }
-    let trimmed: Vec<bool> =
-        (tr0..tr1).flat_map(|rr| (tc0..tc1).map(move |c| (rr, c))).map(|(rr, c)| mask.get(rr * w + c).copied().unwrap_or(false)).collect();
+    let mut trimmed = grid(tc1 - tc0, tr1 - tr0)?;
+    trimmed
+        .extend((tr0..tr1).flat_map(|rr| (tc0..tc1).map(move |c| (rr, c))).map(|(rr, c)| mask.get(rr * w + c).copied().unwrap_or(false)));
     let cols = cols.start + tc0 as u32..cols.start + tc1 as u32;
     let rows = rows.start + tr0 as u32..rows.start + tr1 as u32;
-    Some((cols, rows, trimmed))
+    Ok(Some((cols, rows, trimmed)))
 }
 
 /// Summary statistics of raster cells within a zone.
@@ -990,7 +1003,7 @@ pub(crate) fn zonal_statistics_with_failures(
         return Ok(Vec::new());
     }
 
-    let Some((cols, rows, mask)) = polygon_mask_with_failures(r, polygons, failed_parts) else {
+    let Some((cols, rows, mask)) = polygon_mask_with_failures(r, polygons, failed_parts)? else {
         return Ok(vec![ZoneStats::default(); bands.len()]);
     };
 
@@ -1123,6 +1136,17 @@ impl Expr {
 mod tests {
     use super::*;
 
+    /// A grid the machine can't hold is an error naming its size, not the end of the program
+    /// (#1291); one it can is the size asked for.
+    #[test]
+    fn a_grid_too_large_to_hold_is_an_error() {
+        let huge = 1usize << 31;
+        assert_eq!(grid::<f32>(huge, huge).unwrap_err(), format!("not enough memory for a {huge} × {huge} raster"));
+        assert!(new_band(usize::MAX, 2, 0.0f32).is_err_and(|e| e.starts_with("not enough memory")));
+        assert_eq!(new_band(3, 2, NODATA), Ok(vec![NODATA; 6]));
+        assert!(grid::<f64>(4, 5).is_ok_and(|g| g.is_empty() && g.capacity() >= 20));
+    }
+
     /// Viewshed rows made on several threads see what one thread sees (#1252), with the radius
     /// inside the raster and reaching past its edges.
     #[test]
@@ -1252,7 +1276,7 @@ mod tests {
         };
         // A square with a hole, and a second polygon in the south-west corner.
         let polys = vec![vec![sq(0.005, 0.005, 0.015, 0.015), sq(0.009, 0.009, 0.011, 0.011)], vec![sq(0.0, 0.0, 0.002, 0.002)]];
-        let (cols, rows, mask) = polygon_mask(&r, &polys).unwrap_or_else(|| panic!("no mask"));
+        let (cols, rows, mask) = polygon_mask(&r, &polys).unwrap().unwrap_or_else(|| panic!("no mask"));
         assert_eq!((cols.clone(), rows.clone()), (0..15, 5..20));
         assert_eq!(mask.iter().filter(|m| **m).count(), 100 - 4 + 4);
         let at = |col: u32, row: u32| mask[((row - rows.start) * 15 + col - cols.start) as usize];
@@ -1261,8 +1285,8 @@ mod tests {
         assert!(!at(9, 9) && !at(10, 10), "the hole stays out");
         assert!(at(0, 19) && at(1, 18) && !at(2, 18));
         // Outside the raster, or too small to hold a cell centre: nothing.
-        assert!(polygon_mask(&r, &[vec![sq(1.0, 1.0, 2.0, 2.0)]]).is_none());
-        assert!(polygon_mask(&r, &[vec![sq(0.0051, 0.0051, 0.0052, 0.0052)]]).is_none());
+        assert!(polygon_mask(&r, &[vec![sq(1.0, 1.0, 2.0, 2.0)]]).unwrap().is_none());
+        assert!(polygon_mask(&r, &[vec![sq(0.0051, 0.0051, 0.0052, 0.0052)]]).unwrap().is_none());
     }
 
     /// A failed hole drops only its containing part and reports that part, even with no mask.
@@ -1282,7 +1306,7 @@ mod tests {
         assert_eq!(stats[0].count, 4);
         assert_eq!(failures, vec![0]);
         failures.clear();
-        assert!(polygon_mask_with_failures(&r, &[invalid], &mut failures).is_none());
+        assert!(polygon_mask_with_failures(&r, &[invalid], &mut failures).unwrap().is_none());
         assert_eq!(failures, vec![0]);
     }
 
@@ -1564,7 +1588,7 @@ mod tests {
         ]];
         let bad_ext_stats = zonal_statistics(&r, &[0], &bad_ext_with_hole).unwrap();
         assert_eq!(bad_ext_stats[0], ZoneStats::default());
-        assert!(polygon_mask(&r, &bad_ext_with_hole).is_none());
+        assert!(polygon_mask(&r, &bad_ext_with_hole).unwrap().is_none());
 
         // 8. Exterior ring with non-finite/unprojectable coordinate is rejected
         let nan_ext_with_hole = vec![vec![
@@ -1573,14 +1597,14 @@ mod tests {
         ]];
         let nan_ext_stats = zonal_statistics(&r, &[0], &nan_ext_with_hole).unwrap();
         assert_eq!(nan_ext_stats[0], ZoneStats::default());
-        assert!(polygon_mask(&r, &nan_ext_with_hole).is_none());
+        assert!(polygon_mask(&r, &nan_ext_with_hole).unwrap().is_none());
 
         // 9. Polygon with defective hole (< 3 vertices or non-finite) is rejected rather than silently discarding the hole
         let bad_hole_poly = vec![vec![
             sq(0.005, 0.005, 0.015, 0.015),                           // valid exterior (5 points)
             vec![Coord::new(0.009, 0.009), Coord::new(0.011, 0.011)], // invalid hole: only 2 points!
         ]];
-        assert!(polygon_mask(&r, &bad_hole_poly).is_none(), "polygon with defective hole must be rejected");
+        assert!(polygon_mask(&r, &bad_hole_poly).unwrap().is_none(), "polygon with defective hole must be rejected");
         let bad_hole_stats = zonal_statistics(&r, &[0], &bad_hole_poly).unwrap();
         assert_eq!(bad_hole_stats[0], ZoneStats::default());
 
@@ -1588,7 +1612,7 @@ mod tests {
             sq(0.005, 0.005, 0.015, 0.015),
             vec![Coord::new(f64::NAN, 0.009), Coord::new(0.011, 0.009), Coord::new(0.011, 0.011), Coord::new(f64::NAN, 0.009)],
         ]];
-        assert!(polygon_mask(&r, &nan_hole_poly).is_none(), "polygon with non-finite hole must be rejected");
+        assert!(polygon_mask(&r, &nan_hole_poly).unwrap().is_none(), "polygon with non-finite hole must be rejected");
     }
 
     #[test]

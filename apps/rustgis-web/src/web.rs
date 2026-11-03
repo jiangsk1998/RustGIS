@@ -5,6 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use rustgis_ui_egui::rustgis_engine::data::diagnostics::Capture;
 use rustgis_ui_egui::{Inbox, RustGisApp, Services, Slot};
 
 use crate::parts::Notes;
@@ -571,206 +572,238 @@ async fn unless_stalled(
 
 /// Downloads `url`, or the byte range it asks for (a PMTiles archive's part: see
 /// `rustgis_tiles::cache::split_range`).
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let window = web_sys::window().ok_or("no window")?;
-    use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache;
-    // A data download carries its caller's budget (at most MAX_DOWNLOAD); other fetches use 64 MB.
-    let (url, limit) = cache::split_download_limit(url);
-    let max = limit.map(|n| n as u64).unwrap_or(64 << 20);
-    let (url, tail) = cache::split_tail(url);
-    let (url, range) = cache::split_range(url);
-    // An `s3://` address becomes its web address, and a request to an S3 connection's endpoint
-    // is signed (the bucket's CORS rules must allow the Authorization and x-amz-* headers).
-    let prepared = rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::s3::prepare(url)?;
-    let url = prepared.url.as_str();
-    // An ArcGIS sign-in's token, for the portal and the servers it covers, renewed first when it
-    // is about to expire. It goes as the request's `token` parameter, not a header: ArcGIS's
-    // query endpoints answer the header's CORS preflight with an error.
-    if !prepared.signed {
-        crate::arcgis::renew_if_due(url).await;
-    }
-    let arcgis = if prepared.signed { None } else { rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::arcgis_auth::with_token(url) };
-    // Only the request carries it: messages name the address without it.
-    let request = arcgis.as_deref().unwrap_or(url);
-    let asked = match (range, tail) {
-        (Some((a, b)), _) => Some(format!("bytes={a}-{b}")),
-        (None, Some(n)) => Some(format!("bytes=-{n}")),
-        (None, None) => None,
-    };
-    let init = web_sys::RequestInit::new();
-    // A tile or document that stalls is given up (see `STALL_MS`).
-    let abort = if limit.is_none() { web_sys::AbortController::new().ok() } else { None };
-    if let Some(a) = &abort {
-        init.set_signal(Some(&a.signal()));
-    }
-    let stalled = || format!("nothing came in {} seconds", STALL_MS / 1000);
-    if asked.is_some() || !prepared.headers.is_empty() {
-        let headers = web_sys::Headers::new().map_err(err)?;
-        if let Some(r) = &asked {
-            headers.set("Range", r).map_err(err)?;
+/// A status in `omit` is an expected answer (a tile past a map's edge): its failure isn't
+/// recorded, only noted once per server, as on the desktop.
+async fn fetch_bytes(url: &str, capture: Capture, omit: &'static [u16]) -> Result<Vec<u8>, String> {
+    use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache::RequestDiagnostics, failure::Failure};
+    let mut diagnostics = RequestDiagnostics::with_capture(url, "GET", capture);
+    diagnostics.omit_statuses(omit);
+    let answer = async {
+        let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
+        let window = web_sys::window().ok_or("no window")?;
+        use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache;
+        // A data download carries its caller's budget (at most MAX_DOWNLOAD); other fetches use 64 MB.
+        let (url, limit) = cache::split_download_limit(url);
+        let max = limit.map(|n| n as u64).unwrap_or(64 << 20);
+        let (url, tail) = cache::split_tail(url);
+        let (url, range) = cache::split_range(url);
+        // An `s3://` address becomes its web address, and a request to an S3 connection's endpoint
+        // is signed (the bucket's CORS rules must allow the Authorization and x-amz-* headers).
+        let prepared = rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::s3::prepare(url)?;
+        let url = prepared.url.as_str();
+        // An ArcGIS sign-in's token, for the portal and the servers it covers, renewed first when it
+        // is about to expire. It goes as the request's `token` parameter, not a header: ArcGIS's
+        // query endpoints answer the header's CORS preflight with an error.
+        if !prepared.signed {
+            crate::arcgis::renew_if_due(url).await;
         }
-        for (k, v) in &prepared.headers {
-            headers.set(k, v).map_err(err)?;
+        let arcgis =
+            if prepared.signed { None } else { rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::arcgis_auth::with_token(url) };
+        // Only the request carries it: messages name the address without it.
+        let request = arcgis.as_deref().unwrap_or(url);
+        let asked = match (range, tail) {
+            (Some((a, b)), _) => Some(format!("bytes={a}-{b}")),
+            (None, Some(n)) => Some(format!("bytes=-{n}")),
+            (None, None) => None,
+        };
+        let init = web_sys::RequestInit::new();
+        // A tile or document that stalls is given up (see `STALL_MS`).
+        let abort = if limit.is_none() { web_sys::AbortController::new().ok() } else { None };
+        if let Some(a) = &abort {
+            init.set_signal(Some(&a.signal()));
         }
-        init.set_headers(&headers);
-    }
-    // A signed or authorized request goes only where its credentials are for.
-    if prepared.signed || arcgis.is_some() {
-        init.set_redirect(web_sys::RequestRedirect::Error);
-    }
-    // The token's address goes nowhere else: no referrer from it, no cookies with it.
-    if arcgis.is_some() {
-        init.set_referrer_policy(web_sys::ReferrerPolicy::NoReferrer);
-        init.set_credentials(web_sys::RequestCredentials::Omit);
-    }
-    let promise = window.fetch_with_str_and_init(request, &init);
-    // A refused fetch is an opaque TypeError ("Failed to fetch") by design: the browser doesn't
-    // say why, so the likely reasons are named, with the browser's own message but not its stack.
-    let resp: web_sys::Response = unless_stalled(promise, abort.as_ref())
-        .await
-        .ok_or_else(stalled)?
-        .map_err(|e| {
-            let why = e.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message())).unwrap_or_else(|| err(e));
-            format!(
-                "the browser couldn't reach it (offline, blocked by a browser extension or the network, or the server doesn't accept requests from web pages): {why}"
-            )
-        })?
-        .dyn_into()
-        .map_err(err)?;
-    if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    // The last bytes asked for and the whole file answered: fine when it is no longer.
-    let whole_tail = tail.filter(|_| resp.status() != 206);
-    let max = match whole_tail {
-        Some(n) => n.saturating_add(1).min(max),
-        None => max,
-    };
-    // A range asked for and the whole file answered (200): fine for a range from the start that
-    // holds the whole file (a small archive), checked once it's read; else no ranges.
-    let whole = range.is_some() && resp.status() != 206;
-    if range.is_some_and(|(a, _)| whole && a > 0) {
-        return Err(format!("{url}: {}", cache::NO_RANGES));
-    }
-    // Fonts are at most about 10 MB and plugins 64 MB; refuse anything larger than allowed, by
-    // header when there is one and by the downloaded size otherwise.
-    if let Ok(Some(len)) = resp.headers().get("content-length").map(|v| v.and_then(|s| s.parse::<u64>().ok()))
-        && len > max
-    {
-        // The last bytes asked for and a longer file answered: no ranges, so it is downloaded whole.
-        if whole_tail.is_some() {
+        let stalled = || format!("nothing came in {} seconds", STALL_MS / 1000);
+        if asked.is_some() || !prepared.headers.is_empty() {
+            let headers = web_sys::Headers::new().map_err(err)?;
+            if let Some(r) = &asked {
+                headers.set("Range", r).map_err(err)?;
+            }
+            for (k, v) in &prepared.headers {
+                headers.set(k, v).map_err(err)?;
+            }
+            init.set_headers(&headers);
+        }
+        // A signed or authorized request goes only where its credentials are for.
+        if prepared.signed || arcgis.is_some() {
+            init.set_redirect(web_sys::RequestRedirect::Error);
+        }
+        // The token's address goes nowhere else: no referrer from it, no cookies with it.
+        if arcgis.is_some() {
+            init.set_referrer_policy(web_sys::ReferrerPolicy::NoReferrer);
+            init.set_credentials(web_sys::RequestCredentials::Omit);
+        }
+        let promise = window.fetch_with_str_and_init(request, &init);
+        // A refused fetch is an opaque TypeError ("Failed to fetch") by design: the browser doesn't
+        // say why, so the likely reasons are named, with the browser's own message but not its stack.
+        let resp: web_sys::Response = unless_stalled(promise, abort.as_ref())
+            .await
+            .ok_or_else(|| {
+                diagnostics.timed_out();
+                stalled()
+            })?
+            .map_err(|e| {
+                let why = e.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message())).unwrap_or_else(|| err(e));
+                format!(
+                    "the browser couldn't reach it (offline, blocked by a browser extension or the network, \
+                 or the server doesn't accept requests from web pages): {why}"
+                )
+            })?
+            .dyn_into()
+            .map_err(err)?;
+        diagnostics.answered(resp.status());
+        if !resp.ok() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        // The last bytes asked for and the whole file answered: fine when it is no longer.
+        let whole_tail = tail.filter(|_| resp.status() != 206);
+        let max = match whole_tail {
+            Some(n) => n.saturating_add(1).min(max),
+            None => max,
+        };
+        // A range asked for and the whole file answered (200): fine for a range from the start that
+        // holds the whole file (a small archive), checked once it's read; else no ranges.
+        let whole = range.is_some() && resp.status() != 206;
+        if range.is_some_and(|(a, _)| whole && a > 0) {
             return Err(format!("{url}: {}", cache::NO_RANGES));
         }
-        return Err(format!("{len} bytes is too large"));
-    }
-    // Read a chunk at a time, so a body larger than allowed (whatever its header said) is cut
-    // off as soon as it is, never held whole.
-    // Sized by the header when there is one (checked above), so the chunks don't reallocate.
-    let len = resp.headers().get("content-length").ok().flatten().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-    let mut bytes: Vec<u8> = Vec::with_capacity(usize::try_from(len.min(max)).unwrap_or(0));
-    if let Some(body) = resp.body() {
-        let reader: web_sys::ReadableStreamDefaultReader =
-            body.get_reader().dyn_into().map_err(|_| "the response has no readable body".to_string())?;
-        loop {
-            // Headers came and then the body stalled: given up as a fetch that doesn't answer.
-            // (Aborting the fetch has cancelled its body too.)
-            let Some(chunk) = unless_stalled(reader.read(), abort.as_ref()).await else { return Err(stalled()) };
-            let chunk = chunk.map_err(err)?;
-            if js_sys::Reflect::get(&chunk, &"done".into()).ok().and_then(|d| d.as_bool()).unwrap_or(true) {
-                break;
+        // Fonts are at most about 10 MB and plugins 64 MB; refuse anything larger than allowed, by
+        // header when there is one and by the downloaded size otherwise.
+        if let Ok(Some(len)) = resp.headers().get("content-length").map(|v| v.and_then(|s| s.parse::<u64>().ok()))
+            && len > max
+        {
+            // The last bytes asked for and a longer file answered: no ranges, so it is downloaded whole.
+            if whole_tail.is_some() {
+                return Err(format!("{url}: {}", cache::NO_RANGES));
             }
-            let value = js_sys::Uint8Array::new(&js_sys::Reflect::get(&chunk, &"value".into()).map_err(err)?);
-            let n = value.length() as usize;
-            if (bytes.len() + n) as u64 > max {
-                let _ = reader.cancel();
-                if whole_tail.is_some() {
-                    return Err(format!("{url}: {}", cache::NO_RANGES));
-                }
-                return Err(format!("larger than {max} bytes"));
-            }
-            let at = bytes.len();
-            bytes.resize(at + n, 0);
-            value.copy_to(bytes.get_mut(at..).unwrap_or_default());
+            return Err(format!("{len} bytes is too large"));
         }
+        // Read a chunk at a time, so a body larger than allowed (whatever its header said) is cut
+        // off as soon as it is, never held whole.
+        // Sized by the header when there is one (checked above), so the chunks don't reallocate.
+        let len = resp.headers().get("content-length").ok().flatten().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let mut bytes: Vec<u8> = Vec::with_capacity(usize::try_from(len.min(max)).unwrap_or(0));
+        if let Some(body) = resp.body() {
+            let reader: web_sys::ReadableStreamDefaultReader =
+                body.get_reader().dyn_into().map_err(|_| "the response has no readable body".to_string())?;
+            loop {
+                // Headers came and then the body stalled: given up as a fetch that doesn't answer.
+                // (Aborting the fetch has cancelled its body too.)
+                let Some(chunk) = unless_stalled(reader.read(), abort.as_ref()).await else {
+                    diagnostics.timed_out();
+                    return Err(stalled());
+                };
+                let chunk = chunk.map_err(err)?;
+                if js_sys::Reflect::get(&chunk, &"done".into()).ok().and_then(|d| d.as_bool()).unwrap_or(true) {
+                    break;
+                }
+                let value = js_sys::Uint8Array::new(&js_sys::Reflect::get(&chunk, &"value".into()).map_err(err)?);
+                let n = value.length() as usize;
+                if (bytes.len() + n) as u64 > max {
+                    let _ = reader.cancel();
+                    if whole_tail.is_some() {
+                        return Err(format!("{url}: {}", cache::NO_RANGES));
+                    }
+                    return Err(format!("larger than {max} bytes"));
+                }
+                let at = bytes.len();
+                bytes.resize(at + n, 0);
+                value.copy_to(bytes.get_mut(at..).unwrap_or_default());
+            }
+        }
+        if let Some((a, b)) = range.filter(|_| whole)
+            && bytes.len() as u64 > b - a + 1
+        {
+            return Err(format!("{url}: {}", cache::NO_RANGES));
+        }
+        if whole_tail.is_some_and(|n| bytes.len() as u64 > n) {
+            return Err(format!("{url}: {}", cache::NO_RANGES));
+        }
+        Ok::<_, String>(bytes)
     }
-    if let Some((a, b)) = range.filter(|_| whole)
-        && bytes.len() as u64 > b - a + 1
-    {
-        return Err(format!("{url}: {}", cache::NO_RANGES));
-    }
-    if whole_tail.is_some_and(|n| bytes.len() as u64 > n) {
-        return Err(format!("{url}: {}", cache::NO_RANGES));
-    }
-    Ok(bytes)
+    .await;
+    diagnostics.record(answer.map_err(|e| Failure::new(url, e))).map_err(|failure| failure.message)
 }
 
 /// POSTs a JSON document and reads the answer (at most the tile cache's `MAX_BYTES`), without
 /// following redirects; an error status is `HTTP <status>`.
-async fn post_json(url: &str, body: &str) -> Result<Vec<u8>, String> {
-    use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache;
-    let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let window = web_sys::window().ok_or("no window")?;
-    let init = web_sys::RequestInit::new();
-    init.set_method("POST");
-    init.set_redirect(web_sys::RequestRedirect::Error);
-    let headers = web_sys::Headers::new().map_err(err)?;
-    headers.set("Content-Type", "application/json").map_err(err)?;
-    headers.set("Accept", "application/json").map_err(err)?;
-    init.set_headers(&headers);
-    init.set_body(&wasm_bindgen::JsValue::from_str(body));
-    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(url, &init))
-        .await
-        .map_err(|_| "the browser couldn't reach it (offline, or the server doesn't accept requests from web pages)".to_string())?
-        .dyn_into()
-        .map_err(err)?;
-    if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+async fn post_json(url: &str, body: &str, capture: Capture) -> Result<Vec<u8>, String> {
+    use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache::RequestDiagnostics, failure::Failure};
+    let mut diagnostics = RequestDiagnostics::with_capture(url, "POST", capture);
+    let answer = async {
+        use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache;
+        let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
+        let window = web_sys::window().ok_or("no window")?;
+        let init = web_sys::RequestInit::new();
+        init.set_method("POST");
+        init.set_redirect(web_sys::RequestRedirect::Error);
+        let headers = web_sys::Headers::new().map_err(err)?;
+        headers.set("Content-Type", "application/json").map_err(err)?;
+        headers.set("Accept", "application/json").map_err(err)?;
+        init.set_headers(&headers);
+        init.set_body(&wasm_bindgen::JsValue::from_str(body));
+        let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(url, &init))
+            .await
+            .map_err(|_| "the browser couldn't reach it (offline, or the server doesn't accept requests from web pages)".to_string())?
+            .dyn_into()
+            .map_err(err)?;
+        diagnostics.answered(resp.status());
+        if !resp.ok() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        let buf = wasm_bindgen_futures::JsFuture::from(resp.array_buffer().map_err(err)?).await.map_err(err)?;
+        let bytes = js_sys::Uint8Array::new(&buf);
+        if bytes.length() as usize > cache::MAX_BYTES {
+            return Err(format!("{} bytes is too large", bytes.length()));
+        }
+        Ok::<_, String>(bytes.to_vec())
     }
-    let buf = wasm_bindgen_futures::JsFuture::from(resp.array_buffer().map_err(err)?).await.map_err(err)?;
-    let bytes = js_sys::Uint8Array::new(&buf);
-    if bytes.length() as usize > cache::MAX_BYTES {
-        return Err(format!("{} bytes is too large", bytes.length()));
-    }
-    Ok(bytes.to_vec())
+    .await;
+    diagnostics.record(answer.map_err(|e| Failure::new(url, e))).map_err(|failure| failure.message)
 }
 
 /// Asks for an address's headers (`HEAD`): a TIFF header's announced length and the type. The
 /// browser shows a page `X-TIFF-Header-Length` only when the server exposes it
 /// (`Access-Control-Expose-Headers`); without it, the header is read as any other file's.
-async fn head(url: &str) -> Result<rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::Head, String> {
-    use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache, s3};
-    let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let window = web_sys::window().ok_or("no window")?;
-    let prepared = s3::prepare(url)?;
-    // A request signed for S3 is signed for a GET.
-    if prepared.signed {
-        return Ok(cache::Head::default());
-    }
-    let init = web_sys::RequestInit::new();
-    init.set_method("HEAD");
-    if !prepared.headers.is_empty() {
-        let headers = web_sys::Headers::new().map_err(err)?;
-        for (k, v) in &prepared.headers {
-            headers.set(k, v).map_err(err)?;
+async fn head(url: &str, capture: Capture) -> Result<rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::Head, String> {
+    use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache::RequestDiagnostics, failure::Failure};
+    let mut diagnostics = RequestDiagnostics::with_capture(url, "HEAD", capture);
+    let answer = async {
+        use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache, s3};
+        let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
+        let window = web_sys::window().ok_or("no window")?;
+        let prepared = s3::prepare(url)?;
+        // A request signed for S3 is signed for a GET.
+        if prepared.signed {
+            return Ok(cache::Head::default());
         }
-        init.set_headers(&headers);
+        let init = web_sys::RequestInit::new();
+        init.set_method("HEAD");
+        if !prepared.headers.is_empty() {
+            let headers = web_sys::Headers::new().map_err(err)?;
+            for (k, v) in &prepared.headers {
+                headers.set(k, v).map_err(err)?;
+            }
+            init.set_headers(&headers);
+        }
+        let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(&prepared.url, &init))
+            .await
+            .map_err(|_| "the browser couldn't reach it (offline, or the server doesn't accept requests from web pages)".to_string())?
+            .dyn_into()
+            .map_err(err)?;
+        diagnostics.answered(resp.status());
+        if !resp.ok() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        let header = |k: &str| resp.headers().get(k).ok().flatten();
+        Ok::<_, String>(cache::Head {
+            tiff_header_length: header("x-tiff-header-length").as_deref().and_then(cache::tiff_header_length),
+            content_type: header("content-type"),
+            // Seen only where the server exposes it to pages.
+            accepts_ranges: header("accept-ranges").as_deref().is_some_and(cache::accepts_byte_ranges),
+        })
     }
-    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(&prepared.url, &init))
-        .await
-        .map_err(|_| "the browser couldn't reach it (offline, or the server doesn't accept requests from web pages)".to_string())?
-        .dyn_into()
-        .map_err(err)?;
-    if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    let header = |k: &str| resp.headers().get(k).ok().flatten();
-    Ok(cache::Head {
-        tiff_header_length: header("x-tiff-header-length").as_deref().and_then(cache::tiff_header_length),
-        content_type: header("content-type"),
-        // Seen only where the server exposes it to pages.
-        accepts_ranges: header("accept-ranges").as_deref().is_some_and(cache::accepts_byte_ranges),
-    })
+    .await;
+    diagnostics.record(answer.map_err(|e| Failure::new(url, e))).map_err(|failure| failure.message)
 }
 
 /// Makes an HTTP request (the AI assistant's calls to its model), returning the response of any
@@ -843,8 +876,13 @@ fn clipboard() -> Option<web_sys::Clipboard> {
 /// the app must not read what the user saved on the site.
 fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, embedded: bool) -> Services {
     // Map tiles come through the browser's fetch (the app repaints when they arrive).
-    rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_fetcher(|url, done| {
-        wasm_bindgen_futures::spawn_local(async move { done(fetch_bytes(&url).await) });
+    rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_fetcher_omitting(|url, done, omit| {
+        let capture = Capture::current();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = fetch_bytes(&url, capture.clone(), omit).await;
+            let _scope = capture.enter();
+            done(result);
+        });
     });
     // Their pictures are decoded by the browser, off the page's thread.
     rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_image_decoder(|bytes, done| {
@@ -861,11 +899,21 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
     });
     // So are HEAD requests (a GeoTIFF made on request saying how long its header is).
     rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_header(|url, done| {
-        wasm_bindgen_futures::spawn_local(async move { done(head(&url).await) });
+        let capture = Capture::current();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = head(&url, capture.clone()).await;
+            let _scope = capture.enter();
+            done(result);
+        });
     });
     // So are JSON documents POSTed (the NLDI's flowtrace).
     rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_poster(|url, body, done| {
-        wasm_bindgen_futures::spawn_local(async move { done(post_json(&url, &body).await) });
+        let capture = Capture::current();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = post_json(&url, &body, capture.clone()).await;
+            let _scope = capture.enter();
+            done(result);
+        });
     });
     let open_inbox = inbox.clone();
     let font_ctx = ctx.clone();
@@ -920,8 +968,9 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
         recovery: None,
         fetch_font: Some(Box::new(move |url: &str| {
             let (url, inbox, ctx) = (url.to_string(), font_sink.clone(), font_ctx.clone());
+            let capture = Capture::current();
             wasm_bindgen_futures::spawn_local(async move {
-                match fetch_bytes(&url).await {
+                match fetch_bytes(&url, capture, &[]).await {
                     Ok(bytes) => {
                         inbox.lock().unwrap_or_else(|e| e.into_inner()).push((url, bytes));
                         ctx.request_repaint();
@@ -1018,8 +1067,9 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
         })),
         fetch: Some(Box::new(move |url: &str, slot| {
             let (url, ctx) = (url.to_string(), fetch_ctx.clone());
+            let capture = Capture::current();
             wasm_bindgen_futures::spawn_local(async move {
-                let r = fetch_bytes(&url).await.map_err(|e| format!("{url}: {e}"));
+                let r = fetch_bytes(&url, capture, &[]).await.map_err(|e| format!("{url}: {e}"));
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
                 ctx.request_repaint();
             });

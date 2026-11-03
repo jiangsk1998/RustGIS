@@ -166,6 +166,7 @@ fn delete_field(s: &mut Session, p: &Json) -> CmdResult {
     let id = s.layer_id(p)?;
     let fi = field_index(s, id, ps(p, "field").ok_or("field is required")?)?;
     let l = s.map_mut().layer_mut(id).ok_or("no layer")?;
+    let read_before = l.renderer.expression().is_some_and(|e| rustgis_data::query::parse(e, &l.dataset).is_ok());
     let removed = l.dataset.fields.remove(fi).name;
     for f in &mut l.dataset.features {
         if fi < f.attrs.len() {
@@ -173,15 +174,25 @@ fn delete_field(s: &mut Session, p: &Json) -> CmdResult {
         }
     }
     // Nothing may keep referring to the deleted field.
-    if l.renderer.field().is_some_and(|f| f.eq_ignore_ascii_case(&removed)) {
+    // (Classes by an expression that read until now go the same way.)
+    let unread = read_before && l.renderer.expression().is_some_and(|e| rustgis_data::query::parse(e, &l.dataset).is_err());
+    let mut single = None;
+    if unread || l.renderer.field().is_some_and(|f| f.eq_ignore_ascii_case(&removed)) {
         l.renderer = rustgis_map::Renderer::Single(l.renderer.base_symbol());
+        single = Some(l.name.clone());
     }
     // The layer's labels turn off if the Default class was on it, which starts again from the
-    // layer's first name-like field (keeping its name, clause and visibility). Another class on it
-    // labels with Default's field instead. A class clause naming it no longer reads, and takes no
-    // features, which go on to the next class: it is kept to edit, not dropped with its text symbol.
+    // layer's first name-like field (keeping its name, clause and visibility); by a text expression
+    // that still reads, Default only loses the field. Another class on it labels with Default's
+    // field instead. A class clause naming it no longer reads, and takes no features, which go on
+    // to the next class: it is kept to edit, not dropped with its text symbol.
     if l.labels.default.field.eq_ignore_ascii_case(&removed) {
-        l.labels.restart_default(&l.dataset);
+        let by_text = l.labels.default.by.text.as_deref().is_some_and(|t| rustgis_data::query::parse(t, &l.dataset).is_ok());
+        if by_text {
+            l.labels.default.field.clear();
+        } else {
+            l.labels.restart_default(&l.dataset);
+        }
     }
     l.labels.repoint_missing_fields(&l.dataset);
     if let Some(q) = &l.definition_query
@@ -210,7 +221,11 @@ fn delete_field(s: &mut Session, p: &Json) -> CmdResult {
                 rustgis_map::design::RuleKind::Constraint => rustgis_data::query::parse(&r.expression, ds).is_ok(),
             }
     });
-    Ok(json!({"rulesRemoved": before - d.rules.len()}))
+    let removed_rules = before - d.rules.len();
+    if let Some(name) = single {
+        s.notify(format!("{name}: its classes read the deleted field {removed}, so it is drawn with a single symbol"), false);
+    }
+    Ok(json!({"rulesRemoved": removed_rules}))
 }
 
 /// Sets a field from an expression, on the selected rows or all of them.

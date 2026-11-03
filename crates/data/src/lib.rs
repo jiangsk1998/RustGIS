@@ -6,6 +6,7 @@
 
 pub mod color;
 mod dbf;
+pub mod diagnostics;
 pub mod dirs;
 pub mod dxf;
 pub mod export;
@@ -41,7 +42,7 @@ pub mod wkb;
 pub mod xml;
 pub mod zip;
 
-pub use geometry::{Geometry, GeometryType, VertexId};
+pub use geometry::{Geometry, GeometryType, Measure, VertexId};
 pub use rustgis_geom::{Coord, Extent};
 pub use value::{Field, FieldType, ImageValue, Value};
 
