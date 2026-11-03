@@ -880,7 +880,10 @@ fn similar(s: &mut Session, p: &Value) -> CmdResult {
 /// the layer's Z or M values were dropped on import, or its positions are approximate or aren't
 /// longitude/latitude.
 fn convert(s: &mut Session, p: &Value) -> CmdResult {
-    let ds = feature_ds(s, p)?;
+    let original = feature_ds(s, p)?;
+    // As an export: image fields stay out, their images staying in the source (`export_notes` says so).
+    let clean = original.without_image_fields();
+    let ds = clean.as_ref().unwrap_or(original);
     let name_field =
         ps(p, "nameField").and_then(|n| ds.field_index(n)).or_else(|| ds.fields.iter().position(|f| f.name.eq_ignore_ascii_case("name")));
     let text = match ps(p, "format").ok_or("format is required")? {
@@ -892,7 +895,11 @@ fn convert(s: &mut Session, p: &Value) -> CmdResult {
         f => return Err(format!("unknown format '{f}'")),
     };
     // Every format here is longitude/latitude.
-    let notes = rustgis_data::export_notes([(ds, ds.extent())], ps(p, "path").unwrap_or(&ds.name), rustgis_data::raster::Crs::LonLat);
+    let notes = rustgis_data::export_notes(
+        [(original, original.extent())],
+        ps(p, "path").unwrap_or(&original.name),
+        rustgis_data::raster::Crs::LonLat,
+    );
     let out = match ps(p, "path") {
         Some(path) => {
             rustgis_data::io::write_atomic(std::path::Path::new(path), text.as_bytes()).map_err(|e| format!("{path}: {e}"))?;

@@ -270,6 +270,7 @@ impl ParquetSource {
         let untyped = types.is_empty() && !zm;
         let mut src =
             ParquetSource { info, reader, geom_col, field_cols, covering, reproject, remote, exact: false, group_rows: MAX_GROUP_ROWS };
+        src.probe_and_drop_pictures();
         if untyped {
             match src.peek_zm() {
                 Some(true) => src.info.drop_zm(None),
@@ -303,6 +304,64 @@ impl ParquetSource {
 }
 
 impl ParquetSource {
+    /// A binary column is read as an image field, but it may hold other data. Look at the first
+    /// rows: a column with values but no picture in them isn't read as one, and one mixing pictures
+    /// with other values says that those are shown empty.
+    fn probe_and_drop_pictures(&mut self) {
+        let Some(seen) = self.probe_pictures() else { return };
+        let (mut dropped, mut mixed) = (Vec::new(), Vec::new());
+        let mut fields = Vec::with_capacity(self.info.fields.len());
+        let mut cols = Vec::with_capacity(self.info.fields.len());
+        for ((f, &col), (pictured, others)) in self.info.fields.iter().zip(&self.field_cols).zip(&seen) {
+            if f.ty == FieldType::Image && *others > 0 {
+                if *pictured == 0 {
+                    dropped.push(f.name.clone());
+                    continue;
+                }
+                mixed.push((*others, pictured + others, f.name.clone()));
+            }
+            fields.push(f.clone());
+            cols.push(col);
+        }
+        if !dropped.is_empty() {
+            self.info.notes.push(super::not_pictures_note(&dropped));
+            self.info.fields = fields;
+            self.field_cols = cols;
+        }
+        for (others, total, field) in mixed {
+            self.info.notes.push(super::mixed_pictures_note(others, total, &field));
+        }
+    }
+
+    /// Pictures and other values among the first rows of each image column; `None` when they can't
+    /// be read here (a remote file's first row group not fetched yet).
+    fn probe_pictures(&self) -> Option<Vec<(usize, usize)>> {
+        let md = self.reader.metadata();
+        if md.num_row_groups() == 0 || self.remote.is_some() {
+            return None;
+        }
+        let rows = usize::try_from(md.row_group(0).num_rows()).unwrap_or(0).min(64);
+        if rows == 0 {
+            return None;
+        }
+        let take = vec![true; rows];
+        let rg = self.reader.get_row_group(0).ok()?;
+        let mut out = Vec::with_capacity(self.field_cols.len());
+        for (&col, f) in self.field_cols.iter().zip(&self.info.fields) {
+            if f.ty != FieldType::Image {
+                out.push((0, 0));
+                continue;
+            }
+            let bytes = read_bytes(rg.as_ref(), col, &take).ok()?;
+            let (mut pictured, mut others) = (0, 0);
+            for b in bytes.iter().flatten() {
+                if crate::pictures::meta(b).is_some() { pictured += 1 } else { others += 1 }
+            }
+            out.push((pictured, others));
+        }
+        Some(out)
+    }
+
     /// A source that reads at most `rows` of a row group, for tests of the cap.
     #[cfg(test)]
     pub(crate) fn with_group_rows(mut self, rows: usize) -> Self {
@@ -435,7 +494,12 @@ impl FeatureSource for ParquetSource {
             }
             let rg = self.reader.get_row_group(g).map_err(err)?;
             let geoms = read_bytes(rg.as_ref(), self.geom_col, take)?;
-            let attrs: Vec<Vec<Value>> = self.field_cols.iter().map(|&c| read_values(rg.as_ref(), c, take)).collect::<Result<_>>()?;
+            let attrs: Vec<Vec<Value>> = self
+                .field_cols
+                .iter()
+                .zip(&self.info.fields)
+                .map(|(&c, f)| read_values(rg.as_ref(), c, take, f.ty == FieldType::Image))
+                .collect::<Result<_>>()?;
             // A column shorter than its row group (a truncated or corrupt file) would pair values
             // with the wrong rows: refuse it.
             let wanted = take.iter().filter(|&&t| t).count();
@@ -464,6 +528,42 @@ impl FeatureSource for ParquetSource {
 
     fn remote(&self) -> Option<Arc<Remote>> {
         self.remote.clone()
+    }
+
+    /// The original bytes of one row's image column: only that column's chunk is read.
+    fn image(&self, fid: u64, field: &str) -> Result<Vec<u8>> {
+        let idx = self
+            .info
+            .fields
+            .iter()
+            .position(|f| f.name == field && f.ty == FieldType::Image)
+            .ok_or_else(|| DataError::Unsupported(format!("{field} is not an image field of {}", self.info.name)))?;
+        let col = *self.field_cols.get(idx).ok_or_else(|| DataError::Format(format!("{field} has no column in the file")))?;
+        let md = self.reader.metadata();
+        let mut base = 0u64;
+        for g in 0..md.num_row_groups() {
+            let rows = u64::try_from(md.row_group(g).num_rows()).unwrap_or(0);
+            if fid > base && fid <= base.saturating_add(rows) {
+                if let Some(file) = &self.remote
+                    && !want_chunks(file, md, &[g], &[col])?
+                {
+                    return Err(remote::need());
+                }
+                let rg = self.reader.get_row_group(g).map_err(err)?;
+                let mut take = vec![false; usize::try_from(rows).unwrap_or(0)];
+                if let Some(slot) = take.get_mut(usize::try_from(fid - base - 1).unwrap_or(usize::MAX)) {
+                    *slot = true;
+                }
+                return read_bytes(rg.as_ref(), col, &take)?
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .filter(|b| !b.is_empty())
+                    .ok_or_else(|| DataError::Format(format!("the image field {field} of row {fid} is empty")));
+            }
+            base = base.saturating_add(rows);
+        }
+        Err(DataError::Format(format!("no row with id {fid}")))
     }
 
     /// A file or an upload; a file by its web address is read a view at a time, not in full.
@@ -520,7 +620,12 @@ impl FeatureSource for ParquetSource {
             }
             let rg = self.reader.get_row_group(g).map_err(err)?;
             let geoms = read_bytes(rg.as_ref(), self.geom_col, &take)?;
-            let attrs: Vec<Vec<Value>> = self.field_cols.iter().map(|&c| read_values(rg.as_ref(), c, &take)).collect::<Result<_>>()?;
+            let attrs: Vec<Vec<Value>> = self
+                .field_cols
+                .iter()
+                .zip(&self.info.fields)
+                .map(|(&c, f)| read_values(rg.as_ref(), c, &take, f.ty == FieldType::Image))
+                .collect::<Result<_>>()?;
             let wanted = take.iter().filter(|&&t| t).count();
             if geoms.len() != wanted || attrs.iter().any(|a| a.len() != wanted) {
                 return Err(DataError::Format(format!("GeoParquet: row group {g} has columns shorter than its rows")));
@@ -812,6 +917,9 @@ fn field_type(c: &ColumnDescPtr) -> Option<FieldType> {
         Physical::INT32 | Physical::INT64 => FieldType::Integer,
         Physical::FLOAT | Physical::DOUBLE => FieldType::Double,
         Physical::BYTE_ARRAY if is_text(c) => FieldType::Text,
+        // A binary column that isn't text holds pictures often enough to read as image
+        // attributes (their bytes stay in the file).
+        Physical::BYTE_ARRAY => FieldType::Image,
         _ => return None,
     })
 }
@@ -860,8 +968,9 @@ fn read_column<T: PqType>(r: &mut ColumnReaderImpl<T>, take: &[bool], max_def: i
     Ok(out)
 }
 
-/// Reads a field column as attribute values, for the rows `take` marks, in order.
-fn read_values(rg: &dyn RowGroupReader, col: usize, take: &[bool]) -> Result<Vec<Value>> {
+/// Reads a field column as attribute values, for the rows `take` marks, in order. A binary
+/// column read as `image` keeps only the metadata of its bytes.
+fn read_values(rg: &dyn RowGroupReader, col: usize, take: &[bool], image: bool) -> Result<Vec<Value>> {
     let desc = rg.metadata().column(col).column_descr_ptr();
     let max_def = desc.max_def_level();
     let scale = decimal_scale(&desc).map(|s| 10f64.powi(-s));
@@ -884,7 +993,18 @@ fn read_values(rg: &dyn RowGroupReader, col: usize, take: &[bool]) -> Result<Vec
         }
         ColumnReader::ByteArrayColumnReader(mut r) => read_column(&mut r, take, max_def)?
             .into_iter()
-            .map(|v| v.map(|b| Value::Text(String::from_utf8_lossy(b.data()).into_owned())).unwrap_or_default())
+            .map(|v| {
+                v.map(|b| {
+                    if image {
+                        crate::pictures::meta(b.data())
+                            .map(|(f, w, h)| Value::Image(crate::ImageValue::new(f.mime(), w, h, b.data().len() as u64)))
+                            .unwrap_or(Value::Null)
+                    } else {
+                        Value::Text(String::from_utf8_lossy(b.data()).into_owned())
+                    }
+                })
+                .unwrap_or_default()
+            })
             .collect(),
         _ => Vec::new(),
     })
@@ -1137,6 +1257,8 @@ pub(crate) fn write_features<W: std::io::Write + Send>(
             FieldType::Double => prim(&f.name, Physical::DOUBLE, Repetition::OPTIONAL, None)?,
             FieldType::Boolean => prim(&f.name, Physical::BOOLEAN, Repetition::OPTIONAL, None)?,
             FieldType::Text => prim(&f.name, Physical::BYTE_ARRAY, Repetition::OPTIONAL, Some(LogicalType::String))?,
+            // Only the metadata reaches a dataset: an export filters image fields out first.
+            FieldType::Image => prim(&f.name, Physical::BYTE_ARRAY, Repetition::OPTIONAL, None)?,
         });
     }
     let schema = Arc::new(Type::group_type_builder("schema").with_fields(cols).build().map_err(err)?);
@@ -1225,6 +1347,11 @@ pub(crate) fn write_features<W: std::io::Write + Send>(
                             Value::Null => None,
                             v => Some(ByteArray::from(v.to_string().into_bytes())),
                         }));
+                        c.typed::<ByteArrayType>().write_batch(&v, Some(&d), None).map_err(err)?;
+                    }
+                    FieldType::Image => {
+                        // No image bytes are held: the column is null where a dataset is written.
+                        let (v, d) = levels(rows.iter().map(|_| None::<ByteArray>));
                         c.typed::<ByteArrayType>().write_batch(&v, Some(&d), None).map_err(err)?;
                     }
                 }

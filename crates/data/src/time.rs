@@ -145,7 +145,7 @@ pub fn kind_of(v: &Value) -> Option<Kind> {
                 None => parse_text(t).map(|_| Kind::Text),
             }
         }
-        Value::Null | Value::Bool(_) => None,
+        Value::Null | Value::Bool(_) | Value::Image(_) => None,
     }
 }
 
@@ -173,7 +173,7 @@ pub fn instant(v: &Value, kind: Kind) -> Option<f64> {
         Value::Int(i) => Some(*i as f64),
         Value::Float(x) => Some(*x),
         Value::Text(s) => plain_number(s.trim()),
-        Value::Null | Value::Bool(_) => return None,
+        Value::Null | Value::Bool(_) | Value::Image(_) => return None,
     };
     let t = match (kind, x) {
         // Epoch times only as the field's were recognised (1900 to 2100, at their scale): a stray

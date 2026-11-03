@@ -164,11 +164,14 @@ pub fn export(dataset: &Dataset, rows: &[usize], min_zoom: u8, max_zoom: u8, sou
     let fields: serde_json::Map<String, serde_json::Value> = dataset
         .fields
         .iter()
+        .filter(|f| f.ty != FieldType::Image)
         .map(|f| {
             let ty = match f.ty {
                 FieldType::Integer | FieldType::Double => "Number",
                 FieldType::Text => "String",
                 FieldType::Boolean => "Boolean",
+                // Vector tiles carry text and numbers only: image fields are left out.
+                FieldType::Image => "String",
             };
             (f.name.clone(), serde_json::Value::String(ty.into()))
         })
@@ -318,6 +321,8 @@ fn properties(ds: &Dataset, attrs: &[Value]) -> Result<Vec<(String, mvt::Value)>
             Value::Float(f) => mvt::Value::Number(*f),
             Value::Text(s) => mvt::Value::String(s.clone()),
             Value::Bool(b) => mvt::Value::Bool(*b),
+            // No binary attributes in a vector tile: the image stays in the source.
+            Value::Image(_) => continue,
         };
         out.push((field.name.clone(), value));
     }

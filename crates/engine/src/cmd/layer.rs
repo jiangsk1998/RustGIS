@@ -1749,8 +1749,23 @@ fn add_source_with(
             ds.source = Some(label.clone());
             features += ds.features.len() as u64;
             let id = add_dataset(s, ds);
-            if let (Some(r), Some(l)) = (style.clone(), s.map_mut().layer_mut(id)) {
-                l.renderer = r;
+            // Read whole, the rows hold no pictures: the file or table they came from stays with
+            // the layer, to read a feature's image field on demand.
+            let image_source = match &origin {
+                Origin::Path(path) => {
+                    let full = std::path::absolute(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string());
+                    rustgis_map::source::SourceLayer::from_path(full, table.clone(), src)
+                }
+                Origin::Bytes(file, bytes) => rustgis_map::source::SourceLayer::from_bytes(*file, bytes.clone(), table.clone(), src),
+                Origin::Postgis(o) => rustgis_map::source::SourceLayer::from_postgis((*o).clone(), src),
+                Origin::Mysql(o) => rustgis_map::source::SourceLayer::from_mysql((*o).clone(), src),
+                Origin::Sqlserver(o) => rustgis_map::source::SourceLayer::from_sqlserver((*o).clone(), src),
+            };
+            if let Some(l) = s.map_mut().layer_mut(id) {
+                l.image_source = Some(image_source);
+                if let Some(r) = style.clone() {
+                    l.renderer = r;
+                }
             }
             ids.push(id);
             for m in report.messages {

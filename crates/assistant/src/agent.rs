@@ -60,6 +60,12 @@ pub enum Entry {
     Error(crate::Error),
     /// A note from the app (a stop, a retry, a compaction), translated by the interface.
     Note(Note),
+    /// A picture the model was sent (what it is, and its thumbnail as a `data:` address): shown
+    /// after the call that read it.
+    Image {
+        summary: String,
+        data: String,
+    },
 }
 
 enum State {
@@ -137,6 +143,15 @@ pub struct Agent {
     delegations: Vec<Delegation>,
     /// Threads' reports waiting for the assistant to be free ([`Agent::deliver`]).
     reports: Vec<(String, String, String, bool)>,
+    /// Pictures `read_image` read, sent as their own user turn with the next request.
+    pending_images: Vec<provider::ImagePart>,
+    /// The text of each pending picture's turn, in the same order.
+    pending_image_texts: Vec<String>,
+    /// The thumbnails the transcript shows for them: what each picture is, and its `data:` address.
+    pending_thumbs: Vec<(String, String)>,
+    /// The Chat Completions provider, address and model found to refuse pictures larger than this
+    /// many pixels a side: `read_image` shrinks to it ([`Agent::image_side`]).
+    image_sides: Vec<(String, String, String, u32)>,
 }
 
 /// An agent thread on this computer: an ACP session that works in the background and takes
@@ -193,6 +208,10 @@ impl Agent {
             delegations: Vec::new(),
             reports: Vec::new(),
             max_steps: MAX_STEPS,
+            pending_images: Vec::new(),
+            pending_image_texts: Vec::new(),
+            pending_thumbs: Vec::new(),
+            image_sides: Vec::new(),
         }
     }
 
@@ -292,6 +311,7 @@ impl Agent {
         child.allowed = allowed;
         child.always = self.always.clone();
         child.no_reasoning = self.no_reasoning.clone();
+        child.image_sides = self.image_sides.clone();
         // The budget is the main assistant's: what's left of it for this message.
         child.max_steps = self.max_steps.saturating_sub(self.steps).max(1);
         child.base_system = system_prompt(s) + SUBAGENT_PROMPT;
@@ -449,6 +469,9 @@ impl Agent {
         self.threads.clear();
         self.delegations.clear();
         self.reports.clear();
+        self.pending_images.clear();
+        self.pending_image_texts.clear();
+        self.pending_thumbs.clear();
         self.generation += 1;
     }
 
@@ -553,7 +576,7 @@ impl Agent {
     }
 
     /// Runs a call: the agent's own tools, else the session's.
-    fn run_tool(&self, s: &mut Session, call: &ToolCall, tokens: usize) -> Result<String, String> {
+    fn run_tool(&mut self, s: &mut Session, call: &ToolCall, tokens: usize) -> Result<String, String> {
         if !self.allowed.is_empty() && call.name != "load_skill" && !self.allowed.contains(&call.name) {
             return Err(format!("'{}' isn't one of this subagent's tools", call.name));
         }
@@ -563,8 +586,87 @@ impl Agent {
                 let markdown = skills::load(&self.skills, name)?;
                 Ok(tools::bounded_json(&serde_json::json!({"name":name,"markdown":markdown}), tokens))
             }
+            "read_image" => self.read_image(s, call, tokens),
             _ => tools::run_with_budget(s, call, tokens),
         }
+    }
+
+    /// `read_image`: the picture itself goes in the next request; the call's result is the
+    /// description the model is told, and the transcript shows the thumbnail after it.
+    fn read_image(&mut self, s: &mut Session, call: &ToolCall, tokens: usize) -> Result<String, String> {
+        let read = tools::read_image(s, &call.args, self.image_side())?;
+        let thumb = rustgis_engine::data::pictures::thumbnail(&read.image.1).unwrap_or_default();
+        self.pending_thumbs.push((read.caption.clone(), thumb));
+        self.pending_image_texts.push(read.caption);
+        self.pending_images.push(provider::ImagePart { mime: read.image.0, data: read.image.1 });
+        Ok(tools::bounded_json(&read.content, tokens))
+    }
+
+    /// The longest side the selected provider, address and model was found to take pictures at
+    /// ([`Agent::image_sides`]); `read_image` shrinks to it.
+    fn image_side(&self) -> Option<u32> {
+        let (provider, base, model) = (&self.config.provider, &self.config.base_url, &self.config.model);
+        self.image_sides.iter().find(|(p, b, m, _)| p == provider && b == base && m == model).map(|(_, _, _, side)| *side)
+    }
+
+    /// Halves the pictures of the last image turn the model refused as too large, keeping half the
+    /// longer side (at least 128 pixels), and remembers the side for the next `read_image`.
+    /// `false` when there are no pictures, or they can't go smaller.
+    fn shrink_pictures(&mut self) -> bool {
+        use rustgis_engine::data::pictures;
+        let Some(Turn::Image { images, .. }) = self.turns.iter_mut().rev().find(|t| matches!(t, Turn::Image { .. })) else {
+            return false;
+        };
+        let Some(side) = images.iter().filter_map(|i| pictures::meta(&i.data)).map(|(_, w, h)| w.max(h)).max() else {
+            return false;
+        };
+        let target = (side / 2).max(128);
+        if target >= side {
+            return false;
+        }
+        let mut shrunk = false;
+        for i in &mut *images {
+            if let Ok(data) = pictures::shrink(&i.data, target) {
+                i.data = data;
+                i.mime = "image/jpeg".to_string();
+                shrunk = true;
+            }
+        }
+        if !shrunk {
+            return false;
+        }
+        match self
+            .image_sides
+            .iter_mut()
+            .find(|(p, b, m, _)| p == &self.config.provider && b == &self.config.base_url && m == &self.config.model)
+        {
+            Some(e) => e.3 = e.3.min(target),
+            None => {
+                let (p, b, m) = identity(&self.config);
+                self.image_sides.push((p, b, m, target));
+            }
+        }
+        self.transcript.push(Entry::Note(Note::with(
+            "The model refused the pictures as too large; shrank them to {side} pixels a side and trying again.",
+            [("side", target.to_string())],
+        )));
+        true
+    }
+
+    /// Sends the last image turn's text without its pictures (a model without vision), once.
+    fn drop_pictures(&mut self) -> bool {
+        let Some(Turn::Image { text, images }) = self.turns.iter_mut().rev().find(|t| matches!(t, Turn::Image { .. })) else {
+            return false;
+        };
+        if images.is_empty() {
+            return false;
+        }
+        images.clear();
+        *text = format!("{text} (The model can't take pictures; only their descriptions were sent.)");
+        self.transcript.push(Entry::Note(Note::new(
+            "The model can't take pictures; only their descriptions were sent. Choose a model with vision to have it read them.",
+        )));
+        true
     }
 
     /// Compacts the conversation now (the user's "Compact"): everything so far is summarised.
@@ -749,6 +851,10 @@ impl Agent {
                 self.no_reasoning.extend(self.sent_to.take());
                 return self.send();
             }
+            // A model that takes no pictures: send their descriptions only, once, and say so.
+            Err(e) if provider::refuses_pictures(&e) && self.drop_pictures() => return self.send(),
+            // Pictures too large for the model: shrink them and try again (a few times).
+            Err(e) if provider::picture_too_large(&e) && self.shrink_pictures() => return self.send(),
             Err(e) => {
                 self.transcript.push(Entry::Error(e));
                 self.state = State::Idle;
@@ -808,6 +914,12 @@ impl Agent {
         }
         let State::Calls(_, results) = std::mem::replace(&mut self.state, State::Idle) else { return Step::Done };
         self.turns.push(Turn::Results(results));
+        // A picture read goes as its own user turn after the results, never inside one.
+        if !self.pending_images.is_empty() {
+            let text = std::mem::take(&mut self.pending_image_texts).join("\n");
+            let images = std::mem::take(&mut self.pending_images);
+            self.turns.push(Turn::Image { text, images });
+        }
         self.steps += 1;
         if self.steps >= self.max_steps {
             self.transcript.push(Entry::Note(Note::with(provider::STEP_LIMIT_NOTE, [("steps", self.max_steps.to_string())])));
@@ -837,6 +949,10 @@ impl Agent {
         };
         let shown = if allow { content.clone() } else { "Declined".to_string() };
         self.record(call, content, shown, error);
+        // The pictures read show right after the call that read them.
+        for (summary, data) in std::mem::take(&mut self.pending_thumbs) {
+            self.transcript.push(Entry::Image { summary, data });
+        }
     }
 
     /// Takes the first waiting call off the queue with its result (and what the transcript shows).
@@ -965,6 +1081,9 @@ impl Agent {
                 }
                 Entry::Note(n) => self.transcript.push(Entry::Note(n.clone())),
                 Entry::Error(e) => self.transcript.push(Entry::Error(e.clone())),
+                Entry::Image { summary, data } => {
+                    self.transcript.push(Entry::Image { summary: format!("↳ {summary}"), data: data.clone() })
+                }
                 Entry::User(_) | Entry::Assistant(_) => {}
             }
         }
@@ -1116,6 +1235,10 @@ impl Agent {
             }
         }
         self.generation += 1;
+        // Pictures read in calls that never finished go with the stopped run.
+        self.pending_images.clear();
+        self.pending_image_texts.clear();
+        self.pending_thumbs.clear();
         self.transcript.push(why);
     }
 
@@ -1167,6 +1290,8 @@ guessing.
 - For questions about data, read it with read_features (with a where clause, ordering and a limit) rather than guessing; \
 it reads a tool's output table too. \
 Where clauses are SQL-like: pop_max > 1000000 AND continent = 'Asia'.
+- A field whose values read as `image …` is a picture: read_image sends it to you to look at. Say what you see; never \
+invent what a picture shows.
 - Every change can be undone (edit.undo), so act when the request is clear and ask only when it is ambiguous.
 - Commands that read or write files, use the internet or replace the project wait for the user's approval; they may decline.
 - Keep replies short. Markdown is fine: **bold**, `code`, lists and short tables.

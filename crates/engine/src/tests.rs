@@ -8373,6 +8373,63 @@ fn streamed_layers_save_their_source_not_their_features() {
     let _ = std::fs::remove_file(path);
 }
 
+/// A GeoPackage of two points whose `photo` column holds a PNG: `(4×3, 2×2)`.
+#[cfg(not(target_arch = "wasm32"))]
+fn picture_gpkg() -> (std::path::PathBuf, Vec<u8>) {
+    use image::ImageEncoder;
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png).write_image(&[0u8; 4 * 3 * 3], 4, 3, image::ExtendedColorType::Rgb8).unwrap();
+    let path = std::env::temp_dir().join(format!("rustgis-engine-pictures-{}.gpkg", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.execute_batch(
+        "CREATE TABLE gpkg_spatial_ref_sys (srs_name TEXT, srs_id INTEGER PRIMARY KEY, organization TEXT, organization_coordsys_id INTEGER, definition TEXT, description TEXT);
+         INSERT INTO gpkg_spatial_ref_sys VALUES ('WGS 84', 4326, 'EPSG', 4326, '', '');
+         CREATE TABLE gpkg_contents (table_name TEXT PRIMARY KEY, data_type TEXT, identifier TEXT, description TEXT, last_change TEXT, min_x DOUBLE, min_y DOUBLE, max_x DOUBLE, max_y DOUBLE, srs_id INTEGER);
+         CREATE TABLE gpkg_geometry_columns (table_name TEXT, column_name TEXT, geometry_type_name TEXT, srs_id INTEGER, z TINYINT, m TINYINT);
+         INSERT INTO gpkg_contents (table_name, data_type, srs_id) VALUES ('shots', 'features', 4326);
+         INSERT INTO gpkg_geometry_columns VALUES ('shots', 'geom', 'POINT', 4326, 0, 0);
+         CREATE TABLE shots (fid INTEGER PRIMARY KEY AUTOINCREMENT, geom BLOB, name TEXT, photo BLOB);",
+    )
+    .unwrap();
+    let tx = c.unchecked_transaction().unwrap();
+    for i in 1..=2 {
+        let geom = rustgis_data::wkb::encode(&rustgis_data::Geometry::Point(rustgis_geom::Coord::new(i as f64, 2.0)));
+        tx.execute("INSERT INTO shots VALUES (?1, ?2, ?3, ?4)", rusqlite::params![i, geom, format!("r{i}"), png]).unwrap();
+    }
+    tx.commit().unwrap();
+    (path, png)
+}
+
+/// A layer read whole keeps its file as its image source: pictures are read from it on demand,
+/// before and after the project is saved and opened again.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_layer_loaded_whole_reads_pictures_from_its_file() {
+    let (path, png) = picture_gpkg();
+    let mut s = Session::new(Project::default());
+    let r = s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    assert_eq!(r["streamed"], false, "{r}");
+    let id = r["layer"].as_u64().unwrap() as u32;
+    let l = s.map().layer(id).unwrap();
+    assert!(!l.is_streamed());
+    assert!(l.dataset.fields.iter().any(|f| f.ty == rustgis_data::FieldType::Image && f.name == "photo"));
+    // The pictures aren't in the dataset; the file behind it reads them.
+    assert_eq!(l.image(1, "photo").unwrap(), png);
+    assert_eq!(l.image(2, "photo").unwrap(), png);
+    // Saved, the file and table are kept (not the bytes): the pictures read again when asked.
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text})).unwrap();
+    let l = t.map().layer(id).unwrap();
+    assert_eq!(l.image(1, "photo").unwrap(), png);
+    // The file gone, the failure says so rather than showing a made-up picture.
+    let _ = std::fs::remove_file(&path);
+    let mut u = Session::new(Project::default());
+    u.run("project.openText", &json!({"text": text})).unwrap();
+    assert!(u.map().layer(id).unwrap().image(2, "photo").is_err());
+}
+
 #[test]
 fn tools_read_streamed_layers_whole() {
     let path = grid_fgb("tools", 50);

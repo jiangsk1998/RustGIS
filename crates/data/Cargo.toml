@@ -35,8 +35,9 @@ geozero = { workspace = true }
 calamine = { workspace = true }
 # LAZ (compressed LiDAR) point clouds.
 laz = { workspace = true }
-# KML ground overlays are PNG or JPEG pictures.
-image = { workspace = true, features = ["jpeg"] }
+# KML ground overlays are PNG or JPEG pictures; image attributes can be any of the formats
+# `pictures` recognizes (all pure Rust, so the browser decodes them too).
+image = { workspace = true, features = ["jpeg", "gif", "webp", "tiff"] }
 # Geotagged photos keep a thumbnail as a data: address.
 base64 = { workspace = true }
 lz4_flex = { workspace = true }

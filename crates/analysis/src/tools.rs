@@ -1964,7 +1964,7 @@ pub(crate) fn try_clone_value(v: &Value) -> Result<Value, TryReserveError> {
             s.push_str(t);
             Value::Text(s)
         }
-        Value::Null | Value::Int(_) | Value::Float(_) | Value::Bool(_) => v.clone(),
+        Value::Null | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Image(_) => v.clone(),
     })
 }
 
@@ -2065,7 +2065,7 @@ fn coordinate(v: &Value) -> Option<f64> {
                 Err(_) => return None,
             }
         }
-        Value::Null | Value::Bool(_) => return None,
+        Value::Null | Value::Bool(_) | Value::Image(_) => return None,
     };
     n.is_finite().then_some(n)
 }

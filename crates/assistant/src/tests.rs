@@ -126,6 +126,79 @@ fn urls_allowed() {
     assert!(!allowed_url(""));
 }
 
+/// A picture read for the model goes in each provider's own image form, its description with it.
+#[test]
+fn pictures_reach_every_provider() {
+    use base64::Engine;
+    let data = vec![0x89u8, 0x50, 0x4e, 0x47, 1, 2, 3];
+    let text = "The picture in Fields' photo (feature 7): image 640×480 png.";
+    let turns = vec![Turn::Image { text: text.into(), images: vec![ImagePart { mime: "image/png".into(), data: data.clone() }] }];
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+
+    // OpenAI Chat Completions.
+    let b = body(&chat_request(&cfg("openai"), "s", &turns, &[]));
+    let m = &b["messages"][1];
+    assert_eq!(m["role"], "user");
+    assert_eq!(m["content"][0], json!({"type": "text", "text": text}));
+    assert_eq!(m["content"][1], json!({"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{b64}")}}));
+
+    // OpenAI Responses.
+    let b = body(&chat_request(&chatgpt_cfg(), "s", &turns, &[]));
+    let m = &b["input"][0];
+    assert_eq!(m["role"], "user");
+    assert_eq!(m["content"][0], json!({"type": "input_text", "text": text}));
+    assert_eq!(m["content"][1], json!({"type": "input_image", "image_url": format!("data:image/png;base64,{b64}")}));
+
+    // Anthropic Messages.
+    let b = body(&chat_request(&cfg("anthropic"), "s", &turns, &[]));
+    let m = &b["messages"][0]["content"];
+    assert_eq!(m[0], json!({"type": "text", "text": text}));
+    assert_eq!(m[1], json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}}));
+
+    // Gemini.
+    let b = body(&chat_request(&cfg("gemini"), "s", &turns, &[]));
+    let m = &b["contents"][0]["parts"];
+    assert_eq!(m[0], json!({"text": text}));
+    assert_eq!(m[1]["inline_data"], json!({"mime_type": "image/png", "data": b64}));
+}
+
+/// A refusal for size is told from one for a model that takes no pictures.
+#[test]
+fn picture_refusals_are_told_apart() {
+    let error = |status: u16, detail: &str| crate::Error { status: Some(status), detail: detail.into(), ..String::new().into() };
+    assert!(picture_too_large(&error(413, "payload too large")));
+    assert!(picture_too_large(&error(400, "image dimensions exceed max allowed size")));
+    assert!(!picture_too_large(&error(401, "unauthorized")));
+    assert!(!picture_too_large(&error(400, "the image is not supported")));
+    assert!(refuses_pictures(&error(400, "this model does not support image input")));
+    assert!(!refuses_pictures(&error(400, "image is too large")));
+}
+
+/// A saved conversation keeps a picture's text, not its bytes, and compaction summarises it.
+#[test]
+fn picture_turns_keep_their_text_when_saved() {
+    let turns = vec![Turn::Image {
+        text: "A picture of a bridge.".into(),
+        images: vec![ImagePart { mime: "image/png".into(), data: vec![1; 10] }],
+    }];
+    let saved = serde_json::to_string(&turns).unwrap();
+    assert!(!saved.contains("AAAA"), "the bytes aren't saved: {saved}");
+    let back: Vec<Turn> = serde_json::from_str(&saved).unwrap();
+    assert!(matches!(&back[0], Turn::Image { images, .. } if images.is_empty()), "{saved}");
+    assert_eq!(crate::history::transcript(&turns), vec![Entry::Note(Note::text("A picture of a bridge.".to_string()))]);
+    assert!(crate::compact::as_text(&turns, 1).contains("A picture of a bridge."));
+}
+
+/// `read_image` says which fields are pictures, and asks for a layer and a field.
+#[test]
+fn read_image_names_the_image_fields() {
+    let mut s = sample();
+    let e = tools::read_image(&mut s, &json!({"layer": "Cities", "field": "name"}), None).err().unwrap();
+    assert!(e.contains("no image field"), "{e}");
+    assert!(tools::read_image(&mut s, &json!({"field": "photo"}), None).is_err());
+    assert!(tools::read_image(&mut s, &json!({"layer": "No such layer", "field": "photo"}), None).is_err());
+}
+
 #[test]
 fn openai_round_trip() {
     let s = sample();

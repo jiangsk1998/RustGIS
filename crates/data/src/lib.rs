@@ -25,6 +25,7 @@ pub mod mbtiles;
 pub mod ogc;
 pub mod osm;
 pub mod photo;
+pub mod pictures;
 pub mod query;
 pub mod raster;
 pub mod s3_address;
@@ -42,7 +43,7 @@ pub mod zip;
 
 pub use geometry::{Geometry, GeometryType, VertexId};
 pub use rustgis_geom::{Coord, Extent};
-pub use value::{Field, FieldType, Value};
+pub use value::{Field, FieldType, ImageValue, Value};
 
 use serde::{Deserialize, Serialize};
 
@@ -372,6 +373,13 @@ fn layer_list(names: &[&str]) -> String {
     format!("{} layers ({shown}{more})", names.len())
 }
 
+/// The first five names of a field list, and a count of the rest.
+fn name_list(names: &[&str]) -> String {
+    let shown = names.iter().take(5).copied().collect::<Vec<_>>().join(", ");
+    let more = if names.len() > 5 { format!(" and {} more", names.len() - 5) } else { String::new() };
+    format!("{shown}{more}")
+}
+
 /// What an export of `layers` (each with its whole extent, longitude/latitude, which for a layer
 /// read in place is its source's) written in `crs` says its geometry lacks, one notice per kind:
 /// Z or M values dropped on import ([`zm_export_note`]); positions only approximate, as their
@@ -385,6 +393,37 @@ pub fn export_notes<'a>(
 ) -> Vec<String> {
     let layers: Vec<_> = layers.into_iter().collect();
     let mut notes: Vec<String> = zm_export_note(layers.iter().map(|(ds, _)| *ds), target).into_iter().collect();
+    // Image fields aren't in an export: their bytes stay in the source, so the file has their
+    // names and not their values. Say how many and which.
+    let images: Vec<(&str, Vec<&str>)> = layers
+        .iter()
+        .map(|(ds, _)| {
+            (ds.name.as_str(), ds.fields.iter().filter(|f| f.ty == FieldType::Image).map(|f| f.name.as_str()).collect::<Vec<_>>())
+        })
+        .filter(|(_, names)| !names.is_empty())
+        .collect();
+    match images.as_slice() {
+        [] => {}
+        [(one, names)] => {
+            let s = if names.len() == 1 { "" } else { "s" };
+            notes.push(format!(
+                "{target}: {one}: its {} image field{s} ({}) weren't written; the images stay in the source",
+                names.len(),
+                name_list(names)
+            ));
+        }
+        many => {
+            let names: Vec<&str> = many.iter().flat_map(|(_, n)| n.iter().copied()).collect();
+            let layers: Vec<&str> = many.iter().map(|(l, _)| *l).collect();
+            let s = if names.len() == 1 { "" } else { "s" };
+            notes.push(format!(
+                "{target}: its {} image field{s} ({}) of {} weren't written; the images stay in the source",
+                names.len(),
+                name_list(&names),
+                layer_list(&layers)
+            ));
+        }
+    }
     let approximate: Vec<&Dataset> =
         layers.iter().map(|(ds, _)| *ds).filter(|ds| ds.crs.is_some_and(|c| c != crs && c.lacks_datum_shift())).collect();
     match approximate.as_slice() {
@@ -453,6 +492,28 @@ impl Dataset {
         self.features.iter().filter_map(|f| f.geometry.as_ref()).fold(Extent::EMPTY, |e, g| e.union(&g.extent()))
     }
 
+    /// The dataset as an export writes it: its image fields and their values left out, the
+    /// images staying in the source. `None` when it has no image field, so a caller keeps this
+    /// dataset itself rather than a copy.
+    pub fn without_image_fields(&self) -> Option<Dataset> {
+        let keep: Vec<bool> = self.fields.iter().map(|f| f.ty != FieldType::Image).collect();
+        if keep.iter().all(|k| *k) {
+            return None;
+        }
+        let mut out = self.clone();
+        out.fields = self.fields.iter().zip(&keep).filter(|(_, k)| **k).map(|(f, _)| f.clone()).collect();
+        out.features = self
+            .features
+            .iter()
+            .map(|f| Feature {
+                id: f.id,
+                geometry: f.geometry.clone(),
+                attrs: f.attrs.iter().zip(&keep).filter(|(_, k)| **k).map(|(v, _)| v.clone()).collect(),
+            })
+            .collect();
+        Some(out)
+    }
+
     /// Pushes a feature with the next id, padding/truncating attributes to the schema.
     pub fn push(&mut self, geometry: Option<Geometry>, mut attrs: Vec<Value>) {
         attrs.resize(self.fields.len(), Value::Null);
@@ -511,6 +572,37 @@ impl Dataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_attributes_keep_their_thumbnail_and_leave_exports_alone() {
+        let mut d =
+            Dataset::new("photos", GeometryType::None, vec![Field::new("name", FieldType::Text), Field::new("photo", FieldType::Image)]);
+        let image = ImageValue {
+            mime: "image/jpeg".into(),
+            width: 640,
+            height: 480,
+            byte_len: 12_345,
+            thumbnail: Some("data:image/jpeg;base64,AAAA".into()),
+        };
+        d.push(None, vec![Value::Text("a".into()), Value::Image(image.clone())]);
+
+        // A saved project keeps the metadata and thumbnail; the original bytes stay in the source.
+        let back: Dataset = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back, d);
+        // What the tools and the attribute table see: metadata only, never the bytes.
+        let json = Value::Image(image).to_json();
+        assert_eq!(json["image"]["width"], 640);
+        assert!(json["image"].get("thumbnail").is_none());
+        assert!(!json.to_string().contains("base64"));
+
+        // An export leaves the image field out, and says which.
+        let out = d.without_image_fields().unwrap();
+        assert_eq!(out.fields, vec![Field::new("name", FieldType::Text)]);
+        assert_eq!(out.features[0].attrs, vec![Value::Text("a".into())]);
+        assert!(out.without_image_fields().is_none());
+        let notes = export_notes([(&d, d.extent())], "out.gpkg", crate::raster::Crs::LonLat);
+        assert_eq!(notes, ["out.gpkg: photos: its 1 image field (photo) weren't written; the images stay in the source"]);
+    }
 
     #[test]
     fn features_are_shared_until_changed() {

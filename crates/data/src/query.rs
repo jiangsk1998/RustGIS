@@ -831,6 +831,7 @@ fn truth(v: &Value) -> Option<bool> {
         Value::Int(i) => Some(*i != 0),
         Value::Float(f) => (!f.is_nan()).then_some(*f != 0.0),
         Value::Text(s) => Some(!s.is_empty()),
+        Value::Image(_) => None,
     }
 }
 

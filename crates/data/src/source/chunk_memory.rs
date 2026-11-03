@@ -23,6 +23,7 @@ pub fn feature_bytes(f: &Feature) -> usize {
     let attrs = f.attrs.iter().fold(f.attrs.capacity().saturating_mul(size_of::<Value>()), |n, v| {
         n.saturating_add(match v {
             Value::Text(s) => s.capacity(),
+            Value::Image(img) => img.heap_bytes(),
             _ => 0,
         })
     });

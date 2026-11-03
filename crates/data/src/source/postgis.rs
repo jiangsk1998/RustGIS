@@ -715,15 +715,17 @@ impl std::fmt::Debug for PostgisSource {
     }
 }
 
-/// How a column of a PostgreSQL type is read: cast to a type RustGIS has, or as text. `None`
-/// leaves it out (other geometry, rasters, binary).
+/// How a column of a PostgreSQL type is read: cast to a type RustGIS has, or as text. `bytea`
+/// columns read as image attributes (only their length; the bytes stay on the server). `None`
+/// leaves the column out (other geometry, rasters).
 fn field_cast(ty: &str) -> Option<(FieldType, &'static str)> {
     match ty {
         "int2" | "int4" | "int8" | "oid" => Some((FieldType::Integer, "int8")),
         "float4" | "float8" | "numeric" => Some((FieldType::Double, "float8")),
         // `money` has no cast to a number; as text it keeps its currency's format.
         "bool" => Some((FieldType::Boolean, "bool")),
-        "geometry" | "geography" | "raster" | "bytea" | "box2d" | "box3d" | "tsvector" => None,
+        "bytea" => Some((FieldType::Image, "bytea")),
+        "geometry" | "geography" | "raster" | "box2d" | "box3d" | "tsvector" => None,
         _ => Some((FieldType::Text, "text")),
     }
 }
@@ -796,7 +798,11 @@ impl PostgisSource {
                 continue;
             }
             if let Some((ft, cast)) = field_cast(&ty) {
-                casts.push(format!("{}::{cast}", ident(&name)));
+                // A picture's bytes stay on the server: its length is what a dataset keeps.
+                casts.push(match ft {
+                    FieldType::Image => format!("octet_length({})::int8", ident(&name)),
+                    _ => format!("{}::{cast}", ident(&name)),
+                });
                 fields.push(Field::new(name, ft));
             }
         }
@@ -954,12 +960,40 @@ impl PostgisSource {
                     FieldType::Double => r.try_get::<_, Option<f64>>(i).ok().flatten().map(Value::Float),
                     FieldType::Boolean => r.try_get::<_, Option<bool>>(i).ok().flatten().map(Value::Bool),
                     FieldType::Text => r.try_get::<_, Option<String>>(i).ok().flatten().map(Value::Text),
+                    FieldType::Image => r
+                        .try_get::<_, Option<i64>>(i)
+                        .ok()
+                        .flatten()
+                        .and_then(|n| u64::try_from(n).ok())
+                        .map(|n| Value::Image(crate::ImageValue::sized(n))),
                 }
                 .unwrap_or(Value::Null)
             })
             .collect();
         // A negative key keeps its bits: still one id per row, and the same on every read.
         Some(Feature { id: id.cast_unsigned(), geometry: Some(geometry), attrs })
+    }
+
+    /// The original bytes of a row's image column, read from the server on demand: a dataset
+    /// keeps only the length.
+    pub fn image_at(&self, fid: u64, field: &str) -> Result<Vec<u8>> {
+        let Some(key) = &self.key else {
+            return Err(DataError::Unsupported("an image from a PostGIS table without a single-column integer key".into()));
+        };
+        // The name must be one of the table's own image columns before it goes into the statement.
+        if !self.info.fields.iter().any(|f| f.name == field && f.ty == FieldType::Image) {
+            return Err(DataError::Unsupported(format!("{field} is not an image field of {}", self.info.name)));
+        }
+        let sql =
+            format!("SELECT {field} FROM {table} WHERE {key} = $1", field = ident(field), table = self.table.sql_from(), key = ident(key));
+        let rows = self.conn.with(|c| c.query(sql.as_str(), &[&(fid as i64)]))?;
+        let Some(row) = rows.first() else {
+            return Err(DataError::Format(format!("no row with id {fid}")));
+        };
+        match row.try_get::<_, Option<Vec<u8>>>(0).ok().flatten() {
+            Some(b) if !b.is_empty() => Ok(b),
+            _ => Err(DataError::Format(format!("the image field {field} of row {fid} is empty"))),
+        }
     }
 
     /// The table's spatial index on the column, if it has one (a view has none of its own).
@@ -1132,6 +1166,8 @@ fn text_value(v: &Value) -> Option<String> {
         Value::Float(x) => Some(x.to_string()),
         Value::Text(t) => Some(t.clone()),
         Value::Bool(b) => Some(b.to_string()),
+        // Pictures are read only: there is no image to write back.
+        Value::Image(_) => None,
     }
 }
 
@@ -1420,6 +1456,10 @@ impl FeatureSource for PostgisSource {
         }
         out.complete = step <= 1 && (rows.len() as u64) >= out.matched;
         Ok(out)
+    }
+
+    fn image(&self, fid: u64, field: &str) -> Result<Vec<u8>> {
+        self.image_at(fid, field)
     }
 }
 

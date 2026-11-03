@@ -24,6 +24,12 @@ pub fn output_bytes(tokens: usize) -> usize {
     tokens.clamp(1, MAX_OUTPUT_TOKENS) * 4
 }
 
+/// The most a picture's bytes may take in a model request before it is shrunk: providers refuse
+/// bodies much larger, and one picture shouldn't crowd out the conversation.
+const MAX_IMAGE_BYTES: usize = 4 << 20;
+/// The longest side a picture is shrunk to when it is too large to send.
+const IMAGE_SIDE: u32 = 2_048;
+
 /// Shared tool definitions for the in-app assistant and MCP clients.
 pub fn defs() -> Vec<ToolDef> {
     vec![
@@ -110,6 +116,21 @@ pub fn defs() -> Vec<ToolDef> {
                     "selected": {"type": "boolean", "description": "Only the selected rows"},
                     "limit": {"type": "integer", "description": "At most this many rows (default 20, at most 200)"}
                 }
+            }),
+        },
+        ToolDef {
+            name: "read_image",
+            description: "Send one feature's picture from an image field (a photo, a scan, a screenshot) to the model. Give the layer, the image field and the feature (`fid`, or the `_row` read_features gave). The result says what the picture is; the picture itself follows the results. Pictures are sent as they are unless they are larger than the request allows, when they are shrunk; `max_side` asks for that.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "layer": {"type": "string", "description": "Layer name or id"},
+                    "field": {"type": "string", "description": "The image field's name"},
+                    "fid": {"type": "integer", "description": "The feature's id"},
+                    "row": {"type": "integer", "description": "The feature's _row from read_features (used when fid is absent)"},
+                    "max_side": {"type": "integer", "description": "Shrink the picture to at most this many pixels a side (64 to 4096)"}
+                },
+                "required": ["layer", "field"]
             }),
         },
         ToolDef {
@@ -339,6 +360,8 @@ pub fn run_with_budget(s: &mut Session, call: &ToolCall, tokens: usize) -> Resul
             with_notices(with_new_layers(r, s, &before), s, mark)
         }
         "read_features" => read_features(s, a)?,
+        // The picture itself goes out with the agent's next request (`Agent::read_image`).
+        "read_image" => read_image(s, a, None)?.content,
         // MCP's `run` (not offered to the in-app assistant): a script in one call.
         "run" => return run_script(s, a, tokens),
         "search_docs" => crate::docs::search(&str_arg(a, "query").unwrap_or_default(), limit_arg(a, 8, 30))?,
@@ -752,6 +775,8 @@ fn read_features(s: &Session, a: &Value) -> Result<Value, String> {
             let f = ds.features.get(r)?;
             let mut o = serde_json::Map::new();
             o.insert("_row".into(), json!(r));
+            // The feature's id, which read_image takes.
+            o.insert("_fid".into(), json!(f.id));
             // Where it is (its extent's centre), for zooming or going to it.
             if let Some(g) = &f.geometry {
                 let c = g.extent().center();
@@ -768,6 +793,9 @@ fn read_features(s: &Session, a: &Value) -> Result<Value, String> {
                     rustgis_engine::data::Value::Float(x) => json!(x),
                     rustgis_engine::data::Value::Bool(b) => json!(b),
                     rustgis_engine::data::Value::Text(t) => json!(clip(t, 200)),
+                    // An image never sends its bytes: a summary tells the model what it is (and
+                    // read_image sends the picture itself).
+                    rustgis_engine::data::Value::Image(img) => json!(img.summary()),
                 };
                 o.insert(field.name.clone(), v);
             }
@@ -780,6 +808,103 @@ fn read_features(s: &Session, a: &Value) -> Result<Value, String> {
     reply.insert("matched".into(), json!(rows.len()));
     reply.insert("rows".into(), Value::Array(out));
     Ok(Value::Object(reply))
+}
+
+/// A picture `read_image` read: the result the model is told, the sentence of the picture's own
+/// user turn, and its media type and bytes.
+pub struct ReadImage {
+    pub content: Value,
+    pub caption: String,
+    pub image: (String, Vec<u8>),
+}
+
+/// `read_image`: one feature's picture from `layer`'s `field`, at `fid` (a feature id) or `row`
+/// (a `_row` from `read_features`). `limit` is the largest side the model was found to take
+/// ([`crate::agent::Agent`]), or `None` before it refused any. The picture is sent as it is unless
+/// it is larger than a request should carry, or larger than `max_side`, when it is shrunk and the
+/// user is told.
+pub fn read_image(s: &mut Session, a: &Value, limit: Option<u32>) -> Result<ReadImage, String> {
+    use rustgis_engine::data::{FieldType, ImageValue, pictures};
+
+    let layer = a
+        .get("layer")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .ok_or("layer is required: a layer with an image field")?;
+    let field = a
+        .get("field")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .ok_or("field is required: an image field's name")?;
+    let id = s.layer_id(&json!({"layer": layer}))?;
+    let (name, field, fid, bytes) = {
+        let l = s.map().layer(id).ok_or("no such layer")?;
+        let ds = &l.dataset;
+        let images: Vec<&str> = ds.fields.iter().filter(|f| f.ty == FieldType::Image).map(|f| f.name.as_str()).collect();
+        if images.is_empty() {
+            return Err(format!("{} has no image field: an image needs a binary column of a source the layer reads", l.name));
+        }
+        let fi = ds
+            .fields
+            .iter()
+            .position(|f| f.name.eq_ignore_ascii_case(field))
+            .ok_or_else(|| format!("{} has no field '{field}'; its image fields are: {}", l.name, images.join(", ")))?;
+        if !ds.fields.get(fi).is_some_and(|f| f.ty == FieldType::Image) {
+            return Err(format!("{}'s {field} isn't an image field; its image fields are: {}", l.name, images.join(", ")));
+        }
+        let field = ds.fields.get(fi).map(|f| f.name.clone()).unwrap_or_else(|| field.to_string());
+        let fid = match a.get("fid").and_then(Value::as_u64) {
+            Some(n) => n,
+            None => {
+                let r = a.get("row").and_then(Value::as_u64).ok_or("fid (a feature id) or row (a _row from read_features) is required")?;
+                usize::try_from(r)
+                    .ok()
+                    .and_then(|r| ds.features.get(r))
+                    .map(|f| f.id)
+                    .ok_or_else(|| format!("{} has no row {r}; read its rows with read_features", l.name))?
+            }
+        };
+        let bytes = l.image(fid, &field).map_err(|e| format!("{}'s {field}: {e}", l.name))?;
+        (l.name.clone(), field, fid, bytes)
+    };
+    let (format, w, h) = pictures::meta(&bytes).ok_or_else(|| {
+        format!("{name}'s {field} holds bytes that aren't an image RustGIS reads (or is larger than {} MB)", pictures::MAX_BYTES >> 20)
+    })?;
+    let asked = a.get("max_side").and_then(Value::as_u64).map(|n| u32::try_from(n.clamp(64, 4096)).unwrap_or(IMAGE_SIDE));
+    let side = match (asked, limit) {
+        (Some(x), Some(l)) => Some(x.min(l)),
+        (Some(x), None) => Some(x),
+        (None, l) => l,
+    };
+    let byte_len = bytes.len();
+    let too_big = byte_len > MAX_IMAGE_BYTES;
+    let over_side = side.is_some_and(|side| (w > 0 && w > side) || (h > 0 && h > side));
+    let (mime, data, sent) = if too_big || over_side {
+        let target = side.unwrap_or(IMAGE_SIDE);
+        let data = pictures::shrink(&bytes, target).map_err(|e| format!("{name}'s {field}: {e}"))?;
+        let (sw, sh) = pictures::meta(&data).map_or((0, 0), |(_, w, h)| (w, h));
+        let why = if too_big {
+            format!("its {} KB is more than one request should carry", byte_len.div_ceil(1024))
+        } else {
+            format!("it is larger than {target} pixels a side")
+        };
+        s.notify(format!("{name}: the {field} picture was shrunk from {w}×{h} to {sw}×{sh} for the model, because {why}."), false);
+        (format.mime().to_string(), data, Some((sw, sh)))
+    } else {
+        (format.mime().to_string(), bytes, None)
+    };
+    let summary = ImageValue::new(format.mime(), w, h, byte_len as u64).summary();
+    let caption = match sent {
+        Some((sw, sh)) => format!("The picture in {name}'s {field} (feature {fid}): {summary}, sent at {sw}×{sh} jpeg."),
+        None => format!("The picture in {name}'s {field} (feature {fid}): {summary}."),
+    };
+    let mut content = json!({"layer": name, "field": field, "fid": fid, "image": summary});
+    if let Some((sw, sh)) = sent {
+        content["sent"] = json!(format!("shrunk to {sw}×{sh} jpeg because the original was too large"));
+    }
+    Ok(ReadImage { content, caption, image: (mime, data) })
 }
 
 /// The map as the model sees it at the start of a request: one line per layer.

@@ -39,7 +39,8 @@ pub(crate) fn split_blob(b: &[u8]) -> Option<(Option<Extent>, &[u8])> {
     Some((envelope, b.get(8 + env_len..)?))
 }
 
-/// The field type of a declared column type; `None` for a BLOB (not an attribute).
+/// The field type of a declared column type. Binary columns are image attributes: their bytes
+/// stay in the file, and only the metadata describing them is read.
 pub(crate) fn field_type(decl: &str) -> Option<FieldType> {
     let d = decl.to_ascii_uppercase();
     Some(if d.contains("BOOL") {
@@ -49,7 +50,7 @@ pub(crate) fn field_type(decl: &str) -> Option<FieldType> {
     } else if d.contains("REAL") || d.contains("FLOA") || d.contains("DOUB") || d.contains("NUMERIC") || d.contains("DECIMAL") {
         FieldType::Double
     } else if d.contains("BLOB") {
-        return None;
+        FieldType::Image
     } else {
         FieldType::Text
     })

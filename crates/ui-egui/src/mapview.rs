@@ -3223,6 +3223,26 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
     // A picture value (a photo's thumbnail) shows as the picture, not as its text.
     let picture_key = attrs.iter().find(|(_, v)| v.as_str().is_some_and(is_picture)).map(|(k, _)| k.clone());
     let picture = picture_key.and_then(|k| attrs.remove(&k)).and_then(|v| v.as_str().map(|s| picture_texture(app, ui.ctx(), s)));
+    // Image attributes: each shows its thumbnail, double-clicked to view the original.
+    let image_rows: Vec<(String, u64, crate::images::ThumbView)> = match shown {
+        Some((layer, fid)) => {
+            let job = app.session.map().layer(layer).and_then(|l| l.image_job());
+            info["images"]
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| {
+                            let len = v.get("byte_len").and_then(Value::as_u64).unwrap_or(0);
+                            let view = app.images.thumb(ui.ctx(), (layer, fid, k.clone(), len), job.clone());
+                            (k.clone(), len, view)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        None => Vec::new(),
+    };
+    let mut open_image: Option<(String, u64)> = None;
     let title = if waiting {
         tl!("Asking the map service…").to_string()
     } else if info["raster"].as_bool() == Some(true) {
@@ -3317,6 +3337,40 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
                         }
                     });
                 }
+                // Image attributes, as a row of thumbnails.
+                if !image_rows.is_empty() {
+                    egui::Frame::NONE.inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 0 }).show(ui, |ui| {
+                        egui::ScrollArea::horizontal().id_salt(("popup_images", key)).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for (name, len, view) in &image_rows {
+                                    match view {
+                                        crate::images::ThumbView::Ready(tex) => {
+                                            let resp = ui
+                                                .add(
+                                                    egui::Image::new((tex.id(), vec2(88.0, 88.0)))
+                                                        .sense(Sense::click())
+                                                        .corner_radius(CornerRadius::same(4)),
+                                                )
+                                                .on_hover_text(name);
+                                            if resp.double_clicked() {
+                                                open_image = Some((name.clone(), *len));
+                                            }
+                                        }
+                                        crate::images::ThumbView::Failed(e) => {
+                                            ui.label(egui::RichText::new(e.as_str()).size(11.0).color(t.text_dim));
+                                        }
+                                        crate::images::ThumbView::Loading => {
+                                            ui.add(egui::Spinner::new().size(14.0));
+                                        }
+                                        crate::images::ThumbView::Unavailable => {
+                                            ui.label(egui::RichText::new(name.as_str()).size(11.0).color(t.text_dim));
+                                        }
+                                    }
+                                }
+                            });
+                        });
+                    });
+                }
                 // A solid scroll bar in its own gutter, shown when the rows are taller than the
                 // limit (a floating one is invisible until hovered).
                 ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
@@ -3368,6 +3422,12 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
     });
     if let Some(l) = new_limit {
         ui.ctx().data_mut(|d| d.insert_temp(limit_id, l));
+    }
+    // A double-clicked thumbnail opens its original in the viewer.
+    if let (Some((name, len)), Some((id, fid))) = (open_image, shown) {
+        let job = app.session.map().layer(id).and_then(|l| l.image_job());
+        let title = format!("{name} · {layer}");
+        app.images.open(ui.ctx(), (id, fid, name, len), title, job);
     }
     // Zooms to the feature shown, found by its id, as Zoom To Selection does: the selection and
     // the undo history are left as they are.

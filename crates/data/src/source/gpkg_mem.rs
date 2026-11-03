@@ -5,7 +5,7 @@
 
 use super::{Batch, FeatureSource, Reproject, Request, Sampler, Shared, SourceInfo, clamp_limit, in_request};
 use crate::sqlite::{Db, Table, Val};
-use crate::{DataError, Feature, Field, FieldType, GeometryType, Result, Value, wkb};
+use crate::{DataError, Feature, Field, FieldType, GeometryType, ImageValue, Result, Value, pictures, wkb};
 use rustgis_geom::Extent;
 use std::ops::ControlFlow;
 
@@ -138,14 +138,30 @@ impl GpkgMemSource {
             .ok_or_else(|| DataError::Format(format!("GeoPackage: no column '{geom}' in {table_name}")))?;
         let mut fields = Vec::new();
         let mut field_cols = Vec::new();
+        let mut dropped = Vec::new();
         for (i, c) in table.columns.iter().enumerate() {
             if i == geom_col || Some(i) == table.rowid_column {
                 continue;
             }
             if let Some(ty) = super::gpkg_blob::field_type(&c.decl) {
+                // A binary column is declared an image field, but it may hold other data (see the
+                // desktop reader).
+                if ty == FieldType::Image {
+                    let (pictured, others) = probe_pictures(&db, &table, i);
+                    if pictured == 0 && others > 0 {
+                        dropped.push(c.name.clone());
+                        continue;
+                    }
+                    if others > 0 {
+                        notes.push(super::mixed_pictures_note(others, pictured + others, &c.name));
+                    }
+                }
                 fields.push(Field::new(c.name.clone(), ty));
                 field_cols.push(i);
             }
+        }
+        if !dropped.is_empty() {
+            notes.push(super::not_pictures_note(&dropped));
         }
         let contents = meta_rows(&db, &schema, "gpkg_contents").unwrap_or_default();
         let declared = contents.iter().find(|r| text(get(r, "table_name")).is_some_and(|t| t == table_name)).and_then(|r| {
@@ -255,10 +271,29 @@ impl GpkgMemSource {
     }
 }
 
+/// Pictures and other values among a column's first few values (at most 64, looking at no more
+/// than 256 rows): whether a declared binary column really holds pictures.
+fn probe_pictures(db: &Db<Shared>, table: &Table, col: usize) -> (usize, usize) {
+    let (mut pictured, mut others, mut looked) = (0, 0, 0);
+    let _ = db.rows(table, |_, r| {
+        looked += 1;
+        match r.get(col) {
+            Some(Val::Blob(b)) if pictures::meta(b).is_some() => pictured += 1,
+            Some(Val::Null) | None => {}
+            Some(_) => others += 1,
+        }
+        if pictured + others >= 64 || looked >= 256 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+    });
+    (pictured, others)
+}
+
 /// An attribute value of a field's type.
 fn value(v: &Val, ty: FieldType) -> Value {
     match (v, ty) {
-        (Val::Null, _) | (Val::Blob(_), _) => Value::Null,
+        (Val::Null, _) => Value::Null,
+        (Val::Blob(b), _) => {
+            pictures::meta(b).map(|(f, w, h)| Value::Image(ImageValue::new(f.mime(), w, h, b.len() as u64))).unwrap_or(Value::Null)
+        }
         (Val::Int(i), FieldType::Boolean) => Value::Bool(*i != 0),
         (Val::Int(i), FieldType::Double) => Value::Float(*i as f64),
         (Val::Int(i), _) => Value::Int(*i),
@@ -269,9 +304,40 @@ fn value(v: &Val, ty: FieldType) -> Value {
     }
 }
 
+impl GpkgMemSource {
+    /// The original bytes of one row's image column, read from the table in memory.
+    fn image_at(&self, fid: u64, field: &str) -> Result<Vec<u8>> {
+        let at = self
+            .info
+            .fields
+            .iter()
+            .position(|f| f.name == field && f.ty == FieldType::Image)
+            .ok_or_else(|| DataError::Unsupported(format!("{field} is not an image field of {}", self.info.name)))?;
+        let col = *self.field_cols.get(at).ok_or_else(|| DataError::Format(format!("{field} has no column in {}", self.info.name)))?;
+        let mut found = None;
+        self.db
+            .rows(&self.table, |rowid, r| {
+                if rowid.cast_unsigned() != fid {
+                    return ControlFlow::Continue(());
+                }
+                found = match r.get(col) {
+                    Some(Val::Blob(b)) if !b.is_empty() => Some(b.to_vec()),
+                    _ => None,
+                };
+                ControlFlow::Break(())
+            })
+            .map_err(err)?;
+        found.ok_or_else(|| DataError::Format(format!("the image field {field} of row {fid} is empty or the row is gone")))
+    }
+}
+
 impl FeatureSource for GpkgMemSource {
     fn info(&self) -> &SourceInfo {
         &self.info
+    }
+
+    fn image(&self, fid: u64, field: &str) -> Result<Vec<u8>> {
+        self.image_at(fid, field)
     }
 
     fn read(&self, req: &Request) -> Result<Batch> {

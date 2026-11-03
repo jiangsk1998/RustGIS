@@ -40,6 +40,8 @@ pub fn size(turns: &[Turn]) -> usize {
                     + native.as_ref().map_or(0, |(_, v)| json_size(v))
             }
             Turn::Results(rs) => rs.iter().map(|r| r.content.len()).sum(),
+            // The picture's bytes count as they travel.
+            Turn::Image { text, images } => text.len() + images.iter().map(|i| i.data.len()).sum::<usize>(),
         })
         .sum()
 }
@@ -195,6 +197,8 @@ fn render_turns(turns: &[Turn], upto: usize) -> String {
                 }
                 out.push('\n');
             }
+            // A read picture's description, as the user turn it went in.
+            Turn::Image { text, .. } => out.push_str(&format!("User: {}\n\n", clip(text, 4_000))),
         }
     }
     out

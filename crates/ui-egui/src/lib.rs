@@ -42,6 +42,7 @@ mod geometrycalc;
 mod globe_drape;
 mod graphicformat;
 pub mod icons;
+mod images;
 mod keymap;
 mod labelfonts;
 mod labelpane;
@@ -895,6 +896,8 @@ pub struct RustGisApp {
     pub docs: docpanes::DocState,
     /// The AI Assistant's conversation and settings.
     pub assistant: assistantpane::AssistantState,
+    /// Image attribute thumbnails and the image viewer.
+    pub images: images::Images,
     /// "Let your Agents Control RustGIS" (desktop).
     #[cfg(not(target_arch = "wasm32"))]
     pub connect: connectui::ConnectState,
@@ -1070,6 +1073,7 @@ impl RustGisApp {
             reports: reportpane::ReportState::default(),
             docs: docpanes::DocState::default(),
             assistant: assistantpane::AssistantState::default(),
+            images: images::Images::default(),
             fonts_frames: 0,
             applied_dark: None,
             sent_title: String::new(),
@@ -3964,6 +3968,8 @@ impl RustGisApp {
         }
         i18n::set_current(self.lang());
         let t = theme::Tokens::get(&ctx);
+        // Thumbnails and images read off the frame are uploaded before anything draws them.
+        self.images.poll(&ctx);
         // Before the shortcuts and the fields: the row picked in a text field's menu, as its keys.
         fieldmenu::play(self, &ctx);
         chrome::shortcuts(self, &ctx);
@@ -3986,6 +3992,7 @@ impl RustGisApp {
         layoutview::save_drafts(self);
         graphicformat::save_draft(self);
         dialogs::show(self, &ctx);
+        images::viewer(&mut self.images, &ctx);
         layerchooser::show(self, &ctx);
         mapview::confirm_delete(self, &ctx);
         autosave::offer(self, &ctx);

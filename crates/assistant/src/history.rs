@@ -143,6 +143,8 @@ pub fn transcript(turns: &[Turn]) -> Vec<Entry> {
                 }
             }
             Turn::Results(_) => {}
+            // A saved conversation keeps the picture's text, not its bytes: shown as a note.
+            Turn::Image { text, .. } => out.push(Entry::Note(crate::provider::Note::text(text.clone()))),
         }
     }
     out

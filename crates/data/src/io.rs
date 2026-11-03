@@ -410,6 +410,9 @@ pub(crate) fn check_projected(ext: &str, crs: Crs) -> Result<()> {
 /// [`PROJECTED_FORMATS`]) says it; any other format is written only in longitude/latitude.
 pub fn write_bytes_in(ds: &Dataset, ext: &str, crs: Crs) -> Result<(Vec<u8>, usize)> {
     let ext = ext.to_ascii_lowercase();
+    // An export leaves image fields out: the images stay in the source (see `export_notes`).
+    let clean = ds.without_image_fields();
+    let ds = clean.as_ref().unwrap_or(ds);
     if crs != Crs::LonLat {
         if !PROJECTED_FORMATS.contains(&ext.as_str()) {
             return Err(DataError::Unsupported(format!(".{ext} in {} (it holds longitude/latitude only)", crs.label())));
@@ -469,6 +472,9 @@ pub fn write_path_in(ds: &Dataset, path: &Path, crs: Crs) -> Result<usize> {
         projected = project(ds, crs)?;
         &projected
     };
+    // An export leaves image fields out: the images stay in the source (see `export_notes`).
+    let clean = ds.without_image_fields();
+    let ds = clean.as_ref().unwrap_or(ds);
     match ext.as_str() {
         "gpkg" => {
             #[cfg(not(target_arch = "wasm32"))]
@@ -2130,6 +2136,8 @@ pub fn shapefile_parts_in(ds: &Dataset, crs: Crs) -> Result<(Vec<(&'static str, 
                 let longest = ds.features.iter().filter_map(|r| r.attrs.get(k)).map(|v| v.to_string().len()).max().unwrap_or(0);
                 table.add_character_field(dbf_name(n)?, u8::try_from(longest.clamp(1, 254)).unwrap_or(254))
             }
+            // dBase has no binary field: images are left out (an export filters them out first).
+            FieldType::Image => table,
         };
     }
     let record = |r: &crate::Feature| -> Record {
@@ -2156,6 +2164,8 @@ pub fn shapefile_parts_in(ds: &Dataset, crs: Crs) -> Result<(Vec<(&'static str, 
                     _ => None,
                 }),
                 FieldType::Text => FieldValue::Character((!v.is_null()).then(|| cut(&v.to_string(), 254).to_string())),
+                // Left out with the field itself.
+                FieldType::Image => continue,
             };
             rec.insert(n.clone(), value);
         }

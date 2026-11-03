@@ -202,6 +202,7 @@ fn key_part(v: &Value) -> KeyPart<'_> {
         Value::Float(f) => KeyPart::Float(if *f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() }),
         Value::Text(t) => KeyPart::Text(t),
         Value::Bool(b) => KeyPart::Bool(*b),
+        Value::Image(_) => KeyPart::Null,
     }
 }
 
@@ -284,7 +285,7 @@ fn cmp_number(x: &Value, y: &Value) -> Ordering {
         Value::Int(i) => N::I(*i),
         Value::Float(f) if f.is_nan() => N::F(f64::NAN),
         Value::Float(f) => N::F(f + 0.0),
-        Value::Null | Value::Text(_) => N::F(f64::NAN),
+        Value::Null | Value::Text(_) | Value::Image(_) => N::F(f64::NAN),
     };
     match (n(x), n(y)) {
         (N::I(a), N::I(b)) => a.cmp(&b),

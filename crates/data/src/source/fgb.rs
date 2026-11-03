@@ -114,16 +114,54 @@ impl FgbSource {
             })
             .unwrap_or(Extent::EMPTY);
         let count = h.features_count();
+        let display_name = h.name().filter(|n| !n.trim().is_empty()).unwrap_or(name).to_string();
+        // The crate's index search assumes the default node size; other files are scanned.
+        let indexed = h.index_node_size() == flatgeobuf::packed_r_tree::PackedRTree::DEFAULT_NODE_SIZE && count > 0;
+        let has_zm = h.has_z() || h.has_m();
+        // Binary columns are read as image fields, but they may hold other data: look at the first
+        // features, as the GeoPackage readers do.
+        let seen = probe_pictures(reader, &fields, &slots);
+        if let Some(seen) = seen {
+            let mut keep = vec![true; fields.len()];
+            let mut dropped = Vec::new();
+            let mut mixed: Vec<(usize, usize, String)> = Vec::new();
+            for (i, f) in fields.iter().enumerate() {
+                let (pictured, others) = seen.get(i).copied().unwrap_or((0, 0));
+                if f.ty == FieldType::Image && others > 0 {
+                    if pictured == 0 {
+                        keep[i] = false;
+                        dropped.push(f.name.clone());
+                    } else {
+                        mixed.push((others, pictured + others, f.name.clone()));
+                    }
+                }
+            }
+            if !dropped.is_empty() {
+                notes.push(super::not_pictures_note(&dropped));
+                let mut remap = vec![None; fields.len()];
+                let mut kept = Vec::with_capacity(fields.len());
+                for (i, f) in fields.into_iter().enumerate() {
+                    if keep[i] {
+                        remap[i] = Some(kept.len());
+                        kept.push(f);
+                    }
+                }
+                slots = slots.iter().map(|s| s.and_then(|j| remap.get(j).copied().flatten())).collect();
+                fields = kept;
+            }
+            for (others, total, field) in mixed {
+                notes.push(super::mixed_pictures_note(others, total, &field));
+            }
+        }
         let mut info = SourceInfo {
-            name: h.name().filter(|n| !n.trim().is_empty()).unwrap_or(name).to_string(),
+            name: display_name,
             format: "FlatGeobuf",
             geometry_type,
             fields,
             extent,
             count: (count > 0).then_some(count),
             crs: reproject.label(),
-            // The crate's index search assumes the default node size; other files are scanned.
-            indexed: h.index_node_size() == flatgeobuf::packed_r_tree::PackedRTree::DEFAULT_NODE_SIZE && count > 0,
+            indexed,
             notes,
             zm_dropped: false,
         };
@@ -131,7 +169,7 @@ impl FgbSource {
             &left_out,
             ["of a type RustGIS has no field for was left out", "of types RustGIS has no field for were left out"],
         );
-        if h.has_z() || h.has_m() {
+        if has_zm {
             info.drop_zm((count > 0).then_some(count));
         }
         let mut src = FgbSource { info, input, reproject, slots };
@@ -196,6 +234,31 @@ impl FgbSource {
         out.complete = sample.complete();
         out.features = sample.items;
         Ok(out)
+    }
+
+    /// The original bytes of one feature's image property, read from the file on demand: a
+    /// sequential scan, as a spatial index narrows by geometry, not by feature number.
+    fn image_with<R: Read + Seek>(&self, open: &impl Fn() -> Result<R>, fid: u64, field: &str) -> Result<Vec<u8>> {
+        let slot = self
+            .info
+            .fields
+            .iter()
+            .position(|f| f.name == field && f.ty == FieldType::Image)
+            .ok_or_else(|| DataError::Unsupported(format!("{field} is not an image field of {}", self.info.name)))?;
+        let mut iter = open_reader(open()?)?.select_all().map_err(err)?;
+        let mut n = 0u64;
+        while let Some(f) = iter.next().map_err(err)? {
+            n += 1;
+            if n == fid {
+                let mut props = ImageBytes { slots: &self.slots, slot, bytes: None };
+                f.process_properties(&mut props).map_err(|e| DataError::Format(format!("FlatGeobuf: {e}")))?;
+                return props
+                    .bytes
+                    .filter(|b| !b.is_empty())
+                    .ok_or_else(|| DataError::Format(format!("the image field {field} of feature {fid} is empty")));
+            }
+        }
+        Err(DataError::Format(format!("no feature with id {fid}")))
     }
 
     /// Visits the features a complete [`FgbSource::read_with`] of `extent` gives, in the same
@@ -572,6 +635,14 @@ impl FeatureSource for FgbSource {
             Input::Remote(_) => Err(DataError::Unsupported("a whole FlatGeobuf by its web address read a chunk at a time".into())),
         }
     }
+
+    fn image(&self, fid: u64, field: &str) -> Result<Vec<u8>> {
+        match &self.input {
+            Input::Path(p) => self.image_with(&|| Ok(BufReader::new(std::fs::File::open(p)?)), fid, field),
+            Input::Bytes(b) => self.image_with(&|| Ok(Cursor::new(b.clone())), fid, field),
+            Input::Remote(_) => Err(DataError::Unsupported("an image from a FlatGeobuf by its web address".into())),
+        }
+    }
 }
 
 /// FlatBuffers verifies the header's layout, not the index arithmetic it advertises.
@@ -593,7 +664,7 @@ fn err(e: flatgeobuf::Error) -> DataError {
     DataError::Format(format!("FlatGeobuf: {e}"))
 }
 
-/// The field type a column is read as; `None` for binary, which RustGIS has no field type for.
+/// The field type a column is read as; `None` for types RustGIS has no field type for.
 fn field_type(t: ColumnType) -> Option<FieldType> {
     Some(match t {
         ColumnType::Byte
@@ -606,9 +677,69 @@ fn field_type(t: ColumnType) -> Option<FieldType> {
         | ColumnType::ULong => FieldType::Integer,
         ColumnType::Float | ColumnType::Double => FieldType::Double,
         ColumnType::Bool => FieldType::Boolean,
-        ColumnType::Binary => return None,
+        // Binary columns hold pictures often enough to read as image attributes (the bytes stay
+        // in the source; only their metadata is kept).
+        ColumnType::Binary => FieldType::Image,
         _ => FieldType::Text,
     })
+}
+
+/// Pictures and other values among the first few features, per field: whether a declared binary
+/// field really holds pictures. `None` when they can't be read.
+fn probe_pictures<R: Read + Seek>(reader: FgbReader<R>, fields: &[Field], slots: &[Option<usize>]) -> Option<Vec<(usize, usize)>> {
+    let binary: Vec<bool> = fields.iter().map(|f| f.ty == FieldType::Image).collect();
+    let mut counts = vec![(0usize, 0usize); fields.len()];
+    let mut iter = reader.select_all().ok()?;
+    for _ in 0..64 {
+        let Some(f) = iter.next().ok().flatten() else { break };
+        let mut p = PictureCounts { binary: &binary, slots, counts: &mut counts };
+        if f.process_properties(&mut p).is_err() {
+            return None;
+        }
+    }
+    Some(counts)
+}
+
+/// Counts pictures and other values per image field during a traversal.
+struct PictureCounts<'a> {
+    binary: &'a [bool],
+    slots: &'a [Option<usize>],
+    counts: &'a mut [(usize, usize)],
+}
+
+impl PropertyProcessor for PictureCounts<'_> {
+    fn property(&mut self, idx: usize, _name: &str, v: &ColumnValue) -> flatgeobuf::geozero::error::Result<bool> {
+        let Some(&Some(field)) = self.slots.get(idx) else { return Ok(false) };
+        if !self.binary.get(field).copied().unwrap_or(false) {
+            return Ok(false);
+        }
+        if let Some((pictured, others)) = self.counts.get_mut(field) {
+            match v {
+                ColumnValue::Binary(b) if crate::pictures::meta(b).is_some() => *pictured += 1,
+                ColumnValue::Binary(_) => *others += 1,
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// Captures one image property's bytes during a traversal.
+struct ImageBytes<'a> {
+    slots: &'a [Option<usize>],
+    slot: usize,
+    bytes: Option<Vec<u8>>,
+}
+
+impl PropertyProcessor for ImageBytes<'_> {
+    fn property(&mut self, idx: usize, _name: &str, v: &ColumnValue) -> flatgeobuf::geozero::error::Result<bool> {
+        if self.slots.get(idx).copied().flatten() == Some(self.slot)
+            && let ColumnValue::Binary(b) = v
+        {
+            self.bytes = Some(b.to_vec());
+        }
+        Ok(false)
+    }
 }
 
 /// Collects a feature's properties into values in field order.
@@ -636,7 +767,9 @@ impl PropertyProcessor for Props<'_> {
             ColumnValue::Float(x) => Value::Float(f64::from(*x)),
             ColumnValue::Double(x) => Value::Float(*x),
             ColumnValue::String(s) | ColumnValue::Json(s) | ColumnValue::DateTime(s) => Value::Text((*s).to_string()),
-            ColumnValue::Binary(_) => Value::Null,
+            ColumnValue::Binary(b) => crate::pictures::meta(b)
+                .map(|(f, w, h)| Value::Image(crate::ImageValue::new(f.mime(), w, h, b.len() as u64)))
+                .unwrap_or(Value::Null),
         };
         // Integers in a Double column stay numbers of the column's type.
         let value = match (self.fields.get(idx).map(|f| f.ty), value) {
@@ -709,6 +842,8 @@ pub(crate) fn write_features(
             FieldType::Double => ColumnType::Double,
             FieldType::Boolean => ColumnType::Bool,
             FieldType::Text => ColumnType::String,
+            // Only the metadata reaches a dataset: an export filters image fields out first.
+            FieldType::Image => ColumnType::Binary,
         };
         w.add_column(&f.name, t, |_, c| c.nullable = true);
     }
@@ -729,6 +864,7 @@ pub(crate) fn write_features(
                         Value::Float(x) => out.property(i, &f.name, &ColumnValue::Double(*x)),
                         Value::Bool(x) => out.property(i, &f.name, &ColumnValue::Bool(*x)),
                         Value::Text(x) => out.property(i, &f.name, &ColumnValue::String(x)),
+                        Value::Image(_) => continue,
                     };
                     if let Err(e) = r {
                         failed = Some(e.to_string());

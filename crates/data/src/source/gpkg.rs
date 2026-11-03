@@ -6,7 +6,7 @@
 use super::gpkg_blob::{field_type, is_empty_blob, split_blob};
 use super::{Batch, FeatureSource, Reproject, Request, Sampler, SourceInfo, clamp_limit, in_request, stride};
 use crate::raster::Crs;
-use crate::{DataError, Feature, Field, FieldType, GeometryType, Result, Value, wkb};
+use crate::{DataError, Feature, Field, FieldType, GeometryType, ImageValue, Result, Value, pictures, wkb};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, params_from_iter};
 use rustgis_geom::Extent;
@@ -178,6 +178,25 @@ impl GpkgSource {
                 }
             }
         }
+        // A binary column is declared an image field, but it may hold other data. Look at a
+        // sample: a column with values but no picture in them isn't read as one, and one mixing
+        // pictures with other values says that those are shown empty.
+        let (mut readable, mut dropped) = (Vec::with_capacity(fields.len()), Vec::new());
+        for f in fields {
+            let (pictures, others) = if f.ty == FieldType::Image { probe_pictures(&conn, &table, &f.name) } else { (0, 0) };
+            if pictures == 0 && others > 0 {
+                dropped.push(f.name);
+            } else {
+                if others > 0 {
+                    notes.push(super::mixed_pictures_note(others, pictures + others, &f.name));
+                }
+                readable.push(f);
+            }
+        }
+        if !dropped.is_empty() {
+            notes.push(super::not_pictures_note(&dropped));
+        }
+        fields = readable;
         // Looked up without regard to case, as SQLite names are; the real name is kept.
         let rtree_name = format!("rtree_{table}_{geom}");
         let rtree: Option<String> = conn
@@ -467,6 +486,26 @@ impl FeatureSource for GpkgSource {
         chunks.flush()?;
         Ok(out)
     }
+
+    /// The original bytes of one row's image column, read from the file on demand.
+    fn image(&self, fid: u64, field: &str) -> Result<Vec<u8>> {
+        if !self.info.fields.iter().any(|f| f.name == field && f.ty == FieldType::Image) {
+            return Err(DataError::Unsupported(format!("{field} is not an image field of {}", self.info.name)));
+        }
+        let guard = self.conn.lock().map_err(|_| DataError::Format("GeoPackage connection poisoned".into()))?;
+        let conn = guard.as_ref().ok_or_else(|| DataError::Format("GeoPackage connection closed".into()))?;
+        let key = self.pk.as_deref().map(quote).unwrap_or_else(|| "rowid".into());
+        let sql = format!("SELECT {f} FROM {t} WHERE {key} = ?1", f = quote(field), t = quote(&self.table));
+        let mut st = conn.prepare(&sql).map_err(err)?;
+        let mut rows = st.query([fid as i64]).map_err(err)?;
+        let Some(r) = rows.next().map_err(err)? else {
+            return Err(DataError::Format(format!("no row with id {fid}")));
+        };
+        match r.get_ref(0).map_err(err)? {
+            ValueRef::Blob(b) if !b.is_empty() => Ok(b.to_vec()),
+            _ => Err(DataError::Format(format!("the image field {field} of row {fid} is empty"))),
+        }
+    }
 }
 
 /// A file's device and inode, which tell it from another file put at its path since; `None`
@@ -754,6 +793,7 @@ fn create(conn: &Connection, name: &str, geometry_type: GeometryType, fields: &[
             FieldType::Double => "REAL",
             FieldType::Boolean => "BOOLEAN",
             FieldType::Text => "TEXT",
+            FieldType::Image => "BLOB",
         };
         cols.push(format!("{} {ty}", quote(col)));
     }
@@ -934,6 +974,26 @@ fn sql_value(v: &Value, ty: FieldType) -> rusqlite::types::Value {
     }
 }
 
+/// Pictures and other values among a column's first few non-NULL values (at most 64): whether a
+/// declared binary column really holds pictures.
+fn probe_pictures(conn: &Connection, table: &str, field: &str) -> (usize, usize) {
+    let sql = format!("SELECT {} FROM {} WHERE {} IS NOT NULL LIMIT 64", quote(field), quote(table), quote(field));
+    let Ok(mut st) = conn.prepare(&sql) else { return (0, 0) };
+    let Ok(rows) = st.query_map([], |r| {
+        Ok(match r.get_ref(0)? {
+            ValueRef::Blob(b) => pictures::meta(b).is_some(),
+            _ => false,
+        })
+    }) else {
+        return (0, 0);
+    };
+    let (mut pictured, mut others) = (0, 0);
+    for is_picture in rows.take(64).filter_map(std::result::Result::ok) {
+        if is_picture { pictured += 1 } else { others += 1 }
+    }
+    (pictured, others)
+}
+
 fn value(v: ValueRef<'_>, ty: FieldType) -> Value {
     match (v, ty) {
         (ValueRef::Null, _) => Value::Null,
@@ -944,7 +1004,9 @@ fn value(v: ValueRef<'_>, ty: FieldType) -> Value {
         (ValueRef::Real(f), _) => Value::Float(f),
         (ValueRef::Text(t), FieldType::Text) => Value::Text(String::from_utf8_lossy(t).into_owned()),
         (ValueRef::Text(t), ty) => Value::parse(&String::from_utf8_lossy(t), ty),
-        (ValueRef::Blob(_), _) => Value::Null,
+        (ValueRef::Blob(b), _) => {
+            pictures::meta(b).map(|(f, w, h)| Value::Image(ImageValue::new(f.mime(), w, h, b.len() as u64))).unwrap_or(Value::Null)
+        }
     }
 }
 

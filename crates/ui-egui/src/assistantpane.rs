@@ -2061,6 +2061,16 @@ fn transcript(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, ctx: &egui::Context
                     go_on = true;
                 }
             }
+            // A picture the model was sent: its thumbnail, and what it is.
+            Entry::Image { summary, data } => {
+                if let Some(tex) = app.images.preview(ctx, data) {
+                    let size = tex.size();
+                    let scale = (160.0 / size[0].max(1) as f32).min(1.0);
+                    ui.add(egui::Image::new((tex.id(), vec2(size[0] as f32 * scale, size[1] as f32 * scale))).corner_radius(6));
+                }
+                ui.label(RichText::new(summary.chars().take(160).collect::<String>()).small().color(t.text_dim));
+                ui.add_space(4.0);
+            }
         }
     }
     if agent.waiting() {

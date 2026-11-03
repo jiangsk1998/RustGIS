@@ -52,6 +52,7 @@ impl JoinKey {
             Value::Int(i) => Some(JoinKey::Int(*i)),
             Value::Text(s) => Some(JoinKey::Text(s.clone())),
             Value::Bool(b) => Some(JoinKey::Bool(*b)),
+            Value::Image(_) => None,
             Value::Float(f) => {
                 if !f.is_finite() {
                     return None;

@@ -79,6 +79,8 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
                 },
             };
             let is_layer = layer_id.is_some();
+            // Where image attributes are read from (the layer's source, or its table).
+            let image_job = layer_id.and_then(|id| app.session.map().layer(id)).and_then(|l| l.image_job());
             // Header.
             let (hr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
             ui.painter().rect_filled(hr, 0.0, t.pane_header);
@@ -236,6 +238,53 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
                                         }
                                     } else {
                                         let v = ds.value(r, c);
+                                        // An image attribute: its thumbnail, double-clicked to view
+                                        // the original. Its bytes stay in the source.
+                                        if let V::Image(img) = v {
+                                            let name = ds.fields.get(c).map(|f| f.name.clone()).unwrap_or_default();
+                                            let key = (layer_id.unwrap_or(0), oid, name.clone(), img.byte_len);
+                                            let title = format!("{name} · {}", img.summary());
+                                            let view = app.images.thumb(ui.ctx(), key.clone(), image_job.clone());
+                                            let resp = match view {
+                                                crate::images::ThumbView::Ready(tex) => ui
+                                                    .add(
+                                                        egui::Image::new((tex.id(), vec2(18.0, 18.0)))
+                                                            .sense(Sense::click())
+                                                            .corner_radius(2.0),
+                                                    )
+                                                    .on_hover_text(img.summary()),
+                                                crate::images::ThumbView::Failed(e) => ui
+                                                    .add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(img.summary()).size(11.5).color(t.text_disabled).italics(),
+                                                        )
+                                                        .sense(Sense::click())
+                                                        .truncate(),
+                                                    )
+                                                    .on_hover_text(e),
+                                                crate::images::ThumbView::Loading => ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(tl!("loading…")).size(11.5).color(t.text_disabled).italics(),
+                                                    )
+                                                    .sense(Sense::click()),
+                                                ),
+                                                crate::images::ThumbView::Unavailable => ui
+                                                    .add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(img.summary()).size(11.5).color(t.text_disabled).italics(),
+                                                        )
+                                                        .sense(Sense::click())
+                                                        .truncate(),
+                                                    )
+                                                    .on_hover_text(tl!("Not read from a data source of this layer")),
+                                            };
+                                            if resp.double_clicked() {
+                                                app.images.open(ui.ctx(), key, title, image_job.clone());
+                                            } else if resp.clicked() {
+                                                clicked = Some((r, ui.input(|i| i.modifiers.command || i.modifiers.shift)));
+                                            }
+                                            return;
+                                        }
                                         // A picture (a photo's thumbnail) is named, not spelled out.
                                         let picture = matches!(v, V::Text(s) if crate::mapview::is_picture(s));
                                         let shown = if picture { tl!("picture").to_string() } else { v.to_string() };
@@ -342,6 +391,8 @@ fn fits(text: &str, ty: rustgis_engine::data::FieldType) -> bool {
             }
             T::Double => t.parse::<f64>().is_ok_and(f64::is_finite),
             T::Boolean => matches!(t.to_ascii_lowercase().as_str(), "true" | "false" | "yes" | "no" | "1" | "0" | "y" | "n"),
+            // An image's bytes are read-only here (the viewer shows them).
+            T::Image => false,
         }
 }
 

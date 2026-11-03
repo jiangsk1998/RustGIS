@@ -23,6 +23,9 @@ pub fn commands() -> Vec<C> {
             let path = ps(p, "path").ok_or("path is required")?;
             let t = s.project.tables.get(s.table_index(p)?).ok_or("no such table")?;
             rustgis_data::io::write_path(&t.dataset, Path::new(path)).map_err(|e| e.to_string())?;
+            for note in rustgis_data::export_notes([(&t.dataset, t.dataset.extent())], path, Crs::LonLat) {
+                s.notify(note, false);
+            }
             Ok(json!({"path": path}))
         })
         .params(

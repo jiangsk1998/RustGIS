@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::io::{CsvWriter, GeoJsonWriter, PROJECTED_FORMATS, check_projected, project_features, write_atomic_with};
 use crate::raster::Crs;
 use crate::source::FeatureSource;
-use crate::{DataError, Dataset, Feature, GeometryType, Result};
+use crate::{DataError, Dataset, Feature, FieldType, GeometryType, Result};
 
 /// The feature storage one chunk of an export holds.
 const CHUNK_BYTES: usize = 32 << 20;
@@ -65,12 +65,22 @@ fn write_chunks_in(src: &dyn FeatureSource, layer: &Dataset, path: &Path, crs: C
         t => t,
     };
     let t = if crs == Crs::LonLat { None } else { Some(crs.transformer().map_err(DataError::Format)?) };
+    // An export leaves image fields out: the images stay in the source (see `export_notes`), so
+    // each chunk loses their values before it is written.
+    let keep: Vec<bool> = layer.fields.iter().map(|f| f.ty != FieldType::Image).collect();
+    let clean = layer.without_image_fields();
+    let layer = clean.as_ref().unwrap_or(layer);
     let mut total = 0usize;
     let mut skipped = 0usize;
     let mut feed = |add: &mut dyn FnMut(&[Feature]) -> Result<()>| -> Result<()> {
         // A GeoPackage export that starts again feeds the features again.
         total = 0;
         let batch = src.visit_chunks(None, bytes, &mut |mut chunk| {
+            if keep.iter().any(|k| !*k) {
+                for f in &mut chunk {
+                    f.attrs = f.attrs.iter().zip(&keep).filter(|(_, k)| **k).map(|(v, _)| v.clone()).collect();
+                }
+            }
             if let Some(t) = &t {
                 project_features(&mut chunk, t, crs)?;
             }

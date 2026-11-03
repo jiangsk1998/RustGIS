@@ -532,7 +532,10 @@ impl std::fmt::Debug for SqlServerSource {
 
 fn field_cast(data_type: &str, col: &str) -> Option<(FieldType, String)> {
     Some(match data_type {
-        "geometry" | "geography" | "image" | "binary" | "varbinary" | "timestamp" | "rowversion" => return None,
+        "geometry" | "geography" | "timestamp" | "rowversion" => return None,
+        // Binary columns read as image attributes; only their length is selected, their bytes
+        // staying on the server.
+        "image" | "binary" | "varbinary" => (FieldType::Image, format!("DATALENGTH({col})")),
         "bit" => (FieldType::Boolean, col.to_string()),
         "tinyint" | "smallint" | "int" | "bigint" => (FieldType::Integer, format!("CAST({col} AS BIGINT)")),
         "real" | "float" | "decimal" | "numeric" | "money" | "smallmoney" => (FieldType::Double, format!("CAST({col} AS FLOAT)")),
@@ -722,11 +725,51 @@ impl SqlServerSource {
                     FieldType::Double => float_of(v).map(Value::Float),
                     FieldType::Boolean => bool_of(v).map(Value::Bool),
                     FieldType::Text => text_of(v).map(Value::Text),
+                    FieldType::Image => int_of(v).and_then(|n| u64::try_from(n).ok()).map(|n| Value::Image(crate::ImageValue::sized(n))),
                 }
                 .unwrap_or(Value::Null)
             })
             .collect();
         Some(Feature { id, geometry: Some(geometry), attrs })
+    }
+
+    /// The original bytes of a row's image column, read from the server on demand: a dataset
+    /// keeps only the length.
+    pub fn image_at(&self, fid: u64, field: &str) -> Result<Vec<u8>> {
+        if self.projection.numbered {
+            return Err(DataError::Unsupported(
+                "an image from a SQL Server table without a single-column integer key: its rows can't be addressed".into(),
+            ));
+        }
+        // The name must be one of the table's own image columns before it goes into the statement.
+        if !self.info.fields.iter().any(|f| f.name == field && f.ty == FieldType::Image) {
+            return Err(DataError::Unsupported(format!("{field} is not an image field of {}", self.info.name)));
+        }
+        let keys: Vec<String> = self
+            .conn
+            .query(
+                "SELECT k.COLUMN_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS c JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE k ON k.CONSTRAINT_SCHEMA = c.CONSTRAINT_SCHEMA AND k.CONSTRAINT_NAME = c.CONSTRAINT_NAME WHERE c.CONSTRAINT_TYPE = 'PRIMARY KEY' AND c.TABLE_SCHEMA = @P1 AND c.TABLE_NAME = @P2 ORDER BY k.ORDINAL_POSITION",
+                &[&self.table.schema, &self.table.name],
+            )?
+            .iter()
+            .filter_map(|r| text_of(at(r, 0)))
+            .collect();
+        let [key] = keys.as_slice() else {
+            return Err(DataError::Unsupported(
+                "an image from a SQL Server table without a single-column integer key: its rows can't be addressed".into(),
+            ));
+        };
+        let sql =
+            format!("SELECT {field} FROM {from} WHERE {key} = @P1", field = ident(field), from = self.table.sql_from(), key = ident(key),);
+        let id = (fid as i64).to_string();
+        let rows = self.conn.query(&sql, &[&id])?;
+        let Some(row) = rows.first() else {
+            return Err(DataError::Format(format!("no row with id {fid}")));
+        };
+        bytes_of(at(row, 0))
+            .filter(|b| !b.is_empty())
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| DataError::Format(format!("the image field {field} of row {fid} is empty")))
     }
 
     fn read_within(&self, req: &Request, timeout: Option<u64>) -> Result<Batch> {
@@ -838,6 +881,10 @@ impl FeatureSource for SqlServerSource {
     fn read(&self, req: &Request) -> Result<Batch> {
         self.read_within(req, None)
     }
+
+    fn image(&self, fid: u64, field: &str) -> Result<Vec<u8>> {
+        self.image_at(fid, field)
+    }
 }
 
 #[cfg(test)]
@@ -919,8 +966,12 @@ mod tests {
     #[test]
     fn types_and_identifiers() {
         assert_eq!(ident("a]b"), "[a]]b]");
-        for t in ["geometry", "geography", "image", "binary", "varbinary", "timestamp", "rowversion"] {
+        for t in ["geometry", "geography", "timestamp", "rowversion"] {
             assert_eq!(field_cast(t, "[c]"), None);
+        }
+        // Binary columns read as image attributes, by their length only.
+        for t in ["image", "binary", "varbinary"] {
+            assert_eq!(field_cast(t, "[c]"), Some((FieldType::Image, "DATALENGTH([c])".into())));
         }
         assert_eq!(field_cast("bit", "[c]"), Some((FieldType::Boolean, "[c]".into())));
         for t in ["tinyint", "smallint", "int", "bigint"] {

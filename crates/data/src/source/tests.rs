@@ -159,6 +159,179 @@ fn write_gpkg(path: &Path, rtree: bool) {
     tx.commit().unwrap();
 }
 
+/// A PNG picture of one plain colour.
+fn test_png(w: u32, h: u32) -> Vec<u8> {
+    use image::ImageEncoder;
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(&vec![0u8; (w * h * 3) as usize], w, h, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    out
+}
+
+/// A GeoPackage whose binary columns hold pictures and other data: `photo` (pictures only),
+/// `payload` (other data only) and `mixed` (one picture, one other value).
+fn write_picture_gpkg(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let c = rusqlite::Connection::open(path).unwrap();
+    c.execute_batch(
+        "CREATE TABLE gpkg_spatial_ref_sys (srs_name TEXT, srs_id INTEGER PRIMARY KEY, organization TEXT, organization_coordsys_id INTEGER, definition TEXT, description TEXT);
+         INSERT INTO gpkg_spatial_ref_sys VALUES ('WGS 84', 4326, 'EPSG', 4326, '', '');
+         CREATE TABLE gpkg_contents (table_name TEXT PRIMARY KEY, data_type TEXT, identifier TEXT, description TEXT, last_change TEXT, min_x DOUBLE, min_y DOUBLE, max_x DOUBLE, max_y DOUBLE, srs_id INTEGER);
+         CREATE TABLE gpkg_geometry_columns (table_name TEXT, column_name TEXT, geometry_type_name TEXT, srs_id INTEGER, z TINYINT, m TINYINT);
+         INSERT INTO gpkg_contents (table_name, data_type, srs_id) VALUES ('shots', 'features', 4326);
+         INSERT INTO gpkg_geometry_columns VALUES ('shots', 'geom', 'POINT', 4326, 0, 0);
+         CREATE TABLE shots (fid INTEGER PRIMARY KEY AUTOINCREMENT, geom BLOB, name TEXT, photo BLOB, payload BLOB, mixed BLOB);",
+    )
+    .unwrap();
+    let (big, small) = (test_png(4, 3), test_png(2, 2));
+    let tx = c.unchecked_transaction().unwrap();
+    for (i, (photo, payload, mixed)) in [
+        (big.clone(), b"PK\x03\x04 not an image".to_vec(), small.clone()),
+        (small.clone(), b"not an image either".to_vec(), b"neither is this".to_vec()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fid = i as i64 + 1;
+        let geom = wkb::encode(&Geometry::Point(rustgis_geom::Coord::new(i as f64 + 1.0, i as f64 + 2.0)));
+        tx.execute(
+            "INSERT INTO shots VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![fid, geom, format!("r{i}"), photo, payload, mixed],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+/// A FlatGeobuf whose binary columns hold pictures and other data, as the GeoPackage fixture does.
+fn write_picture_fgb(path: &Path) {
+    use flatgeobuf::geozero::{ColumnValue, PropertyProcessor};
+    use flatgeobuf::{ColumnType, FgbWriter, GeometryType as G};
+    let mut w = FgbWriter::create("shots", G::Point).unwrap();
+    w.add_column("name", ColumnType::String, |_, _| {});
+    w.add_column("photo", ColumnType::Binary, |_, _| {});
+    w.add_column("payload", ColumnType::Binary, |_, _| {});
+    w.add_column("mixed", ColumnType::Binary, |_, _| {});
+    let (big, small) = (test_png(4, 3), test_png(2, 2));
+    let rows = [
+        ("r0", big, b"PK\x03\x04 not an image".to_vec(), small.clone()),
+        ("r1", small, b"not an image either".to_vec(), b"neither is this".to_vec()),
+    ];
+    for (i, (name, photo, payload, mixed)) in rows.into_iter().enumerate() {
+        let c = Coord::new(i as f64 + 1.0, i as f64 + 2.0);
+        let g = flatgeobuf::geozero::wkb::Wkb(wkb::encode(&Geometry::Point(c)));
+        w.add_feature_geom(g, |f| {
+            f.property(0, "name", &ColumnValue::String(name)).unwrap();
+            f.property(1, "photo", &ColumnValue::Binary(&photo)).unwrap();
+            f.property(2, "payload", &ColumnValue::Binary(&payload)).unwrap();
+            f.property(3, "mixed", &ColumnValue::Binary(&mixed)).unwrap();
+        })
+        .unwrap();
+    }
+    w.write(std::fs::File::create(path).unwrap()).unwrap();
+}
+
+/// A GeoParquet whose binary columns hold pictures and other data, as the GeoPackage fixture does.
+fn write_picture_parquet(path: &Path) {
+    use arrow_array::{BinaryArray, RecordBatch, StringArray};
+    use arrow_schema::{DataType, Field as AField, Schema};
+    let pts = [Coord::new(1.0, 2.0), Coord::new(3.0, 4.0)];
+    let wkbs: Vec<Vec<u8>> = pts.iter().map(|c| wkb::encode(&Geometry::Point(*c))).collect();
+    let (big, small) = (test_png(4, 3), test_png(2, 2));
+    let photos = [big, small.clone()];
+    let payload = [b"PK\x03\x04 not an image".to_vec(), b"not an image either".to_vec()];
+    let mixed = [small, b"neither is this".to_vec()];
+    let fields = vec![
+        AField::new("name", DataType::Utf8, false),
+        AField::new("geometry", DataType::Binary, false),
+        AField::new("photo", DataType::Binary, false),
+        AField::new("payload", DataType::Binary, false),
+        AField::new("mixed", DataType::Binary, false),
+    ];
+    let cols: Vec<arrow_array::ArrayRef> = vec![
+        Arc::new(StringArray::from(vec!["r0", "r1"])),
+        Arc::new(BinaryArray::from(wkbs.iter().map(|w| w.as_slice()).collect::<Vec<_>>())),
+        Arc::new(BinaryArray::from(photos.iter().map(|w| w.as_slice()).collect::<Vec<_>>())),
+        Arc::new(BinaryArray::from(payload.iter().map(|w| w.as_slice()).collect::<Vec<_>>())),
+        Arc::new(BinaryArray::from(mixed.iter().map(|w| w.as_slice()).collect::<Vec<_>>())),
+    ];
+    let geo = r#"{"version":"1.0.0","primary_column":"geometry","columns":{"geometry":{"encoding":"WKB","geometry_types":["Point"]}}}"#;
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), cols).unwrap();
+    let props = ::parquet::file::properties::WriterProperties::builder()
+        .set_key_value_metadata(Some(vec![::parquet::file::metadata::KeyValue::new("geo".to_string(), geo.to_string())]))
+        .build();
+    let mut w = ::parquet::arrow::ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, Some(props)).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// The picture checks for a source made by one of the three fixtures above.
+fn check_picture_fields(src: &dyn FeatureSource) {
+    let info = src.info();
+    let field = |n: &str| info.fields.iter().find(|f| f.name == n);
+    // Pictures stay image fields; a column holding no picture isn't read as one, and the note
+    // says so (never silently empty).
+    assert!(field("photo").is_some_and(|f| f.ty == FieldType::Image), "{:?}", info.fields);
+    assert!(field("mixed").is_some_and(|f| f.ty == FieldType::Image), "{:?}", info.fields);
+    assert!(field("payload").is_none(), "a column of other data isn't read as a picture field: {:?}", info.fields);
+    assert!(info.notes.iter().any(|n| n.contains("payload") && n.contains("isn't pictures")), "{:?}", info.notes);
+    // A column mixing pictures with other data keeps the pictures and notes what is empty.
+    assert!(info.notes.iter().any(|n| n.contains("mixed") && n.contains("1 of the first 2")), "{:?}", info.notes);
+
+    // The values say what the picture is; the original bytes stay in the source.
+    let all = src.read(&Request::all()).unwrap();
+    let images: Vec<&crate::ImageValue> = all
+        .features
+        .iter()
+        .flat_map(|f| &f.attrs)
+        .filter_map(|v| match v {
+            Value::Image(i) => Some(i),
+            _ => None,
+        })
+        .collect();
+    // Two pictures in `photo`, and one in `mixed` (its other value is shown empty).
+    assert_eq!(images.len(), 3, "{:?}", all.features);
+    let sizes: Vec<(u32, u32)> = images.iter().map(|i| (i.width, i.height)).collect();
+    assert!(sizes.contains(&(4, 3)) && sizes.contains(&(2, 2)), "{sizes:?}");
+    assert!(images.iter().all(|i| i.mime == "image/png"), "{:?}", images.len());
+    // Read by id, in whatever order the source numbers its features.
+    let mut photos: Vec<Vec<u8>> = [1, 2].into_iter().filter_map(|id| src.image(id, "photo").ok()).collect();
+    photos.sort_by_key(Vec::len);
+    assert_eq!(photos, [test_png(2, 2), test_png(4, 3)]);
+    let mixed: Vec<Vec<u8>> = [1, 2].into_iter().filter_map(|id| src.image(id, "mixed").ok()).collect();
+    // The picture is read; the column's other value is shown empty (its bytes aren't one).
+    assert!(mixed.contains(&test_png(2, 2)));
+    // A column that was left out can't be read, and the error says why.
+    assert!(src.image(1, "payload").is_err());
+}
+
+#[test]
+fn flatgeobuf_binary_columns_are_pictures_only_when_their_values_are() {
+    let path = dir().join("shots.fgb");
+    write_picture_fgb(&path);
+    check_picture_fields(&fgb::FgbSource::open_path(&path, "shots").unwrap());
+}
+
+#[test]
+fn geoparquet_binary_columns_are_pictures_only_when_their_values_are() {
+    let path = dir().join("shots.parquet");
+    write_picture_parquet(&path);
+    check_picture_fields(&parquet::ParquetSource::open_path(&path, "shots").unwrap());
+}
+
+#[test]
+fn gpkg_binary_columns_are_pictures_only_when_their_values_are() {
+    let path = dir().join("shots.gpkg");
+    write_picture_gpkg(&path);
+    let desktop = gpkg::GpkgSource::open(&path, None).unwrap();
+    let mem = gpkg_mem::GpkgMemSource::open_shared(Shared(Arc::new(std::fs::read(&path).unwrap())), None).unwrap();
+    for src in [&desktop as &dyn FeatureSource, &mem] {
+        check_picture_fields(src);
+    }
+}
+
 /// The same checks for every provider.
 fn check(src: &dyn FeatureSource, expect_indexed: bool) {
     let info = src.info();
@@ -2089,19 +2262,20 @@ fn geoparquet_columns_not_kept_or_read_as_numbers_are_said() {
     w.write(&RecordBatch::try_new(schema, cols).unwrap()).unwrap();
     w.close().unwrap();
 
-    let left_out = "5 columns of types RustGIS has no field for were left out: \
-                    price (decimal), photo (binary), tags (list), extra (struct), geometry_bbox (struct)";
+    let left_out = "4 columns of types RustGIS has no field for were left out: \
+                    price (decimal), tags (list), extra (struct), geometry_bbox (struct)";
     let as_numbers = "3 columns of dates or times were read as whole numbers: seen (milliseconds since 1970-01-01), \
                       logged (microseconds since 1970-01-01), day (days since 1970-01-01)";
+    let photo = "photo holds data that isn't pictures RustGIS can show, so it isn't read";
     // Read in place: the source's notes, which adding the layer gives as notices.
     let src = open_path(&path, None).unwrap();
     let info = src.info();
-    assert_eq!(info.notes, vec![left_out.to_string(), as_numbers.to_string()]);
+    assert_eq!(info.notes, vec![left_out.to_string(), as_numbers.to_string(), photo.to_string()]);
     let names: Vec<&str> = info.fields.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, ["name", "seen", "logged", "day"]);
     // Read whole: the same, in the read's report, and the values as said.
     let (ds, report) = materialize(src.as_ref()).unwrap();
-    assert_eq!(report.messages, vec![format!("columns: {left_out}"), format!("columns: {as_numbers}")]);
+    assert_eq!(report.messages, vec![format!("columns: {left_out}"), format!("columns: {as_numbers}"), format!("columns: {photo}")]);
     assert_eq!(
         ds.features[0].attrs,
         vec![Value::Text("a".into()), Value::Int(1_790_856_000_000), Value::Int(1_790_856_000_000_000), Value::Int(20_727)]
@@ -2115,7 +2289,7 @@ fn geoparquet_columns_not_kept_or_read_as_numbers_are_said() {
     assert!(materialize(src.as_ref()).unwrap().1.messages.is_empty());
 }
 
-/// A FlatGeobuf's binary column, which RustGIS has no field type for, is said and left out, the
+/// A FlatGeobuf's binary column holding data that isn't pictures is said and left out, the
 /// columns after it keeping their values; a file without one says nothing.
 #[test]
 fn flatgeobuf_binary_columns_are_said_and_left_out() {
@@ -2136,7 +2310,7 @@ fn flatgeobuf_binary_columns_are_said_and_left_out() {
     .unwrap();
     w.write(std::fs::File::create(&path).unwrap()).unwrap();
 
-    let note = "1 column of a type RustGIS has no field for was left out: blob (binary)";
+    let note = "blob holds data that isn't pictures RustGIS can show, so it isn't read";
     let src = open_path(&path, None).unwrap();
     assert_eq!(src.info().notes, vec![note.to_string()]);
     let names: Vec<&str> = src.info().fields.iter().map(|f| f.name.as_str()).collect();

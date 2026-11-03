@@ -580,6 +580,31 @@ pub enum Turn {
     },
     /// The results of the calls in the assistant turn before.
     Results(Vec<ToolResult>),
+    /// A picture read for the model, as its own user turn after the results (see `read_image`).
+    /// A saved conversation keeps the text only: the bytes of a picture aren't saved.
+    Image {
+        text: String,
+        #[serde(skip)]
+        images: Vec<ImagePart>,
+    },
+}
+
+/// An image sent to the model, by its media type and bytes (the original, or one shrunk to fit).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImagePart {
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
+/// A part's bytes, base64 as Anthropic and Gemini take them.
+fn base64_data(part: &ImagePart) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(&part.data)
+}
+
+/// A part's bytes as the data address OpenAI and the Responses API accept in a request.
+fn data_uri(part: &ImagePart) -> String {
+    format!("data:{};base64,{}", part.mime, base64_data(part))
 }
 
 /// A message from RustGIS in the transcript (a stop, a retry, a compaction): an English template
@@ -626,6 +651,8 @@ pub const NOTE_TEMPLATES: &[&str] = &[
     "The model sent an empty reply; ask again, or try another model.",
     STEP_LIMIT_NOTE,
     "Stopped.",
+    "The model refused the pictures as too large; shrank them to {side} pixels a side and trying again.",
+    "The model can't take pictures; only their descriptions were sent. Choose a model with vision to have it read them.",
 ];
 
 /// The note of a refused reply, with the model's explanation if it gave one.
@@ -1040,6 +1067,13 @@ fn openai_request(cfg: &Config, system: &str, turns: &[Turn], tools: &[ToolDef])
                     messages.push(json!({"role": "tool", "tool_call_id": r.id, "content": r.content}));
                 }
             }
+            Turn::Image { text, images } => {
+                let mut content = vec![json!({"type": "text", "text": text})];
+                for i in images {
+                    content.push(json!({"type": "image_url", "image_url": {"url": data_uri(i)}}));
+                }
+                messages.push(json!({"role": "user", "content": content}));
+            }
         }
     }
     let tools: Vec<Value> = tools
@@ -1062,11 +1096,37 @@ fn openai_request(cfg: &Config, system: &str, turns: &[Turn], tools: &[ToolDef])
     HttpRequest { method: "POST", url: format!("{}/chat/completions", cfg.base()), headers, body: json_body(&body) }
 }
 
-/// Whether OpenAI refused a Chat Completions request for reasoning alongside function tools (some
+/// Whether a provider refused a request for reasoning alongside function tools (some
 /// models take tools there only with `reasoning_effort` set to `none`). Requests leave
 /// `reasoning_effort` unset, so a 400 about it can only be about the model's default.
 pub fn refuses_reasoning_with_tools(e: &Error) -> bool {
     e.status == Some(400) && (e.param.as_deref() == Some("reasoning_effort") || e.detail.to_lowercase().contains("reasoning_effort"))
+}
+
+/// Whether a provider refused a request because a picture, or the request carrying it, was too
+/// large: the agent shrinks the pictures and asks again.
+pub fn picture_too_large(e: &Error) -> bool {
+    if e.status == Some(413) {
+        return true;
+    }
+    if e.status != Some(400) {
+        return false;
+    }
+    let d = e.detail.to_lowercase();
+    let picture = ["image", "picture", "media"].iter().any(|w| d.contains(w));
+    let size = ["too large", "too big", "size", "exceed", "limit", "dimension", "pixel"].iter().any(|w| d.contains(w));
+    picture && size
+}
+
+/// Whether a provider refused a request because its model takes no pictures: the agent sends the
+/// pictures' descriptions only, and says so.
+pub fn refuses_pictures(e: &Error) -> bool {
+    let d = e.detail.to_lowercase();
+    let picture = ["image", "picture", "vision", "multimodal", "media"].iter().any(|w| d.contains(w));
+    let unsupported = ["not supported", "doesn't support", "does not support", "unsupported", "only text", "text-only", "invalid content"]
+        .iter()
+        .any(|w| d.contains(w));
+    picture && unsupported
 }
 
 fn openai_reply(v: &Value) -> Result<Reply, String> {
@@ -1139,6 +1199,13 @@ fn responses_request(cfg: &Config, system: &str, turns: &[Turn], tools: &[ToolDe
                 for r in rs {
                     input.push(json!({"type": "function_call_output", "call_id": r.id, "output": r.content}));
                 }
+            }
+            Turn::Image { text, images } => {
+                let mut content = vec![json!({"type": "input_text", "text": text})];
+                for i in images {
+                    content.push(json!({"type": "input_image", "image_url": data_uri(i)}));
+                }
+                input.push(json!({"type": "message", "role": "user", "content": content}));
             }
         }
     }
@@ -1365,6 +1432,13 @@ fn anthropic_request(cfg: &Config, system: &str, turns: &[Turn], tools: &[ToolDe
                 "user",
                 rs.iter().map(|r| json!({"type": "tool_result", "tool_use_id": r.id, "content": r.content, "is_error": r.error})).collect(),
             ),
+            Turn::Image { text, images } => {
+                let mut blocks = vec![json!({"type": "text", "text": text})];
+                for i in images {
+                    blocks.push(json!({"type": "image", "source": {"type": "base64", "media_type": i.mime, "data": base64_data(i)}}));
+                }
+                push("user", blocks);
+            }
         }
     }
     let tools: Vec<Value> = tools.iter().map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.schema})).collect();
@@ -1496,6 +1570,13 @@ fn gemini_request(cfg: &Config, system: &str, turns: &[Turn], tools: &[ToolDef])
                         json!({"functionResponse": f})
                     })
                     .collect();
+                contents.push(json!({"role": "user", "parts": parts}));
+            }
+            Turn::Image { text, images } => {
+                let mut parts = vec![json!({"text": text})];
+                for i in images {
+                    parts.push(json!({"inline_data": {"mime_type": i.mime, "data": base64_data(i)}}));
+                }
                 contents.push(json!({"role": "user", "parts": parts}));
             }
         }

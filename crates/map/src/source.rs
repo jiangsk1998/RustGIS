@@ -184,6 +184,66 @@ pub struct GpkgEdit {
     pub versions: Versions,
 }
 
+/// Where a feature's image field is read from: the layer's open source, or the table a layer
+/// loaded whole saves its edits to (which has no open source of its own).
+#[derive(Clone)]
+pub enum ImageJob {
+    Source(Box<SourceLayer>),
+    Postgis(PostgisEdit),
+    Gpkg(GpkgEdit),
+}
+
+impl ImageJob {
+    /// The original bytes of one feature's image field, read on demand.
+    pub fn image(&self, fid: u64, field: &str) -> Result<Vec<u8>, String> {
+        match self {
+            ImageJob::Source(s) => {
+                // A layer loaded whole keeps its source from the session only: after a project
+                // loads it has to be opened again, here, off the UI thread.
+                if s.handle.is_some() {
+                    return s.image(fid, field);
+                }
+                if s.path.is_none() && s.embedded.is_none() && s.postgis.is_none() && s.mysql.is_none() && s.sqlserver.is_none() {
+                    return Err(
+                        "the file this layer was read from isn't kept in the project; add the layer again to read its pictures".into()
+                    );
+                }
+                let mut opened = (**s).clone();
+                opened.open()?;
+                if opened.handle.is_none() {
+                    return Err("the layer's source is still opening; try again in a moment".into());
+                }
+                opened.image(fid, field)
+            }
+            ImageJob::Postgis(e) => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (e, fid, field);
+                    Err("PostGIS databases are read in the desktop app".into())
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let src = open_postgis(&e.origin).map_err(|e| e.to_string())?;
+                    src.image(fid, field).map_err(|e| e.to_string())
+                }
+            }
+            ImageJob::Gpkg(e) => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (e, fid, field);
+                    Err("GeoPackage files are opened in the desktop app".into())
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let src = rustgis_data::source::gpkg::GpkgSource::open(std::path::Path::new(&e.path), Some(&e.table))
+                        .map_err(|e| e.to_string())?;
+                    src.image(fid, field).map_err(|e| e.to_string())
+                }
+            }
+        }
+    }
+}
+
 /// How a loaded row is told apart from the same row edited: a hash of its geometry and
 /// attributes (FNV-1a over their JSON, the same in every build).
 pub fn row_hash(f: &rustgis_data::Feature) -> u64 {
@@ -400,6 +460,25 @@ impl std::fmt::Debug for SourceLayer {
             .field("error", &self.error)
             .field("login", &self.login)
             .finish_non_exhaustive()
+    }
+}
+
+/// Saves a whole-loaded layer's image source without the uploaded file it may be reading: the
+/// project keeps thumbnails and metadata, not the original pictures (see `Layer::image_source`).
+pub mod image_source_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Option<super::SourceLayer>, s: S) -> Result<S::Ok, S::Error> {
+        let mut copy = v.clone();
+        if let Some(c) = &mut copy {
+            c.embedded = None;
+            c.handle = None;
+        }
+        copy.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<super::SourceLayer>, D::Error> {
+        Option::<super::SourceLayer>::deserialize(d)
     }
 }
 
@@ -875,6 +954,12 @@ impl SourceLayer {
 
     pub fn info(&self) -> Option<&SourceInfo> {
         self.handle.as_deref().map(|h| h.info())
+    }
+
+    /// The original bytes of one feature's image field, read from the source on demand.
+    pub fn image(&self, fid: u64, field: &str) -> Result<Vec<u8>, String> {
+        let h = self.handle.clone().ok_or("the layer's source isn't open")?;
+        h.image(fid, field).map_err(|e| e.to_string())
     }
 
     /// Every feature of the source, up to the read limit (a source by its web address fetching

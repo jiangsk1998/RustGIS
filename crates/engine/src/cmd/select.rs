@@ -450,12 +450,23 @@ fn popup_mode(s: &mut Session, p: &Value) -> CmdResult {
 fn feature_json(map: &rustgis_map::Map, id: u32, row: usize) -> Option<Value> {
     let l = map.layer(id)?;
     let mut attrs = serde_json::Map::new();
+    // Image fields show as their metadata; their bytes are read on demand (see
+    // `Layer::image`), never held here.
+    let mut images = serde_json::Map::new();
     for (i, fd) in l.dataset.fields.iter().enumerate() {
-        attrs.insert(fd.name.clone(), json!(l.dataset.value(row, i).to_string()));
+        match l.dataset.value(row, i) {
+            rustgis_data::Value::Image(img) => {
+                images.insert(fd.name.clone(), img.meta_json());
+                attrs.insert(fd.name.clone(), json!(img.summary()));
+            }
+            v => {
+                attrs.insert(fd.name.clone(), json!(v.to_string()));
+            }
+        }
     }
     // The feature id finds the feature again after a streamed layer reads another window.
     let fid = l.dataset.features.get(row).map(|f| f.id);
-    Some(json!({"layer": l.name, "layerId": id, "row": row, "fid": fid, "attributes": attrs}))
+    Some(json!({"layer": l.name, "layerId": id, "row": row, "fid": fid, "attributes": attrs, "images": images}))
 }
 
 #[cfg(test)]

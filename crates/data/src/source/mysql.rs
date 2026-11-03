@@ -621,12 +621,16 @@ impl std::fmt::Debug for MysqlSource {
     }
 }
 
-/// How a column of a MySQL type is read: as itself or cast. `None` leaves it out (geometry,
-/// binary).
+/// How a column of a MySQL type is read: as itself or cast. `None` leaves it out (geometry).
 fn field_cast(data_type: &str, column_type: &str, col: &str) -> Option<(FieldType, String)> {
     let t = data_type.to_ascii_lowercase();
-    if GEOMETRY_TYPES.contains(&t.as_str()) || t.contains("blob") || t.contains("binary") {
+    if GEOMETRY_TYPES.contains(&t.as_str()) {
         return None;
+    }
+    // Binary columns read as image attributes; the bytes stay on the server (only their length
+    // is selected).
+    if t.contains("blob") || t.contains("binary") {
+        return Some((FieldType::Image, format!("OCTET_LENGTH({col})")));
     }
     Some(match t.as_str() {
         // MySQL's `BOOLEAN` is `tinyint(1)`.
@@ -893,12 +897,50 @@ impl MysqlSource {
                     FieldType::Double => float_of(v).map(Value::Float),
                     FieldType::Boolean => int_of(v).map(|i| Value::Bool(i != 0)),
                     FieldType::Text => text_of(v).map(Value::Text),
+                    // The length OCTET_LENGTH selected for a binary column.
+                    FieldType::Image => int_of(v).and_then(|n| u64::try_from(n).ok()).map(|n| Value::Image(crate::ImageValue::sized(n))),
                 }
                 .unwrap_or(Value::Null)
             })
             .collect();
         // A negative key keeps its bits: still one id per row, and the same on every read.
         Some(Feature { id, geometry: Some(geometry), attrs })
+    }
+
+    /// The original bytes of a row's image column, read from the server on demand: a dataset
+    /// keeps only the length.
+    pub fn image_at(&self, fid: u64, field: &str) -> Result<Vec<u8>> {
+        if self.numbered {
+            return Err(DataError::Unsupported(
+                "an image from a MySQL table without a single-column integer key: its rows can't be addressed".into(),
+            ));
+        }
+        // The name must be one of the table's own image columns before it goes into the statement.
+        if !self.info.fields.iter().any(|f| f.name == field && f.ty == FieldType::Image) {
+            return Err(DataError::Unsupported(format!("{field} is not an image field of {}", self.info.name)));
+        }
+        let t = &self.table;
+        let keys: Vec<String> = self.conn.with(|c| {
+            c.exec::<String, _, _>(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
+                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_KEY = 'PRI' ORDER BY ORDINAL_POSITION",
+                (&t.schema, &t.name),
+            )
+        })?;
+        let [key] = keys.as_slice() else {
+            return Err(DataError::Unsupported(
+                "an image from a MySQL table without a single-column integer key: its rows can't be addressed".into(),
+            ));
+        };
+        let sql = format!("SELECT {field} FROM {from} WHERE {key} = ?", field = ident(field), from = t.sql_from(), key = ident(key),);
+        let rows: Vec<mysql::Row> = self.conn.with(|c| c.exec::<mysql::Row, _, _>(sql.as_str(), (fid as i64,)))?;
+        let Some(row) = rows.first() else {
+            return Err(DataError::Format(format!("no row with id {fid}")));
+        };
+        match at(row, 0) {
+            mysql::Value::Bytes(b) if !b.is_empty() => Ok(b.clone()),
+            _ => Err(DataError::Format(format!("the image field {field} of row {fid} is empty"))),
+        }
     }
 }
 
@@ -1026,6 +1068,10 @@ impl FeatureSource for MysqlSource {
     fn read(&self, req: &Request) -> Result<Batch> {
         self.read_within(req, None)
     }
+
+    fn image(&self, fid: u64, field: &str) -> Result<Vec<u8>> {
+        self.image_at(fid, field)
+    }
 }
 
 #[cfg(test)]
@@ -1106,7 +1152,7 @@ mod tests {
         assert_eq!(field_cast("bigint", "bigint unsigned", "`n`"), Some((FieldType::Integer, "`n`".into())));
         assert_eq!(field_cast("decimal", "decimal(10,2)", "`d`"), Some((FieldType::Double, "`d`".into())));
         assert_eq!(field_cast("date", "date", "`d`"), Some((FieldType::Text, "CAST(`d` AS CHAR)".into())));
-        assert_eq!(field_cast("longblob", "longblob", "`b`"), None);
+        assert_eq!(field_cast("longblob", "longblob", "`b`"), Some((FieldType::Image, "OCTET_LENGTH(`b`)".into())));
         assert_eq!(field_cast("point", "point", "`p`"), None);
     }
 

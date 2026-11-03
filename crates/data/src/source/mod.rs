@@ -151,6 +151,26 @@ fn is_gdb_part(name: &str) -> bool {
         && matches!(ext.to_ascii_lowercase().as_str(), "gdbtable" | "gdbtablx" | "gdbindexes" | "atx" | "spx" | "freelist" | "horizon")
 }
 
+/// The note on a binary column whose values are only partly pictures: the rest show empty.
+pub(crate) fn mixed_pictures_note(others: usize, total: usize, field: &str) -> String {
+    format!("{others} of the first {total} values of {field} aren't pictures RustGIS can show; they're shown empty")
+}
+
+/// The note on binary columns left out because none of their values is a picture RustGIS can show.
+pub(crate) fn not_pictures_note(dropped: &[String]) -> String {
+    match dropped {
+        [one] => format!("{one} holds data that isn't pictures RustGIS can show, so it isn't read"),
+        _ => {
+            let names: Vec<&str> = dropped.iter().map(String::as_str).collect();
+            format!(
+                "{} columns hold data that isn't pictures RustGIS can show and aren't read: {}",
+                dropped.len(),
+                crate::name_list(&names)
+            )
+        }
+    }
+}
+
 /// What a source holds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceInfo {
@@ -266,6 +286,11 @@ pub trait FeatureSource: Send + Sync {
         Err(DataError::Unsupported("a source that can't be read a chunk at a time".into()))
     }
     fn info(&self) -> &SourceInfo;
+    /// The original bytes of one feature's image field. The bytes stay in the source: a dataset
+    /// keeps only their metadata (see [`crate::Value::Image`]).
+    fn image(&self, _fid: u64, field: &str) -> Result<Vec<u8>> {
+        Err(DataError::Unsupported(format!("reading an image ({field}) from this kind of source")))
+    }
     /// Whether features were left out of every read because the coordinate system the source
     /// declares can't place them, so that defining its projection again can't bring them back.
     fn lost_to_crs(&self) -> bool {

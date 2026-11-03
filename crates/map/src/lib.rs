@@ -196,6 +196,10 @@ pub struct Layer {
     /// The GeoPackage table this layer's edits save to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpkg: Option<source::GpkgEdit>,
+    /// Where a layer loaded whole reads a feature's image field from: its file or table, kept out
+    /// of the dataset. The project keeps what names it (a path and table), not its uploaded bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "source::image_source_serde")]
+    pub image_source: Option<source::SourceLayer>,
     /// Process-local identity, preserved by snapshots but never stored in a project.
     #[serde(skip, default = "next_layer_instance")]
     instance_id: u64,
@@ -264,9 +268,32 @@ impl Layer {
         self.postgis.as_ref().map(|e| &e.versions).or_else(|| self.gpkg.as_ref().map(|e| &e.versions))
     }
 
+    /// What reads a feature's image field: the layer's source, the source it was loaded whole
+    /// from, or the table its edits are saved to when the layer was loaded whole.
+    pub fn image_job(&self) -> Option<source::ImageJob> {
+        if let Some(s) = &self.source {
+            return Some(source::ImageJob::Source(Box::new(s.clone())));
+        }
+        if let Some(s) = &self.image_source {
+            return Some(source::ImageJob::Source(Box::new(s.clone())));
+        }
+        if let Some(e) = &self.postgis {
+            return Some(source::ImageJob::Postgis(e.clone()));
+        }
+        self.gpkg.clone().map(source::ImageJob::Gpkg)
+    }
+
+    /// The original bytes of one feature's image field, read on demand.
+    pub fn image(&self, fid: u64, field: &str) -> Result<Vec<u8>, String> {
+        match self.image_job() {
+            Some(job) => job.image(fid, field),
+            None => Err(format!("{field} isn't read from a data source of this layer")),
+        }
+    }
+
     /// Local linked paths, followed by the dataset's record-only provenance.
     pub fn file_paths_mut(&mut self) -> Vec<(&mut String, bool)> {
-        let Layer { dataset, source, raster, gpkg, .. } = self;
+        let Layer { dataset, source, raster, gpkg, image_source, .. } = self;
         let mut paths = Vec::new();
         if let Some(src) = source {
             if let Some(g) = &mut src.gdal {
@@ -296,6 +323,9 @@ impl Layer {
         }
         if let Some(g) = gpkg {
             paths.push((&mut g.path, false));
+        }
+        if let Some(p) = image_source.as_mut().and_then(|s| s.path.as_mut()) {
+            paths.push((p, false));
         }
         if let Some(p) = &mut dataset.source {
             paths.push((p, true));
@@ -343,12 +373,19 @@ impl Layer {
         self.install(Vec::new());
     }
 
-    /// The dataset, streamed, raster and time-following Zarr addresses used to read this layer
+    /// The dataset, streamed, whole-loaded image and raster addresses used to read this layer
     /// again, in that order. Local paths are included; database origins stay password-free.
     pub fn addresses_mut(&mut self) -> impl Iterator<Item = &mut String> {
-        self.dataset.source.iter_mut().chain(self.source.iter_mut().filter_map(|source| source.path.as_mut())).chain(
-            self.raster.iter_mut().flat_map(|raster| raster.path.iter_mut().chain(raster.time_zarr.iter_mut().map(|zarr| &mut zarr.store))),
-        )
+        self.dataset
+            .source
+            .iter_mut()
+            .chain(self.source.iter_mut().filter_map(|source| source.path.as_mut()))
+            .chain(self.image_source.iter_mut().filter_map(|source| source.path.as_mut()))
+            .chain(
+                self.raster
+                    .iter_mut()
+                    .flat_map(|raster| raster.path.iter_mut().chain(raster.time_zarr.iter_mut().map(|zarr| &mut zarr.store))),
+            )
     }
 
     pub fn new(id: u32, dataset: Dataset) -> Self {
@@ -387,6 +424,7 @@ impl Layer {
             source: None,
             postgis: None,
             gpkg: None,
+            image_source: None,
             projected: Default::default(),
             display: None,
             display_rejected: Vec::new(),
@@ -2645,6 +2683,98 @@ mod tests {
         d.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::Int(1)]);
         d.push(Some(Geometry::Point(Coord::new(10.0, 10.0))), vec![Value::Int(2)]);
         d
+    }
+
+    #[test]
+    fn images_are_read_from_the_layers_source() {
+        use rustgis_data::source::{Batch, FeatureSource, Request, SourceInfo};
+
+        struct Pictures(SourceInfo);
+        impl FeatureSource for Pictures {
+            fn info(&self) -> &SourceInfo {
+                &self.0
+            }
+            fn read(&self, _req: &Request) -> rustgis_data::Result<Batch> {
+                Ok(Batch { features: Vec::new(), matched: 0, complete: true, skipped: 0 })
+            }
+            fn image(&self, fid: u64, field: &str) -> rustgis_data::Result<Vec<u8>> {
+                if field != "photo" {
+                    return Err(rustgis_data::DataError::Unsupported(format!("{field} isn't a picture field")));
+                }
+                Ok(format!("picture of feature {fid}").into_bytes())
+            }
+        }
+
+        let info = SourceInfo {
+            name: "shots".into(),
+            format: "GeoPackage",
+            geometry_type: GeometryType::None,
+            fields: vec![Field::new("photo", FieldType::Image)],
+            extent: Extent::EMPTY,
+            count: Some(2),
+            crs: String::new(),
+            indexed: false,
+            notes: Vec::new(),
+            zm_dropped: false,
+        };
+        let mut l = Layer::new(1, Dataset::new("shots", GeometryType::None, vec![Field::new("photo", FieldType::Image)]));
+        l.source = Some(source::SourceLayer::from_path("shots.gpkg", None, Box::new(Pictures(info))));
+        assert_eq!(l.image(7, "photo").unwrap(), b"picture of feature 7");
+        // A field that isn't an image isn't fetched as one.
+        assert!(l.image(7, "other").is_err());
+        // A layer with no source knows no images: never a made-up one.
+        l.source = None;
+        assert!(l.image(7, "photo").is_err());
+    }
+
+    #[test]
+    fn whole_loaded_layers_keep_an_image_source_not_its_uploaded_bytes() {
+        use rustgis_data::source::{Batch, FeatureSource, Request, SourceInfo};
+        struct Pictures(SourceInfo);
+        impl FeatureSource for Pictures {
+            fn info(&self) -> &SourceInfo {
+                &self.0
+            }
+            fn read(&self, _req: &Request) -> rustgis_data::Result<Batch> {
+                Ok(Batch { features: Vec::new(), matched: 0, complete: true, skipped: 0 })
+            }
+            fn image(&self, fid: u64, field: &str) -> rustgis_data::Result<Vec<u8>> {
+                if field != "photo" {
+                    return Err(rustgis_data::DataError::Unsupported(format!("{field} isn't a picture field")));
+                }
+                Ok(format!("picture of feature {fid}").into_bytes())
+            }
+        }
+        let info = SourceInfo {
+            name: "shots".into(),
+            format: "GeoPackage",
+            geometry_type: GeometryType::None,
+            fields: vec![Field::new("photo", FieldType::Image)],
+            extent: Extent::EMPTY,
+            count: Some(2),
+            crs: String::new(),
+            indexed: false,
+            notes: Vec::new(),
+            zm_dropped: false,
+        };
+        let mut l = Layer::new(1, Dataset::new("shots", GeometryType::None, vec![Field::new("photo", FieldType::Image)]));
+        // Loaded whole from its file: the source stays behind the dataset, not in it.
+        l.image_source =
+            Some(source::SourceLayer::from_path("/tmp/rustgis-no-such-file.gpkg", Some("shots".into()), Box::new(Pictures(info.clone()))));
+        assert_eq!(l.image(7, "photo").unwrap(), b"picture of feature 7");
+        assert!(matches!(l.image_job(), Some(source::ImageJob::Source(_))));
+        // Saved, a path and table are kept (the source is opened again when asked); a project
+        // loaded from them has no open handle, so a file that's gone is an error, not a blank.
+        let saved = serde_json::to_value(&l).unwrap();
+        assert_eq!(saved["image_source"]["table"], "shots");
+        let back: Layer = serde_json::from_value(saved).unwrap();
+        assert!(back.image(7, "photo").is_err());
+        // An uploaded file is read while it's open, but its bytes never go into the project.
+        l.image_source =
+            Some(source::SourceLayer::from_bytes("up.gpkg", std::sync::Arc::new(vec![1, 2, 3]), None, Box::new(Pictures(info))));
+        let saved = serde_json::to_value(&l).unwrap();
+        assert_eq!(saved["image_source"]["file_name"], "up.gpkg");
+        assert!(saved["image_source"].get("embedded").is_none(), "{saved}");
     }
 
     #[test]
