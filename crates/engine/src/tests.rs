@@ -8975,10 +8975,11 @@ fn duckdb_queries_and_databases() {
         assert!(e.contains("need DuckDB"), "{e}");
         return;
     }
-    // A result mixing geometry types: a layer per type.
+    // A result mixing geometry types: a layer per type, the newest (lines, added after points) on
+    // top of the drawing order, as the Layers pane lists them.
     let r = s.run("layer.addSql", &json!({"sql": query, "name": "Trip"})).unwrap();
     let names: Vec<String> = s.map().layers.iter().map(|l| l.name.clone()).collect();
-    assert_eq!(names, vec!["Trip (points)", "Trip (lines)"], "{r}");
+    assert_eq!(names, vec!["Trip (lines)", "Trip (points)"], "{r}");
     // Streamed, a layer remembers its query; a project never runs it again when the result is gone
     // (a project file is hostile input), and says how to.
     let r = s
