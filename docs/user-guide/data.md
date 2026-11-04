@@ -916,9 +916,12 @@ Mercator, Mercator, Lambert azimuthal, stereographic, equirectangular, sinusoida
 exported GeoTIFF keeps. A raster too large to hold in memory (more than 120 million samples, 32
 million in the web app) opens from its largest overview that fits; one without overviews opens as
 an overview made as it is read, a strip or tile at a time (every second, fourth… pixel each way),
-so reading it takes as long as decoding the whole file once. A cloud-optimised GeoTIFF added by its
-web address is read in place instead, a tile at a time (see [Files on the
-web](data-formats.md#files-on-the-web)).
+so reading it takes as long as decoding the whole file once. A cloud-optimised (tiled) GeoTIFF is
+read in place instead, a tile at a time, at full resolution: on the web when added by its address
+(see [Files on the web](data-formats.md#files-on-the-web)), and on the desktop from its file too —
+a local one past that size opens as a tile layer, framed to its bounds. `"whole": true` reads it
+whole anyway. A GeoTIFF in strips is still read whole, so save it as a cloud-optimised one (GDAL's
+`gdal_translate -of COG in.tif out.tif`) to see it at full resolution.
 
 The web app opens a picked or dropped file of up to 256 MB whole. A larger GeoTIFF is read a part
 at a time instead: its header, then only the tiles of the overview it opens from. A

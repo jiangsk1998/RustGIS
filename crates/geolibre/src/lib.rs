@@ -481,6 +481,11 @@ fn stage(inputs: &dyn Inputs, value: &str, data: Data, tf: &Transformer, job: &m
         }
         return Ok(job.stage(value, "geojson", bytes));
     }
+    // A GeoTIFF read in place (a cloud-optimised one, or a large tiled one) is a file the
+    // program reads from its path.
+    if let Some((path, _)) = inputs.raster_file(value) {
+        return Ok(FileRef::Path(path));
+    }
     if on_disk(value) {
         return Ok(FileRef::Path(value.to_string()));
     }
@@ -550,6 +555,12 @@ fn prepare_with(spec: &ToolSpec, meta: &Meta, inputs: &dyn Inputs, params: &Valu
         for n in value_of(&p.name).map(names).unwrap_or_default() {
             if let Some(r) = inputs.raster(&n) {
                 raster_crs.push(r.raster.crs);
+            } else if let Some((_, crs)) = inputs.raster_file(&n) {
+                // The file's own header may say it; a coordinate system given when it was added
+                // stands in for one it doesn't.
+                if let Some(c) = crs {
+                    raster_crs.push(c);
+                }
             } else if let Some(ds) = inputs.dataset(&n) {
                 vector_extents.push(ds.extent());
             }

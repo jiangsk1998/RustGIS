@@ -117,6 +117,7 @@ pub fn spec(t: &TileLayer) -> Spec {
             TileKind::Cog => Kind::Cog,
         },
         url: t.url.clone(),
+        crs: t.crs.clone(),
         subdomains: t.subdomains.clone(),
         min_zoom: t.min_zoom,
         max_zoom: t.max_zoom,

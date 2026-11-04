@@ -348,11 +348,18 @@ pub fn add_raster(s: &mut Session, name: &str, mut layer: RasterLayer) -> CmdRes
     }
     let (w, h, n, overview) = layer.data.as_ref().map(|d| (d.width, d.height, d.band_count(), d.overview)).unwrap_or_default();
     let rounded = layer.data.as_deref().and_then(rounded_count);
+    // A GeoTIFF that had to be read as an overview: a tiled (cloud-optimised) one is read in
+    // place instead, at full resolution.
+    let tiff = layer.path.as_deref().is_some_and(|p| {
+        let lower = p.to_ascii_lowercase();
+        lower.ends_with(".tif") || lower.ends_with(".tiff")
+    });
     let empty_before = s.map().layers.is_empty();
     let id = s.map_mut().add_raster(unique.clone(), layer);
     s.active_layer = Some(id);
     if let Some((fw, fh)) = overview {
-        s.notify(format!("{unique}: showing a {w} × {h} overview of the {fw} × {fh} raster"), false);
+        let hint = if tiff { "; a tiled (cloud-optimised) GeoTIFF is read in place instead, at full resolution" } else { "" };
+        s.notify(format!("{unique}: showing a {w} × {h} overview of the {fw} × {fh} raster{hint}"), false);
     }
     if let Some(count) = rounded {
         let held = "pixels are held as 32-bit floats, exact for whole numbers up to 16,777,216 and to about 7 significant digits";
@@ -433,11 +440,14 @@ pub(crate) fn as_scan(p: &Value) -> Result<bool, String> {
     }
 }
 
-/// Opens a raster file by path.
-pub fn add_path(s: &mut Session, path: &str, name: Option<&str>, scan: bool) -> CmdResult {
+/// Opens a raster file by path. `crs` gives a coordinate system the file doesn't say: its
+/// coordinates are taken as that one, not reprojected.
+pub fn add_path(s: &mut Session, path: &str, name: Option<&str>, scan: bool, crs: Option<&str>) -> CmdResult {
     let mut r = raster::read_path(Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
     if scan {
         r = r.into_scan().map_err(|e| format!("{path}: {e}"))?;
+    } else if let Some(c) = crs.map(str::trim).filter(|c| !c.is_empty()) {
+        r.define_crs(rustgis_data::raster::Crs::parse(c)?).map_err(|e| format!("{path}: {e}"))?;
     }
     let name = name.map(str::to_string).unwrap_or_else(|| r.name.clone());
     // Absolute, so the project finds it again from anywhere (`absolute`, unlike `canonicalize`,
@@ -519,6 +529,8 @@ pub(crate) fn add_named_bytes(s: &mut Session, p: &Value, name: String, bytes: V
         let mut r = raster::read_bytes(&name, &bytes).map_err(|e| format!("{name}: {e}"))?;
         if scan {
             r = r.into_scan().map_err(|e| format!("{name}: {e}"))?;
+        } else if let Some(c) = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty()) {
+            r.define_crs(rustgis_data::raster::Crs::parse(c)?).map_err(|e| format!("{name}: {e}"))?;
         }
         let title = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| r.name.clone());
         return add_raster(s, &title, RasterLayer::from_bytes(r, name, bytes));

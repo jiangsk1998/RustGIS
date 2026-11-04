@@ -1040,6 +1040,7 @@ pub(crate) mod tests {
         let spec = crate::source::Spec {
             kind: crate::source::Kind::PmTiles,
             url: a.clone(),
+            crs: None,
             subdomains: Vec::new(),
             min_zoom: 0,
             max_zoom: 19,

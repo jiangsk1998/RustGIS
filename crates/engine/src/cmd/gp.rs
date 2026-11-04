@@ -970,6 +970,17 @@ impl Inputs for MapInputs<'_> {
             embedded: rl.embedded.as_deref().map(|b| (rl.file_name.as_deref().unwrap_or("raster.tif"), b.as_slice())),
         })
     }
+    fn raster_file(&self, layer: &str) -> Option<(String, Option<rustgis_data::raster::Crs>)> {
+        // A GeoTIFF on this computer is a tile layer read in place; an external program reads it
+        // from its path (a web address is none).
+        let t = self.snap.map.tiles.iter().find(|t| t.kind == rustgis_map::tiles::TileKind::Cog && t.name.eq_ignore_ascii_case(layer))?;
+        let path = t.url.split('#').next().unwrap_or(&t.url);
+        if cfg!(target_arch = "wasm32") || !std::path::Path::new(path).is_file() {
+            return None;
+        }
+        let crs = t.crs.as_deref().and_then(|c| rustgis_data::raster::Crs::parse(c).ok());
+        Some((path.to_string(), crs))
+    }
 }
 
 fn run(s: &mut Session, p: &Value) -> CmdResult {

@@ -11,6 +11,7 @@ fn main() {
     let spec = Spec {
         kind: Kind::Style,
         url: "https://tiles.openfreemap.org/styles/liberty".into(),
+        crs: None,
         subdomains: Vec::new(),
         min_zoom: 0,
         max_zoom: 22,

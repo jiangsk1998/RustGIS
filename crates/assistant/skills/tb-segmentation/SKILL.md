@@ -11,8 +11,12 @@ boundary; the inner boundaries are smooth curves.
 
 ## Before starting
 
-- The image raster needs an EPSG code; for one without it, run
-  `geolibre:assign_projection_raster` first (CGCS2000 3-degree zone 39 → EPSG 4527).
+- The image raster needs an EPSG code in its header (CGCS2000 3-degree zone 39 → EPSG 4527). For
+  one without it, write the code with GDAL, which keeps the geotransform and overviews:
+  `gdal_edit.py -a_srs EPSG:4527 image.tif`. Don't use `geolibre:assign_projection_raster`: it
+  drops the geotransform.
+- A large local COG added as a tile layer (Add Data read it in place) is used by these tools by
+  its layer name: the tools read the file from its path.
 - The parcel layer has `JCBH`.
 - Baseline parameters: threshold 2.5 / min_area 200 / small regions 30 m² / PAEK 4 m.
   Feedback "too fragmented" ("太碎") → raise the threshold; "too coarse" ("太粗") → lower it.

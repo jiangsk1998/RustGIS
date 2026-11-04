@@ -334,3 +334,42 @@ fn defaults_are_left_to_the_runner() {
         ]
     );
 }
+
+/// A local cloud-optimised GeoTIFF given as a tile layer is staged where it is, by its path (its
+/// pixels are never loaded whole), and a coordinate system given with the layer sets the working
+/// one.
+#[test]
+fn a_local_geotiff_layer_is_staged_by_its_path() {
+    struct LocalCog(String);
+    impl Inputs for LocalCog {
+        fn dataset(&self, _: &str) -> Option<&Dataset> {
+            None
+        }
+        fn selection(&self, _: &str) -> &[usize] {
+            &[]
+        }
+        fn raster_file(&self, layer: &str) -> Option<(String, Option<Crs>)> {
+            (layer == "scene").then(|| (self.0.clone(), Some(Crs::from_epsg(4527).unwrap())))
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("rustgis-geolibre-cog-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("scene.tif");
+    std::fs::write(&path, rustgis_data::raster::cog::example(1024, 64)).unwrap();
+    let manifest = json!({
+        "id": "clip", "display_name": "Clip", "category": "Raster", "summary": "",
+        "params": [
+            {"name": "raster", "io_role": "input", "data_kind": "raster", "required": true, "schema": {"kind": "input"}},
+            {"name": "output", "io_role": "output", "data_kind": "raster", "required": false, "schema": {"kind": "output"}}
+        ]
+    });
+    let (spec, meta) = spec_of(&manifest).unwrap();
+    let f = LocalCog(path.display().to_string());
+    let params = rustgis_analysis::resolve_params(&spec, &json!({"raster": "scene"})).unwrap();
+    let job = prepare_with(&spec, &meta, &f, &params).unwrap();
+    // Nothing is copied into the working folder: the program reads the file from its path.
+    assert!(job.files.is_empty(), "{:?}", job.files);
+    assert_eq!(job.argv("/work"), [format!("--raster={}", path.display()), "--output=/work/output.tif".to_string()]);
+    assert_eq!(job.crs, Crs::from_epsg(4527).unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+}

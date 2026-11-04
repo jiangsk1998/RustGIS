@@ -35,6 +35,8 @@ pub enum Kind {
 pub struct Spec {
     pub kind: Kind,
     pub url: String,
+    /// A GeoTIFF's coordinate system, when its header doesn't say it (`"EPSG:…"`).
+    pub crs: Option<String>,
     pub subdomains: Vec<String>,
     pub min_zoom: u8,
     pub max_zoom: u8,
@@ -55,9 +57,10 @@ pub struct Spec {
 impl Spec {
     fn key(&self) -> String {
         format!(
-            "{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.kind,
             self.url,
+            self.crs.as_deref().unwrap_or(""),
             self.subdomains.join(","),
             self.min_zoom,
             self.max_zoom,
@@ -145,12 +148,18 @@ pub const DEFAULT_STYLE: &str = include_str!("default_style.json");
 /// The style to draw `spec` with, once the documents it needs have been fetched.
 pub fn resolve(spec: &Spec) -> Resolve {
     let key = spec.key();
-    // A PMTiles archive on this computer is a path, not a web address.
-    let local = spec.kind == Kind::PmTiles && pmtiles::is_local(&spec.url);
+    // A PMTiles archive or GeoTIFF on this computer is a path, not a web address.
+    let local = match spec.kind {
+        Kind::PmTiles => pmtiles::is_local(&spec.url),
+        Kind::Cog => cog::is_local(&spec.url),
+        _ => false,
+    };
     let checked = if spec.kind == Kind::MbTiles {
         mbtiles::check(&spec.url)
-    } else if local {
+    } else if spec.kind == Kind::PmTiles && local {
         pmtiles::check_local(&spec.url)
+    } else if spec.kind == Kind::Cog && local {
+        cog::check_local(&spec.url)
     } else {
         address::check(&spec.url, None)
     };
@@ -215,10 +224,12 @@ fn resolve_anew(spec: &Spec, key: String) -> Resolve {
             Ok(None) => return Resolve::Pending,
             Err(e) => return Resolve::Failed(format!("{}: {e}", spec.url)),
         },
-        Kind::Cog => match cog::info(&spec.url) {
+        Kind::Cog => match cog::info_with(&spec.url, spec.crs.as_deref()) {
             Ok(Some(info)) => {
                 let archive = Archive {
-                    tiles: cog::template(&spec.url),
+                    // The coordinate system rides in each map tile's address, so its header is
+                    // read with it.
+                    tiles: cog::template(&cog::with_crs(&spec.url, spec.crs.as_deref())),
                     vector: false,
                     min_zoom: info.min_zoom,
                     max_zoom: info.max_zoom,
@@ -646,6 +657,7 @@ mod tests {
         Spec {
             kind,
             url: url.into(),
+            crs: None,
             subdomains: Vec::new(),
             min_zoom: 0,
             max_zoom: 19,

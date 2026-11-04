@@ -16,7 +16,7 @@ use crate::{CmdResult, CommandSpec as C, Session};
 pub fn commands() -> Vec<C> {
     vec![
         C::new("layer.addData", "Add Data", "Home › Add", add_data)
-            .params(r#"{"path": string, "name"?: string, "layer"?: "GeoPackage, GDAL, DuckDB or DXF layer", "paperSpace"?: "bool: a DXF's layout entities too", "stream"?: bool, "as"?: "scan" (a TIFF, PNG or JPEG, even a photo or a GeoTIFF, as a picture with no coordinates), "crs"?: "EPSG:… (or WKT) for Shapefile coordinates (overrides .prj), a CSV, or a GDAL or DuckDB file that doesn't say", "x"?: "CSV x/longitude column", "y"?: "CSV y/latitude column", "wkt"?: "CSV WKT geometry column", "delimiter"?: ","|";"|"\\t"|"|"}"#),
+            .params(r#"{"path": string, "name"?: string, "layer"?: "GeoPackage, GDAL, DuckDB or DXF layer", "paperSpace"?: "bool: a DXF's layout entities too", "stream"?: bool, "as"?: "scan" (a TIFF, PNG or JPEG, even a photo or a GeoTIFF, as a picture with no coordinates), "crs"?: "EPSG:… (or WKT) for Shapefile coordinates (overrides .prj), a CSV, a raster (GeoTIFF or COG) whose header doesn't say its coordinate system (its coordinates are taken as that one, not reprojected), or a GDAL or DuckDB file that doesn't say", "x"?: "CSV x/longitude column", "y"?: "CSV y/latitude column", "wkt"?: "CSV WKT geometry column", "delimiter"?: ","|";"|"\\t"|"|", "whole"?: "bool: read a tiled GeoTIFF larger than what is held in memory whole (as a raster layer with an overview) instead of in place, a tile at a time, at full resolution"}"#),
         C::new("layer.addPhotos", "Add Photos", "Home › Add", add_photos).params(
             r#"{"paths"?: [JPEG photo files], "folder"?: "a folder of photos (every JPEG in it)", "name"?: "the layer (default Photos; photos join it when it exists)"}"#,
         ),
@@ -40,7 +40,7 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"layer"?: name|id, "crs": "EPSG:… or WKT; reinterpret native coordinates, without rewriting the source file"}"#),
         C::new("layer.loadAll", "Load All Features", "Layers", load_all).when(need_streamed).params(r#"{"layer"?: name|id}"#),
         C::new("layer.addUrl", "Add Data From URL", "Home › Add › Add Data", add_url).params(
-            r#"{"url": "https://…/data.geojson|.csv|.parquet|.fgb|.gpkg|.zip|.kml|.kmz|.gpx|.tif|.jp2 (JPEG 2000: desktop, through GDAL) (the format from the address, else the contents) | a .pmtiles archive", "name"?: text, "layer"?: "one layer of a zip, KML or GPX", "zoom"?: "bool: true zooms to what was added; false keeps the view of a GeoParquet or FlatGeobuf read in place (zoomed to only when the map was empty)", "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "whole"?: "bool: download a cloud-optimised GeoTIFF whole (as a raster layer) instead of reading it in place (an address without a file name is read in place when its first bytes are a cloud-optimised GeoTIFF)", "cog"?: "bool: the address is a cloud-optimised GeoTIFF whatever its name says (the app's probe found it so)", "start"?, "end"?, "unit"?, "interval"?, "dates"?: "a GeoTIFF address with date placeholders ({date:YYYY}, {YYYY}{MM}{DD}), one file per date: the dates it spans and steps through (as time.set), turning the time slider on"}"#,
+            r#"{"url": "https://…/data.geojson|.csv|.parquet|.fgb|.gpkg|.zip|.kml|.kmz|.gpx|.tif|.jp2 (JPEG 2000: desktop, through GDAL) (the format from the address, else the contents) | a .pmtiles archive", "name"?: text, "layer"?: "one layer of a zip, KML or GPX", "zoom"?: "bool: true zooms to what was added; false keeps the view of a GeoParquet or FlatGeobuf read in place (zoomed to only when the map was empty)", "x"?, "y"?, "wkt"?, "crs"?: "as layer.addData (a GeoTIFF read in place takes it as the coordinate system its header doesn't say)", "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "whole"?: "bool: download a cloud-optimised GeoTIFF whole (as a raster layer) instead of reading it in place (an address without a file name is read in place when its first bytes are a cloud-optimised GeoTIFF)", "cog"?: "bool: the address is a cloud-optimised GeoTIFF whatever its name says (the app's probe found it so)", "start"?, "end"?, "unit"?, "interval"?, "dates"?: "a GeoTIFF address with date placeholders ({date:YYYY}, {YYYY}{MM}{DD}), one file per date: the dates it spans and steps through (as time.set), turning the time slider on"}"#,
         ),
         C::new("layer.addDownload", "Add Downloaded Data", "Home › Add", add_download)
             .params(r#"{"id": a download the app finished (Home › Add › Add Data › From URL), "url": its address, "name"?: text, "layer"?: text, "zoom"?: bool, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "service"?: bool (a service's features: their axes and paging are checked), "bounds"?: [west, south, east, north] (with service: the layer's longitude/latitude bounds from its capabilities, which its axes are checked against; without bounds they are left as they come; ignored without service), "coverage"?: bool (a WCS coverage: a GeoTIFF, else the service's error), "geolibreProject"?: bool (internal: downloaded project JSON), "geolibreLayer"?: {"token", "record"} (internal: reserved imported layer and its saved style), "geolibreZarr"?: bool (internal: an imported Zarr slice as GeoTIFF)}"#),
@@ -1241,7 +1241,20 @@ fn add_data(s: &mut Session, p: &Value) -> CmdResult {
         return add_photos(s, &json!({"paths": [path], "name": name}));
     }
     if rustgis_data::raster::is_raster_name(path) {
-        return super::raster::add_path(s, path, ps(p, "name").map(str::trim).filter(|n| !n.is_empty()), scan);
+        // A local tiled GeoTIFF too large to hold whole is read in place, a tile at a time, at
+        // full resolution: the same pipeline a cloud-optimised GeoTIFF on the web uses.
+        #[cfg(not(target_arch = "wasm32"))]
+        if !scan && !path.contains("://") && is_tiff_url(path) && !super::b(p, "whole").unwrap_or(false) {
+            let full = std::path::absolute(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string());
+            if local_cog_too_large(&full) {
+                s.notify(
+                    format!("{path}: larger than what is held in memory, so it is read in place, a tile at a time, at full resolution"),
+                    false,
+                );
+                return add_cog(s, p, &full);
+            }
+        }
+        return super::raster::add_path(s, path, ps(p, "name").map(str::trim).filter(|n| !n.is_empty()), scan, ps(p, "crs"));
     }
     // A Zarr store's folder: its first variable, or the one "layer" names.
     #[cfg(not(target_arch = "wasm32"))]
@@ -2973,12 +2986,32 @@ pub fn is_unnamed_url(url: &str) -> bool {
     path.rsplit('/').find(|p| !p.is_empty()).is_some_and(|last| !last.contains('.'))
 }
 
+/// Whether a local GeoTIFF is a tiled (cloud-optimised) one holding more samples than
+/// [`MAX_SAMPLES`](rustgis_data::raster::MAX_SAMPLES), so reading it whole would keep only an
+/// overview: it is read in place instead, a tile at a time. A strip GeoTIFF, or a file that can't
+/// be read in place, is read whole as before.
+#[cfg(not(target_arch = "wasm32"))]
+fn local_cog_too_large(path: &str) -> bool {
+    let Ok(info) = crate::render::rustgis_tiles::cog::info_blocking(path) else { return false };
+    let Some(full) = info.layout.levels.first() else { return false };
+    let samples = u64::from(full.width).saturating_mul(u64::from(full.height)).saturating_mul(info.layout.bands.max(1) as u64);
+    samples > rustgis_data::raster::MAX_SAMPLES as u64
+}
+
 /// Adds a cloud-optimised GeoTIFF by its address as a layer read in place (its tiles by range,
 /// as the view needs them), framed when its header is in.
 pub(crate) fn add_cog(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     let stem = cog_name(url);
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or(&stem);
+    // A coordinate system the file doesn't say: its coordinates are taken as that one.
+    let crs = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+    if let Some(c) = &crs {
+        rustgis_data::raster::Crs::parse(c)?;
+    }
     let mut q = json!({"url": url, "kind": "cog", "name": name, "top": true});
+    if let Some(c) = &crs {
+        q["crs"] = json!(c);
+    }
     // A dated address's span and steps (see map.addTiles).
     for k in ["start", "end", "unit", "interval", "dates"] {
         if let Some(v) = p.get(k) {
@@ -2996,7 +3029,18 @@ pub(crate) fn add_cog(s: &mut Session, p: &Value, url: &str) -> CmdResult {
         }
         None => url.to_string(),
     };
-    if let Ok(Some(info)) = crate::render::rustgis_tiles::cog::info(&url) {
+    // The header of a file on this computer is read from disk, waiting for it (its bounds frame
+    // the view at once); a web address's is read off the frame, framed when it is in.
+    #[cfg(not(target_arch = "wasm32"))]
+    let info = if crate::render::rustgis_tiles::cog::is_local(&url) {
+        // Its error, if any, is the layer's to report when it draws.
+        crate::render::rustgis_tiles::cog::info_blocking(&crate::render::rustgis_tiles::cog::with_crs(&url, crs.as_deref())).ok()
+    } else {
+        crate::render::rustgis_tiles::cog::info_with(&url, crs.as_deref()).ok().flatten()
+    };
+    #[cfg(target_arch = "wasm32")]
+    let info = crate::render::rustgis_tiles::cog::info_with(&url, crs.as_deref()).ok().flatten();
+    if let Some(info) = info {
         let [w, so, e, n] = info.bounds;
         s.zoom_to(&rustgis_geom::Extent::new(w, so, e, n));
         r["bounds"] = json!(info.bounds);
@@ -3013,6 +3057,8 @@ pub(crate) fn add_cog(s: &mut Session, p: &Value, url: &str) -> CmdResult {
 /// folder's name.
 fn cog_name(url: &str) -> String {
     let path = url.split(['?', '#']).next().unwrap_or(url);
+    // A file on this computer (a Windows path ends its folders with `\`).
+    let path = path.replace('\\', "/");
     let mut parts = path.rsplit('/');
     let file = parts.next().unwrap_or("GeoTIFF");
     let file = file.rsplit_once('.').map(|(a, _)| a).unwrap_or(file);

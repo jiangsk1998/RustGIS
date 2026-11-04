@@ -30,8 +30,8 @@ pub enum TileKind {
     /// for one added to the web app (kept in memory, not in the project).
     #[serde(rename = "mbtiles")]
     MbTiles,
-    /// A cloud-optimised GeoTIFF by its web address: drawn from the overview and tiles the view
-    /// needs, read by byte range.
+    /// A cloud-optimised GeoTIFF: drawn from the overview and tiles the view needs, read by byte
+    /// range from its web address, or on the desktop from its file.
     #[serde(rename = "cog")]
     Cog,
 }
@@ -96,6 +96,10 @@ pub struct TileLayer {
     pub kind: TileKind,
     /// The URL template, TileJSON or style address.
     pub url: String,
+    /// For a cloud-optimised GeoTIFF whose header doesn't say its coordinate system: the one its
+    /// coordinates are in (`"EPSG:…"`), as `layer.addUrl`'s `"crs"` gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crs: Option<String>,
     /// Advertised longitude/latitude coverage (west, south, east, north), kept from service
     /// capabilities so Zoom To Layer works without fetching the service again.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_bounds")]
@@ -347,6 +351,7 @@ impl TileLayer {
             name: name.into(),
             kind,
             url: url.into(),
+            crs: None,
             bounds: None,
             subdomains: Vec::new(),
             min_zoom: 0,
@@ -432,14 +437,30 @@ impl TileLayer {
         self.time_urls.sort_by(|a, b| a.0.total_cmp(&b.0));
         self.time_urls.dedup_by(|a, b| a.0 == b.0);
         self.time_urls.truncate(MAX_TIME_URLS);
-        let local = matches!(self.kind, TileKind::PmTiles | TileKind::MbTiles) && is_local_archive(&self.url);
+        let local =
+            (matches!(self.kind, TileKind::PmTiles | TileKind::MbTiles) || self.kind == TileKind::Cog) && is_local_archive(&self.url);
+        // A coordinate system only a GeoTIFF layer takes, and only one that reads.
+        if self.kind != TileKind::Cog {
+            self.crs = None;
+        }
+        self.crs = self.crs.take().and_then(|c| {
+            let c = c.trim().to_string();
+            (!c.is_empty() && c.len() <= 4096 && rustgis_data::raster::Crs::parse(&c).is_ok()).then_some(c)
+        });
         if let Some(name) = self.url.strip_prefix(UPLOAD).filter(|_| self.kind == TileKind::MbTiles) {
             if name.is_empty() || name.len() > 512 || name.chars().any(char::is_control) {
                 return Err("an uploaded MBTiles file needs a name".into());
             }
         } else if local {
             if self.error.is_none() {
-                check_path(&self.url, if self.kind == TileKind::MbTiles { "mbtiles" } else { "pmtiles" })?;
+                // A COG's look (`#bands=…`) is not part of the file's path.
+                let path = if self.kind == TileKind::Cog { self.url.split('#').next().unwrap_or(&self.url) } else { &self.url };
+                let exts: &[&str] = match self.kind {
+                    TileKind::MbTiles => &["mbtiles"],
+                    TileKind::PmTiles => &["pmtiles"],
+                    _ => &["tif", "tiff"],
+                };
+                check_path(path, exts)?;
             }
         } else {
             check_url(&self.url)?;
@@ -487,8 +508,8 @@ impl TileLayer {
 /// The prefix of an MBTiles archive added to the web app, held in memory.
 pub const UPLOAD: &str = "upload:";
 
-/// Whether a PMTiles or MBTiles archive address is a file rather than a web address. An address
-/// read through a saved S3 connection is never a file, well formed or not.
+/// Whether a PMTiles archive, MBTiles archive or GeoTIFF address is a file rather than a web
+/// address. An address read through a saved S3 connection is never a file, well formed or not.
 pub fn is_local_archive(url: &str) -> bool {
     if rustgis_data::s3_address::is_wrapper(url) {
         return false;
@@ -497,9 +518,9 @@ pub fn is_local_archive(url: &str) -> bool {
     !(lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("s3://"))
 }
 
-/// Whether an archive's file path may be read: absolute, a `.<ext>` file (`pmtiles`,
-/// `mbtiles`), no longer than 4096 bytes.
-pub fn check_path(path: &str, ext: &str) -> Result<(), String> {
+/// Whether an archive's or GeoTIFF's file path may be read: absolute, a file of one of `exts`
+/// (such as `pmtiles`, or `tif` and `tiff`), no longer than 4096 bytes.
+pub fn check_path(path: &str, exts: &[&str]) -> Result<(), String> {
     let p = path.strip_prefix("file://").unwrap_or(path);
     if p.len() > 4096 || p.chars().any(char::is_control) {
         return Err("the path is too long or has control characters".into());
@@ -509,10 +530,11 @@ pub fn check_path(path: &str, ext: &str) -> Result<(), String> {
     // make Windows connect to another machine.
     let share = p.starts_with("\\\\") || p.starts_with("//") || (path.starts_with("file://") && !p.starts_with('/'));
     if share || !(p.starts_with('/') || windows_drive) {
-        return Err(format!("'{p}': give the full path of the archive on this computer"));
+        return Err(format!("'{p}': give the full path of the file on this computer"));
     }
-    if !p.to_ascii_lowercase().ends_with(&format!(".{ext}")) {
-        return Err(format!("'{p}' isn't a .{ext} file"));
+    let lower = p.to_ascii_lowercase();
+    if !exts.iter().any(|ext| lower.ends_with(&format!(".{ext}"))) {
+        return Err(format!("'{p}' isn't a .{} file", exts.join(" or .")));
     }
     Ok(())
 }
@@ -585,6 +607,16 @@ mod tests {
         assert_eq!((t.min_zoom, t.max_zoom, t.tile_size, t.opacity), (MAX_ZOOM, MAX_ZOOM, 256, 1.0));
         for bad in ["file:///etc/passwd", "ftp://x/{z}", "https://", "https:// x.com/{z}", "javascript:alert(1)"] {
             assert!(TileLayer::new("x", TileKind::Raster, bad).repair().is_err(), "{bad}");
+        }
+        // A GeoTIFF on this computer is a COG layer's address: its file path, by its look. A
+        // relative path or another file isn't.
+        for good in ["/data/scene.tif", "/data/scene.tiff#bands=2,3,4&range=0,255"] {
+            let mut t = TileLayer::new("", TileKind::Cog, good);
+            assert!(t.repair().is_ok(), "{good}");
+            assert_eq!(t.name, "scene", "{good}");
+        }
+        for bad in ["scene.tif", "/data/scene.png", "//server/share/scene.tif"] {
+            assert!(TileLayer::new("x", TileKind::Cog, bad).repair().is_err(), "{bad}");
         }
     }
 

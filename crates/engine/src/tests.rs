@@ -1889,6 +1889,126 @@ fn with_raster() -> Session {
     s
 }
 
+/// A tiled GeoTIFF's header alone claiming `w` × `h` pixels in three 8-bit bands: enough to know
+/// it is read in place (its tiles, which this file doesn't hold, are never asked for).
+#[cfg(not(target_arch = "wasm32"))]
+fn huge_tiled_tiff(w: u32, h: u32) -> Vec<u8> {
+    const TILE: u32 = 1024;
+    let n = w.div_ceil(TILE) * h.div_ceil(TILE);
+    let arrays_at = 8 + 2 + 12 * 14 + 4;
+    let (bps_at, counts_at) = (arrays_at, arrays_at + 6);
+    let (offsets_at, scale_at) = (counts_at + 4 * n, counts_at + 8 * n);
+    let (tie_at, keys_at) = (scale_at + 24, scale_at + 72);
+    // (tag, type, count, value or where the values are); 3 short, 4 long, 12 double.
+    let entries: [(u16, u16, u32, u32); 14] = [
+        (256, 4, 1, w),
+        (257, 4, 1, h),
+        (258, 3, 3, bps_at),
+        (259, 3, 1, 1),
+        (262, 3, 1, 2),
+        (277, 3, 1, 3),
+        (284, 3, 1, 1),
+        (322, 3, 1, TILE),
+        (323, 3, 1, TILE),
+        (324, 4, n, offsets_at),
+        (325, 4, n, counts_at),
+        (33550, 12, 3, scale_at),
+        (33922, 12, 6, tie_at),
+        (34735, 3, 12, keys_at),
+    ];
+    let mut out = b"II*\0".to_vec();
+    out.extend(8u32.to_le_bytes());
+    out.extend((entries.len() as u16).to_le_bytes());
+    for (tag, kind, count, value) in entries {
+        out.extend(tag.to_le_bytes());
+        out.extend(kind.to_le_bytes());
+        out.extend(count.to_le_bytes());
+        out.extend(value.to_le_bytes());
+    }
+    out.extend(0u32.to_le_bytes());
+    out.extend([8u16, 8, 8].iter().flat_map(|v| v.to_le_bytes()));
+    out.extend((0..n).flat_map(|_| 1u32.to_le_bytes()));
+    out.extend((0..n).flat_map(|_| 0u32.to_le_bytes()));
+    let px = 1.0 / f64::from(w);
+    out.extend([px, px, 0.0, 0.0, 0.0, 0.0, 0.0, 46.0, 10.0, 0.0].iter().flat_map(|v: &f64| v.to_le_bytes()));
+    out.extend([1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326].iter().flat_map(|v| v.to_le_bytes()));
+    out
+}
+
+/// A local tiled GeoTIFF larger than what is held in memory opens as a tile layer read in place,
+/// at full resolution; the project keeps its path.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_large_local_tiled_geotiff_is_read_in_place() {
+    let mut s = world();
+    let dir = std::env::temp_dir().join(format!("rustgis-local-cog-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("huge.tif");
+    std::fs::write(&path, huge_tiled_tiff(20_000, 20_000)).unwrap();
+    let out = s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    assert_eq!(out["inPlace"], json!(true), "{out}");
+    assert!(out["warning"].is_null(), "{out}");
+    assert!(s.map().layer_by_name("huge").is_none(), "not a whole-file raster layer");
+    let tiles: Vec<_> = s.map().tiles.iter().filter(|t| t.kind == rustgis_map::tiles::TileKind::Cog).collect();
+    assert_eq!(tiles.len(), 1, "{:?}", s.map().tiles);
+    assert_eq!(tiles[0].url, path.display().to_string());
+    assert!(rustgis_map::tiles::is_local_archive(&tiles[0].url));
+    // Saved and opened again: the layer comes back from the file's path.
+    let proj = dir.join("p.rgis");
+    s.run("project.saveAs", &json!({"path": proj.display().to_string()})).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.open", &json!({"path": proj.display().to_string()})).unwrap();
+    let back: Vec<_> = t.map().tiles.iter().filter(|t| t.kind == rustgis_map::tiles::TileKind::Cog).collect();
+    assert_eq!(back.len(), 1, "{:?}", t.map().tiles);
+    assert_eq!(back[0].url, path.display().to_string());
+    // A tiled GeoTIFF under the limit is still read whole, as before.
+    let small = dir.join("small.tif");
+    std::fs::write(&small, rustgis_data::raster::cog::example(1024, 64)).unwrap();
+    let out = s.run("layer.addData", &json!({"path": small.display().to_string()})).unwrap();
+    assert!(out["inPlace"].is_null(), "{out}");
+    assert_eq!(out["width"], json!(1024), "{out}");
+    assert!(s.map().layer_by_name("small").is_some(), "{:?}", s.map().layers);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A coordinate system given to Add Data for a GeoTIFF whose header's doesn't apply to it (a
+/// projected file opened as 10° E 46° N): the coordinates are taken as that one, not reprojected,
+/// and it is kept with the layer.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_crs_given_to_add_data_places_a_geotiff() {
+    let mut s = world();
+    let dir = std::env::temp_dir().join(format!("rustgis-crs-data-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let small = dir.join("place.tif");
+    // Read whole: the raster layer's own coordinate system is the one given.
+    std::fs::write(&small, rustgis_data::raster::cog::example(1024, 64)).unwrap();
+    let out = s.run("layer.addData", &json!({"path": small.display().to_string(), "crs": "EPSG:3857"})).unwrap();
+    assert_eq!(out["width"], json!(1024), "{out}");
+    let l = s.map().layer_by_name("place").expect("its layer");
+    let r = l.raster.as_ref().and_then(|rl| rl.data.as_deref()).expect("its pixels");
+    let crs = rustgis_data::raster::Crs::parse("EPSG:3857").expect("EPSG 3857");
+    assert_eq!(r.crs, crs);
+    // Read in place (a large tiled file): the tile layer keeps it, and the project too.
+    let path = dir.join("huge.tif");
+    std::fs::write(&path, huge_tiled_tiff(20_000, 20_000)).unwrap();
+    let out = s.run("layer.addData", &json!({"path": path.display().to_string(), "crs": "EPSG:3857"})).unwrap();
+    assert_eq!(out["inPlace"], json!(true), "{out}");
+    // Placed as metres near Web Mercator's origin, not 10–11° E 45–46° N.
+    let bounds: Vec<f64> = out["bounds"].as_array().map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+    assert_eq!(bounds.len(), 4, "{out}");
+    assert!(bounds.iter().all(|v| v.abs() < 0.01), "{bounds:?}");
+    let tiles: Vec<_> = s.map().tiles.iter().filter(|t| t.kind == rustgis_map::tiles::TileKind::Cog).collect();
+    assert_eq!(tiles.last().and_then(|t| t.crs.as_deref()), Some("EPSG:3857"), "{:?}", s.map().tiles);
+    let proj = dir.join("p.rgis");
+    s.run("project.saveAs", &json!({"path": proj.display().to_string()})).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.open", &json!({"path": proj.display().to_string()})).unwrap();
+    let back: Vec<_> = t.map().tiles.iter().filter(|t| t.kind == rustgis_map::tiles::TileKind::Cog).collect();
+    assert_eq!(back.last().and_then(|t| t.crs.as_deref()), Some("EPSG:3857"), "{:?}", t.map().tiles);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A QGIS raster style colours a raster layer; one reading a band the raster hasn't is noted and
 /// leaves it as it was.
 #[test]
@@ -9190,6 +9310,123 @@ fn sqlite_edits_save_inserts_updates_and_deletes() {
     let e = s.run("sqlite.saveEdits", &p).unwrap_err();
     assert!(e.contains("changed since it was loaded"), "{e}");
     assert_eq!(db.query_row("SELECT count(*) FROM places", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A table with no geometry column gets points from two numeric fields the user picks: reading,
+/// moving a point and adding one write those fields back, and the choice stays in the project.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn sqlite_points_come_from_two_numeric_fields() {
+    use image::ImageEncoder;
+    use rustgis_data::{Coord, Geometry};
+
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png).write_image(&[0u8; 4 * 3 * 3], 4, 3, image::ExtendedColorType::Rgb8).unwrap();
+    let path = std::env::temp_dir().join(format!("rustgis-engine-sqlite-points-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let db = {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch("CREATE TABLE photos (id INTEGER PRIMARY KEY, name TEXT, Longitude REAL, Latitude REAL, photo BLOB);").unwrap();
+        c.execute("INSERT INTO photos VALUES (1, 'a', 117.63361, 33.70124, ?1)", [png.clone()]).unwrap();
+        c.execute("INSERT INTO photos VALUES (2, 'b', 118.0, 34.0, ?1)", [png.clone()]).unwrap();
+        // No usable pair of coordinates: the row isn't a point, and is reported.
+        c.execute("INSERT INTO photos VALUES (3, 'c', NULL, NULL, NULL)", []).unwrap();
+        c
+    };
+    let mut s = Session::new(Project::default());
+
+    // The dialog reads the table's fields first: no geometry column, and Longitude/Latitude
+    // are the numeric fields it can make points from (the key column isn't a field).
+    let info = s.run("sqlite.tableInfo", &json!({"path": path.display().to_string(), "table": "photos"})).unwrap();
+    assert_eq!((info["table"].as_str(), info["key"].as_str(), info["geometry"].as_str()), (Some("photos"), Some("id"), None), "{info}");
+    let numeric: Vec<&str> = info["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["numeric"].as_bool().unwrap_or(false))
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    assert_eq!(numeric, vec!["Longitude", "Latitude"], "{info}");
+
+    // Only a pair of fields makes points.
+    assert!(s.run("sqlite.addLayer", &json!({"path": path.display().to_string(), "table": "photos", "x": "Longitude"})).is_err());
+    let e = s
+        .run("sqlite.addLayer", &json!({"path": path.display().to_string(), "table": "photos", "x": "name", "y": "Latitude"}))
+        .unwrap_err();
+    assert!(e.contains("not numbers"), "{e}");
+    let e = s
+        .run(
+            "sqlite.addLayer",
+            &json!({"path": path.display().to_string(), "table": "photos", "x": "Longitude", "y": "Latitude", "crs": "nowhere"}),
+        )
+        .unwrap_err();
+    assert!(e.contains("coordinate system"), "{e}");
+
+    let loaded = s
+        .run(
+            "sqlite.addLayer",
+            &json!({"path": path.display().to_string(), "table": "photos", "name": "P", "x": "Longitude", "y": "Latitude"}),
+        )
+        .unwrap();
+    assert_eq!(
+        (loaded["features"].as_u64(), loaded["matched"].as_u64(), loaded["skipped"].as_u64()),
+        (Some(2), Some(3), Some(1)),
+        "{loaded}"
+    );
+    let id = loaded["layer"].as_u64().unwrap() as u32;
+    let l = s.map().layer(id).unwrap();
+    assert_eq!(l.dataset.geometry_type, rustgis_data::GeometryType::Point);
+    assert!(matches!(l.dataset.features[0].geometry, Some(Geometry::Point(c)) if (c.x - 117.63361).abs() < 1e-9));
+    assert_eq!(l.image(1, "photo").unwrap(), png);
+    let p = json!({"layer": "P"});
+    let counts = |s: &mut Session| {
+        let r = s.run("sqlite.pendingEdits", &p).unwrap();
+        (r["inserts"].as_u64().unwrap(), r["updates"].as_u64().unwrap(), r["deletes"].as_u64().unwrap())
+    };
+
+    // Moving a point writes its two coordinate fields, not a geometry column (there is none).
+    s.map_mut().editing.settings.enabled = true;
+    s.map_mut().layer_mut(id).unwrap().dataset.features[0].geometry = Some(Geometry::Point(Coord::new(117.64, 33.71)));
+    s.map_mut().layer_mut(id).unwrap().touch_geometry();
+    s.run(
+        "edit.addFeature",
+        &json!({"layer": "P", "geometry": {"type": "Point", "coordinates": [117.62, 33.69]},
+        "attributes": {"name": "new"}}),
+    )
+    .unwrap();
+    assert_eq!(counts(&mut s), (1, 1, 0));
+    let r = s.run("sqlite.saveEdits", &p).unwrap();
+    assert_eq!((r["inserted"].as_u64(), r["updated"].as_u64()), (Some(1), Some(1)), "{r}");
+    let (x, y): (f64, f64) =
+        db.query_row("SELECT Longitude, Latitude FROM photos WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert!((x - 117.64).abs() < 1e-9 && (y - 33.71).abs() < 1e-9, "{x}, {y}");
+    let (x, y): (f64, f64) =
+        db.query_row("SELECT Longitude, Latitude FROM photos WHERE id = 4", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert!((x - 117.62).abs() < 1e-9 && (y - 33.69).abs() < 1e-9, "{x}, {y}");
+    assert_eq!(db.query_row("SELECT name FROM photos WHERE id = 4", [], |r| r.get::<_, String>(0)).unwrap(), "new");
+    // The row without coordinates stays as it was.
+    assert_eq!(db.query_row("SELECT count(*) FROM photos", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
+
+    // The choice is kept in the project, so Discard reads the same points again.
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text})).unwrap();
+    t.run("sqlite.discardEdits", &json!({"layer": id})).unwrap();
+    let l = t.map().layer(id).unwrap();
+    // Rows 1, 2 and the added 4; row 3 has no coordinates.
+    assert_eq!(l.dataset.features.len(), 3);
+    assert_eq!(l.dataset.geometry_type, rustgis_data::GeometryType::Point);
+    assert!(matches!(&l.dataset.features[0].geometry, Some(Geometry::Point(c)) if (c.x - 117.64).abs() < 1e-9));
+    assert_eq!(l.image(1, "photo").unwrap(), png);
+
+    // Saving checks the fields still exist and still hold numbers: a renamed column saves nothing.
+    let r1 = s.map().layer(id).unwrap().dataset.features.iter().position(|f| f.id == 2).unwrap();
+    s.run("edit.setValue", &json!({"layer": "P", "row": r1, "field": "name", "value": "mine"})).unwrap();
+    db.execute("ALTER TABLE photos RENAME COLUMN Longitude TO Lon", []).unwrap();
+    let e = s.run("sqlite.saveEdits", &p).unwrap_err();
+    assert!(e.contains("nothing was saved"), "{e}");
+    assert_eq!(db.query_row("SELECT name FROM photos WHERE id = 2", [], |r| r.get::<_, String>(0)).unwrap(), "b");
     let _ = std::fs::remove_file(&path);
 }
 

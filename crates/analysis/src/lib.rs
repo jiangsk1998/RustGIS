@@ -166,6 +166,13 @@ pub trait Inputs {
     fn raster(&self, _layer: &str) -> Option<RasterInput<'_>> {
         None
     }
+    /// A raster read in place from a file (a cloud-optimised GeoTIFF, or a large tiled GeoTIFF
+    /// added as a tile layer), for a tool that runs an external program on the file: its path, and
+    /// the coordinate system its header doesn't say (as the layer was added with). None for a
+    /// raster layer, which [`Inputs::raster`] gives.
+    fn raster_file(&self, _layer: &str) -> Option<(String, Option<rustgis_data::raster::Crs>)> {
+        None
+    }
     /// The active map's flat projection, for tools that show what it does to the Earth (Tissot's
     /// indicatrix): its name. `None` when there's no map or it is a globe.
     fn projection_name(&self) -> Option<String> {

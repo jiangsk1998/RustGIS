@@ -65,7 +65,7 @@ pub const NETWORK: &[&str] = &[
 pub fn commands() -> Vec<C> {
     vec![
         C::new("map.addTiles", "Add Tile Layer", "Home › Add", add).params(
-            r#"{"url": "https://…/{z}/{x}/{y}.png" | vector tiles ".pbf" or TileJSON | MapLibre style.json | a PMTiles archive (web address or file path) | an MBTiles file path, "kind"?: "raster"|"vector"|"style"|"pmtiles"|"mbtiles" (guessed from the url), "name"?: text, "bounds"?: [west, south, east, north] (longitude/latitude coverage, when known), "attribution"?: text, "minZoom"?: number, "maxZoom"?: number, "tileSize"?: 256|512 (1024 too for a WMS or map service asked for in Web Mercator by its tiles' box: their pictures are asked for that size), "singleImage"?: bool (a WMS or map service: one picture of the view instead of tiles, so symbols and labels aren't cut at tile edges; tiles on the globe, a tilted map or a projection the service doesn't offer; by default on for one, unless tileSize is given), "tms"?: bool, "subdomains"?: [text], "layers"?: [vector tile layer names, drawn in colours of their own], "styleLayers"?: [MapLibre style layers drawing vector tiles instead (their source is the tiles')], "opacity"?: 0–1, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten"|"difference" (how it combines with what is beneath), "overlay"?: bool (on top of the map's layers, as every new layer goes; without it a basemap, under them; one with the same address and role is replaced when it has the same name or the same look), "top"?: bool (on top of the map's layers, as a layer added as data goes; by default an overlay's place), "replace"?: bool (removes the other tile basemaps, not overlays), "id"?: catalog id, "view"?: bool (a MapLibre style: go to the place, zoom, bearing and pitch its root properties give, once it loads), "start"?, "end"?: dates a url with date placeholders ({date:YYYY-MM-DD}, {YYYY}) spans, turning the time slider on (or, when it is on, setting its span), "unit"?, "interval"?, "dates"?: its steps (as in time.set), "legend"?: "the web address of its legend picture (PNG or JPEG)" | [address | {"url": address, "minScale"?: scale denominator, "maxScale"?: one (the scales it is for, from minScale up to below maxScale)}] (at most 16; the Layers pane shows the one for the map's scale under the layer; service.add gives a WMS or WMTS layer its service's)}"#,
+            r#"{"url": "https://…/{z}/{x}/{y}.png" | vector tiles ".pbf" or TileJSON | MapLibre style.json | a PMTiles archive (web address or file path) | an MBTiles file path, "kind"?: "raster"|"vector"|"style"|"pmtiles"|"mbtiles" (guessed from the url), "name"?: text, "crs"?: "EPSG:… for a cloud-optimised GeoTIFF whose header doesn't say its coordinate system (its coordinates are taken as that one, not reprojected)", "bounds"?: [west, south, east, north] (longitude/latitude coverage, when known), "attribution"?: text, "minZoom"?: number, "maxZoom"?: number, "tileSize"?: 256|512 (1024 too for a WMS or map service asked for in Web Mercator by its tiles' box: their pictures are asked for that size), "singleImage"?: bool (a WMS or map service: one picture of the view instead of tiles, so symbols and labels aren't cut at tile edges; tiles on the globe, a tilted map or a projection the service doesn't offer; by default on for one, unless tileSize is given), "tms"?: bool, "subdomains"?: [text], "layers"?: [vector tile layer names, drawn in colours of their own], "styleLayers"?: [MapLibre style layers drawing vector tiles instead (their source is the tiles')], "opacity"?: 0–1, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten"|"difference" (how it combines with what is beneath), "overlay"?: bool (on top of the map's layers, as every new layer goes; without it a basemap, under them; one with the same address and role is replaced when it has the same name or the same look), "top"?: bool (on top of the map's layers, as a layer added as data goes; by default an overlay's place), "replace"?: bool (removes the other tile basemaps, not overlays), "id"?: catalog id, "view"?: bool (a MapLibre style: go to the place, zoom, bearing and pitch its root properties give, once it loads), "start"?, "end"?: dates a url with date placeholders ({date:YYYY-MM-DD}, {YYYY}) spans, turning the time slider on (or, when it is on, setting its span), "unit"?, "interval"?, "dates"?: its steps (as in time.set), "legend"?: "the web address of its legend picture (PNG or JPEG)" | [address | {"url": address, "minScale"?: scale denominator, "maxScale"?: one (the scales it is for, from minScale up to below maxScale)}] (at most 16; the Layers pane shows the one for the map's scale under the layer; service.add gives a WMS or WMTS layer its service's)}"#,
         ),
         C::new("map.removeTiles", "Remove Tile Layer", "Home › Add", remove)
             .params(r#"{"name"?: text, "index"?: number, "id"?: catalog id} (removes every tile layer when none is given)"#),
@@ -274,6 +274,10 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
     if let Some(v) = p.get("legend").filter(|v| !v.is_null()) {
         t.legends = legends(v)?;
     }
+    // A GeoTIFF whose header doesn't say its coordinate system takes this one (repair() checks it).
+    if let Some(c) = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty()) {
+        t.crs = Some(c.to_string());
+    }
     t.repair()?;
     // A layer its service draws on request: one picture of the view, or tiles of the size given
     // (#1162). Added by its address as from its service: one picture unless tiles are asked for
@@ -342,7 +346,7 @@ fn extent_of(t: &TileLayer) -> Result<Option<rustgis_geom::Extent>, String> {
     let bounds = match (t.bounds, t.kind) {
         (Some(bounds), _) => Some(bounds),
         (None, TileKind::PmTiles) => pmtiles::info(&t.url)?.map(|i| i.bounds),
-        (None, TileKind::Cog) => cog::info(&t.url)?.map(|i| i.bounds),
+        (None, TileKind::Cog) => cog::info_with(&t.url, t.crs.as_deref())?.map(|i| i.bounds),
         _ => return Err(format!("{}: a {} doesn't say what it covers", t.name, t.kind.label().to_lowercase())),
     };
     let Some([w, so, e, n]) = bounds else { return Ok(None) };
@@ -572,6 +576,7 @@ fn cog_look(p: &Value) -> Result<Option<Box<dyn Fn(Look) -> Look>>, String> {
         bands: bands.clone().unwrap_or(old.bands),
         range: range.unwrap_or(old.range),
         aef: aef.unwrap_or(old.aef),
+        crs: old.crs,
     })))
 }
 
@@ -657,7 +662,7 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
         Some(look) => {
             let new = look(cog::split(&t.url).1);
             // Bands the file hasn't (when its header is in): said, not shown as its own look.
-            if let Ok(Some(info)) = cog::info(&t.url)
+            if let Ok(Some(info)) = cog::info_with(&t.url, t.crs.as_deref())
                 && let Some(b) = new.bands.iter().find(|b| **b >= info.layout.bands)
             {
                 return Err(format!("the GeoTIFF has {} bands, not {}", info.layout.bands, b + 1));

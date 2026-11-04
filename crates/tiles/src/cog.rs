@@ -68,6 +68,9 @@ pub struct Look {
     pub range: Option<(f32, f32)>,
     /// Values are AlphaEarth's quantised embeddings, shown as `sign(v)·(v/127.5)²`.
     pub aef: bool,
+    /// The coordinate system the file's coordinates are in, when its header doesn't say one
+    /// (`crs=EPSG:4527`): a short EPSG or proj definition.
+    pub crs: Option<String>,
 }
 
 impl Look {
@@ -83,10 +86,14 @@ impl Look {
         if self.aef {
             parts.push("dequantize=aef".into());
         }
+        if let Some(c) = &self.crs {
+            parts.push(format!("crs={c}"));
+        }
         if parts.is_empty() { String::new() } else { format!("#{}", parts.join("&")) }
     }
 
-    /// The look an address part says (`bands=…&range=…&dequantize=aef`); `None` when it isn't one.
+    /// The look an address part says (`bands=…&range=…&dequantize=aef&crs=…`); `None` when it
+    /// isn't one.
     fn parse(part: &str) -> Option<Look> {
         let mut look = Look::default();
         for kv in part.split('&') {
@@ -108,12 +115,23 @@ impl Look {
                     look.range = Some((lo, hi));
                 }
                 "dequantize" => look.aef = v == "aef",
+                "crs" => {
+                    let c = v.trim();
+                    // A short definition, without the separators of the look itself.
+                    if c.is_empty() || c.len() > MAX_CRS || c.chars().any(|c| c == '&' || c == '#' || c.is_control()) {
+                        return None;
+                    }
+                    look.crs = Some(c.to_string());
+                }
                 _ => return None,
             }
         }
         Some(look)
     }
 }
+
+/// The longest coordinate system definition an address carries.
+const MAX_CRS: usize = 512;
 
 /// A COG's address without its [`Look`], and the look (the file's own when it names none).
 pub fn split(url: &str) -> (&str, Look) {
@@ -126,9 +144,20 @@ pub fn split(url: &str) -> (&str, Look) {
     }
 }
 
-/// A COG's address showing `look` (any look it had replaced).
+/// A COG's address showing `look` (any look it had replaced, its coordinate system kept when the
+/// new look names none).
 pub fn with_look(url: &str, look: &Look) -> String {
-    format!("{}{}", split(url).0, look.suffix())
+    let (file, old) = split(url);
+    let crs = look.crs.clone().or(old.crs);
+    format!("{file}{}", Look { crs, ..look.clone() }.suffix())
+}
+
+/// A COG's address with `crs` as the coordinate system its coordinates are in (`None` for what
+/// its header says), the rest of its look kept.
+pub fn with_crs(url: &str, crs: Option<&str>) -> String {
+    let (file, old) = split(url);
+    let crs = crs.map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+    format!("{file}{}", Look { crs, ..old }.suffix())
 }
 
 /// A value as a look shows it.
@@ -144,6 +173,36 @@ fn shown_value(v: f32, aef: bool) -> f32 {
 /// Whether a tile address is a COG's.
 pub fn is_tile(url: &str) -> bool {
     url.starts_with(SCHEME)
+}
+
+/// Whether an address is a file on this computer rather than a web address: the desktop reads
+/// these, the browser doesn't.
+pub fn is_local(url: &str) -> bool {
+    if rustgis_data::s3_address::is_wrapper(url) {
+        return false;
+    }
+    let (file, _) = split(url);
+    let lower = file.get(..8).unwrap_or(file).to_ascii_lowercase();
+    !(lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("s3://"))
+}
+
+/// Whether a local file may be read: an absolute path to a `.tif` or `.tiff` file (checked here,
+/// whatever route the address came by).
+pub fn check_local(url: &str) -> Result<(), String> {
+    let (file, _) = split(url);
+    let p = file.strip_prefix("file://").unwrap_or(file);
+    let drive = p.as_bytes().get(1) == Some(&b':') && p.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+    // A path on this computer: not a network share (\\server\share, or file://server/…), which a
+    // project could use to make Windows connect to another machine.
+    let share = p.starts_with("\\\\") || p.starts_with("//") || (file.starts_with("file://") && !p.starts_with('/'));
+    if share || !(p.starts_with('/') || drive) || p.chars().any(char::is_control) || p.len() > 4096 {
+        return Err(format!("'{p}': a GeoTIFF is given by its full path on this computer"));
+    }
+    let lower = p.to_ascii_lowercase();
+    if !(lower.ends_with(".tif") || lower.ends_with(".tiff")) {
+        return Err(format!("'{p}' isn't a .tif or .tiff file"));
+    }
+    Ok(())
 }
 
 /// What a COG holds, ready to draw from.
@@ -249,24 +308,41 @@ pub(crate) fn forget_file(url: &str) {
 
 /// A file's info: `Ok(None)` while it is being read (asking for it starts the read).
 pub fn info(url: &str) -> Result<Option<Arc<Info>>, String> {
+    info_with(url, None)
+}
+
+/// A file's info, its coordinates taken as `crs` when given (its header may not say them):
+/// `Ok(None)` while it is being read (asking for it starts the read).
+pub fn info_with(url: &str, crs: Option<&str>) -> Result<Option<Arc<Info>>, String> {
     let url = split(url).0;
+    let crs = crs.map(str::trim).filter(|c| !c.is_empty());
+    let key = info_key(url, crs);
     {
         let i = infos().lock().unwrap_or_else(|e| e.into_inner());
-        match i.get(url) {
+        match i.get(&key) {
             Some(State::Ready(info)) => return Ok(Some(info.clone())),
             Some(State::Loading(_)) => return Ok(None),
             Some(State::Failed(e, at)) if at.elapsed() < RETRY => return Err(e.clone()),
             _ => {}
         }
     }
-    with_info(url, Box::new(|_| crate::cache::notify()));
+    with_info(url, key, crs.map(str::to_string), Box::new(|_| crate::cache::notify()));
     Ok(None)
 }
 
-fn with_info(url: &str, then: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>) {
+/// The key a file's info is kept under: the file itself, and the coordinate system given for it
+/// (a file with no coordinate system of its own is read as different files by different looks).
+fn info_key(url: &str, crs: Option<&str>) -> String {
+    match crs {
+        Some(c) => format!("{url}\u{1}{c}"),
+        None => url.to_string(),
+    }
+}
+
+fn with_info(url: &str, key: String, crs: Option<String>, then: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>) {
     {
         let mut i = infos().lock().unwrap_or_else(|e| e.into_inner());
-        match i.get_mut(url) {
+        match i.get_mut(&key) {
             Some(State::Ready(info)) => {
                 let info = info.clone();
                 drop(i);
@@ -284,13 +360,13 @@ fn with_info(url: &str, then: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>)
                 return;
             }
             _ => {
-                i.insert(url.to_string(), State::Loading(vec![then]));
+                i.insert(key.clone(), State::Loading(vec![then]));
             }
         }
     }
-    let key = url.to_string();
     load(
         url.to_string(),
+        crs,
         Box::new(move |r| {
             let waiting = {
                 let mut i = infos().lock().unwrap_or_else(|e| e.into_inner());
@@ -322,6 +398,13 @@ fn read(url: &str, at: u64, len: u64, done: Done) {
         return;
     }
     let end = at.saturating_add(len) - 1;
+    // A file on this computer is read from disk, not through the cache's fetcher (which knows
+    // only web addresses).
+    #[cfg(not(target_arch = "wasm32"))]
+    if is_local(url) {
+        crate::cache::fetch_local(format!("{url}{RANGE}{at}-{end}"), done);
+        return;
+    }
     crate::cache::fetch_counted(format!("{url}{RANGE}{at}-{end}"), done);
 }
 
@@ -333,13 +416,30 @@ fn read(url: &str, at: u64, len: u64, done: Done) {
 /// and doesn't say it answers ranges isn't read as a GeoTIFF at all (a server ignoring the range
 /// would send its whole answer); a GeoTIFF mislabelled so on a server that answers ranges is still
 /// read. Without an answer, the first [`HEAD`] bytes are read as for any other file.
-fn load(url: String, done: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>) {
+fn load(url: String, crs: Option<String>, done: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>) {
+    let crs = match crs.as_deref().map(rustgis_data::raster::Crs::parse).transpose() {
+        Ok(c) => c,
+        Err(e) => {
+            done(Err(format!("{url}: {e}")));
+            return;
+        }
+    };
+    // A file on this computer: no address to check and nothing to ask of a server, only its
+    // header to read.
+    #[cfg(not(target_arch = "wasm32"))]
+    if is_local(&url) {
+        if let Err(e) = check_local(&url) {
+            done(Err(e));
+            return;
+        }
+        return read_header(url, HEAD, crs, done);
+    }
     if let Err(e) = crate::address::check(&url, None) {
         done(Err(e));
         return;
     }
     if named_tiff(&url) {
-        return read_header(url, HEAD, done);
+        return read_header(url, HEAD, crs, done);
     }
     let u = url.clone();
     crate::cache::head(
@@ -349,7 +449,7 @@ fn load(url: String, done: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>) {
             if h.content_type.as_deref().is_some_and(not_tiff_type) && !h.accepts_ranges && h.tiff_header_length.is_none() {
                 return done(Err(format!("{u}: not a GeoTIFF")));
             }
-            read_header(u, header_length(h.tiff_header_length), done);
+            read_header(u, header_length(h.tiff_header_length), crs, done);
         }),
     );
 }
@@ -374,23 +474,29 @@ fn header_length(announced: Option<u64>) -> u64 {
 }
 
 /// Reads a file's first `len` bytes, then whatever more the IFDs need.
-fn read_header(url: String, len: u64, done: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>) {
+fn read_header(url: String, len: u64, crs: Option<rustgis_data::raster::Crs>, done: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>) {
     let u = url.clone();
     read(
         &url,
         0,
         len,
         Box::new(move |r| match r {
-            Ok(b) if cog::is_tiff(&b) => step(u, Sparse::default().with(0, b), 0, done),
+            Ok(b) if cog::is_tiff(&b) => step(u, Sparse::default().with(0, b), crs, 0, done),
             Ok(_) => done(Err(format!("{u}: not a GeoTIFF"))),
             Err(e) => done(Err(format!("{u}: {e}"))),
         }),
     );
 }
 
-fn step(url: String, have: Sparse, rounds: usize, done: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>) {
+fn step(
+    url: String,
+    have: Sparse,
+    crs: Option<rustgis_data::raster::Crs>,
+    rounds: usize,
+    done: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>,
+) {
     match cog::layout(&have) {
-        Ok(Parse::Done(layout)) => stats(url, have, *layout, done),
+        Ok(Parse::Done(layout)) => stats(url, have, *layout, crs, done),
         Ok(Parse::NotTiled(why)) => done(Err(format!("{NOT_COG}: {why}"))),
         Ok(Parse::Need(a, b)) => {
             let Some(len) = header_read(&have, a, b, rounds) else {
@@ -405,7 +511,7 @@ fn step(url: String, have: Sparse, rounds: usize, done: Box<dyn FnOnce(Result<Ar
                 Box::new(move |r| match r {
                     // Nothing more to read: the file ends before what its header points at.
                     Ok(more) if more.is_empty() => done(Err(format!("{u}: the GeoTIFF is cut short"))),
-                    Ok(more) => step(u, have.with(a, more), rounds + 1, done),
+                    Ok(more) => step(u, have.with(a, more), crs, rounds + 1, done),
                     Err(e) => done(Err(format!("{u}: {e}"))),
                 }),
             );
@@ -441,7 +547,18 @@ fn header_read(have: &Sparse, a: u64, b: u64, rounds: usize) -> Option<u64> {
 pub const NOT_COG: &str = "not a cloud-optimised GeoTIFF";
 
 /// Reads the coarsest overview (a few tiles) for the stretch, then the file is ready.
-fn stats(url: String, header: Sparse, layout: Layout, done: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>) {
+fn stats(
+    url: String,
+    header: Sparse,
+    mut layout: Layout,
+    crs: Option<rustgis_data::raster::Crs>,
+    done: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>,
+) {
+    // The coordinate system given for the file (its header may not say one) takes the place of
+    // what its tags say.
+    if let Some(c) = crs {
+        layout.crs = c;
+    }
     let transformer = match layout.crs.transformer() {
         Ok(t) => t,
         Err(e) => {
@@ -858,8 +975,13 @@ pub(crate) fn fetch(url: &str, done: Done) {
     let (file, look) = split(&archive);
     let file = file.to_string();
     let f = file.clone();
+    // The look may name the coordinate system the file doesn't say.
+    let crs = look.crs.clone();
+    let key = info_key(&file, crs.as_deref());
     with_info(
         &file,
+        key,
+        crs,
         Box::new(move |info| match info {
             Ok(info) => {
                 let i = info.clone();
@@ -1097,23 +1219,29 @@ fn read_whole(e: &str) -> bool {
 /// line): `Ok(false)` for any other file, read whole instead.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn probe_blocking(url: &str) -> Result<bool, String> {
-    let url = split(url).0;
+    let (file, look) = split(url);
+    let crs = look.crs.clone();
+    let key = info_key(file, crs.as_deref());
     let (tx, rx) = std::sync::mpsc::channel();
-    with_info(url, Box::new(move |r| tx.send(r.map(|_| ())).unwrap_or_default()));
+    with_info(file, key, crs, Box::new(move |r| tx.send(r.map(|_| ())).unwrap_or_default()));
     match rx.recv_timeout(std::time::Duration::from_secs(60)) {
         Ok(Ok(())) => Ok(true),
         Ok(Err(e)) if read_whole(&e) => Ok(false),
         Ok(Err(e)) => Err(e),
-        Err(_) => Err(format!("{url}: no answer in a minute")),
+        Err(_) => Err(format!("{file}: no answer in a minute")),
     }
 }
 
 /// Whether the file at `url` is a cloud-optimised GeoTIFF, off the frame (the app): `then` gets
 /// `Ok(false)` for any other file, read whole instead.
 pub fn probe(url: &str, then: Box<dyn FnOnce(Result<bool, String>) + Send>) {
-    let url = split(url).0;
+    let (file, look) = split(url);
+    let crs = look.crs.clone();
+    let key = info_key(file, crs.as_deref());
     with_info(
-        url,
+        file,
+        key,
+        crs,
         Box::new(move |r| {
             then(match r {
                 Ok(_) => Ok(true),
@@ -1135,10 +1263,12 @@ pub const MAX_VALUES_READ: u64 = 64_000_000;
 /// A file's header, waiting for it: for an analysis that reads the values (opengeos/RustGIS#579).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn info_blocking(url: &str) -> Result<Arc<Info>, String> {
-    let url = split(url).0;
+    let (file, look) = split(url);
+    let crs = look.crs.clone();
+    let key = info_key(file, crs.as_deref());
     let (tx, rx) = std::sync::mpsc::channel();
-    with_info(url, Box::new(move |r| tx.send(r).unwrap_or_default()));
-    rx.recv_timeout(Duration::from_secs(120)).map_err(|_| format!("{url}: no answer in two minutes"))?
+    with_info(file, key, crs, Box::new(move |r| tx.send(r).unwrap_or_default()));
+    rx.recv_timeout(Duration::from_secs(120)).map_err(|_| format!("{file}: no answer in two minutes"))?
 }
 
 /// Band `band`'s values (0-based) in a window of a level: columns `cols.0..cols.1` and rows
@@ -1231,6 +1361,52 @@ mod tests {
         assert_eq!(template("https://x.org/a.tif"), "cog:{z}/{x}/{y}@https://x.org/a.tif");
         assert_eq!(parse_url("cog:3/2/1@https://x.org/a.tif"), Some((3, 2, 1, "https://x.org/a.tif".into())));
         assert!(parse_url("cog:99/0/0@x").is_none() && parse_url("cog:1/0/0@").is_none() && !is_tile("pmtiles:1/0/0@x"));
+        // A file on this computer is a GeoTIFF address too; a web address is not local.
+        assert!(is_local("/data/scene.tif") && !is_local("https://x.org/a.tif") && !is_local("s3://bucket/a.tif"));
+        assert!(check_local("/data/scene.tif").is_ok() && check_local("/data/scene.TIFF#bands=1").is_ok());
+        for bad in ["scene.tif", "C:/data/scene.jpg", "//server/share/a.tif", "file://server/a.tif"] {
+            assert!(check_local(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A GeoTIFF on this computer is read from disk in place, a tile at a time, by range.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn reads_a_local_geotiff_in_place() {
+        let file = rustgis_data::raster::cog::example(1024, 64);
+        let path = std::env::temp_dir().join(format!("rustgis-local-cog-{}.tif", std::process::id()));
+        std::fs::write(&path, &file).expect("write the example");
+        let url = path.display().to_string();
+        assert!(is_local(&url) && check_local(&url).is_ok(), "{url}");
+        let info = info_blocking(&url).expect("its header");
+        assert_eq!(info.bounds, [10.0, 45.0, 11.0, 46.0]);
+        let values = read_values_blocking(&info, &url, 0, 0, (0, 4), (0, 4)).expect("its first tile");
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                assert_eq!(values[(y * 4 + x) as usize], ((x + y) % 256) as f32, "pixel {x}, {y}");
+            }
+        }
+        forget();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A coordinate system given for a file whose header's doesn't apply to it places it: the
+    /// address's `crs=…` takes the place of the tags.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_coordinate_system_in_the_address_places_a_local_geotiff() {
+        let file = rustgis_data::raster::cog::example(1024, 64);
+        let path = std::env::temp_dir().join(format!("rustgis-crs-cog-{}.tif", std::process::id()));
+        std::fs::write(&path, &file).expect("write the example");
+        // As 10–11 m easting and 45–46 m northing of Web Mercator, rather than 10–11° E.
+        let url = with_crs(&path.display().to_string(), Some("EPSG:3857"));
+        let info = info_blocking(&url).expect("its header, placed by the given coordinate system");
+        let crs = rustgis_data::raster::Crs::parse("EPSG:3857").expect("EPSG 3857");
+        assert_eq!(info.layout.crs, crs);
+        // Metres near the equator's origin, not degrees.
+        assert!(info.bounds.iter().all(|v| v.abs() < 0.01), "{:?}", info.bounds);
+        forget();
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -1330,12 +1506,19 @@ mod tests {
     #[test]
     fn looks_in_addresses() {
         let u = "https://x.org/a.tiff";
-        let look = Look { bands: vec![1, 16, 9], range: Some((-0.3, 0.3)), aef: true };
+        let look = Look { bands: vec![1, 16, 9], range: Some((-0.3, 0.3)), aef: true, crs: None };
         let shown = with_look(u, &look);
         assert_eq!(shown, "https://x.org/a.tiff#bands=2,17,10&range=-0.3,0.3&dequantize=aef");
         assert_eq!(split(&shown), (u, look));
         // Another look replaces it; the file's own adds nothing.
         assert_eq!(with_look(&shown, &Look::default()), u);
+        // A coordinate system rides with the look, and another look keeps it.
+        let c = with_crs(u, Some("EPSG:4527"));
+        assert_eq!(c, "https://x.org/a.tiff#crs=EPSG:4527");
+        assert_eq!(split(&c).1.crs.as_deref(), Some("EPSG:4527"));
+        let bands = Look { bands: vec![0], ..Look::default() };
+        assert_eq!(with_look(&c, &bands), "https://x.org/a.tiff#bands=1&crs=EPSG:4527");
+        assert_eq!(with_crs(&c, None), u);
         // A template keeps the look, so each look's map tiles are their own.
         let (_, _, _, archive) = parse_url(&template(&shown).replace("{z}/{x}/{y}", "1/0/0")).unwrap();
         assert_eq!(split(&archive).0, u);

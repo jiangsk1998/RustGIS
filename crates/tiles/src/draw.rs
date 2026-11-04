@@ -1314,6 +1314,7 @@ pub(crate) mod tests {
         let spec = Spec {
             kind: crate::source::Kind::PmTiles,
             url: path.display().to_string(),
+            crs: None,
             subdomains: Vec::new(),
             min_zoom: 0,
             max_zoom: 14,
@@ -1413,6 +1414,7 @@ pub(crate) mod tests {
         let spec = Spec {
             kind: crate::source::Kind::PmTiles,
             url: path.display().to_string(),
+            crs: None,
             subdomains: Vec::new(),
             min_zoom: 0,
             max_zoom: 14,

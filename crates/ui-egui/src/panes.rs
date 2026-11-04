@@ -3518,7 +3518,23 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     // A standalone table is picked by its id, since names can repeat, and shown by its name.
     let tables: Vec<(u32, String)> = app.session.project.tables.iter().map(|t| (t.id, t.name.clone())).collect();
     let layer_names = |kind: ParamKind| -> Vec<String> {
-        app.session.map().layers.iter().filter(|l| takes_layer(kind, l)).map(|l| l.name.clone()).collect()
+        let mut v: Vec<String> = app.session.map().layers.iter().filter(|l| takes_layer(kind, l)).map(|l| l.name.clone()).collect();
+        // A GeoTIFF on this computer is a tile layer read in place: a GeoLibre tool reads it from
+        // its path (its pixels are never loaded whole).
+        if spec.id.starts_with("geolibre:")
+            && matches!(kind, ParamKind::RasterLayer | ParamKind::RasterLayers)
+            && !cfg!(target_arch = "wasm32")
+        {
+            for t in app.session.map().tiles.iter().filter(|t| {
+                t.kind == rustgis_engine::map::tiles::TileKind::Cog
+                    && std::path::Path::new(t.url.split('#').next().unwrap_or(&t.url)).is_file()
+            }) {
+                if !v.iter().any(|n| n == &t.name) {
+                    v.push(t.name.clone());
+                }
+            }
+        }
+        v
     };
     let plugin_tool = spec.id.starts_with(rustgis_engine::plugins::PREFIX);
     #[cfg(not(target_arch = "wasm32"))]

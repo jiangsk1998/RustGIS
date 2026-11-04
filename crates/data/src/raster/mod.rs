@@ -560,6 +560,16 @@ impl Raster {
         }
     }
 
+    /// Takes its coordinates as `crs` (reinterpreting them, not reprojecting them), for a file that
+    /// doesn't say its coordinate system: `layer.defineProjection` and a `"crs"` on import.
+    pub fn define_crs(&mut self, crs: Crs) -> Result<()> {
+        let transformer = crs.transformer().map_err(DataError::Format)?;
+        self.crs = crs;
+        self.transformer = transformer;
+        self.extent = self.compute_extent();
+        Ok(())
+    }
+
     /// This raster as a scan: its pixels with no coordinates, as `"as": "scan"` opens a picture.
     pub fn into_scan(mut self) -> Result<Raster> {
         if self.georeferenced {
