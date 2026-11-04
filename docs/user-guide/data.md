@@ -15,7 +15,7 @@ Formats](data-formats.md).
 | FlatGeobuf (`.fgb`) | Yes | Yes (`share.exportLayer`) |
 | KML/KMZ (with their styles), GPX | Yes | Yes |
 | Spreadsheets (`.xlsx`, `.xls`, `.ods`), GeoRSS feeds, LandXML, encoded polylines | Yes | No |
-| GML, MapInfo MIF/MID, OpenStreetMap PBF, TopoJSON, AutoCAD DXF (ASCII) | Yes | No |
+| GML, MapInfo MIF/MID, OpenStreetMap PBF, TopoJSON, CityJSON (footprints with heights), AutoCAD DXF (ASCII) | Yes | No |
 | LiDAR point clouds: LAS, LAZ, COPC (an evenly spread sample) | Yes | No |
 | Geotagged photos (JPEG with EXIF GPS): points with their thumbnails | Yes | No |
 | Esri File Geodatabase (`.gdb` folder; 3D multipatches as footprints) | Yes (desktop) | No |
@@ -585,6 +585,45 @@ database is kept without its password. The commands `sources.list`, `sources.sav
 `sources.favourite` and `sources.remove` read and change the lists, for the command line and the
 [AI Assistant](assistant.md). On the command line they last for the run.
 
+### HTTPS certificates
+
+On desktop and the command line, RustGIS's HTTPS clients use platform certificate verification:
+OGC services (WMS, WMTS, WFS and WCS), web tiles and downloads, ArcGIS portal sign-in's token
+requests, the AI Assistant's model requests, the plugin registry, the uv download that makes
+Python environments, and the GeoLibre runner installer. A private or enterprise CA (or a TLS
+inspection proxy's) must be trusted by the operating system for the account running RustGIS:
+
+- **Windows:** install the CA in the appropriate Windows Trusted Root Certification
+  Authorities store. Windows evaluates the certificate chain and its trust/distrust policies.
+- **macOS:** install and trust the CA for SSL in Keychain Access.
+- **Linux and the BSDs:** install the CA in the system CA bundle, or set `SSL_CERT_FILE` to a PEM
+  CA bundle and/or `SSL_CERT_DIR` to CA certificate directories before starting RustGIS. These
+  variables select the trust sources instead of the default system locations (an empty
+  `SSL_CERT_DIR` counts as unset).
+  If no default system roots are found and neither variable is set, this client falls back to
+  its bundled Mozilla roots, so public HTTPS still works in minimal containers. It does not
+  add Mozilla roots to an existing CA store (even one it can't read) or an explicitly configured one.
+
+`SSL_CERT_FILE` and `SSL_CERT_DIR` do **not** override Windows or macOS trust for this client.
+Restart RustGIS after changing certificate trust. The service must still send a valid chain,
+use a certificate matching its hostname, and have unexpired certificates; there is no option
+to skip verification. Database connections (PostgreSQL/PostGIS, MySQL, SQL Server) have their
+own TLS settings; PostGIS with verification on and no root certificate given still trusts only
+the bundled roots.
+
+Two steps use other trust:
+
+- **ArcGIS sign-in** opens the portal's page in your browser, which checks the portal's
+  certificate with its own trust (some browsers keep their own certificate store). If it doesn't
+  trust the CA, sign-in stops before RustGIS gets a token.
+- **uv**, making a plugin's Python environment, downloads Python and packages with its bundled
+  Mozilla roots. To have it use the operating system's trust, set `UV_SYSTEM_CERTS=true` in the
+  environment (or `system-certs = true` in a `uv.toml`) before starting RustGIS. A non-empty
+  `SSL_CERT_FILE` or `SSL_CERT_DIR` replaces uv's roots on every platform.
+
+The web app continues to use the browser's certificate verification and fetch behavior; its
+server must also allow browser requests (CORS).
+
 ### Named connections
 
 In the pane, **New Connection ▾** and **Edit…** let you set the name, group and address;
@@ -807,7 +846,7 @@ index. Deleting idle cache files does not modify the dataset.
 On the desktop, a GeoJSON FeatureCollection larger than 32 MB is read the same way, with no size
 limit: opening reads the file once, keeping each feature's place in it and its bounding box (a
 file over 256 MB through a buffer, so it is never held whole), and each view parses just the
-features it shows. A single feature, a bare geometry or TopoJSON is loaded whole.
+features it shows. A single feature, a bare geometry, TopoJSON or CityJSON is loaded whole.
 
 A streamed layer works like any other for symbology, labels, pop-ups, selection and the
 attribute table (which lists the features read for the view). On the desktop, **Export Features**
@@ -913,8 +952,9 @@ as RGB; other YCbCr and CMYK images aren't read. A rotated or skewed image is re
 north-up grid as it is read. The coordinate system is an EPSG code,
 or the file's own projection described in its GeoKeys (Albers, Lambert conformal conic, transverse
 Mercator, Mercator, Lambert azimuthal, stereographic, equirectangular, sinusoidal and others), which an
-exported GeoTIFF keeps. A raster too large to hold in memory (more than 120 million samples, 32
-million in the web app) opens from its largest overview that fits; one without overviews opens as
+exported GeoTIFF keeps. A raster too large to hold in memory (more than 120 million samples, or
+more on a computer with more memory, see Environments in the analysis guide; 32 million in the
+web app) opens from its largest overview that fits; one without overviews opens as
 an overview made as it is read, a strip or tile at a time (every second, fourth… pixel each way),
 so reading it takes as long as decoding the whole file once. A cloud-optimised (tiled) GeoTIFF is
 read in place instead, a tile at a time, at full resolution: on the web when added by its address

@@ -22,14 +22,21 @@ pub fn commands() -> Vec<C> {
         C::new("share.exportTable", "Export Table", "Publish › Output", |s, p| {
             let path = ps(p, "path").ok_or("path is required")?;
             let t = s.project.tables.get(s.table_index(p)?).ok_or("no such table")?;
-            // A table can hold geometry (a tool's or plugin's output, a project file), so what is
+            // Tables may retain geometry and its import losses, just as feature layers do: what is
             // written lacks the Z or M values dropped when it was read and its image fields (their
-            // images stay in the source), and a Shapefile cuts field names to dBase's. Said once
-            // the file is written, as `share.exportLayer` says them.
+            // images stay in the source); a Shapefile also cuts field names and values to dBase's.
+            let notes = rustgis_data::export_notes([(&t.dataset, t.dataset.extent())], path, Crs::LonLat);
             let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-            let names_note = if matches!(ext.as_str(), "shp" | "zip") { rustgis_data::io::shapefile_names_note(&t.dataset.fields, path) } else { None };
-            rustgis_data::io::write_path(&t.dataset, Path::new(path)).map_err(|e| e.to_string())?;
-            for note in rustgis_data::export_notes([(&t.dataset, t.dataset.extent())], path, Crs::LonLat).into_iter().chain(names_note) {
+            let mut dbf_notes = Vec::new();
+            if matches!(ext.as_str(), "shp" | "zip") {
+                dbf_notes.extend(rustgis_data::io::shapefile_names_note(&t.dataset.fields, path));
+                dbf_notes.extend(rustgis_data::io::shapefile_values_notes(&t.dataset, path));
+            }
+            let left_out = rustgis_data::io::write_path(&t.dataset, Path::new(path)).map_err(|e| e.to_string())?;
+            if left_out > 0 {
+                s.notify(format!("{path}: {left_out} features without drawable geometry were left out"), false);
+            }
+            for note in notes.into_iter().chain(dbf_notes) {
                 s.notify(note, false);
             }
             Ok(json!({"path": path}))
@@ -61,16 +68,25 @@ pub fn map_png(s: &mut Session, width: Option<f64>, height: Option<f64>, dpi: Op
 }
 
 /// The map view on one PDF page (for printing): the page is the view's shape at 96 points per
-/// inch of screen, rendered at `dpi`.
+/// inch of screen, kept as vectors with what is pixels by nature drawn at `dpi`.
 pub fn map_pdf(s: &mut Session, dpi: f64) -> Result<Vec<u8>, String> {
     let (vw, vh) = s.view_size;
     let ppp = (dpi / 96.0).clamp(0.5, 6.0);
     let view =
         View { width: vw.clamp(16.0, 8000.0), height: vh.clamp(16.0, 8000.0), pixels_per_point: ppp, camera: s.map().camera, sky: false };
-    let png = rustgis_render::render_png(s.map_mut(), &view)?;
-    let pm = rustgis_render::decode_png(&png).ok_or("could not draw the map")?;
+    let drawing = rustgis_render::render_drawing(s.map_mut(), &view).ok_or("could not draw the map")?;
     let mm = |pt: f64| pt * 25.4 / 96.0;
-    Ok(rustgis_render::pdf::write(&[rustgis_render::pdf::Page::new(&pm, mm(view.width), mm(view.height))], &s.map().name))
+    let (w, h) = (mm(view.width), mm(view.height));
+    let page = if drawing.overflowed() {
+        // Too large for vectors: the map as one picture, as it is drawn on screen.
+        super::layout::pictured_notices(s, &[], &[1]);
+        let png = rustgis_render::render_png(s.map_mut(), &view)?;
+        let pm = rustgis_render::decode_png(&png).ok_or("could not draw the map")?;
+        rustgis_render::pdf::Page::new(&pm, w, h)
+    } else {
+        rustgis_render::pdf::Page::drawing(drawing, w, h)
+    };
+    Ok(rustgis_render::pdf::write(&[page], &s.map().name))
 }
 
 fn export_map(s: &mut Session, p: &Value) -> CmdResult {
@@ -118,7 +134,11 @@ fn export_layer(s: &mut Session, p: &Value) -> CmdResult {
     let notes = rustgis_data::export_notes([(ds, l.extent())], &path, crs);
     // A Shapefile (`.shp`, or zipped to `.zip`) cuts field names to dBase's.
     let shapefile = matches!(ext.as_str(), "shp" | "zip");
-    let names_note = if shapefile { rustgis_data::io::shapefile_names_note(&ds.fields, &path) } else { None };
+    let mut dbf_notes = Vec::new();
+    if shapefile {
+        dbf_notes.extend(rustgis_data::io::shapefile_names_note(&ds.fields, &path));
+        dbf_notes.extend(rustgis_data::io::shapefile_values_notes(ds, &path));
+    }
     // FlatGeobuf, KML, GPX and Shapefile hold features with geometry only (a Shapefile, only
     // geometry it can draw).
     if left_out > 0 {
@@ -130,7 +150,7 @@ fn export_layer(s: &mut Session, p: &Value) -> CmdResult {
     for note in notes {
         s.notify(note, false);
     }
-    if let Some(note) = names_note {
+    for note in dbf_notes {
         s.notify(note, false);
     }
     if shapefile && rustgis_data::raster::wkt::to_wkt(crs).is_none() {

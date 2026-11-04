@@ -12,8 +12,13 @@ Select a layer in Layers and open **Style › Symbology** (or the Symbology pane
 - **Single Symbol**: one fill, outline and marker for every feature.
 - **Unique Values**: one colour per distinct value of a field. If no field is chosen, the current
   renderer's field is kept when available; otherwise the first available field is used, including
-  text fields. The Layers pane and layout legends list only the
-  classes that drawn features use (after the definition query and display filters);
+  text fields. There are up to 64 classes: the first values in numeric order when every value is
+  a number (9, 10, 100, as on a numeric field or a text field of codes), otherwise in text order
+  (by character, so `B` before `a`). Features with a value past them draw as
+  `<all other values>`, and a notice says how many and in which order the classes were taken. The
+  legend lists the classes by number when every class is a number, a class renamed by hand in its
+  value's place, and otherwise by label without regard to case. The Layers pane and layout
+  legends list only the classes that drawn features use (after the definition query and display filters);
   `<all other values>` appears only when a drawn feature falls outside the classes and its symbol
   is not fully transparent. A layout legend can leave it out with **Hide other values** (see
   [Layouts](layouts.md)). Instead of a field, Unique Values can class by an
@@ -477,11 +482,20 @@ Turn labels on per layer (Labeling › Labels › **Label**), then:
 - **Other places round points**: a point's label whose place another label takes tries the
   other places round the point, corners first (above right, above left, below right, below left,
   right, left, above, below, leaving out its own), and goes to the first where
-  all of it shows; where none is free it is left out, as before (Labeling pane › Position ›
+  all of it shows; where none does, it stays at its own place and shows what fits there (an icon
+  without its text, say), or is left out if nothing fits (Labeling pane › Position ›
   **Try other places round the point**, for point layers). Off by default: a label that moves can
   take the place a less important one had. The class's offset applies to every place, and Lock
   keeps the place each label took
   (`labels.placement={"layer": "Cities", "otherPositions": true}`).
+- **Other places along lines**: a Parallel or Curved label whose place at the middle is taken, or
+  (curved) where the line bends too sharply, tries up to seven others along the same stretch,
+  nearest the middle first, and goes to the first that will do (Labeling pane › Position › Along
+  lines › **Try other places along the line**). If none will, it is left out, as with this off. A
+  line with a repeat keeps its repeats where they are, so the box is hidden while Repeat is on, and
+  the setting does nothing there or at a position off the line. Off by default, for the same reason
+  as round points, and Lock keeps the place each label took
+  (`labels.placement={"layer": "Rivers", "position": "curved", "otherPositions": true}`).
 - **Lock** keeps the labelled features fixed while you pan and zoom; **Pause** stops drawing
   labels for faster navigation; **View Unplaced** draws the labels that didn't fit in red. They
   apply to the whole map, so they are on the ribbon (Labeling › Map Labeling), not in the pane.

@@ -556,7 +556,9 @@ fn text_symbol(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
         // The whole range `labels.style` accepts (#457); the map follows a drag and letting
         // go runs the command once, so a drag is one undo step.
         let mut size = f64::from(c.it.size);
-        let r = ui.add(egui::DragValue::new(&mut size).range(LABEL_SIZE).speed(0.1).suffix(" pt")).labelled_by(input_label.id);
+        let r = ui
+            .add(egui::DragValue::new(&mut size).update_while_editing(false).range(LABEL_SIZE).speed(0.1).suffix(" pt"))
+            .labelled_by(input_label.id);
         let id = l.id;
         crate::ribbon::live_drag(
             app,
@@ -645,7 +647,9 @@ fn background(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
     let number = |app: &mut RustGisApp, ui: &mut Ui, label: &str, cur: f32, range: std::ops::RangeInclusive<f64>, key: &'static str| {
         let input_label = ui.label(tl!(label));
         let mut v = f64::from(cur);
-        let r = ui.add(egui::DragValue::new(&mut v).range(range.clone()).speed(0.05).suffix(" pt")).labelled_by(input_label.id);
+        let r = ui
+            .add(egui::DragValue::new(&mut v).update_while_editing(false).range(range.clone()).speed(0.05).suffix(" pt"))
+            .labelled_by(input_label.id);
         crate::ribbon::live_drag(
             app,
             ui,
@@ -710,9 +714,16 @@ fn wrapping(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
     let input_label = ui.label(tl!("Wrap length"));
     let mut n = f64::from(c.it.wrap_length);
     let r = ui
-        .add(egui::DragValue::new(&mut n).range(0..=MAX_WRAP_LENGTH).speed(0.2).max_decimals(0).custom_formatter(|v, _| {
-            if v <= 0.0 { tl!("Off").to_string() } else { crate::i18n::fmt("{n} characters", &[("n", &v.to_string())]) }
-        }))
+        .add(
+            egui::DragValue::new(&mut n)
+                .update_while_editing(false)
+                .range(0..=MAX_WRAP_LENGTH)
+                .speed(0.2)
+                .max_decimals(0)
+                .custom_formatter(|v, _| {
+                    if v <= 0.0 { tl!("Off").to_string() } else { crate::i18n::fmt("{n} characters", &[("n", &v.to_string())]) }
+                }),
+        )
         .labelled_by(input_label.id)
         .on_hover_text(tl!("Lines longer than this are broken between their words."));
     let id = l.id;
@@ -748,7 +759,9 @@ fn letter_spacing(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
     let input_label = ui.label(tl!("Letter spacing"));
     let (lo, hi) = (rustgis_engine::map::layout::MIN_LETTER_SPACING, rustgis_engine::map::layout::MAX_LETTER_SPACING);
     let mut spacing = f64::from(c.it.spacing);
-    let r = ui.add(egui::DragValue::new(&mut spacing).range(lo..=hi).speed(0.05).suffix(" pt")).labelled_by(input_label.id);
+    let r = ui
+        .add(egui::DragValue::new(&mut spacing).update_while_editing(false).range(lo..=hi).speed(0.05).suffix(" pt"))
+        .labelled_by(input_label.id);
     let id = l.id;
     crate::ribbon::live_drag(
         app,
@@ -794,7 +807,9 @@ fn halo_style(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
         }
         let Some(width) = c.it.halo_width else { return };
         let mut w = f64::from(width);
-        let r = ui.add(egui::DragValue::new(&mut w).range(HALO_WIDTH).speed(0.05).suffix(" pt")).labelled_by(input_label.id);
+        let r = ui
+            .add(egui::DragValue::new(&mut w).update_while_editing(false).range(HALO_WIDTH).speed(0.05).suffix(" pt"))
+            .labelled_by(input_label.id);
         let id = l.id;
         crate::ribbon::live_drag(
             app,
@@ -924,6 +939,16 @@ fn position(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
         });
         if cur.along_line() {
             repeat(app, ui, l, c);
+            // One label a line: other places along it, tried when its own won't do (#1187). Each
+            // repeat is already a place of its own.
+            if c.it.repeat.is_none() {
+                ui.add_space(4.0);
+                let mut on = c.it.other_positions;
+                let help = tl!("If its place is taken or (curved) the line bends too much, the label tries other places along the line.");
+                if ui.checkbox(&mut on, tl!("Try other places along the line")).on_hover_text(help).changed() {
+                    run(app, "labels.placement", c.params(json!({"otherPositions": on})));
+                }
+            }
         }
     }
     ui.add_space(6.0);
@@ -949,6 +974,7 @@ fn repeat(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
             let r = ui
                 .add(
                     egui::DragValue::new(&mut v)
+                        .update_while_editing(false)
                         .range(LABEL_REPEAT)
                         .speed(1.0)
                         .max_decimals(1)
@@ -987,7 +1013,7 @@ fn offset(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
             let input_label = ui.label(tl!(label));
             let mut v = f64::from(cur.get(i).copied().unwrap_or(0.0));
             let r = ui
-                .add(egui::DragValue::new(&mut v).range(LABEL_OFFSET).speed(0.1).suffix(" pt"))
+                .add(egui::DragValue::new(&mut v).update_while_editing(false).range(LABEL_OFFSET).speed(0.1).suffix(" pt"))
                 .labelled_by(input_label.id)
                 .on_hover_text(tl!("A label along a line isn't moved."));
             crate::ribbon::live_drag(
@@ -1365,6 +1391,64 @@ mod tests {
         h.state_mut().session.run("layer.select", &json!({"layer": countries})).unwrap();
         h.run();
         assert!(h.query_by_role_and_label(Role::CheckBox, BOX).is_none(), "not for polygons");
+    }
+
+    /// A line layer's labels can try other places along the line (#1187): the box is there for a
+    /// placement along the line without a repeat, and hiding it leaves what it was set to.
+    #[test]
+    fn other_positions_are_set_in_the_pane_along_lines() {
+        use egui::accesskit::Role;
+        const BOX: &str = "Try other places along the line";
+        let mut h = harness(with_cities());
+        h.run();
+        let rivers = layer_id(h.state(), "Rivers");
+        h.state_mut().session.run("layer.select", &json!({"layer": rivers})).unwrap();
+        h.run();
+        open_tab(&mut h, "Position");
+        let on = |h: &egui_kittest::Harness<'_, RustGisApp>| {
+            h.state().session.map().layer_by_name("Rivers").unwrap().labels.default.other_positions
+        };
+        assert!(h.query_by_role_and_label(Role::CheckBox, BOX).is_none(), "not off the line");
+        for position in ["parallel", "curved"] {
+            h.state_mut().session.run("labels.placement", &json!({"layer": rivers, "position": position})).unwrap();
+            h.run();
+            assert!(h.query_by_role_and_label(Role::CheckBox, BOX).is_some(), "{position}");
+        }
+        h.get_by_role_and_label(Role::CheckBox, BOX).click();
+        h.run();
+        assert!(on(&h));
+        h.state_mut().session.run("labels.placement", &json!({"layer": rivers, "repeat": 144})).unwrap();
+        h.run();
+        assert!(h.query_by_role_and_label(Role::CheckBox, BOX).is_none(), "not with a repeat");
+        assert!(on(&h), "hidden, it's kept");
+        h.state_mut().session.run("labels.placement", &json!({"layer": rivers, "repeat": null})).unwrap();
+        h.run();
+        h.get_by_role_and_label(Role::CheckBox, BOX).click();
+        h.run();
+        assert!(!on(&h));
+        let countries = layer_id(h.state(), "Countries");
+        h.state_mut().session.run("layer.select", &json!({"layer": countries})).unwrap();
+        h.run();
+        assert!(h.query_by_role_and_label(Role::CheckBox, BOX).is_none(), "not for polygons");
+    }
+
+    /// The box along the line sets the class chosen, not Default (#1187).
+    #[test]
+    fn other_positions_along_lines_set_the_chosen_class() {
+        let mut app = with_cities();
+        let rivers = layer_id(&app, "Rivers");
+        app.session.run("layer.select", &json!({"layer": rivers})).unwrap();
+        app.run("labels.class.add", json!({"name": "Named"})).unwrap();
+        app.run("labels.placement", json!({"class": "Named", "position": "curved"})).unwrap();
+        let mut h = harness(app);
+        h.run();
+        pick_class(&mut h, "Default", "Named");
+        open_tab(&mut h, "Position");
+        h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Try other places along the line").click();
+        h.run();
+        let l = labels(h.state());
+        assert!(l.class("Named").unwrap().other_positions);
+        assert!(!l.default.other_positions);
     }
 
     #[test]

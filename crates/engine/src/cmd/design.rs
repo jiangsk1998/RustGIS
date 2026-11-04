@@ -2,6 +2,7 @@
 //! Relationships, and Edit › Manage Edits, Snapping, Features (modify tools), Elevation and
 //! Corrections. Every feature edit goes through [`apply`], which enforces the layer's design.
 
+use rustgis_data::value::PastClasses;
 use rustgis_data::{Feature, FieldType, Geometry, GeometryType, Value};
 use rustgis_geom::{Coord, lonlat_to_merc, merc_to_lonlat};
 use rustgis_map::design::{
@@ -13,6 +14,8 @@ use super::{b, f, need_feature_layer, ps};
 use crate::{CmdResult, CommandSpec as C, Session};
 
 mod shared_vertex;
+mod sketch;
+pub use sketch::{MAX_LINE, trace_between};
 mod snap_vertex;
 
 /// One edited feature: its state before (none for an insert) and its row after (none for a
@@ -57,6 +60,13 @@ fn now() -> f64 {
 /// calculation rules, then domains, contingent values and constraint rules (an error undoes the
 /// whole command). Records the archive and the edit counts.
 pub(crate) fn apply(s: &mut Session, id: u32, changes: Vec<Change>) -> Result<(), String> {
+    apply_with(s, id, changes, true)
+}
+
+/// [`apply`], with `new_defaults` false for added rows that carry another feature's attributes
+/// (the pieces of a cut): they keep them, with no subtype defaults or elevation filled in.
+/// Calculation rules and checks still run on every row.
+pub(crate) fn apply_with(s: &mut Session, id: u32, changes: Vec<Change>, new_defaults: bool) -> Result<(), String> {
     if changes.is_empty() {
         return Ok(());
     }
@@ -77,7 +87,8 @@ pub(crate) fn apply(s: &mut Session, id: u32, changes: Vec<Change>) -> Result<()
             }
         }
     };
-    let new_rows: Vec<usize> = changes.iter().filter(|c| c.before.is_none()).filter_map(|c| c.row).collect();
+    let new_rows: Vec<usize> =
+        if new_defaults { changes.iter().filter(|c| c.before.is_none()).filter_map(|c| c.row).collect() } else { Vec::new() };
     let zs: Vec<(usize, Option<f64>)> = new_rows
         .iter()
         .map(|r| {
@@ -369,6 +380,15 @@ pub fn commands() -> Vec<C> {
         ),
         C::new("edit.explode", "Explode", "Edit › Features › Modify", explode).when(need_editable_selection),
         C::new("edit.split", "Split", "Edit › Features › Modify", split).when(need_editable_selection).params(r#"{"lon", "lat"}"#),
+        C::new("edit.cutPolygon", "Cut Polygon", "Edit › Features › Modify", sketch::cut_polygon)
+            .when(need_editable_selection)
+            .params(r#"{"line": GeoJSON LineString (lon/lat) drawn across the selected polygons}"#),
+        C::new("edit.reshape", "Reshape", "Edit › Features › Modify", sketch::reshape)
+            .when(need_editable_selection)
+            .params(r#"{"line": GeoJSON LineString (lon/lat) drawn across the selected line or polygon's boundary}"#),
+        C::new("edit.trace", "Trace Edge Path", "Edit › Features", sketch::trace).view().params(
+            r#"{"from": [lon, lat], "to": [lon, lat], "layer"?, "row"?: number (else the nearest edge within the tolerance), "tolerancePx"?: number (default: the snapping tolerance)}"#,
+        ),
         C::new("edit.traverse", "Traverse", "Edit › Features › Modify", traverse).when(need_editable).params(
             r#"{"layer"?, "start": [lon, lat], "units"?: "Meters" (default)|"Feet"|"Kilometers"|"Miles", "legs": [{"distance": number, "bearing": degrees from north}]} (closed in a polygon layer, open in a line layer)"#,
         ),
@@ -799,13 +819,44 @@ fn subtypes(s: &mut Session, p: &Json) -> CmdResult {
     let symbolize = b(p, "symbolize").unwrap_or(true);
     let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
     // Unique values by subtype code.
+    let mut past = PastClasses::default();
     if symbolize {
         let base = l.renderer.base_symbol();
-        l.renderer = rustgis_map::Renderer::unique(&l.dataset, &[], &fname, rustgis_map::Ramp::default(), base)?;
+        // The classes come from every feature, so a definition query doesn't drop any; the
+        // features past them are counted among those it lets through, which are drawn.
+        let (r, rest) = rustgis_map::Renderer::unique_counted(&l.dataset, &[], &fname, rustgis_map::Ramp::default(), base)?;
+        let rows = l.visible_rows();
+        past = PastClasses { features: drawn_past(&l.dataset, &r, &fname, &rows), ..rest };
+        l.renderer = r;
     }
     let n = subs.len();
-    l.design.subtypes = Some(Subtypes { field: fname, subtypes: subs });
+    let name = l.name.clone();
+    l.design.subtypes = Some(Subtypes { field: fname.clone(), subtypes: subs });
+    if past.features > 0 {
+        let (max, order) = (rustgis_map::symbology::MAX_UNIQUE, if past.by_number { "by number" } else { "in text order" });
+        s.notify(
+            format!(
+                "{name}: {} features whose value is past the first {max} values of {fname} ({order}) are drawn as <all other values>",
+                past.features
+            ),
+            false,
+        );
+    }
     Ok(json!({"subtypes": n}))
+}
+
+/// How many features `rows` keeps, with a geometry, have a value of `field` that is none of the
+/// Unique Values `renderer`'s classes: those drawn as `<all other values>`.
+fn drawn_past(ds: &rustgis_data::Dataset, renderer: &rustgis_map::Renderer, field: &str, rows: &[bool]) -> usize {
+    let (rustgis_map::Renderer::Unique { classes, .. }, Some(fi)) = (renderer, ds.field_index(field)) else { return 0 };
+    let classes: std::collections::HashSet<&str> = classes.iter().map(|(k, _)| k.as_str()).collect();
+    ds.features
+        .iter()
+        .enumerate()
+        .filter(|(r, f)| rows.get(*r).copied().unwrap_or(true) && f.geometry.is_some())
+        // (Each value's text as `Dataset::unique_values` writes it, a missing one empty.)
+        .filter(|(_, f)| !classes.contains(f.attrs.get(fi).map(|v| v.to_string()).unwrap_or_default().as_str()))
+        .count()
 }
 
 fn attribute_rule(s: &mut Session, p: &Json) -> CmdResult {

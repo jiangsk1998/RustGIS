@@ -120,7 +120,7 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"layout"?}"#),
         C::new("layout.export", "Export Layout", "Publish › Output", export)
             .view()
-            .params(r#"{"layout"?, "path": "*.png|*.pdf|*.svg" (PNG/SVG: current page; SVG: each element a group of its own; text and shapes as SVG, map frames and surrounds as pictures at dpi), "dpi"?: 72..600, "allPages"?: bool (PDF only; default true: every map series page, up to 500; false: the current page)}"#),
+            .params(r#"{"layout"?, "path": "*.png|*.pdf|*.svg" (PNG/SVG: current page; SVG: each element a group of its own; text and shapes as SVG, map frames and surrounds as vectors, rasters and tiles in them as pictures at dpi), "dpi"?: 72..600, "allPages"?: bool (PDF only; default true: every map series page, up to 500; false: the current page)}"#),
         C::new("layout.save", "Save Layout File", "Publish › Save As", |s, p| {
             let path = ps(p, "path").ok_or("path is required")?;
             let l = active(s, p)?.clone();
@@ -3158,6 +3158,8 @@ fn named_fonts_unread(layout: &Layout) -> Option<&'static str> {
     )
 }
 
+/// Layout `li` as a PDF (kept as vectors; every map series page when `all`) or a PNG of the
+/// current page, at `dpi`.
 pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) -> Result<Vec<u8>, String> {
     let saved = s.project.layouts.get(li).ok_or("no layout")?.clone();
     if let Some(note) = named_fonts_unread(&saved) {
@@ -3180,6 +3182,9 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
         _ => vec![current],
     };
     let stepping = names.is_some() && pages.len() > 1;
+    // What the PDF draws as pictures because its vectors would grow too large: frames, and
+    // whole pages (their surrounds).
+    let (mut frames_pictured, mut pages_pictured) = (Vec::new(), Vec::new());
     let mut render_pages = || -> Result<(Vec<rustgis_render::pdf::Page>, Option<Vec<u8>>), String> {
         let mut out = Vec::new();
         let mut png = None;
@@ -3197,10 +3202,22 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
                     None => info.as_ref().map(|i| i.1.clone()).unwrap_or_default(),
                 },
             };
-            let img = rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info).ok_or("the page is too large to draw")?;
-            // Each page is compressed as soon as it's drawn, within a memory budget.
+            // Each page is kept as vectors (its pictures compressed) as soon as it's drawn, within
+            // a memory budget.
             if pdf {
-                out.push(rustgis_render::pdf::Page::new(&img, layout.width, layout.height));
+                let (w, h) = (layout.width, layout.height);
+                let (drawing, pictured) = rustgis_render::layout::render_drawing(layout, &mut s.project.maps, dpi, &info)
+                    .ok_or("the page is too large to draw")?;
+                if drawing.overflowed() {
+                    pages_pictured.push(page + 1);
+                    let layout = s.project.layouts.get(li).ok_or("no layout")?;
+                    let img =
+                        rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info).ok_or("the page is too large to draw")?;
+                    out.push(rustgis_render::pdf::Page::new(&img, w, h));
+                } else {
+                    frames_pictured.extend(pictured);
+                    out.push(rustgis_render::pdf::Page::drawing(drawing, w, h));
+                }
                 held += out.last().map_or(0, rustgis_render::pdf::Page::len);
                 if held > PDF_BUDGET {
                     return Err(format!(
@@ -3210,6 +3227,7 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
                     ));
                 }
             } else {
+                let img = rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info).ok_or("the page is too large to draw")?;
                 png = Some(img.encode_png().map_err(|e| e.to_string())?);
             }
         }
@@ -3221,7 +3239,46 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
         *cur = saved.clone();
     }
     let (pages, png) = result?;
+    pictured_notices(s, &frames_pictured, &pages_pictured);
     if pdf { Ok(rustgis_render::pdf::write(&pages, &saved.name)) } else { png.ok_or_else(|| "nothing to draw".to_string()) }
+}
+
+/// Says which layout elements, map frames and surrounds (by name), and pages (by number) an export
+/// draws as pictures because their
+/// vectors would pass the size a page's content may come to: one notice for each, with a count.
+pub(crate) fn pictured_notices(s: &mut Session, frames: &[(u32, String)], pages: &[usize]) {
+    let mb = rustgis_render::vector::MAX_COST >> 20;
+    // The first of a list, and how many more there are.
+    let listed = |items: Vec<String>, most: usize| {
+        let more = items.len().saturating_sub(most);
+        let mut text = items.into_iter().take(most).collect::<Vec<_>>().join(", ");
+        if more > 0 {
+            text.push_str(&format!(" and {more} more"));
+        }
+        text
+    };
+    // Each element once (a frame on every page of a series is one frame), by its id and name: two
+    // elements sharing a name are two.
+    let mut elements: Vec<(u32, String)> = frames.to_vec();
+    elements.sort_unstable();
+    elements.dedup();
+    let names: Vec<String> = elements.into_iter().map(|(_, name)| name).collect();
+    if !names.is_empty() {
+        let n = names.len();
+        s.warn(format!(
+            "The export draws {n} layout element{} as pictures, not vectors: their vectors would pass {mb} MB ({})",
+            if n == 1 { "" } else { "s" },
+            listed(names, 10)
+        ));
+    }
+    if !pages.is_empty() {
+        let n = pages.len();
+        s.warn(format!(
+            "The export draws {n} page{} as pictures, not vectors: their vectors would pass {mb} MB (page {})",
+            if n == 1 { "" } else { "s" },
+            listed(pages.iter().map(usize::to_string).collect(), 20)
+        ));
+    }
 }
 
 fn export(s: &mut Session, p: &Value) -> CmdResult {
@@ -3244,7 +3301,8 @@ fn export(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"path": path, "bytes": bytes.len()}))
 }
 
-/// The layout `li` as it is now (a map series at its current page) as SVG, pictures at `dpi`.
+/// The layout `li` as it is now (a map series at its current page) as SVG, kept as vectors with
+/// pictures at `dpi`; a frame too large for vectors is a picture, and the export says so.
 fn layout_svg(s: &mut Session, li: usize, dpi: f64) -> Result<String, String> {
     let dpi = if dpi.is_finite() { dpi.clamp(36.0, 600.0) } else { 150.0 };
     let current = s.project.layouts.get(li).ok_or("no layout")?.series.as_ref().map_or(0, |sr| sr.page);
@@ -3256,8 +3314,10 @@ fn layout_svg(s: &mut Session, li: usize, dpi: f64) -> Result<String, String> {
     };
     // Rendering borrows the current layout; it does not step or modify the series page.
     let layout = s.project.layouts.get(li).ok_or("no layout")?;
-    rustgis_render::svg::layout_svg(layout, &mut s.project.maps, dpi, &info)
-        .ok_or_else(|| "could not draw the page; check its map sources and export size".into())
+    let (text, pictured) = rustgis_render::svg::layout_svg(layout, &mut s.project.maps, dpi, &info)
+        .ok_or("could not draw the page; check its map sources and export size")?;
+    pictured_notices(s, &pictured, &[]);
+    Ok(text)
 }
 
 pub(crate) fn import(s: &mut Session, text: &str) -> CmdResult {

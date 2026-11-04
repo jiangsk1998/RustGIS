@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use rustgis_data::raster::{ColorHint, Crs, GeoTransform, MAX_SAMPLES, Raster, Transformer};
+use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, Transformer, max_samples};
 use rustgis_geom::Coord;
 
 use crate::georef::Fit;
@@ -29,6 +29,10 @@ const INTERIOR_POINTS: usize = 32;
 /// What one output column costs in working buffers, in `f32` samples: its image position (24
 /// bytes) and its share of the exact nodes (4 bytes).
 const COLUMN_COST: f64 = 7.0;
+
+/// The way from an output coordinate back to an image position, shared by the threads that make
+/// the rows.
+type Source<'a> = dyn Fn(f64, f64) -> Option<(f64, f64)> + Sync + 'a;
 
 /// How cells are sampled from the image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,10 +131,12 @@ impl Sampler<'_> {
     fn sample(&self, c: f64, row: f64, out: &mut [f32]) {
         let (w, h) = (i64::from(self.r.width), i64::from(self.r.height));
         let index = |i: i64, j: i64| (j.clamp(0, h - 1) * w + i.clamp(0, w - 1)) as usize;
+        // The pixel under the position. The 1e-10 (as in GDAL) keeps a position a rounding error
+        // below a pixel's edge in the pixel after it.
+        let centre = index((c + 1e-10).floor() as i64, (row + 1e-10).floor() as i64);
         if self.method == Resampling::Nearest {
-            let idx = index(c.floor() as i64, row.floor() as i64);
             for (b, o) in out.iter_mut().enumerate() {
-                *o = self.at(b, idx).unwrap_or(f32::NAN);
+                *o = self.at(b, centre).unwrap_or(f32::NAN);
             }
             return;
         }
@@ -138,6 +144,17 @@ impl Sampler<'_> {
         let (u, v) = (c - 0.5, row - 0.5);
         let (i0, j0) = (u.floor() as i64, v.floor() as i64);
         let (fu, fv) = (u - i0 as f64, v - j0 as f64);
+        // A position on a pixel with no value has none either, as in GDAL, rather than the mean of
+        // the neighbours that have one (#973). That includes NaN in a raster without a no-data
+        // value (gdalwarp with `-srcnodata nan`). The pixel has no value only where every band
+        // but alpha is no-data, as gdalwarp's default (`UNIFIED_SRC_NODATA=PARTIAL`) has it: a
+        // colour pixel with one channel at the no-data value keeps its value, and that channel
+        // blends from the neighbours. At the pixel's exact centre only that pixel weighs, so the
+        // channel has no value there, as in gdalwarp.
+        if (0..out.len()).all(|b| Some(b) == self.alpha || self.at(b, centre).is_none()) {
+            out.fill(f32::NAN);
+            return;
+        }
         for (b, o) in out.iter_mut().enumerate() {
             let cubic = (self.method == Resampling::Cubic).then(|| self.cubic(b, &index, i0, j0, fu, fv)).flatten();
             *o = cubic.unwrap_or_else(|| self.bilinear(b, &index, i0, j0, fu, fv));
@@ -224,12 +241,15 @@ pub fn warp(r: &Raster, fit: &Fit, o: &Options) -> Result<Raster, String> {
     let cells = |cell: f64| -> (f64, f64) { (((max_x - min_x) / cell).ceil().max(1.0), ((max_y - min_y) / cell).ceil().max(1.0)) };
     // The samples held, and the buffers a row needs (they add up on a long thin grid).
     let load = |(ow, oh): (f64, f64)| ow * (oh * out_bands as f64 + COLUMN_COST);
-    let too_many = |n: (f64, f64)| load(n) > MAX_SAMPLES as f64;
+    let max = max_samples();
+    let too_many = |n: (f64, f64)| load(n) > max as f64;
     let cell = match o.cell {
         Some(c) if !(c.is_finite() && c > 0.0) => return Err("cellSize must be a positive number".into()),
         Some(c) => {
             if too_many(cells(c)) {
-                return Err(format!("a cell size of {c} makes a grid of more than {MAX_SAMPLES} samples: give a larger cellSize"));
+                return Err(format!(
+                    "a cell size of {c} makes a grid of more than {max} samples, this computer's limit: give a larger cellSize"
+                ));
             }
             c
         }
@@ -241,7 +261,7 @@ pub fn warp(r: &Raster, fit: &Fit, o: &Options) -> Result<Raster, String> {
                 if !too_many(n) {
                     break;
                 }
-                cell *= (load(n) / MAX_SAMPLES as f64).sqrt().max(1.01);
+                cell *= (load(n) / max as f64).sqrt().max(1.01);
             }
             if too_many(cells(cell)) {
                 return Err("the warped image is too large to hold: give a cellSize".into());
@@ -258,7 +278,7 @@ pub fn warp(r: &Raster, fit: &Fit, o: &Options) -> Result<Raster, String> {
         let (c, row) = (c / sx, row / sy);
         (c.is_finite() && row.is_finite()).then_some((c, row))
     };
-    sampled(r, &g, canvas, o.resampling, &source, o.name.clone())
+    sampled(None, r, &g, canvas, o.resampling, &source, o.name.clone())
 }
 
 /// The bounds `[min x, min y, max x, max y]` of a `w` × `h` image whose pixel positions `place`
@@ -348,9 +368,10 @@ impl Grid {
             return Err("the origin and cellSize can't make a grid over this area".into());
         }
         let (w, h) = (((max_x - min_x) / cx).round().max(1.0), ((max_y - min_y) / cy).round().max(1.0));
-        if w * h > MAX_SAMPLES as f64 {
+        let max = max_samples();
+        if w * h > max as f64 {
             return Err(format!(
-                "a cell size of {cx} makes a grid of {} × {} cells, more than {MAX_SAMPLES}: give a larger cellSize or a smaller extent",
+                "a cell size of {cx} makes a grid of {} × {} cells, more than this computer's {max}: give a larger cellSize or a smaller extent",
                 w as u64, h as u64
             ));
         }
@@ -435,13 +456,20 @@ impl Method {
 /// whole-number type), or see-through for a colour image with neither alpha nor no-data, which
 /// gains an alpha band for it.
 pub fn project(r: &Raster, g: &Grid, method: Method, name: String) -> Result<Raster, String> {
+    project_on(None, r, g, method, name)
+}
+
+/// [`project`] on `threads` threads (none: as many as pay off). Each cell is made from the source
+/// alone and written where it lies, so rows go on several threads (#1252).
+fn project_on(threads: Option<usize>, r: &Raster, g: &Grid, method: Method, name: String) -> Result<Raster, String> {
     r.require_coordinates()?;
     let canvas = Canvas::of(r, false);
     let out_bands = canvas.out_bands;
     // The samples held, and the buffers a row needs.
-    if g.width as f64 * (g.height as f64 * out_bands as f64 + COLUMN_COST) > MAX_SAMPLES as f64 {
+    let max = max_samples();
+    if g.width as f64 * (g.height as f64 * out_bands as f64 + COLUMN_COST) > max as f64 {
         return Err(format!(
-            "{} × {} cells of {} band(s) are more than {MAX_SAMPLES} samples: give a larger cellSize or a smaller extent",
+            "{} × {} cells of {} band(s) are more than this computer's {max} samples: give a larger cellSize or a smaller extent",
             g.width, g.height, out_bands
         ));
     }
@@ -454,8 +482,8 @@ pub fn project(r: &Raster, g: &Grid, method: Method, name: String) -> Result<Ras
     };
     // The method that runs, as the result reports it (a palette image's classes are never mixed).
     match method.used_on(r) {
-        Method::Sample(m) => sampled(r, g, canvas, m, &source, name),
-        Method::Average | Method::Mode => aggregated(r, g, canvas, method == Method::Mode, &source, name),
+        Method::Sample(m) => sampled(threads, r, g, canvas, m, &source, name),
+        Method::Average | Method::Mode => aggregated(threads, r, g, canvas, method == Method::Mode, &source, name),
     }
 }
 
@@ -508,20 +536,22 @@ impl Canvas {
         Canvas { nb, alpha_src, add_alpha, out_bands: nb + usize::from(add_alpha), clear, outside, color }
     }
 
-    /// Cell `at` of `bands` set to `values` (no value where NaN), and opaque when an alpha band
-    /// was added.
-    fn set(&self, bands: &mut [Vec<f32>], at: usize, values: &[f32]) {
+    /// Cell `at` of a row (its slice of each band, see [`Rows`]) set to `values` (no value where
+    /// NaN), and, when an alpha band was added, opaque unless no band has a value.
+    fn set(&self, bands: &mut [&mut [f32]], at: usize, values: &[f32]) {
         for (band, v) in bands.iter_mut().zip(values) {
             if let Some(o) = band.get_mut(at) {
                 // A cell with no value is no-data (or see-through) like one outside.
                 *o = if v.is_nan() { if self.clear { 0.0 } else { self.outside } } else { *v };
             }
         }
-        // Alpha is read as 0–255 whatever the pixel type.
+        // Alpha is read as 0–255 whatever the pixel type. A cell with no value in any band (a
+        // NaN pixel under its centre in a float image without no-data) is see-through like one
+        // outside, not opaque black.
         if self.add_alpha
             && let Some(o) = bands.get_mut(self.nb).and_then(|b| b.get_mut(at))
         {
-            *o = 255.0;
+            *o = if values.iter().take(self.nb).all(|v| v.is_nan()) { 0.0 } else { 255.0 };
         }
     }
 
@@ -546,13 +576,43 @@ impl Canvas {
     }
 }
 
+/// The rows of a grid's bands, `w` cells each: a row is its slice of every band, so threads can
+/// write rows where they lie ([`crate::parallel::for_each_row`]).
+struct Rows<'a>(Vec<std::slice::ChunksMut<'a, f32>>);
+
+impl<'a> Rows<'a> {
+    /// No rows when `w` is 0 (a row of no cells).
+    fn of(bands: &'a mut [Vec<f32>], w: usize) -> Rows<'a> {
+        Rows(if w == 0 { Vec::new() } else { bands.iter_mut().map(|b| b.chunks_mut(w)).collect() })
+    }
+}
+
+impl<'a> Iterator for Rows<'a> {
+    type Item = Vec<&'a mut [f32]>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // No bands, no rows (an empty row of every band would never end).
+        if self.0.is_empty() {
+            return None;
+        }
+        self.0.iter_mut().map(Iterator::next).collect()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.0.iter().map(ExactSizeIterator::len).min().unwrap_or(0);
+        (n, Some(n))
+    }
+}
+
+impl ExactSizeIterator for Rows<'_> {}
+
 /// The image positions of the `out.len()` points `x_at(i)` along the row `y` of output
 /// coordinates: exact every [`STEP`] points, and linear between where the midpoint of a stretch
 /// is within [`TOLERANCE`] of exact (otherwise exact throughout the stretch).
 fn row_positions(
     x_at: &dyn Fn(usize) -> f64,
     y: f64,
-    source: &dyn Fn(f64, f64) -> Option<(f64, f64)>,
+    source: &Source,
     nodes: &mut Vec<(usize, Option<(f64, f64)>)>,
     out: &mut [Option<(f64, f64)>],
 ) {
@@ -599,13 +659,15 @@ fn row_positions(
     }
 }
 
-/// `r` on the grid `g`, each cell sampled at its centre's image position (`source`).
+/// `r` on the grid `g`, each cell sampled at its centre's image position (`source`), on
+/// `threads` threads (none: as many as pay off).
 fn sampled(
+    threads: Option<usize>,
     r: &Raster,
     g: &Grid,
     canvas: Canvas,
     method: Resampling,
-    source: &dyn Fn(f64, f64) -> Option<(f64, f64)>,
+    source: &Source,
     name: String,
 ) -> Result<Raster, String> {
     let (w, h) = (f64::from(r.width), f64::from(r.height));
@@ -613,35 +675,53 @@ fn sampled(
     let method = if matches!(r.color, ColorHint::Palette(_)) { Resampling::Nearest } else { method };
     let sampler = Sampler { r, method, alpha: canvas.alpha_src, round: !r.data_type.starts_with("Float") };
     let mut bands = canvas.bands(ow, oh)?;
-    let mut coords: Vec<Option<(f64, f64)>> = vec![None; ow];
-    let mut nodes = Vec::new();
-    let mut px = vec![f32::NAN; canvas.nb];
-    let x_at = |ox: usize| g.min_x + (ox as f64 + 0.5) * g.cell_x;
-    for oy in 0..oh {
-        let y = g.max_y - (oy as f64 + 0.5) * g.cell_y;
-        row_positions(&x_at, y, source, &mut nodes, &mut coords);
-        for (ox, c) in coords.iter().enumerate() {
-            let Some((c, row)) = *c else { continue };
-            if !(c >= 0.0 && row >= 0.0 && c < w && row < h) {
-                continue;
-            }
-            sampler.sample(c, row, &mut px);
-            canvas.set(&mut bands, oy * ow + ox, &px);
-        }
+    if ow == 0 {
+        return canvas.finish(r, g, bands, name);
     }
+    let x_at = |ox: usize| g.min_x + (ox as f64 + 0.5) * g.cell_x;
+    // A cell's work in `MIN_ROW_WORK`'s units (some 30 ns): its pixels read per band, and its
+    // share of the way back to the image.
+    let reads = match method {
+        Resampling::Nearest => 1,
+        Resampling::Bilinear => 4,
+        Resampling::Cubic => 16,
+    };
+    let work = ow.saturating_mul(oh).saturating_mul(canvas.nb.saturating_mul(reads).saturating_add(2));
+    // A thread's scratch: the row's image positions and its exact nodes.
+    let threads = threads.unwrap_or_else(|| crate::parallel::threads_for_rows(oh, work, ow.saturating_mul(28)));
+    crate::control::begin(oh);
+    crate::parallel::for_each_row(
+        Rows::of(&mut bands, ow),
+        threads,
+        || (vec![None; ow], Vec::new(), vec![f32::NAN; canvas.nb]),
+        |(coords, nodes, px), oy, mut line| {
+            let y = g.max_y - (oy as f64 + 0.5) * g.cell_y;
+            row_positions(&x_at, y, source, nodes, coords);
+            for (ox, c) in coords.iter().enumerate() {
+                let Some((c, row)) = *c else { continue };
+                if !(c >= 0.0 && row >= 0.0 && c < w && row < h) {
+                    continue;
+                }
+                sampler.sample(c, row, px);
+                canvas.set(&mut line, ox, px);
+            }
+        },
+    )?;
     canvas.finish(r, g, bands, name)
 }
 
 /// `r` on the grid `g`, each cell the mean (or, with `mode`, the most frequent value, with GDAL's
 /// tie rule: see [`mode_of`]) of the pixels whose centres fall in it. A cell's corners are placed
 /// on the image (`source`) and the pixel centres inside the quadrilateral they make are taken; one
-/// with none takes the pixel under its centre. A palette image takes the mode.
+/// with none takes the pixel under its centre. A palette image takes the mode. On `threads`
+/// threads (none: as many as pay off).
 fn aggregated(
+    threads: Option<usize>,
     r: &Raster,
     g: &Grid,
     canvas: Canvas,
     mode: bool,
-    source: &dyn Fn(f64, f64) -> Option<(f64, f64)>,
+    source: &Source,
     name: String,
 ) -> Result<Raster, String> {
     let (w, h) = (r.width as usize, r.height as usize);
@@ -650,20 +730,79 @@ fn aggregated(
     let round = !r.data_type.starts_with("Float");
     let nearest = Sampler { r, method: Resampling::Nearest, alpha: None, round };
     let mut bands = canvas.bands(ow, oh)?;
-    let mut nodes = Vec::new();
-    // Cell corners: a row's top edge, then its bottom edge (the next row's top).
+    if ow == 0 {
+        return canvas.finish(r, g, bands, name);
+    }
     let x_at = |i: usize| g.min_x + i as f64 * g.cell_x;
-    let mut top: Vec<Option<(f64, f64)>> = vec![None; ow + 1];
-    let mut bottom: Vec<Option<(f64, f64)>> = vec![None; ow + 1];
-    row_positions(&x_at, g.max_y, source, &mut nodes, &mut top);
-    let mut values: Vec<Vec<f32>> = vec![Vec::new(); canvas.nb];
-    // Each value's weight: a colour counts as much as its pixel is opaque, as bilinear weighs it.
-    let mut weights: Vec<Vec<f32>> = vec![Vec::new(); canvas.nb];
-    let mut sums: Vec<(f64, f64)> = vec![(0.0, 0.0); canvas.nb];
-    let alpha = canvas.alpha_src;
-    let mut cell = vec![f32::NAN; canvas.nb];
-    for oy in 0..oh {
-        row_positions(&x_at, g.max_y - (oy + 1) as f64 * g.cell_y, source, &mut nodes, &mut bottom);
+    let each = Aggregate { r, canvas: &canvas, nearest, mode, round };
+    // A cell's work in `MIN_ROW_WORK`'s units (some 30 ns): its corners, and the pixels it takes
+    // per band (the source's pixels, shared among the cells that cover them).
+    let work = ow.saturating_mul(oh).saturating_add(w.saturating_mul(h)).saturating_mul(canvas.nb.saturating_add(1));
+    // A thread's scratch: two edges of corners and their exact nodes.
+    let threads = threads.unwrap_or_else(|| crate::parallel::threads_for_rows(oh, work, ow.saturating_add(1).saturating_mul(56)));
+    crate::control::begin(oh);
+    crate::parallel::for_each_row(
+        Rows::of(&mut bands, ow),
+        threads,
+        || Corners {
+            last: None,
+            top: vec![None; ow + 1],
+            bottom: vec![None; ow + 1],
+            nodes: Vec::new(),
+            values: vec![Vec::new(); canvas.nb],
+            weights: vec![Vec::new(); canvas.nb],
+            sums: vec![(0.0, 0.0); canvas.nb],
+            cell: vec![f32::NAN; canvas.nb],
+        },
+        |s, oy, mut line| {
+            let Corners { last, top, bottom, nodes, .. } = &mut *s;
+            // The row's top edge is the bottom of the one before, when this thread made it.
+            if last.is_some_and(|l| l + 1 == oy) {
+                std::mem::swap(top, bottom);
+            } else {
+                row_positions(&x_at, g.max_y - oy as f64 * g.cell_y, source, nodes, top);
+            }
+            row_positions(&x_at, g.max_y - (oy + 1) as f64 * g.cell_y, source, nodes, bottom);
+            *last = Some(oy);
+            each.row(s, &mut line);
+        },
+    )?;
+    canvas.finish(r, g, bands, name)
+}
+
+/// A thread's scratch in [`aggregated`].
+struct Corners {
+    /// The row it made last, whose bottom edge `bottom` holds.
+    last: Option<usize>,
+    /// A row's cell corners: its top edge, then its bottom edge (the next row's top).
+    top: Vec<Option<(f64, f64)>>,
+    bottom: Vec<Option<(f64, f64)>>,
+    nodes: Vec<(usize, Option<(f64, f64)>)>,
+    values: Vec<Vec<f32>>,
+    /// Each value's weight: a colour counts as much as its pixel is opaque, as bilinear weighs it.
+    weights: Vec<Vec<f32>>,
+    sums: Vec<(f64, f64)>,
+    cell: Vec<f32>,
+}
+
+/// What each row of [`aggregated`] takes from the source.
+struct Aggregate<'a> {
+    r: &'a Raster,
+    canvas: &'a Canvas,
+    /// For a cell no pixel centre falls in.
+    nearest: Sampler<'a>,
+    mode: bool,
+    round: bool,
+}
+
+impl Aggregate<'_> {
+    /// One row, between the corners in `s`, into `line` (its slice of each band).
+    fn row(&self, s: &mut Corners, line: &mut [&mut [f32]]) {
+        let (r, canvas, nearest, mode, round) = (self.r, self.canvas, &self.nearest, self.mode, self.round);
+        let (w, h) = (r.width as usize, r.height as usize);
+        let alpha = canvas.alpha_src;
+        let Corners { top, bottom, values, weights, sums, cell, .. } = s;
+        let ow = top.len().saturating_sub(1);
         for ox in 0..ow {
             let corners = (top.get(ox), top.get(ox + 1), bottom.get(ox + 1), bottom.get(ox));
             let (Some(Some(tl)), Some(Some(tr)), Some(Some(br)), Some(Some(bl))) = corners else { continue };
@@ -709,9 +848,8 @@ fn aggregated(
                     }
                 }
             }
-            let at = oy * ow + ox;
             if inside {
-                for (b, (((o, v), k), sum)) in cell.iter_mut().zip(values.iter_mut()).zip(&weights).zip(&sums).enumerate() {
+                for (b, (((o, v), k), sum)) in cell.iter_mut().zip(values.iter_mut()).zip(weights.iter()).zip(sums.iter()).enumerate() {
                     *o = if mode {
                         // The most frequent colour, and alpha, among the pixels that show:
                         // see-through ones count for nothing, as in the mean. A cell where none
@@ -735,13 +873,11 @@ fn aggregated(
                 if !(cx >= 0.0 && cy >= 0.0 && cx < w as f64 && cy < h as f64) {
                     continue;
                 }
-                nearest.sample(cx, cy, &mut cell);
+                nearest.sample(cx, cy, cell);
             }
-            canvas.set(&mut bands, at, &cell);
+            canvas.set(line, ox, cell);
         }
-        std::mem::swap(&mut top, &mut bottom);
     }
-    canvas.finish(r, g, bands, name)
 }
 
 /// Whether `p` is inside the quadrilateral `q`: an output cell's top left, top right, bottom
@@ -937,6 +1073,31 @@ mod tests {
         assert!(out.bands[0].data.iter().all(|v| *v == 10.0 || *v == -9999.0));
     }
 
+    /// The control-point warp shares the no-data rule of #973: a cell whose centre falls on a
+    /// no-data pixel has no value, even with valid pixels around it.
+    #[test]
+    fn warp_leaves_a_cell_over_no_data_without_a_value() {
+        // 6 × 6 pixels of 10 with a 2 × 2 no-data hole at columns and rows 2–3, 1 m square and
+        // unrotated; half-metre cells, centred a quarter pixel from the pixel edges.
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 6.0, pixel_width: 1.0, pixel_height: -1.0 };
+        let mut data = vec![10.0f32; 36];
+        for idx in [14, 15, 20, 21] {
+            data[idx] = -9999.0;
+        }
+        let r = Raster::new("nd", 6, 6, vec![data], gt, Crs::LonLat, Some(-9999.0), ColorHint::Gray, "Float32").unwrap();
+        let fit = georef::fit(Kind::Similarity, &gcps(6.0, 6.0, |c, rw| (500_000.0 + c, 4_000_000.0 - rw))).unwrap();
+        let out = warp(&r, &fit, &opts(Some(0.5), Resampling::Bilinear)).unwrap();
+        // 12 × 12 cells over the image (one more column or row if the fit rounds the footprint up).
+        assert!(out.width >= 12 && out.height >= 12);
+        // The 4 × 4 cells over the hole have no value; before, the outer ring of them took the mean
+        // of the valid neighbours and only the middle 2 × 2 were no-data.
+        let empty: Vec<(i64, i64)> =
+            (0..12).flat_map(|row| (0..12).map(move |c| (c, row))).filter(|&(c, row)| out.value(0, c, row).is_none()).collect();
+        let hole: Vec<(i64, i64)> = (4..8).flat_map(|row| (4..8).map(move |c| (c, row))).collect();
+        assert_eq!(empty, hole);
+        assert!(out.bands[0].data.iter().all(|v| *v == 10.0 || *v == -9999.0));
+    }
+
     #[test]
     fn hostile_fits_and_options_are_refused() {
         let r = scan(4, 4, vec![vec![1.0; 16]], ColorHint::Gray, "Float32");
@@ -979,6 +1140,106 @@ mod tests {
 
     fn values(r: &Raster) -> Vec<Option<f32>> {
         (0..i64::from(r.height)).flat_map(|row| (0..i64::from(r.width)).map(move |c| (c, row))).map(|(c, row)| r.value(0, c, row)).collect()
+    }
+
+    /// Bilinear and cubic leave a cell no-data where the pixel under its centre is no-data, and
+    /// otherwise average the valid neighbours, as gdalwarp does (#973).
+    #[test]
+    fn bilinear_and_cubic_leave_a_cell_over_no_data_without_a_value() {
+        // 6 × 6 pixels, value = column + 10 · row, with a 2 × 2 no-data hole at columns and rows
+        // 2–3; cells shifted a quarter pixel, so cell (k, r) is centred in pixel (k, r + 1).
+        let mut v: Vec<f32> = (0..36).map(|i| (i % 6 + 10 * (i / 6)) as f32).collect();
+        for idx in [14, 15, 20, 21] {
+            v[idx] = -1.0;
+        }
+        // The hole as the no-data value, and as NaN in a raster without one.
+        let nan: Vec<f32> = v.iter().map(|&x| if x < 0.0 { f32::NAN } else { x }).collect();
+        let r = utm(6, 6, v, "Float32");
+        let mut no_nodata = utm(6, 6, nan, "Float32");
+        no_nodata.nodata = None;
+        let g = Grid::snapped(r.crs, [0.25, 0.25, 5.25, 5.25], (1.0, 1.0), (0.25, 0.25)).unwrap();
+        assert_eq!((g.width, g.height), (5, 5));
+        // gdalwarp -r bilinear and -r cubic (GDAL 3.12.2 and 3.13.1) on the same grid; the NaN
+        // raster with `-srcnodata nan` gives the same values.
+        let n = None;
+        let gdal = [
+            [Some(7.75), Some(8.75), Some(9.75), Some(10.75), Some(11.75)],
+            [Some(17.75), Some(18.0), n, n, Some(21.75)],
+            [Some(27.75), Some(28.5), n, n, Some(31.75)],
+            [Some(37.75), Some(39.2), Some(42.25), Some(42.538_46), Some(41.75)],
+            [Some(47.75), Some(48.75), Some(49.75), Some(50.75), Some(51.75)],
+        ];
+        for src in [&r, &no_nodata] {
+            let out = values(&project(src, &g, Method::Sample(Resampling::Bilinear), "b".into()).unwrap());
+            for (got, want) in out.iter().zip(gdal.iter().flatten()) {
+                assert_eq!(got.is_some(), want.is_some(), "{out:?}");
+                if let (Some(a), Some(b)) = (got, want) {
+                    assert!((a - b).abs() < 1e-4, "{out:?}");
+                }
+            }
+            // Cubic: the cells over the hole have no value either. The others in columns 1–4 of
+            // rows 1–3 have a hole pixel among their sixteen, so they fall back to bilinear, as in
+            // GDAL; this test doesn't reach the cubic kernel itself.
+            let out = values(&project(src, &g, Method::Sample(Resampling::Cubic), "c".into()).unwrap());
+            for (i, (got, want)) in out.iter().zip(gdal.iter().flatten()).enumerate() {
+                assert_eq!(got.is_some(), want.is_some(), "{out:?}");
+                let (row, col) = (i / 5, i % 5);
+                if (1..=3).contains(&row)
+                    && (1..=4).contains(&col)
+                    && let (Some(a), Some(b)) = (got, want)
+                {
+                    assert!((a - b).abs() < 1e-4, "cell ({col}, {row}): {out:?}");
+                }
+            }
+        }
+    }
+
+    /// A colour pixel has no value only where every channel is no-data: one channel at the
+    /// no-data value blends from the neighbours, as in gdalwarp (`UNIFIED_SRC_NODATA=PARTIAL`).
+    #[test]
+    fn a_colour_cell_needs_every_channel_no_data_to_have_no_value() {
+        // 6 × 6 pixels of (100, 150, 200), no-data 0: pixel (2, 2) has red 0, pixel (4, 4) is 0 in
+        // every channel. Cells shifted a quarter pixel, so cell (k, r) is centred in pixel (k, r + 1).
+        let mut bands = vec![vec![100.0f32; 36], vec![150.0; 36], vec![200.0; 36]];
+        bands[0][14] = 0.0;
+        for band in &mut bands {
+            band[28] = 0.0;
+        }
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 6.0, pixel_width: 1.0, pixel_height: -1.0 };
+        let crs = Crs::from_epsg(32613).unwrap();
+        let r = Raster::new("rgb", 6, 6, bands, gt, crs, Some(0.0), ColorHint::Rgb { alpha: false }, "UInt8").unwrap();
+        let g = Grid::snapped(r.crs, [0.25, 0.25, 5.25, 5.25], (1.0, 1.0), (0.25, 0.25)).unwrap();
+        // gdalwarp -r bilinear and -r cubic (GDAL 3.12.2 and 3.13.1): (100, 150, 200) over the
+        // pixel with red 0, and no value over the one that is 0 in every channel.
+        for method in [Resampling::Bilinear, Resampling::Cubic] {
+            let out = project(&r, &g, Method::Sample(method), "o".into()).unwrap();
+            let cell = |c, row| (0..3).map(|b| out.value(b, c, row)).collect::<Vec<_>>();
+            assert_eq!(cell(2, 1), [Some(100.0), Some(150.0), Some(200.0)], "{method:?}");
+            assert_eq!(cell(4, 3), [None, None, None], "{method:?}");
+        }
+    }
+
+    /// A colour image without no-data gains an alpha band; a cell over a pixel with no value in
+    /// any band (NaN in a float image) is see-through there, not opaque black.
+    #[test]
+    fn an_added_alpha_is_clear_over_a_pixel_with_no_value() {
+        // 6 × 6 pixels of (100, 150, 200), Float32 without no-data, pixel (2, 2) NaN in every
+        // band. Cells shifted a quarter pixel, so cell (k, r) is centred in pixel (k, r + 1).
+        let mut bands = vec![vec![100.0f32; 36], vec![150.0; 36], vec![200.0; 36]];
+        for band in &mut bands {
+            band[14] = f32::NAN;
+        }
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 6.0, pixel_width: 1.0, pixel_height: -1.0 };
+        let crs = Crs::from_epsg(32613).unwrap();
+        let r = Raster::new("rgb", 6, 6, bands, gt, crs, None, ColorHint::Rgb { alpha: false }, "Float32").unwrap();
+        let g = Grid::snapped(r.crs, [0.25, 0.25, 5.25, 5.25], (1.0, 1.0), (0.25, 0.25)).unwrap();
+        for method in [Resampling::Nearest, Resampling::Bilinear, Resampling::Cubic] {
+            let out = project(&r, &g, Method::Sample(method), "o".into()).unwrap();
+            assert_eq!(out.bands.len(), 4, "{method:?}: an alpha band is added");
+            let alpha = |c: usize, row: usize| out.bands[3].data[row * 5 + c];
+            assert_eq!(alpha(2, 1), 0.0, "{method:?}: over the NaN pixel");
+            assert_eq!(alpha(1, 1), 255.0, "{method:?}: next to it");
+        }
     }
 
     /// Average and mode take every pixel whose centre falls in a cell, no-data skipped; mode's
@@ -1099,6 +1360,43 @@ mod tests {
         let far = Grid::snapped(crs, [-1e308, 0.0, 0.0, 10.0], (1e300, 1.0), (1e308, 0.0)).unwrap_err();
         assert!(far.contains("can't make a grid"), "{far}");
         assert!(Grid::snapped(crs, [0.0, 0.0, 10.0, 10.0], (1.0, 1.0), (f64::NAN, 0.0)).is_err());
+    }
+
+    /// Rows made on several threads are those made on one, bit for bit, for every method: each
+    /// cell is made from the source alone, and an aggregating thread that skips rows places the
+    /// top corners it didn't keep (#1252).
+    #[test]
+    fn project_on_several_threads_is_project_on_one() {
+        // 300 × 200 pixels of 0.001° near Teresina, colour with alpha, some see-through.
+        let (w, h) = (300u32, 200u32);
+        let n = (w * h) as usize;
+        let band = |k: usize| (0..n).map(|i| ((i * (7 + k) + i / 300 * 13) % 256) as f32).collect::<Vec<f32>>();
+        let alpha = (0..n).map(|i| if i % 17 == 0 { 0.0 } else { 255.0 }).collect();
+        let gt = GeoTransform { origin_x: -42.82, origin_y: -5.08, pixel_width: 0.001, pixel_height: -0.001 };
+        let colour =
+            Raster::new("t", w, h, vec![band(0), band(1), band(2), alpha], gt, Crs::LonLat, None, ColorHint::Rgb { alpha: true }, "UInt8")
+                .unwrap();
+        let data = Raster::new("d", w, h, vec![band(3)], gt, Crs::LonLat, Some(0.0), ColorHint::Gray, "Float32").unwrap();
+        let utm23s = Crs::from_epsg(31983).unwrap();
+        let bits = |r: &Raster| r.bands.iter().map(|b| b.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>()).collect::<Vec<_>>();
+        for r in [&colour, &data] {
+            let (bounds, cell) = footprint_in(r, utm23s).unwrap();
+            // Finer and coarser than the source, so aggregating cells take one pixel or many.
+            for scale in [0.7, 2.5] {
+                let g = Grid::snapped(utm23s, bounds, (cell * scale, cell * scale), (0.0, 0.0)).unwrap();
+                for method in [
+                    Method::Sample(Resampling::Nearest),
+                    Method::Sample(Resampling::Bilinear),
+                    Method::Sample(Resampling::Cubic),
+                    Method::Average,
+                    Method::Mode,
+                ] {
+                    let one = project_on(Some(1), r, &g, method, "p".into()).unwrap();
+                    let many = project_on(Some(4), r, &g, method, "p".into()).unwrap();
+                    assert_eq!(bits(&one), bits(&many), "{} {method:?} at {scale}", r.name);
+                }
+            }
+        }
     }
 
     /// A raster projected to another system and back keeps its values in place, within a cell.

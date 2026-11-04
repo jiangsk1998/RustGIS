@@ -28,7 +28,7 @@ pub fn commands() -> Vec<C> {
             .when(|s| if s.can_redo() { None } else { Some("nothing to redo") }),
         C::new("tool.set", "Set Map Tool", "Home › Navigate", set_tool)
             .view()
-            .params(r#"{"tool": "explore"|"select"|"selectPolygon"|"selectLasso"|"selectRadius"|"zoomIn"|"measure"|"measureArea"|"createPoint"|"createLine"|"createPolygon"|"editVertices"|"graphicPoint"|"graphicText"|"graphicLine"|"graphicCurve"|"graphicFreehand"|"graphicPolygon"|"graphicLasso"|"graphicRectangle"|"graphicCircle"|"graphicEllipse"|"graphicPicture"}"#),
+            .params(r#"{"tool": "explore"|"select"|"selectPolygon"|"selectLasso"|"selectRadius"|"zoomIn"|"measure"|"measureArea"|"createPoint"|"createLine"|"createPolygon"|"editVertices"|"cutPolygon"|"reshape"|"graphicPoint"|"graphicText"|"graphicLine"|"graphicCurve"|"graphicFreehand"|"graphicPolygon"|"graphicLasso"|"graphicRectangle"|"graphicCircle"|"graphicEllipse"|"graphicPicture"}"#),
         C::new("info.project", "Project Info", "Project", info).view().params(r#"{"nameFilter"?: string, "includeFields"?: bool}"#),
         C::new("info.commands", "List Commands", "Help", list).view(),
         // The session log (#797): read, written out, emptied, turned on or off. It sits outside
@@ -85,13 +85,6 @@ fn log(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"entries": shown, "count": count, "total": total, "on": s.log.on()}))
 }
 
-/// A CSV cell: quoted, and kept from being read as a formula where it starts as one does (`=`,
-/// `+`, `-`, `@`, or a tab or carriage return before them), as spreadsheets would.
-fn csv_cell(t: &str) -> String {
-    let lead = if t.starts_with(['=', '+', '-', '@', '\t', '\r']) { "'" } else { "" };
-    format!("\"{lead}{}\"", t.replace('"', "\"\""))
-}
-
 /// `project.exportLog`: the log written out, as CSV (one row an entry, the parameters as a JSON
 /// column) or JSON Lines (one entry a line).
 fn export_log(s: &mut Session, p: &Value) -> CmdResult {
@@ -126,37 +119,11 @@ fn export_log(s: &mut Session, p: &Value) -> CmdResult {
     // Written entry by entry, so a long log isn't held as text first; a failure part way leaves
     // an existing file as it was.
     let n = s.log.len();
-    rustgis_data::io::write_atomic_with(&path, |w| {
-        use std::io::Write;
-        if format == "csv" {
-            w.write_all(b"time_utc,at,command,ok,millis,error,params\n")?;
-        }
-        s.log.entries().try_for_each(|e| write_entry(w, e, format))
-    })
-    .map_err(|e| format!("{}: {e}", path.display()))?;
-    s.notify(format!("Exported the session log ({n} entries) to {}", path.display()), false);
+    rustgis_data::io::write_atomic_with(&path, |w| s.log.write(w, format == "csv")).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Entries dropped past the log's limits aren't in the file: said.
+    let dropped = s.log.dropped_said().map(|d| format!("; not in it: {d}")).unwrap_or_default();
+    s.notify(format!("Exported the session log ({n} entries) to {}{dropped}", path.display()), false);
     Ok(json!({"path": path.display().to_string(), "entries": n, "format": format}))
-}
-
-/// Entry `e` as a CSV row or a JSON line, written to `w`.
-fn write_entry(w: &mut dyn std::io::Write, e: &crate::project_log::LogEntry, format: &str) -> std::io::Result<()> {
-    if format == "csv" {
-        let (date, time) = rustgis_map::graphics::civil(e.at / 1000);
-        writeln!(
-            w,
-            "{date} {time}:{:02},{},{},{},{},{},{}",
-            (e.at / 1000) % 60,
-            e.at,
-            csv_cell(&e.command),
-            e.ok,
-            e.millis,
-            csv_cell(e.error.as_deref().unwrap_or("")),
-            csv_cell(&e.params.to_string())
-        )
-    } else {
-        serde_json::to_writer(&mut *w, e).map_err(std::io::Error::other)?;
-        w.write_all(b"\n")
-    }
 }
 
 /// `project.clearLog`: empties the log, which then holds this command's own entry, so a cleared
@@ -204,6 +171,17 @@ fn reset(s: &mut Session, p: Project) {
     // nothing of the new project is fetched before.
     s.s3_pending.clear();
     crate::s3_connections::resolve_project_s3(s);
+    // What reading a raster left out (a colour table, names, a sidecar's scale) is said again as
+    // the project opens, as when it was added. One still read in the background isn't here yet.
+    let lost: Vec<(String, String)> = s
+        .project
+        .maps
+        .iter()
+        .flat_map(|m| &m.layers)
+        .filter_map(|l| Some((&l.name, l.raster.as_ref()?.data.as_ref()?)))
+        .flat_map(|(name, d)| d.lost.iter().map(move |l| (name.clone(), l.clone())))
+        .collect();
+    super::raster::say_losses(s, lost);
     // A terrain saved on a DEM name two layers share draws the first of them: said, as the
     // project opens (its layers keep their names).
     let shared: Vec<(String, String)> = s
@@ -377,6 +355,8 @@ fn rename(s: &mut Session, p: &Value) -> CmdResult {
     Ok(Value::Null)
 }
 
+/// Picks the map tool: a Create tool needs a layer of its kind selected, and the tools that
+/// change features (Edit Vertices, Cut Polygon, Reshape) need editing on.
 fn set_tool(s: &mut Session, p: &Value) -> CmdResult {
     let t = parse_tool(p)?;
     if t.creates() {
@@ -392,7 +372,7 @@ fn set_tool(s: &mut Session, p: &Value) -> CmdResult {
             return Err(format!("{} needs a {} layer", t.label(), t.label().trim_start_matches("Create ").to_lowercase()));
         }
     }
-    if t == Tool::EditVertices && !s.map().editing.settings.enabled {
+    if matches!(t, Tool::EditVertices | Tool::CutPolygon | Tool::Reshape) && !s.map().editing.settings.enabled {
         return Err("editing is turned off (Edit › Edit)".into());
     }
     s.tool = t;
