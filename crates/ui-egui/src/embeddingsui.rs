@@ -466,7 +466,7 @@ pub fn pane(app: &mut RustGisApp, ui: &mut egui::Ui) {
         });
     } else {
         ui.label(
-            egui::RichText::new(tl!("Listed for discovery: RustGIS doesn't read this dataset yet. Its data and paper are linked above."))
+            egui::RichText::new(tl!("Listed for discovery: HuaGIS doesn't read this dataset yet. Its data and paper are linked above."))
                 .color(t.text_dim),
         );
     }

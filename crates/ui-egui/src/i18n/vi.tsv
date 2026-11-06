@@ -60,8 +60,8 @@ A line, or markers or hash marks along it	Một đường, hoặc điểm đánh
 A magnifying lens that follows the pointer.	Kính lúp di chuyển theo con trỏ.
 A map, feature or coverage service's address: WMS, WMTS, WFS, WCS, OGC API Features or Tiles, or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer (or a services directory, to browse).	Địa chỉ của một dịch vụ bản đồ, đối tượng hoặc coverage: WMS, WMTS, WFS, WCS, OGC API Features hoặc Tiles, hoặc ArcGIS FeatureServer, MapServer, ImageServer hoặc VectorTileServer (hoặc một thư mục dịch vụ để duyệt).
 a name, or owner/name such as giswqs/geospatial	một tên, hoặc chủ sở hữu/tên như giswqs/geospatial
-A named endpoint you can reuse. Keys and tokens are kept until RustGIS closes, never saved.	Một điểm cuối có tên mà bạn có thể dùng lại. Khóa và token được giữ cho đến khi RustGIS đóng, không bao giờ được lưu.
-A named endpoint you can reuse. Keys are kept until RustGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	Một điểm cuối có tên mà bạn có thể dùng lại. Khóa được giữ cho đến khi RustGIS đóng, trừ khi bạn chọn ghi nhớ chúng trên máy tính này; bản thân kết nối không bao giờ giữ chúng.
+A named endpoint you can reuse. Keys and tokens are kept until HuaGIS closes, never saved.	Một điểm cuối có tên mà bạn có thể dùng lại. Khóa và token được giữ cho đến khi HuaGIS đóng, không bao giờ được lưu.
+A named endpoint you can reuse. Keys are kept until HuaGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	Một điểm cuối có tên mà bạn có thể dùng lại. Khóa được giữ cho đến khi HuaGIS đóng, trừ khi bạn chọn ghi nhớ chúng trên máy tính này; bản thân kết nối không bao giờ giữ chúng.
 A named endpoint you can reuse. Passwords last for this session unless you choose to remember them in this computer's password store.	Một điểm cuối có tên mà bạn có thể dùng lại. Mật khẩu chỉ dùng trong phiên này, trừ khi bạn chọn ghi nhớ chúng trong kho mật khẩu của máy tính này.
 A node cannot connect to itself.	Một nút không thể kết nối với chính nó.
 A notebook of text and command cells.	Sổ tay gồm các ô văn bản và ô lệnh.
@@ -98,8 +98,8 @@ A5 Grid	Lưới A5
 A5's equal-area pentagonal cells at a resolution, over the map's extent, a layer or the world, as polygons with their ids.	Các ô ngũ giác đồng diện tích của A5 ở một độ phân giải, trên phạm vi bản đồ, một lớp hoặc toàn thế giới, dưới dạng vùng kèm id của chúng.
 About	Giới thiệu
 About plugins	Giới thiệu về plugin
-About RustGIS	Giới thiệu RustGIS
-About RustGIS.	Giới thiệu RustGIS.
+About HuaGIS	Giới thiệu HuaGIS
+About HuaGIS.	Giới thiệu HuaGIS.
 Above	Trên
 Above Left	Trên trái
 Above Right	Trên phải
@@ -276,7 +276,7 @@ Agent input queue is full or disconnected; stop the agent and try again.	Hàng �
 Agent threads	Luồng tác tử
 Agent work	Agent work
 Agents have full access: they may run scripts, tasks, models and plugins. Click to stop the MCP relay	Các tác tử có toàn quyền truy cập: chúng có thể chạy script, nhiệm vụ, mô hình và plugin. Nhấp để dừng chuyển tiếp MCP
-Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	Các tác tử trên máy tính này đã kết nối (Claude Code, Codex, Cursor và các tác tử khác) làm việc trên bản đồ đang mở ở đây bằng công cụ của RustGIS: chúng có thể mở, lưu tệp và dùng web. Script và quản lý plugin vẫn tắt.
+Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with HuaGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	Các tác tử trên máy tính này đã kết nối (Claude Code, Codex, Cursor và các tác tử khác) làm việc trên bản đồ đang mở ở đây bằng công cụ của HuaGIS: chúng có thể mở, lưu tệp và dùng web. Script và quản lý plugin vẫn tắt.
 Agents then run commands, change files and use the web on this computer without asking you.	Khi đó tác tử sẽ chạy lệnh, thay đổi tệp và dùng web trên máy tính này mà không hỏi bạn.
 Aggregate Points to A5	Gộp điểm vào A5
 Aggregation	Gộp nhóm
@@ -301,7 +301,7 @@ Allow Feature Selection	Cho phép chọn đối tượng
 Allow only certain combinations of values across fields.	Chỉ cho phép một số tổ hợp giá trị nhất định giữa các trường.
 Allow such actions for this conversation	Cho phép các thao tác như vậy trong cuộc trò chuyện này
 Allow this action?	Cho phép thao tác này?
-Allow this agent's RustGIS action?	Cho phép thao tác RustGIS này của tác tử?
+Allow this agent's HuaGIS action?	Cho phép thao tác HuaGIS này của tác tử?
 Along lines	Dọc theo đường
 Along Selected Line	Dọc theo đường được chọn
 Alt+	Alt+
@@ -313,7 +313,7 @@ Alternating bar	Thanh xen kẽ
 Altitude	Độ cao
 Always allow	Luôn cho phép
 Amazon S3	Amazon S3
-Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3, hoặc một dịch vụ tương thích S3 (MinIO, Cloudflare R2, Wasabi…) theo điểm cuối của nó. Khóa được giữ cho đến khi RustGIS đóng; kết nối đã lưu giữ tên, điểm cuối và khu vực, không bao giờ giữ khóa bí mật.
+Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until HuaGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3, hoặc một dịch vụ tương thích S3 (MinIO, Cloudflare R2, Wasabi…) theo điểm cuối của nó. Khóa được giữ cho đến khi HuaGIS đóng; kết nối đã lưu giữ tên, điểm cuối và khu vực, không bao giờ giữ khóa bí mật.
 amenity=cafe, shop	amenity=cafe, shop
 An agent on this computer asks to:	Một tác tử trên máy tính này yêu cầu:
 An ArcGIS Online organization's or an ArcGIS Enterprise portal's address; ArcGIS Online when blank	Địa chỉ của tổ chức ArcGIS Online hoặc cổng ArcGIS Enterprise; để trống là ArcGIS Online
@@ -363,7 +363,7 @@ Arrange	Sắp xếp
 Arrange Element	Sắp xếp phần tử
 Arrow	Mũi tên
 Arrowheads	Đầu mũi tên
-Ask a question about your data, or describe what to do with the map. The assistant runs RustGIS commands for you; every change can be undone.	Đặt câu hỏi về dữ liệu của bạn, hoặc mô tả việc cần làm với bản đồ. Trợ lý sẽ chạy các lệnh RustGIS cho bạn; mọi thay đổi đều có thể hoàn tác.
+Ask a question about your data, or describe what to do with the map. The assistant runs HuaGIS commands for you; every change can be undone.	Đặt câu hỏi về dữ liệu của bạn, hoặc mô tả việc cần làm với bản đồ. Trợ lý sẽ chạy các lệnh HuaGIS cho bạn; mọi thay đổi đều có thể hoàn tác.
 Ask about the map, or tell it what to do…	Hỏi về bản đồ, hoặc bảo nó cần làm gì…
 Ask about your data, or tell the assistant what to do with the map.	Hỏi về dữ liệu của bạn, hoặc bảo trợ lý cần làm gì với bản đồ.
 Ask Which Layers to Add	Hỏi lớp nào cần thêm
@@ -717,7 +717,7 @@ Color Vision Simulator	Trình mô phỏng thị giác màu
 Colorbar	Thanh màu
 Colormap	Bản đồ màu
 Colors from the raster's own color table.	Màu lấy từ bảng màu riêng của raster.
-Colour ramps (RustGIS, QGIS, GDAL, GMT)	Dải màu (RustGIS, QGIS, GDAL, GMT)
+Colour ramps (HuaGIS, QGIS, GDAL, GMT)	Dải màu (HuaGIS, QGIS, GDAL, GMT)
 Columns named like longitude/latitude, easting/northing or geometry are picked for you.	Các cột có tên như longitude/latitude, easting/northing hoặc geometry được chọn sẵn cho bạn.
 Combinations from the box above, one per line	Các tổ hợp từ ô phía trên, mỗi dòng một tổ hợp
 Combines two polygon layers into every piece either covers, with the attributes of both where they overlap.	Kết hợp hai lớp vùng thành mọi phần mà một trong hai phủ, với thuộc tính của cả hai ở chỗ chồng nhau.
@@ -924,7 +924,7 @@ Delete selected rows	Xóa các hàng được chọn
 Delete Style	Xóa kiểu
 Delete Task	Xóa nhiệm vụ
 Delete Task Step	Xóa bước nhiệm vụ
-Delete the GeoLibre runner that RustGIS installed. Install it again at any time.	Xóa trình chạy GeoLibre mà RustGIS đã cài đặt. Có thể cài đặt lại bất cứ lúc nào.
+Delete the GeoLibre runner that HuaGIS installed. Install it again at any time.	Xóa trình chạy GeoLibre mà HuaGIS đã cài đặt. Có thể cài đặt lại bất cứ lúc nào.
 Delete the layout {name}?	Xóa bố cục {name}?
 Delete the map {name}?	Xóa bản đồ {name}?
 Delete the selected features.	Xóa các đối tượng được chọn.
@@ -1136,7 +1136,7 @@ Element Properties	Thuộc tính phần tử
 Elevation	Độ cao
 Elevation model	Mô hình độ cao
 Elevation profiles along lines, cross sections and more.	Mặt cắt độ cao dọc theo đường, mặt cắt ngang và hơn thế.
-Eligible requests in RustGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	Các yêu cầu đủ điều kiện trong RustGIS dùng gói ChatGPT của bạn. Bạn có thể quản lý mức sử dụng trong cài đặt ChatGPT.
+Eligible requests in HuaGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	Các yêu cầu đủ điều kiện trong HuaGIS dùng gói ChatGPT của bạn. Bạn có thể quản lý mức sử dụng trong cài đặt ChatGPT.
 Ellipse	Hình elip
 Embeddings	Embedding
 Ember	Than hồng
@@ -1329,7 +1329,7 @@ Find and run geoprocessing tools.	Tìm và chạy công cụ xử lý không gia
 Find any command by name (Ctrl+K).	Tìm bất kỳ lệnh nào theo tên (Ctrl+K).
 Find Items	Tìm mục
 Find Place	Tìm địa điểm
-Find plugins in the RustGIS plugin registry.	Tìm plugin trong kho plugin RustGIS.
+Find plugins in the HuaGIS plugin registry.	Tìm plugin trong kho plugin HuaGIS.
 Find Similar	Tìm tương tự
 Find Tools	Tìm công cụ
 Finding routes…	Đang tìm tuyến đường…
@@ -1363,14 +1363,14 @@ Folder…	Thư mục…
 Follow the time slider	Theo thanh trượt thời gian
 Font	Phông chữ
 for a store that doesn't say	cho kho không ghi rõ
-For ArcGIS Online, the client ID is RustGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	Với ArcGIS Online, client ID là ứng dụng riêng của RustGIS. Với cổng ArcGIS Enterprise, hãy đăng ký trên đó một ứng dụng OAuth (Content › New item › Developer credentials) có URL chuyển hướng là {redirect}, rồi nhập client ID của nó.
+For ArcGIS Online, the client ID is HuaGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	Với ArcGIS Online, client ID là ứng dụng riêng của HuaGIS. Với cổng ArcGIS Enterprise, hãy đăng ký trên đó một ứng dụng OAuth (Content › New item › Developer credentials) có URL chuyển hướng là {redirect}, rồi nhập client ID của nó.
 for the layers that change with time, as they list their times (2024-06-01, 1995)	cho các lớp thay đổi theo thời gian, như chúng liệt kê thời gian của mình (2024-06-01, 1995)
 Forest	Rừng
 Forget Earthdata Login Token	Quên token Earthdata Login
 Forget Saved Keys	Quên khóa đã lưu
 Forget Saved Password	Quên mật khẩu đã lưu
 Format	Định dạng
-Found: {names}. An agent works on this map through RustGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › RustGIS › Agent work. It asks you before each action.	Đã tìm thấy: {names}. Tác tử làm việc trên bản đồ này bằng công cụ của RustGIS và công cụ riêng (web, script, tệp), trong thư mục riêng được lưu ở Tài liệu › RustGIS › Agent work. Nó sẽ hỏi bạn trước mỗi thao tác.
+Found: {names}. An agent works on this map through HuaGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › HuaGIS › Agent work. It asks you before each action.	Đã tìm thấy: {names}. Tác tử làm việc trên bản đồ này bằng công cụ của HuaGIS và công cụ riêng (web, script, tệp), trong thư mục riêng được lưu ở Tài liệu › HuaGIS › Agent work. Nó sẽ hỏi bạn trước mỗi thao tác.
 Frame rate	Tốc độ khung hình
 Frame rate, draw time, data size and memory.	Tốc độ khung hình, thời gian vẽ, kích thước dữ liệu và bộ nhớ.
 France	Pháp
@@ -1534,7 +1534,7 @@ host=localhost dbname=gis user=postgres	host=localhost dbname=gis user=postgres
 host=… dbname=… user=…	host=… dbname=… user=…
 Hosted Imagery	Ảnh lưu trữ trực tuyến
 Hour	Giờ
-How often RustGIS keeps a copy of unsaved work, to offer it back after a crash.	Tần suất RustGIS giữ một bản sao của công việc chưa lưu, để đề xuất lại sau khi gặp sự cố.
+How often HuaGIS keeps a copy of unsaved work, to offer it back after a crash.	Tần suất HuaGIS giữ một bản sao của công việc chưa lưu, để đề xuất lại sau khi gặp sự cố.
 How the layer's colours combine with the tile layers and basemap beneath.	Cách màu của lớp kết hợp với các lớp ô bản đồ và bản đồ nền bên dưới.
 How the layer's colours combine with what's beneath.	Cách màu của lớp kết hợp với những gì bên dưới.
 HUB Ocean's Ocean Data Platform: marine datasets, read as features (up to 10,000 each).	Ocean Data Platform của HUB Ocean: các bộ dữ liệu biển, đọc dưới dạng đối tượng (tối đa 10.000 mỗi bộ).
@@ -1601,7 +1601,7 @@ In memory	Trong bộ nhớ
 In Progress	Đang thực hiện
 in progress	đang thực hiện
 In project	Trong dự án
-In RustGIS, it can:	Trong RustGIS, nó có thể:
+In HuaGIS, it can:	Trong HuaGIS, nó có thể:
 In the browser, pick the .shp and .dbf together, with any sidecars, or pick a ZIP. The override applies to every Shapefile in the ZIP.	Trong trình duyệt, hãy chọn cùng lúc tệp .shp và .dbf cùng các tệp đi kèm, hoặc chọn một tệp ZIP. Thiết lập thay thế áp dụng cho mọi Shapefile trong ZIP.
 In the coordinate system's units: metres for UTM.	Theo đơn vị của hệ tọa độ: mét với UTM.
 In the middle	Ở giữa
@@ -1689,7 +1689,7 @@ Item Pop-ups	Cửa sổ bật lên của mục
 Item {id}	Mục {id}
 its default	giá trị mặc định của nó
 Its default: {default}. Its times: {times}	Mặc định: {default}. Thời gian: {times}
-Its firewall ({firewall}) blocked RustGIS. The service may only allow some applications: contact its administrator and send them the details below.	Tường lửa của nó ({firewall}) đã chặn RustGIS. Dịch vụ có thể chỉ cho phép một số ứng dụng: hãy liên hệ quản trị viên và gửi cho họ các chi tiết bên dưới.
+Its firewall ({firewall}) blocked HuaGIS. The service may only allow some applications: contact its administrator and send them the details below.	Tường lửa của nó ({firewall}) đã chặn HuaGIS. Dịch vụ có thể chỉ cho phép một số ứng dụng: hãy liên hệ quản trị viên và gửi cho họ các chi tiết bên dưới.
 Its tool isn't available now (a plugin's, not loaded, or a suite's, not installed)	Công cụ của nó hiện không khả dụng (của một plugin chưa tải, hoặc của một bộ công cụ chưa cài đặt)
 Jobs	Tác vụ
 JOIN	JOIN
@@ -1719,7 +1719,7 @@ Keep Tool	Giữ công cụ
 Keep value	Giữ giá trị
 Keeps the access key ID and secret access key in this computer's credential store, never in the connection or the project.	Giữ ID khóa truy cập và khóa truy cập bí mật trong kho thông tin xác thực của máy tính này, không bao giờ trong kết nối hay dự án.
 Keeps the parts of two polygon layers that only one of them covers, with that layer's attributes.	Giữ các phần của hai lớp vùng mà chỉ một trong hai phủ, với thuộc tính của lớp đó.
-Keeps the token in the system's credential store, so it is there when RustGIS starts again. Unticked, a token remembered before is deleted when you save another.	Giữ token trong kho thông tin xác thực của hệ thống, để nó vẫn có khi RustGIS khởi động lại. Nếu bỏ chọn, token đã ghi nhớ trước đó sẽ bị xóa khi bạn lưu token khác.
+Keeps the token in the system's credential store, so it is there when HuaGIS starts again. Unticked, a token remembered before is deleted when you save another.	Giữ token trong kho thông tin xác thực của hệ thống, để nó vẫn có khi HuaGIS khởi động lại. Nếu bỏ chọn, token đã ghi nhớ trước đó sẽ bị xóa khi bạn lưu token khác.
 Kernel Density	Mật độ kernel
 Kernel Type	Loại kernel
 Key	Key
@@ -1800,7 +1800,7 @@ Legend label. Clear it to show the value again.	Nhãn chú giải. Xóa nhãn đ
 Length	Độ dài
 Length {length} · gain {gain} · loss {loss}	Chiều dài {length} · lên {gain} · xuống {loss}
 Let the assistant hand tasks to agents on this computer	Cho phép trợ lý giao việc cho các tác tử trên máy tính này
-Let your Agents Control RustGIS	Cho phép tác tử của bạn điều khiển RustGIS
+Let your Agents Control HuaGIS	Cho phép tác tử của bạn điều khiển HuaGIS
 Letter spacing	Khoảng cách chữ
 Level	Cấp
 Library	Thư viện
@@ -1856,7 +1856,7 @@ List The National Map Services	Liệt kê dịch vụ The National Map
 List the provider's models	Liệt kê các mô hình của nhà cung cấp
 List this layer in the legend	Liệt kê lớp này trong chú giải
 List what it holds	Liệt kê nội dung
-Listed for discovery: RustGIS doesn't read this dataset yet. Its data and paper are linked above.	Liệt kê để khám phá: RustGIS chưa đọc được bộ dữ liệu này. Dữ liệu và bài báo của nó được liên kết ở trên.
+Listed for discovery: HuaGIS doesn't read this dataset yet. Its data and paper are linked above.	Liệt kê để khám phá: HuaGIS chưa đọc được bộ dữ liệu này. Dữ liệu và bài báo của nó được liên kết ở trên.
 Listing datasets…	Đang liệt kê bộ dữ liệu…
 Listing…	Đang liệt kê…
 Lit	Sáng
@@ -1901,7 +1901,7 @@ Look for {name}, outlined on the ribbon.	Tìm {name}, được viền nổi bậ
 Looking up the place…	Đang tra cứu địa điểm…
 Loop	Lặp lại
 Lower Priority	Giảm ưu tiên
-Made in RustGIS: samples, drawings and tool outputs	Tạo trong RustGIS: dữ liệu mẫu, hình vẽ và kết quả công cụ
+Made in HuaGIS: samples, drawings and tool outputs	Tạo trong HuaGIS: dữ liệu mẫu, hình vẽ và kết quả công cụ
 Magnifier	Kính lúp
 Major Lakes	Hồ lớn
 Major Rivers	Sông lớn
@@ -2157,7 +2157,7 @@ no command	không có lệnh
 No data at the points picked.	Không có dữ liệu tại các điểm đã chọn.
 No data cube matches	Không có khối dữ liệu nào khớp
 No datasets match.	Không có bộ dữ liệu nào khớp.
-No datasets with data RustGIS can add	Không có bộ dữ liệu nào chứa dữ liệu RustGIS có thể thêm
+No datasets with data HuaGIS can add	Không có bộ dữ liệu nào chứa dữ liệu HuaGIS có thể thêm
 no date in the name	không có ngày trong tên
 no download service	không có dịch vụ tải xuống
 No edits since the project was saved	Không có chỉnh sửa nào từ lần lưu dự án gần nhất
@@ -2219,8 +2219,8 @@ North Polar Stereographic	Phép chiếu nổi cực Bắc
 NOT	NOT
 Not a GeoLibre project	Không phải dự án GeoLibre
 not a picture	không phải ảnh
-not a RustGIS layout	không phải bố cục RustGIS
-not a RustGIS project	không phải dự án RustGIS
+not a HuaGIS layout	không phải bố cục HuaGIS
+not a HuaGIS project	không phải dự án HuaGIS
 Not applied yet.	Chưa được áp dụng.
 Not for texts: a text is edited in the Format pane.	Không dành cho văn bản: văn bản được sửa trong khung Định dạng.
 not needed	không cần
@@ -2291,7 +2291,7 @@ Open a Data Cube	Mở một khối dữ liệu
 open a layout first	hãy mở một bố cục trước
 Open a model file (*.model.json)	Mở tệp mô hình (*.model.json)
 Open a model of this project	Mở một mô hình của dự án này
-Open a RustGIS or Jupyter notebook.	Mở sổ tay RustGIS hoặc Jupyter.
+Open a HuaGIS or Jupyter notebook.	Mở sổ tay HuaGIS hoặc Jupyter.
 Open an offline area to edit.	Mở một khu vực ngoại tuyến để chỉnh sửa.
 Open browser again	Mở lại trình duyệt
 Open Custom Template	Mở mẫu tùy chỉnh
@@ -2318,7 +2318,7 @@ Open the layer's attribute table.	Mở bảng thuộc tính của lớp.
 Open the layer's table.	Mở bảng của lớp.
 Open the plugin's panel.	Mở bảng điều khiển của plugin.
 Open the Release Page	Mở trang phát hành
-Open the RustGIS user guide.	Mở hướng dẫn sử dụng RustGIS.
+Open the HuaGIS user guide.	Mở hướng dẫn sử dụng HuaGIS.
 Open the selected layer's table.	Mở bảng của lớp được chọn.
 Open the Symbology pane.	Mở ngăn Ký hiệu.
 Open the task's steps	Mở các bước của nhiệm vụ
@@ -2494,7 +2494,7 @@ Plugin registry	Kho plugin
 Plugins	Plugin
 Plugins are .rgplugin files. Install only plugins from people you trust.	Plugin là các tệp .rgplugin. Chỉ cài đặt plugin từ những người bạn tin tưởng.
 Plugins marked Not sandboxed run as programs on your computer instead, and can do anything you can.	Các plugin được đánh dấu "Không có hộp cát" thì chạy như chương trình trên máy tính của bạn và có thể làm mọi việc bạn làm được.
-Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through RustGIS's own commands, within the permissions you accept.	Plugin chạy trong hộp cát: chúng không thể truy cập tệp của bạn hay mạng, và chỉ thay đổi dự án thông qua các lệnh của chính RustGIS, trong phạm vi quyền bạn chấp nhận.
+Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through HuaGIS's own commands, within the permissions you accept.	Plugin chạy trong hộp cát: chúng không thể truy cập tệp của bạn hay mạng, và chỉ thay đổi dự án thông qua các lệnh của chính HuaGIS, trong phạm vi quyền bạn chấp nhận.
 PMTiles archive	Kho PMTiles
 PNG frames (zip)	Khung hình PNG (zip)
 PNG image	Ảnh PNG
@@ -2571,7 +2571,7 @@ Project Template	Mẫu dự án
 project's path is required	cần có path của project
 Projection	Phép chiếu
 Projections	Các phép chiếu
-Projects and JSON data (RustGIS, QGIS, GeoLibre)	Dự án và dữ liệu JSON (RustGIS, QGIS, GeoLibre)
+Projects and JSON data (HuaGIS, QGIS, GeoLibre)	Dự án và dữ liệu JSON (HuaGIS, QGIS, GeoLibre)
 Properties	Thuộc tính
 Property	Thuộc tính
 Proportional Symbols	Ký hiệu tỷ lệ
@@ -2632,7 +2632,7 @@ Read error	Lỗi đọc
 Read the bands picked for the view (at most about 6 km a side)	Đọc các kênh đã chọn cho khung nhìn (tối đa khoảng 6 km mỗi cạnh)
 Read the map's layers and features	Đọc các lớp và đối tượng của bản đồ
 Read the points in the view, coloured by their principal components	Đọc các điểm trong khung nhìn, tô màu theo các thành phần chính của chúng
-Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	Đọc các tệp của một granule cần token Earthdata Login, dùng được cho mọi DAAC của NASA. Token được giữ cho tới khi RustGIS đóng trừ khi bạn chọn Ghi nhớ, không bao giờ lưu trong dự án, và chỉ gửi tới các máy chủ dữ liệu Earthdata của NASA.
+Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until HuaGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	Đọc các tệp của một granule cần token Earthdata Login, dùng được cho mọi DAAC của NASA. Token được giữ cho tới khi HuaGIS đóng trừ khi bạn chọn Ghi nhớ, không bao giờ lưu trong dự án, và chỉ gửi tới các máy chủ dữ liệu Earthdata của NASA.
 Reading the catalog: {n} documents read, {m} items found…	Đang đọc danh mục: đã đọc {n} tài liệu, tìm thấy {m} mục…
 Reading the catalog…	Đang đọc danh mục…
 Reading the embeddings…	Đang đọc embedding…
@@ -2817,32 +2817,32 @@ Run Tool	Chạy công cụ
 Run {name}	Chạy {name}
 Running the query for the map…	Đang chạy truy vấn cho bản đồ…
 Running…	Đang chạy…
-RustGIS	RustGIS
-RustGIS bookmarks	Dấu trang RustGIS
-RustGIS could not confirm that any previously saved key was deleted from the system keychain.	RustGIS không thể xác nhận rằng các khóa đã lưu trước đó đã bị xóa khỏi chuỗi khóa hệ thống.
-RustGIS couldn't reach the server.	RustGIS không thể kết nối tới máy chủ.
-RustGIS deep learning package	Gói học sâu RustGIS
-RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	Lần trước RustGIS không đóng đúng cách, vì vậy nó đã khởi động với World Atlas thay vì dự án khởi động của bạn. Hãy mở dự án từ menu Dự án khi bạn sẵn sàng.
-RustGIS didn't close properly last time.	RustGIS đã không đóng đúng cách lần trước.
-RustGIS doesn't have this tool. Install the tools it comes from, or delete the node.	RustGIS không có công cụ này. Hãy cài đặt bộ công cụ chứa nó, hoặc xóa nút.
-RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	RustGIS là một GIS miễn phí và mã nguồn mở viết bằng Rust thuần. Nó chạy trên máy tính và trong trình duyệt, và mọi thao tác đều là một lệnh mà bạn cũng có thể chạy từ dòng lệnh.
-RustGIS layer file	Tệp lớp RustGIS
-RustGIS layers, maps and projects	Lớp, bản đồ và dự án RustGIS
-RustGIS layout	Bố cục RustGIS
-RustGIS maps and projects	Bản đồ và dự án RustGIS
-RustGIS model	Mô hình RustGIS
-RustGIS or Jupyter notebook	Sổ tay RustGIS hoặc Jupyter
-RustGIS plugin	Plugin RustGIS
-RustGIS presentation	Bản trình bày RustGIS
-RustGIS project	Dự án RustGIS
-RustGIS project template	Mẫu dự án RustGIS
-RustGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	Lần trước RustGIS gặp lỗi nội bộ. Chi tiết nằm trong {path}; hãy đính kèm vào báo cáo lỗi.
-RustGIS report or report template	Báo cáo hoặc mẫu báo cáo RustGIS
-RustGIS styles	Kiểu RustGIS
-RustGIS task	Nhiệm vụ RustGIS
-RustGIS was quit last time without saving your changes.	Lần trước RustGIS đã thoát mà không lưu các thay đổi của bạn.
-RustGIS {latest} is available.	Đã có RustGIS {latest}.
-RustGIS {version} is the latest version.	RustGIS {version} là phiên bản mới nhất.
+HuaGIS	HuaGIS
+HuaGIS bookmarks	Dấu trang HuaGIS
+HuaGIS could not confirm that any previously saved key was deleted from the system keychain.	HuaGIS không thể xác nhận rằng các khóa đã lưu trước đó đã bị xóa khỏi chuỗi khóa hệ thống.
+HuaGIS couldn't reach the server.	HuaGIS không thể kết nối tới máy chủ.
+HuaGIS deep learning package	Gói học sâu HuaGIS
+HuaGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	Lần trước HuaGIS không đóng đúng cách, vì vậy nó đã khởi động với World Atlas thay vì dự án khởi động của bạn. Hãy mở dự án từ menu Dự án khi bạn sẵn sàng.
+HuaGIS didn't close properly last time.	HuaGIS đã không đóng đúng cách lần trước.
+HuaGIS doesn't have this tool. Install the tools it comes from, or delete the node.	HuaGIS không có công cụ này. Hãy cài đặt bộ công cụ chứa nó, hoặc xóa nút.
+HuaGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	HuaGIS là một GIS miễn phí và mã nguồn mở viết bằng Rust thuần. Nó chạy trên máy tính và trong trình duyệt, và mọi thao tác đều là một lệnh mà bạn cũng có thể chạy từ dòng lệnh.
+HuaGIS layer file	Tệp lớp HuaGIS
+HuaGIS layers, maps and projects	Lớp, bản đồ và dự án HuaGIS
+HuaGIS layout	Bố cục HuaGIS
+HuaGIS maps and projects	Bản đồ và dự án HuaGIS
+HuaGIS model	Mô hình HuaGIS
+HuaGIS or Jupyter notebook	Sổ tay HuaGIS hoặc Jupyter
+HuaGIS plugin	Plugin HuaGIS
+HuaGIS presentation	Bản trình bày HuaGIS
+HuaGIS project	Dự án HuaGIS
+HuaGIS project template	Mẫu dự án HuaGIS
+HuaGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	Lần trước HuaGIS gặp lỗi nội bộ. Chi tiết nằm trong {path}; hãy đính kèm vào báo cáo lỗi.
+HuaGIS report or report template	Báo cáo hoặc mẫu báo cáo HuaGIS
+HuaGIS styles	Kiểu HuaGIS
+HuaGIS task	Nhiệm vụ HuaGIS
+HuaGIS was quit last time without saving your changes.	Lần trước HuaGIS đã thoát mà không lưu các thay đổi của bạn.
+HuaGIS {latest} is available.	Đã có HuaGIS {latest}.
+HuaGIS {version} is the latest version.	HuaGIS {version} là phiên bản mới nhất.
 RUSTGIS_ASSISTANT_MODEL	RUSTGIS_ASSISTANT_MODEL
 RUSTGIS_ASSISTANT_PROVIDER	RUSTGIS_ASSISTANT_PROVIDER
 RUSTGIS_GPU	RUSTGIS_GPU
@@ -2851,7 +2851,7 @@ S3 Buckets	Bucket S3
 S3 Connections	Kết nối S3
 S3…	S3…
 Sample data (Natural Earth)	Dữ liệu mẫu (Natural Earth)
-Sample data © Natural Earth (public domain). RustGIS is licensed under Apache-2.0.	Dữ liệu mẫu © Natural Earth (phạm vi công cộng). RustGIS được cấp phép theo Apache-2.0.
+Sample data © Natural Earth (public domain). HuaGIS is licensed under Apache-2.0.	Dữ liệu mẫu © Natural Earth (phạm vi công cộng). HuaGIS được cấp phép theo Apache-2.0.
 Sample data: Natural Earth (public domain). Licensed under Apache-2.0.	Dữ liệu mẫu: Natural Earth (phạm vi công cộng). Cấp phép theo Apache-2.0.
 Sans-serif	Không chân
 Satellite Embedding Datasets	Các bộ dữ liệu embedding vệ tinh
@@ -2995,7 +2995,7 @@ Sections	Phần
 See and set the camera's position and scale.	Xem và đặt vị trí và tỷ lệ của máy ảnh.
 See the map as people with colour vision deficiencies do.	Xem bản đồ như người bị khiếm khuyết thị giác màu.
 See the tools you've run.	Xem các công cụ bạn đã chạy.
-See whether a newer RustGIS has been released.	Kiểm tra xem đã có bản RustGIS mới hơn chưa.
+See whether a newer HuaGIS has been released.	Kiểm tra xem đã có bản HuaGIS mới hơn chưa.
 SELECT	SELECT
 Select	Chọn
 Select (click)	Chọn (nhấp)
@@ -3193,8 +3193,8 @@ Sign-in timed out. Start again and allow the browser to reach this computer's lo
 signed in	đã đăng nhập
 Signed in to {portal}	Đã đăng nhập vào {portal}
 Signed in to {portal} as {user}	Đã đăng nhập vào {portal} với tên {user}
-Signed out on this computer, but OpenAI didn't confirm it. You can disconnect RustGIS in ChatGPT's settings.	Đã đăng xuất trên máy tính này, nhưng OpenAI chưa xác nhận. Bạn có thể ngắt kết nối RustGIS trong cài đặt ChatGPT.
-Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect RustGIS in ChatGPT's settings.	Đã đăng xuất trên máy tính này, nhưng không đọc được chuỗi khóa hệ thống nên OpenAI không được yêu cầu kết thúc phiên. Bạn có thể ngắt kết nối RustGIS trong cài đặt ChatGPT.
+Signed out on this computer, but OpenAI didn't confirm it. You can disconnect HuaGIS in ChatGPT's settings.	Đã đăng xuất trên máy tính này, nhưng OpenAI chưa xác nhận. Bạn có thể ngắt kết nối HuaGIS trong cài đặt ChatGPT.
+Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect HuaGIS in ChatGPT's settings.	Đã đăng xuất trên máy tính này, nhưng không đọc được chuỗi khóa hệ thống nên OpenAI không được yêu cầu kết thúc phiên. Bạn có thể ngắt kết nối HuaGIS trong cài đặt ChatGPT.
 Significance level	Mức ý nghĩa
 Signing in with ChatGPT works in the desktop app.	Đăng nhập bằng ChatGPT hoạt động trong ứng dụng máy tính.
 Signing the asset (Planetary Computer)…	Đang ký tài nguyên (Planetary Computer)…
@@ -3443,7 +3443,7 @@ The assistant follows a skill's instructions when it uses it. Whatever they say,
 The assistant is busy; stop it or wait for it to finish.	Trợ lý đang bận; hãy dừng nó hoặc đợi nó hoàn tất.
 The assistant wants to run this, and {why}:	Trợ lý muốn chạy thao tác sau, cần bạn cho phép vì {why}:
 The Basemaps plugin's tab of public basemaps.	Thẻ bản đồ nền công khai của plugin Bản đồ nền.
-The browser didn't give RustGIS the clipboard ({why}): paste with {keys}.	Trình duyệt không cấp bảng nhớ tạm cho RustGIS ({why}): hãy dán bằng {keys}.
+The browser didn't give HuaGIS the clipboard ({why}): paste with {keys}.	Trình duyệt không cấp bảng nhớ tạm cho HuaGIS ({why}): hãy dán bằng {keys}.
 the capture failed unexpectedly	chụp thất bại ngoài dự kiến
 The class these label groups and the Labeling pane edit.	Lớp phân loại mà các nhóm nhãn này và ngăn Gán nhãn chỉnh sửa.
 The clipboard came after you moved on, so nothing was pasted: paste with {keys}.	Bảng nhớ tạm đến sau khi bạn đã chuyển đi, nên không có gì được dán: hãy dán bằng {keys}.
@@ -3451,7 +3451,7 @@ The connection failed; trying again in {seconds} s.	Kết nối thất bại; th
 the connection has no id	kết nối không có id
 The country list couldn't be read ({e}): type a country's code	Không đọc được danh sách quốc gia ({e}): hãy nhập mã quốc gia
 The current elevation stays in effect while you edit inputs. Click Apply elevation to apply the value and units.	Độ cao hiện tại vẫn có hiệu lực trong khi bạn sửa đầu vào. Nhấp Áp dụng độ cao để áp dụng giá trị và đơn vị.
-The dataset has nothing RustGIS can add	Bộ dữ liệu không có gì RustGIS có thể thêm
+The dataset has nothing HuaGIS can add	Bộ dữ liệu không có gì HuaGIS có thể thêm
 The desktop app adds data cubes	Ứng dụng máy tính thêm khối dữ liệu
 The distance between two marks along the line	Khoảng cách giữa hai dấu dọc theo đường
 The environment (AWS_ACCESS_KEY_ID…)	Môi trường (AWS_ACCESS_KEY_ID…)
@@ -3476,14 +3476,14 @@ The layer's fills	Phần tô của lớp
 The layer's strokes	Nét của lớp
 the layout export failed unexpectedly	xuất bố cục thất bại ngoài dự kiến
 The link doesn't say its STAC API: Find Items searches {api}	Liên kết không ghi rõ STAC API của nó: Tìm mục sẽ tìm trong {api}
-The list of plugins to browse. Leave it empty for the RustGIS plugin registry.	Danh sách plugin để duyệt. Để trống để dùng kho plugin RustGIS.
+The list of plugins to browse. Leave it empty for the HuaGIS plugin registry.	Danh sách plugin để duyệt. Để trống để dùng kho plugin HuaGIS.
 The map at the left; the title, locator, legend, sources and reference in a panel at the right.	Bản đồ bên trái; tiêu đề, bộ định vị, chú giải, nguồn và tham chiếu trong một bảng bên phải.
 the map has no GeoPackage layer loaded for editing (Home › Add Data › Edit GeoPackage Table…)	bản đồ không có lớp GeoPackage nào được tải để chỉnh sửa (Trang chủ › Thêm dữ liệu › Chỉnh sửa bảng GeoPackage…)
 the map has no layers	bản đồ không có lớp nào
 the map has no PostGIS layer loaded for editing (Home › Add Data › Database…, Load for editing)	bản đồ không có lớp PostGIS nào được tải để chỉnh sửa (Trang chủ › Thêm dữ liệu › Cơ sở dữ liệu…, Tải để chỉnh sửa)
 The map has no tile archive read from a file.	Bản đồ không có kho ô bản đồ đọc từ tệp.
 The map is drawn in this coordinate system; layers are projected on the fly.	Bản đồ được vẽ trong hệ tọa độ này; các lớp được chiếu tức thời.
-the map isn't on screen in RustGIS (a layout or the catalog is shown), so it was drawn offscreen	bản đồ không hiển thị trên màn hình RustGIS (đang hiển thị bố cục hoặc danh mục), nên đã được vẽ ngoài màn hình
+the map isn't on screen in HuaGIS (a layout or the catalog is shown), so it was drawn offscreen	bản đồ không hiển thị trên màn hình HuaGIS (đang hiển thị bố cục hoặc danh mục), nên đã được vẽ ngoài màn hình
 The map view as it is now	Khung nhìn bản đồ như hiện tại
 The map's extent isn't known yet	Chưa biết phạm vi của bản đồ
 The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	Khung nhìn bản đồ cần {n} tệp {ty} của Overture (tối đa {max}): hãy phóng to, hoặc thêm chủ đề dưới dạng ô bản đồ
@@ -3551,7 +3551,7 @@ The sign-in is kept in the system keychain, never in the app's settings or a pro
 The sign-in is still kept in the app's settings folder, readable by your user account: the system keychain is unavailable, so it hasn't been moved there yet.	Thông tin đăng nhập vẫn được giữ trong thư mục cài đặt của ứng dụng, tài khoản người dùng của bạn có thể đọc: chuỗi khóa hệ thống không khả dụng nên chưa được chuyển sang đó.
 The significance level is a number, such as 0.05	Mức ý nghĩa là một số, ví dụ 0.05
 The start-up project {path} didn't open: {error}	Không mở được dự án khởi động {path}: {error}
-The start-up project {path} isn't a RustGIS project file.	Dự án khởi động {path} không phải là tệp dự án RustGIS.
+The start-up project {path} isn't a HuaGIS project file.	Dự án khởi động {path} không phải là tệp dự án HuaGIS.
 The step's layer {name} isn't in the map.	Lớp {name} của bước này không có trên bản đồ.
 The store has no variables with two or more dimensions.	Kho không có biến nào có từ hai chiều trở lên.
 the store is gone	kho không còn nữa
@@ -3560,7 +3560,7 @@ The summary failed unexpectedly	Tổng hợp thất bại ngoài dự kiến
 The summary finished after another project was opened, so it wasn't added	Tổng hợp hoàn tất sau khi một dự án khác được mở, nên không được thêm
 The system keychain could not complete the request.	Chuỗi khóa hệ thống không thể hoàn tất yêu cầu.
 The system keychain is locked or access was refused.	Chuỗi khóa hệ thống đang bị khóa hoặc quyền truy cập bị từ chối.
-The system keychain is unavailable, so this sign-in won't be remembered: it lasts until RustGIS closes.	Chuỗi khóa hệ thống không khả dụng, nên lần đăng nhập này sẽ không được ghi nhớ: nó có hiệu lực tới khi RustGIS đóng.
+The system keychain is unavailable, so this sign-in won't be remembered: it lasts until HuaGIS closes.	Chuỗi khóa hệ thống không khả dụng, nên lần đăng nhập này sẽ không được ghi nhớ: nó có hiệu lực tới khi HuaGIS đóng.
 The system keychain is unavailable.	Chuỗi khóa hệ thống không khả dụng.
 The task's steps changed, so the step being edited was closed: edit it again.	Các bước của nhiệm vụ đã thay đổi nên bước đang sửa đã bị đóng: hãy sửa lại.
 the time slider is off	thanh trượt thời gian đang tắt
@@ -3608,7 +3608,7 @@ This map has no layers yet.	Bản đồ này chưa có lớp nào.
 This map's thumbnail, from an image.	Ảnh thu nhỏ của bản đồ này, từ một ảnh.
 This map's thumbnail, from the view.	Ảnh thu nhỏ của bản đồ này, từ khung nhìn.
 This plugin can:	Plugin này có thể:
-This plugin runs as a program on your computer, outside RustGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	Plugin này chạy như một chương trình trên máy tính của bạn, bên ngoài hộp cát của RustGIS. Nó có thể làm mọi việc bạn làm được: đọc và thay đổi tệp của bạn, dùng mạng và chạy các chương trình khác. Chỉ cài đặt nếu bạn tin tưởng tác giả của nó.
+This plugin runs as a program on your computer, outside HuaGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	Plugin này chạy như một chương trình trên máy tính của bạn, bên ngoài hộp cát của HuaGIS. Nó có thể làm mọi việc bạn làm được: đọc và thay đổi tệp của bạn, dùng mạng và chạy các chương trình khác. Chỉ cài đặt nếu bạn tin tưởng tác giả của nó.
 This request has no one-time allow option.	Yêu cầu này không có tùy chọn cho phép một lần.
 This request uses an unsupported capability. Check the parameter and change the request.	Yêu cầu này dùng tính năng không được hỗ trợ. Kiểm tra tham số và sửa yêu cầu.
 This result is kept	Kết quả này được giữ lại
@@ -3740,7 +3740,7 @@ unknown (an older project)	không rõ (dự án cũ hơn)
 Unknown shortcut binding field.	Trường gán phím tắt không xác định.
 Unknown shortcut command.	Lệnh phím tắt không xác định.
 UNKNOWN TOOL	CÔNG CỤ KHÔNG XÁC ĐỊNH
-Unload the GeoLibre tools and stop loading them when RustGIS starts.	Gỡ tải các công cụ GeoLibre và không tải chúng khi RustGIS khởi động nữa.
+Unload the GeoLibre tools and stop loading them when HuaGIS starts.	Gỡ tải các công cụ GeoLibre và không tải chúng khi HuaGIS khởi động nữa.
 Unsaved changes	Thay đổi chưa lưu
 Unsupervised classes (k-means)	Lớp không giám sát (k-means)
 Unsupervised classes (k-means).	Lớp không giám sát (k-means).
@@ -3872,13 +3872,13 @@ Web Tool	Công cụ web
 Website	Trang web
 Weekly usage	Mức sử dụng hằng tuần
 Weights	Trọng số
-Welcome to RustGIS	Chào mừng đến với RustGIS
+Welcome to HuaGIS	Chào mừng đến với HuaGIS
 West	Tây
 WFS	WFS
 WGS 84 / Globe	WGS 84 / Quả địa cầu
 WGS 84 / Web Mercator	WGS 84 / Web Mercator
-What RustGIS opens with: the World Atlas sample or a blank map.	RustGIS mở với gì: mẫu World Atlas hoặc một bản đồ trống.
-What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	RustGIS mở với gì: mẫu World Atlas, một bản đồ trống, một dự án bạn chọn, hoặc dự án mở hoặc lưu gần nhất.
+What HuaGIS opens with: the World Atlas sample or a blank map.	HuaGIS mở với gì: mẫu World Atlas hoặc một bản đồ trống.
+What HuaGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	HuaGIS mở với gì: mẫu World Atlas, một bản đồ trống, một dự án bạn chọn, hoặc dự án mở hoặc lưu gần nhất.
 What to do, where to find it and why	Cần làm gì, tìm ở đâu và tại sao
 What's near a point	Những gì gần một điểm
 When a file holds several layers, choose the ones to add instead of adding them all.	Khi một tệp chứa nhiều lớp, hãy chọn lớp cần thêm thay vì thêm tất cả.

@@ -87,7 +87,7 @@ fn fields(app: &mut RustGisApp, ui: &mut egui::Ui) {
     };
     ui.label(
         egui::RichText::new(crate::i18n::fmt(
-            "For ArcGIS Online, the client ID is RustGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.",
+            "For ArcGIS Online, the client ID is HuaGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.",
             &[("redirect", &redirect)],
         ))
         .weak(),

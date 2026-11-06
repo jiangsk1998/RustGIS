@@ -19,7 +19,7 @@ pub fn plain(f: &Failure) -> (String, String) {
         (Reason::Status(403), Some(firewall)) if f.firewall_blocked() => (
             refused.into(),
             crate::i18n::fmt(
-                "Its firewall ({firewall}) blocked RustGIS. The service may only allow some applications: contact its administrator and send them the details below.",
+                "Its firewall ({firewall}) blocked HuaGIS. The service may only allow some applications: contact its administrator and send them the details below.",
                 &[("firewall", firewall)],
             ),
         ),
@@ -28,9 +28,7 @@ pub fn plain(f: &Failure) -> (String, String) {
         (Reason::Status(429), _) => (tl!("The server is limiting requests.").into(), tl!("Try again in a moment.").into()),
         (Reason::Status(s), _) if s >= 500 => (tl!("The server had a problem answering.").into(), tl!("Try again later.").into()),
         (Reason::Status(_), _) => (refused.into(), tl!("Check the address and the service type.").into()),
-        (Reason::Unreachable, _) => {
-            (tl!("RustGIS couldn't reach the server.").into(), tl!("Check the address and your connection.").into())
-        }
+        (Reason::Unreachable, _) => (tl!("HuaGIS couldn't reach the server.").into(), tl!("Check the address and your connection.").into()),
         (Reason::Timeout, _) => (tl!("The server took too long to answer.").into(), tl!("Try again later.").into()),
         (Reason::Other, _) => (tl!("The request failed.").into(), redact_text(&f.message)),
     }
@@ -100,7 +98,7 @@ mod tests {
     fn a_firewall_block_is_told_plainly_with_its_details() {
         let headers = [("server".to_string(), "cloudflare".to_string()), ("cf-ray".to_string(), "a4c9-BOG".to_string())];
         let page = b"<title>Attention Required! | Cloudflare</title>";
-        let f = Failure::answered("https://example.org/MapServer?f=json&token=secret", 403, &headers, page).sent_as("RustGIS/1.0");
+        let f = Failure::answered("https://example.org/MapServer?f=json&token=secret", 403, &headers, page).sent_as("HuaGIS/1.0");
         let (what, next) = plain(&f);
         assert_eq!(what, "The server refused the request.");
         assert!(next.contains("Cloudflare") && next.contains("administrator"), "{next}");
@@ -111,7 +109,7 @@ mod tests {
             "Server: cloudflare",
             "Firewall: Cloudflare, which blocked the request",
             "Request ID: cf-ray a4c9-BOG",
-            "Sent as: User-Agent: RustGIS/1.0",
+            "Sent as: User-Agent: HuaGIS/1.0",
             "Response: \"Attention Required! | Cloudflare\"",
         ] {
             assert!(report.contains(line), "{line} in {report}");

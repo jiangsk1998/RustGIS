@@ -137,7 +137,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                     });
                 }
                 Some(Ok(r)) if is_newer(&r.version, current) => {
-                    ui.label(egui::RichText::new(crate::i18n::fmt("RustGIS {latest} is available.", &[("latest", &r.version)])).strong());
+                    ui.label(egui::RichText::new(crate::i18n::fmt("HuaGIS {latest} is available.", &[("latest", &r.version)])).strong());
                     ui.label(crate::i18n::fmt("You have version {version}.", &[("version", current)]));
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new(tl!("Installed with Homebrew, winget, the AUR or COPR? Update it there.")).small().weak());
@@ -152,7 +152,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                     });
                 }
                 Some(Ok(_)) => {
-                    ui.label(crate::i18n::fmt("RustGIS {version} is the latest version.", &[("version", current)]));
+                    ui.label(crate::i18n::fmt("HuaGIS {version} is the latest version.", &[("version", current)]));
                     ui.add_space(6.0);
                     if ui.button(tl!("Check Again")).clicked() {
                         again = true;

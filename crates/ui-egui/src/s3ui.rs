@@ -413,7 +413,7 @@ fn sync(app: &mut RustGisApp) {
 /// The dialog: a connection, then a bucket browsed a level at a time.
 pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
     sync(app);
-    ui.label(egui::RichText::new(tl!("Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a saved connection keeps its name, endpoint and region, never its secret.")).weak());
+    ui.label(egui::RichText::new(tl!("Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until HuaGIS closes; a saved connection keeps its name, endpoint and region, never its secret.")).weak());
     egui::CollapsingHeader::new(tl!("Connection")).default_open(s3::connections().is_empty()).show(ui, |ui| connection_form(app, ui));
     ui.separator();
     browse(app, ui);

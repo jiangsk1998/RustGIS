@@ -203,12 +203,12 @@ fn copyable(ui: &mut egui::Ui, text: &str) {
 pub fn section(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) {
     let mut on = enabled(app);
     let hint = tl!(
-        "Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. So can a script any program of yours writes to the file bridge shown below. Scripts and plugin management stay off. The choice is remembered across launches."
+        "Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with HuaGIS's tools: they can open and save files and use the web. So can a script any program of yours writes to the file bridge shown below. Scripts and plugin management stay off. The choice is remembered across launches."
     );
     let id = ui.make_persistent_id("connect_agents_section");
     let mut changed = false;
     let mut header = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-        .show_header(ui, |ui| changed = ui.checkbox(&mut on, tl!("Let your Agents Control RustGIS")).on_hover_text(hint).changed());
+        .show_header(ui, |ui| changed = ui.checkbox(&mut on, tl!("Let your Agents Control HuaGIS")).on_hover_text(hint).changed());
     if changed {
         app.connect.on = Some(on);
         app.connect.error = None;
@@ -253,7 +253,7 @@ pub fn section(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) {
 fn details(app: &mut RustGisApp, ui: &mut egui::Ui) {
     let mut full = full_access(app);
     let hint = tl!(
-        "Agents may also run scripts, tasks and models, and install, remove and run plugins: anything you could do yourself. Turn it on only for an agent you trust with your computer. It lasts until RustGIS closes or agents are turned off."
+        "Agents may also run scripts, tasks and models, and install, remove and run plugins: anything you could do yourself. Turn it on only for an agent you trust with your computer. It lasts until HuaGIS closes or agents are turned off."
     );
     if ui.checkbox(&mut full, tl!("Full access")).on_hover_text(hint).changed() {
         app.connect.full = full;
@@ -269,7 +269,7 @@ fn details(app: &mut RustGisApp, ui: &mut egui::Ui) {
         let (command, result) = (bridge.command_path().display().to_string(), bridge.result_path().display().to_string());
         ui.label(RichText::new(tl!("Agents without MCP can write a script (one command per line) to:")).small());
         copyable(ui, &command);
-        ui.label(RichText::new(tl!("RustGIS runs it and writes the outcome to:")).small());
+        ui.label(RichText::new(tl!("HuaGIS runs it and writes the outcome to:")).small());
         copyable(ui, &result);
     }
     let Some(port) = app.relay.as_ref().map(|r| r.port()) else { return };

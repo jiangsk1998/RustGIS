@@ -176,7 +176,7 @@ fn start(app: &mut RustGisApp, d: rustgis_assistant::agent::Delegation, ctx: &eg
             .and_then(|work| Run::start(d.agent, &command, &d.task, relay, &cli, work, auto, ctx.clone())),
         (None, _, _) => Err("the MCP relay couldn't start".to_string()),
         (_, None, _) => Err(format!("{} can't be started here (it, or Node.js for its ACP adapter, wasn't found)", d.agent.label)),
-        (_, _, None) => Err("rustgis-cli wasn't found beside RustGIS".to_string()),
+        (_, _, None) => Err("rustgis-cli wasn't found beside HuaGIS".to_string()),
     };
     match started {
         Ok(run) => app.assistant.threads.runs.push(ThreadRun {
@@ -315,7 +315,7 @@ pub fn windows(app: &mut RustGisApp, ctx: &egui::Context) {
                 });
                 if let Some(p) = th.run.map_approvals().first() {
                     egui::Frame::NONE.fill(t.amber.gamma_multiply(0.15)).corner_radius(6).inner_margin(8).show(ui, |ui| {
-                        ui.label(RichText::new(tl!("Allow this agent's RustGIS action?")).strong());
+                        ui.label(RichText::new(tl!("Allow this agent's HuaGIS action?")).strong());
                         // The whole request (up to 4 KB), scrolled rather than cut.
                         egui::ScrollArea::vertical().max_height(160.0).id_salt(("acp_approval", p.id)).show(ui, |ui| {
                             ui.label(RichText::new(&p.summary).monospace().small());

@@ -1,12 +1,13 @@
 //! On Windows, embeds the app icon in `rustgis.exe`, so Explorer, shortcuts and pinned taskbar
-//! entries show the logo. The icon is drawn by the same code as the window icon
-//! (`crates/render/src/logo.rs`), so there is no image file to keep in sync.
+//! entries show the logo. The icon is built by the same code as the window icon
+//! (`crates/render/src/logo.rs`), from the logo image it embeds.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../../crates/render/src/logo.rs");
+    println!("cargo:rerun-if-changed=../../crates/render/assets/huagis-logo.png");
     #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         windows::embed_icon()?;
@@ -48,12 +49,12 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "CompanyName", "The RustGIS contributors"
-      VALUE "FileDescription", "RustGIS"
+      VALUE "FileDescription", "HuaGIS"
       VALUE "FileVersion", "{version}"
       VALUE "InternalName", "rustgis"
-      VALUE "LegalCopyright", "Copyright the RustGIS contributors. Apache-2.0."
+      VALUE "LegalCopyright", "Copyright the HuaGIS contributors. Apache-2.0."
       VALUE "OriginalFilename", "rustgis.exe"
-      VALUE "ProductName", "RustGIS"
+      VALUE "ProductName", "HuaGIS"
       VALUE "ProductVersion", "{version}"
     END
   END

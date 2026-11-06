@@ -60,8 +60,8 @@ A line, or markers or hash marks along it	Линия либо маркеры и�
 A magnifying lens that follows the pointer.	Увеличительная лупа, следующая за указателем.
 A map, feature or coverage service's address: WMS, WMTS, WFS, WCS, OGC API Features or Tiles, or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer (or a services directory, to browse).	Адрес сервиса карт, объектов или покрытий: WMS, WMTS, WFS, WCS, OGC API Features или Tiles либо ArcGIS FeatureServer, MapServer, ImageServer или VectorTileServer (или каталог сервисов для просмотра).
 a name, or owner/name such as giswqs/geospatial	имя или владелец/имя, например giswqs/geospatial
-A named endpoint you can reuse. Keys and tokens are kept until RustGIS closes, never saved.	Именованная конечная точка для повторного использования. Ключи и токены хранятся до закрытия RustGIS и никогда не сохраняются.
-A named endpoint you can reuse. Keys are kept until RustGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	Именованная конечная точка для повторного использования. Ключи хранятся до закрытия RustGIS, если вы не решите запомнить их на этом компьютере; само подключение их никогда не хранит.
+A named endpoint you can reuse. Keys and tokens are kept until HuaGIS closes, never saved.	Именованная конечная точка для повторного использования. Ключи и токены хранятся до закрытия HuaGIS и никогда не сохраняются.
+A named endpoint you can reuse. Keys are kept until HuaGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	Именованная конечная точка для повторного использования. Ключи хранятся до закрытия HuaGIS, если вы не решите запомнить их на этом компьютере; само подключение их никогда не хранит.
 A named endpoint you can reuse. Passwords last for this session unless you choose to remember them in this computer's password store.	Именованная конечная точка для повторного использования. Пароли действуют в течение этого сеанса, если вы не решите запомнить их в хранилище паролей этого компьютера.
 A node cannot connect to itself.	Узел не может соединяться сам с собой.
 A notebook of text and command cells.	Блокнот из текстовых и командных ячеек.
@@ -98,8 +98,8 @@ A5 Grid	Сетка A5
 A5's equal-area pentagonal cells at a resolution, over the map's extent, a layer or the world, as polygons with their ids.	Равновеликие пятиугольные ячейки A5 заданного разрешения в экстенте карты, слоя или всего мира, в виде полигонов с их идентификаторами.
 About	О программе
 About plugins	О модулях
-About RustGIS	О RustGIS
-About RustGIS.	О RustGIS.
+About HuaGIS	О HuaGIS
+About HuaGIS.	О HuaGIS.
 Above	Сверху
 Above Left	Сверху слева
 Above Right	Сверху справа
@@ -276,7 +276,7 @@ Agent input queue is full or disconnected; stop the agent and try again.	Вхо�
 Agent threads	Потоки агентов
 Agent work	Agent work
 Agents have full access: they may run scripts, tasks, models and plugins. Click to stop the MCP relay	Агенты имеют полный доступ: они могут запускать скрипты, задачи, модели и модули. Щёлкните, чтобы остановить MCP-релей
-Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	Подключившиеся агенты на этом компьютере (Claude Code, Codex, Cursor и другие) работают с открытой здесь картой через инструменты RustGIS: они могут открывать и сохранять файлы и пользоваться вебом. Скрипты и управление плагинами остаются выключенными.
+Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with HuaGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	Подключившиеся агенты на этом компьютере (Claude Code, Codex, Cursor и другие) работают с открытой здесь картой через инструменты HuaGIS: они могут открывать и сохранять файлы и пользоваться вебом. Скрипты и управление плагинами остаются выключенными.
 Agents then run commands, change files and use the web on this computer without asking you.	Тогда агенты будут без вопросов выполнять команды, изменять файлы и пользоваться вебом на этом компьютере.
 Aggregate Points to A5	Агрегировать точки в A5
 Aggregation	Агрегация
@@ -301,7 +301,7 @@ Allow Feature Selection	Разрешить выбор объектов
 Allow only certain combinations of values across fields.	Разрешить только определённые сочетания значений в полях.
 Allow such actions for this conversation	Разрешать такие действия в этом разговоре
 Allow this action?	Разрешить это действие?
-Allow this agent's RustGIS action?	Разрешить это действие агента в RustGIS?
+Allow this agent's HuaGIS action?	Разрешить это действие агента в HuaGIS?
 Along lines	Вдоль линий
 Along Selected Line	Вдоль выбранной линии
 Alt+	Alt+
@@ -313,7 +313,7 @@ Alternating bar	Чередующаяся полоса
 Altitude	Высота
 Always allow	Всегда разрешать
 Amazon S3	Amazon S3
-Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3 или S3-совместимый сервис (MinIO, Cloudflare R2, Wasabi…) по его конечной точке. Ключи хранятся до закрытия RustGIS; сохранённое подключение сохраняет имя, конечную точку и регион, но никогда не сохраняет секретный ключ.
+Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until HuaGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3 или S3-совместимый сервис (MinIO, Cloudflare R2, Wasabi…) по его конечной точке. Ключи хранятся до закрытия HuaGIS; сохранённое подключение сохраняет имя, конечную точку и регион, но никогда не сохраняет секретный ключ.
 amenity=cafe, shop	amenity=cafe, shop
 An agent on this computer asks to:	Агент на этом компьютере просит:
 An ArcGIS Online organization's or an ArcGIS Enterprise portal's address; ArcGIS Online when blank	Адрес организации ArcGIS Online или портала ArcGIS Enterprise; если пусто — ArcGIS Online
@@ -363,7 +363,7 @@ Arrange	Упорядочить
 Arrange Element	Упорядочить элемент
 Arrow	Стрелка
 Arrowheads	Наконечники стрелок
-Ask a question about your data, or describe what to do with the map. The assistant runs RustGIS commands for you; every change can be undone.	Задайте вопрос о своих данных или опишите, что сделать с картой. Помощник выполняет команды RustGIS за вас; любое изменение можно отменить.
+Ask a question about your data, or describe what to do with the map. The assistant runs HuaGIS commands for you; every change can be undone.	Задайте вопрос о своих данных или опишите, что сделать с картой. Помощник выполняет команды HuaGIS за вас; любое изменение можно отменить.
 Ask about the map, or tell it what to do…	Спросите о карте или скажите, что сделать…
 Ask about your data, or tell the assistant what to do with the map.	Спросите о своих данных или скажите помощнику, что сделать с картой.
 Ask Which Layers to Add	Спрашивать, какие слои добавить
@@ -717,7 +717,7 @@ Color Vision Simulator	Симулятор цветового зрения
 Colorbar	Цветовая шкала
 Colormap	Цветовая карта
 Colors from the raster's own color table.	Цвета из собственной цветовой таблицы растра.
-Colour ramps (RustGIS, QGIS, GDAL, GMT)	Цветовые шкалы (RustGIS, QGIS, GDAL, GMT)
+Colour ramps (HuaGIS, QGIS, GDAL, GMT)	Цветовые шкалы (HuaGIS, QGIS, GDAL, GMT)
 Columns named like longitude/latitude, easting/northing or geometry are picked for you.	Столбцы с именами вроде longitude/latitude, easting/northing или geometry выбираются автоматически.
 Combinations from the box above, one per line	Сочетания из поля выше, по одному в строке
 Combines two polygon layers into every piece either covers, with the attributes of both where they overlap.	Объединяет два полигональных слоя во все части, покрытые любым из них, с атрибутами обоих там, где они перекрываются.
@@ -924,7 +924,7 @@ Delete selected rows	Удалить выбранные строки
 Delete Style	Удалить стиль
 Delete Task	Удалить задачу
 Delete Task Step	Удалить шаг задачи
-Delete the GeoLibre runner that RustGIS installed. Install it again at any time.	Удалить модуль запуска GeoLibre, установленный RustGIS. Его можно установить снова в любое время.
+Delete the GeoLibre runner that HuaGIS installed. Install it again at any time.	Удалить модуль запуска GeoLibre, установленный HuaGIS. Его можно установить снова в любое время.
 Delete the layout {name}?	Удалить макет {name}?
 Delete the map {name}?	Удалить карту {name}?
 Delete the selected features.	Удалить выбранные объекты.
@@ -1136,7 +1136,7 @@ Element Properties	Свойства элемента
 Elevation	Высота
 Elevation model	Модель высот
 Elevation profiles along lines, cross sections and more.	Профили высот вдоль линий, поперечные разрезы и другое.
-Eligible requests in RustGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	Подходящие запросы в RustGIS используют ваш тариф ChatGPT. Управлять использованием можно в настройках ChatGPT.
+Eligible requests in HuaGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	Подходящие запросы в HuaGIS используют ваш тариф ChatGPT. Управлять использованием можно в настройках ChatGPT.
 Ellipse	Эллипс
 Embeddings	Эмбеддинги
 Ember	Угли
@@ -1329,7 +1329,7 @@ Find and run geoprocessing tools.	Найти и запустить инстру�
 Find any command by name (Ctrl+K).	Найти любую команду по названию (Ctrl+K).
 Find Items	Найти элементы
 Find Place	Найти место
-Find plugins in the RustGIS plugin registry.	Найти модули в каталоге модулей RustGIS.
+Find plugins in the HuaGIS plugin registry.	Найти модули в каталоге модулей HuaGIS.
 Find Similar	Найти похожие
 Find Tools	Найти инструменты
 Finding routes…	Поиск маршрутов…
@@ -1363,14 +1363,14 @@ Folder…	Папка…
 Follow the time slider	Следовать за ползунком времени
 Font	Шрифт
 for a store that doesn't say	для хранилища, где это не указано
-For ArcGIS Online, the client ID is RustGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	Для ArcGIS Online ID клиента — это собственное приложение RustGIS. Для портала ArcGIS Enterprise зарегистрируйте на нём приложение OAuth (Content › New item › Developer credentials) с URL перенаправления {redirect} и укажите его ID клиента.
+For ArcGIS Online, the client ID is HuaGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	Для ArcGIS Online ID клиента — это собственное приложение HuaGIS. Для портала ArcGIS Enterprise зарегистрируйте на нём приложение OAuth (Content › New item › Developer credentials) с URL перенаправления {redirect} и укажите его ID клиента.
 for the layers that change with time, as they list their times (2024-06-01, 1995)	для слоёв, меняющихся со временем, в том виде, как они перечисляют свои времена (2024-06-01, 1995)
 Forest	Лес
 Forget Earthdata Login Token	Забыть токен Earthdata Login
 Forget Saved Keys	Забыть сохранённые ключи
 Forget Saved Password	Забыть сохранённый пароль
 Format	Формат
-Found: {names}. An agent works on this map through RustGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › RustGIS › Agent work. It asks you before each action.	Найдены: {names}. Агент работает с этой картой через инструменты RustGIS и свои собственные (веб, скрипты, файлы) в отдельной папке, которая сохраняется в Документы › RustGIS › Agent work. Он спрашивает вас перед каждым действием.
+Found: {names}. An agent works on this map through HuaGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › HuaGIS › Agent work. It asks you before each action.	Найдены: {names}. Агент работает с этой картой через инструменты HuaGIS и свои собственные (веб, скрипты, файлы) в отдельной папке, которая сохраняется в Документы › HuaGIS › Agent work. Он спрашивает вас перед каждым действием.
 Frame rate	Частота кадров
 Frame rate, draw time, data size and memory.	Частота кадров, время отрисовки, объём данных и память.
 France	Франция
@@ -1534,7 +1534,7 @@ host=localhost dbname=gis user=postgres	host=localhost dbname=gis user=postgres
 host=… dbname=… user=…	host=… dbname=… user=…
 Hosted Imagery	Размещённые изображения
 Hour	Час
-How often RustGIS keeps a copy of unsaved work, to offer it back after a crash.	Как часто RustGIS сохраняет копию несохранённой работы, чтобы предложить её после сбоя.
+How often HuaGIS keeps a copy of unsaved work, to offer it back after a crash.	Как часто HuaGIS сохраняет копию несохранённой работы, чтобы предложить её после сбоя.
 How the layer's colours combine with the tile layers and basemap beneath.	Как цвета слоя сочетаются с тайловыми слоями и базовой картой под ним.
 How the layer's colours combine with what's beneath.	Как цвета слоя смешиваются с нижележащими.
 HUB Ocean's Ocean Data Platform: marine datasets, read as features (up to 10,000 each).	Ocean Data Platform от HUB Ocean: морские наборы данных, читаемые как объекты (до 10 000 из каждого).
@@ -1601,7 +1601,7 @@ In memory	В памяти
 In Progress	Выполняется
 in progress	выполняется
 In project	В проекте
-In RustGIS, it can:	В RustGIS он может:
+In HuaGIS, it can:	В HuaGIS он может:
 In the browser, pick the .shp and .dbf together, with any sidecars, or pick a ZIP. The override applies to every Shapefile in the ZIP.	В браузере выберите вместе .shp и .dbf со всеми сопутствующими файлами или выберите ZIP. Переопределение применяется ко всем Shapefile в ZIP.
 In the coordinate system's units: metres for UTM.	В единицах системы координат: метры для UTM.
 In the middle	Посередине
@@ -1689,7 +1689,7 @@ Item Pop-ups	Всплывающие окна элементов
 Item {id}	Элемент {id}
 its default	его значение по умолчанию
 Its default: {default}. Its times: {times}	По умолчанию: {default}. Времена: {times}
-Its firewall ({firewall}) blocked RustGIS. The service may only allow some applications: contact its administrator and send them the details below.	Его брандмауэр ({firewall}) заблокировал RustGIS. Сервис может разрешать только некоторые приложения: свяжитесь с его администратором и отправьте ему подробности ниже.
+Its firewall ({firewall}) blocked HuaGIS. The service may only allow some applications: contact its administrator and send them the details below.	Его брандмауэр ({firewall}) заблокировал HuaGIS. Сервис может разрешать только некоторые приложения: свяжитесь с его администратором и отправьте ему подробности ниже.
 Its tool isn't available now (a plugin's, not loaded, or a suite's, not installed)	Его инструмент сейчас недоступен (инструмент модуля, который не загружен, или набора, который не установлен)
 Jobs	Задания
 JOIN	JOIN
@@ -1719,7 +1719,7 @@ Keep Tool	Удерживать инструмент
 Keep value	Сохранить значение
 Keeps the access key ID and secret access key in this computer's credential store, never in the connection or the project.	Хранит идентификатор ключа доступа и секретный ключ доступа в хранилище учётных данных этого компьютера, а не в подключении или проекте.
 Keeps the parts of two polygon layers that only one of them covers, with that layer's attributes.	Сохраняет части двух полигональных слоёв, покрытые только одним из них, с атрибутами этого слоя.
-Keeps the token in the system's credential store, so it is there when RustGIS starts again. Unticked, a token remembered before is deleted when you save another.	Хранит токен в системном хранилище учётных данных, чтобы он был доступен при следующем запуске RustGIS. Если флажок снят, ранее запомненный токен удаляется при сохранении другого.
+Keeps the token in the system's credential store, so it is there when HuaGIS starts again. Unticked, a token remembered before is deleted when you save another.	Хранит токен в системном хранилище учётных данных, чтобы он был доступен при следующем запуске HuaGIS. Если флажок снят, ранее запомненный токен удаляется при сохранении другого.
 Kernel Density	Плотность ядра
 Kernel Type	Тип ядра
 Key	Key
@@ -1800,7 +1800,7 @@ Legend label. Clear it to show the value again.	Подпись в легенде
 Length	Длина
 Length {length} · gain {gain} · loss {loss}	Длина {length} · подъём {gain} · спуск {loss}
 Let the assistant hand tasks to agents on this computer	Разрешить помощнику передавать задачи агентам на этом компьютере
-Let your Agents Control RustGIS	Разрешить вашим агентам управлять RustGIS
+Let your Agents Control HuaGIS	Разрешить вашим агентам управлять HuaGIS
 Letter spacing	Межбуквенный интервал
 Level	Уровень
 Library	Библиотека
@@ -1856,7 +1856,7 @@ List The National Map Services	Список сервисов The National Map
 List the provider's models	Показать модели поставщика
 List this layer in the legend	Показывать этот слой в легенде
 List what it holds	Показать содержимое
-Listed for discovery: RustGIS doesn't read this dataset yet. Its data and paper are linked above.	Указано для ознакомления: RustGIS пока не читает этот набор данных. Ссылки на его данные и статью приведены выше.
+Listed for discovery: HuaGIS doesn't read this dataset yet. Its data and paper are linked above.	Указано для ознакомления: HuaGIS пока не читает этот набор данных. Ссылки на его данные и статью приведены выше.
 Listing datasets…	Получение списка наборов данных…
 Listing…	Получение списка…
 Lit	Освещено
@@ -1901,7 +1901,7 @@ Look for {name}, outlined on the ribbon.	Найдите {name}, выделенн
 Looking up the place…	Поиск места…
 Loop	Повтор
 Lower Priority	Понизить приоритет
-Made in RustGIS: samples, drawings and tool outputs	Созданные в RustGIS: примеры, рисунки и результаты инструментов
+Made in HuaGIS: samples, drawings and tool outputs	Созданные в HuaGIS: примеры, рисунки и результаты инструментов
 Magnifier	Лупа
 Major Lakes	Крупные озёра
 Major Rivers	Крупные реки
@@ -2157,7 +2157,7 @@ no command	нет команды
 No data at the points picked.	В выбранных точках нет данных.
 No data cube matches	Нет подходящих кубов данных
 No datasets match.	Нет подходящих наборов данных.
-No datasets with data RustGIS can add	Нет наборов данных, которые RustGIS может добавить
+No datasets with data HuaGIS can add	Нет наборов данных, которые HuaGIS может добавить
 no date in the name	в имени нет даты
 no download service	нет службы загрузки
 No edits since the project was saved	Нет правок после сохранения проекта
@@ -2219,8 +2219,8 @@ North Polar Stereographic	Северная полярная стереограф
 NOT	NOT
 Not a GeoLibre project	Не проект GeoLibre
 not a picture	не изображение
-not a RustGIS layout	не макет RustGIS
-not a RustGIS project	не проект RustGIS
+not a HuaGIS layout	не макет HuaGIS
+not a HuaGIS project	не проект HuaGIS
 Not applied yet.	Ещё не применено.
 Not for texts: a text is edited in the Format pane.	Не для текстов: текст редактируется на панели «Формат».
 not needed	не требуется
@@ -2291,7 +2291,7 @@ Open a Data Cube	Открыть куб данных
 open a layout first	сначала откройте макет
 Open a model file (*.model.json)	Открыть файл модели (*.model.json)
 Open a model of this project	Открыть модель этого проекта
-Open a RustGIS or Jupyter notebook.	Открыть блокнот RustGIS или Jupyter.
+Open a HuaGIS or Jupyter notebook.	Открыть блокнот HuaGIS или Jupyter.
 Open an offline area to edit.	Открыть автономную область для редактирования.
 Open browser again	Открыть браузер снова
 Open Custom Template	Открыть пользовательский шаблон
@@ -2318,7 +2318,7 @@ Open the layer's attribute table.	Открыть таблицу атрибуто
 Open the layer's table.	Открыть таблицу слоя.
 Open the plugin's panel.	Открыть панель модуля.
 Open the Release Page	Открыть страницу выпуска
-Open the RustGIS user guide.	Открыть руководство пользователя RustGIS.
+Open the HuaGIS user guide.	Открыть руководство пользователя HuaGIS.
 Open the selected layer's table.	Открыть таблицу выбранного слоя.
 Open the Symbology pane.	Открыть панель «Символы».
 Open the task's steps	Открыть шаги задачи
@@ -2494,7 +2494,7 @@ Plugin registry	Каталог модулей
 Plugins	Модули
 Plugins are .rgplugin files. Install only plugins from people you trust.	Модули — это файлы .rgplugin. Устанавливайте модули только от тех, кому доверяете.
 Plugins marked Not sandboxed run as programs on your computer instead, and can do anything you can.	Модули с пометкой «Без песочницы» работают как программы на вашем компьютере и могут всё, что можете вы.
-Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through RustGIS's own commands, within the permissions you accept.	Модули работают в песочнице: у них нет доступа к вашим файлам и сети, и они изменяют проект только через собственные команды RustGIS в рамках разрешений, которые вы приняли.
+Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through HuaGIS's own commands, within the permissions you accept.	Модули работают в песочнице: у них нет доступа к вашим файлам и сети, и они изменяют проект только через собственные команды HuaGIS в рамках разрешений, которые вы приняли.
 PMTiles archive	Архив PMTiles
 PNG frames (zip)	Кадры PNG (zip)
 PNG image	Изображение PNG
@@ -2571,7 +2571,7 @@ Project Template	Шаблон проекта
 project's path is required	требуется путь к проекту
 Projection	Проекция
 Projections	Проекции
-Projects and JSON data (RustGIS, QGIS, GeoLibre)	Проекты и данные JSON (RustGIS, QGIS, GeoLibre)
+Projects and JSON data (HuaGIS, QGIS, GeoLibre)	Проекты и данные JSON (HuaGIS, QGIS, GeoLibre)
 Properties	Свойства
 Property	Свойство
 Proportional Symbols	Пропорциональные символы
@@ -2632,7 +2632,7 @@ Read error	Ошибка чтения
 Read the bands picked for the view (at most about 6 km a side)	Прочитать выбранные каналы для вида (не более примерно 6 км по стороне)
 Read the map's layers and features	Читать слои и объекты карты
 Read the points in the view, coloured by their principal components	Прочитать точки в виде, окрашенные по их главным компонентам
-Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	Для чтения файлов гранулы нужен токен Earthdata Login, который подходит для всех DAAC NASA. Он хранится до закрытия RustGIS, если не отмечено «Запомнить», никогда не сохраняется в проекте и отправляется только на серверы данных Earthdata NASA.
+Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until HuaGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	Для чтения файлов гранулы нужен токен Earthdata Login, который подходит для всех DAAC NASA. Он хранится до закрытия HuaGIS, если не отмечено «Запомнить», никогда не сохраняется в проекте и отправляется только на серверы данных Earthdata NASA.
 Reading the catalog: {n} documents read, {m} items found…	Чтение каталога: прочитано документов: {n}, найдено элементов: {m}…
 Reading the catalog…	Чтение каталога…
 Reading the embeddings…	Чтение эмбеддингов…
@@ -2817,32 +2817,32 @@ Run Tool	Запустить инструмент
 Run {name}	Запустить {name}
 Running the query for the map…	Выполнение запроса для карты…
 Running…	Выполняется…
-RustGIS	RustGIS
-RustGIS bookmarks	Закладки RustGIS
-RustGIS could not confirm that any previously saved key was deleted from the system keychain.	RustGIS не удалось подтвердить, что ранее сохранённый ключ удалён из системной связки ключей.
-RustGIS couldn't reach the server.	RustGIS не удалось связаться с сервером.
-RustGIS deep learning package	Пакет глубокого обучения RustGIS
-RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	В прошлый раз RustGIS завершил работу некорректно, поэтому он открылся с World Atlas вместо вашего стартового проекта. Откройте проект из меню «Проект», когда будете готовы.
-RustGIS didn't close properly last time.	В прошлый раз RustGIS закрылся неправильно.
-RustGIS doesn't have this tool. Install the tools it comes from, or delete the node.	В RustGIS нет этого инструмента. Установите набор инструментов, из которого он взят, или удалите узел.
-RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	RustGIS — свободная ГИС с открытым исходным кодом на чистом Rust. Она работает на компьютере и в браузере, а каждое действие — это команда, которую можно выполнить и из командной строки.
-RustGIS layer file	Файл слоя RustGIS
-RustGIS layers, maps and projects	Слои, карты и проекты RustGIS
-RustGIS layout	Макет RustGIS
-RustGIS maps and projects	Карты и проекты RustGIS
-RustGIS model	Модель RustGIS
-RustGIS or Jupyter notebook	Блокнот RustGIS или Jupyter
-RustGIS plugin	Модуль RustGIS
-RustGIS presentation	Презентация RustGIS
-RustGIS project	Проект RustGIS
-RustGIS project template	Шаблон проекта RustGIS
-RustGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	В прошлый раз в RustGIS произошла внутренняя ошибка. Подробности в {path}; приложите их к отчёту об ошибке.
-RustGIS report or report template	Отчёт или шаблон отчёта RustGIS
-RustGIS styles	Стили RustGIS
-RustGIS task	Задача RustGIS
-RustGIS was quit last time without saving your changes.	В прошлый раз RustGIS был закрыт без сохранения изменений.
-RustGIS {latest} is available.	Доступна версия RustGIS {latest}.
-RustGIS {version} is the latest version.	RustGIS {version}: последняя версия.
+HuaGIS	HuaGIS
+HuaGIS bookmarks	Закладки HuaGIS
+HuaGIS could not confirm that any previously saved key was deleted from the system keychain.	HuaGIS не удалось подтвердить, что ранее сохранённый ключ удалён из системной связки ключей.
+HuaGIS couldn't reach the server.	HuaGIS не удалось связаться с сервером.
+HuaGIS deep learning package	Пакет глубокого обучения HuaGIS
+HuaGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	В прошлый раз HuaGIS завершил работу некорректно, поэтому он открылся с World Atlas вместо вашего стартового проекта. Откройте проект из меню «Проект», когда будете готовы.
+HuaGIS didn't close properly last time.	В прошлый раз HuaGIS закрылся неправильно.
+HuaGIS doesn't have this tool. Install the tools it comes from, or delete the node.	В HuaGIS нет этого инструмента. Установите набор инструментов, из которого он взят, или удалите узел.
+HuaGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	HuaGIS — свободная ГИС с открытым исходным кодом на чистом Rust. Она работает на компьютере и в браузере, а каждое действие — это команда, которую можно выполнить и из командной строки.
+HuaGIS layer file	Файл слоя HuaGIS
+HuaGIS layers, maps and projects	Слои, карты и проекты HuaGIS
+HuaGIS layout	Макет HuaGIS
+HuaGIS maps and projects	Карты и проекты HuaGIS
+HuaGIS model	Модель HuaGIS
+HuaGIS or Jupyter notebook	Блокнот HuaGIS или Jupyter
+HuaGIS plugin	Модуль HuaGIS
+HuaGIS presentation	Презентация HuaGIS
+HuaGIS project	Проект HuaGIS
+HuaGIS project template	Шаблон проекта HuaGIS
+HuaGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	В прошлый раз в HuaGIS произошла внутренняя ошибка. Подробности в {path}; приложите их к отчёту об ошибке.
+HuaGIS report or report template	Отчёт или шаблон отчёта HuaGIS
+HuaGIS styles	Стили HuaGIS
+HuaGIS task	Задача HuaGIS
+HuaGIS was quit last time without saving your changes.	В прошлый раз HuaGIS был закрыт без сохранения изменений.
+HuaGIS {latest} is available.	Доступна версия HuaGIS {latest}.
+HuaGIS {version} is the latest version.	HuaGIS {version}: последняя версия.
 RUSTGIS_ASSISTANT_MODEL	RUSTGIS_ASSISTANT_MODEL
 RUSTGIS_ASSISTANT_PROVIDER	RUSTGIS_ASSISTANT_PROVIDER
 RUSTGIS_GPU	RUSTGIS_GPU
@@ -2851,7 +2851,7 @@ S3 Buckets	Бакеты S3
 S3 Connections	Подключения S3
 S3…	S3…
 Sample data (Natural Earth)	Пример данных (Natural Earth)
-Sample data © Natural Earth (public domain). RustGIS is licensed under Apache-2.0.	Пример данных © Natural Earth (общественное достояние). RustGIS распространяется по лицензии Apache-2.0.
+Sample data © Natural Earth (public domain). HuaGIS is licensed under Apache-2.0.	Пример данных © Natural Earth (общественное достояние). HuaGIS распространяется по лицензии Apache-2.0.
 Sample data: Natural Earth (public domain). Licensed under Apache-2.0.	Пример данных: Natural Earth (общественное достояние). Лицензия Apache-2.0.
 Sans-serif	Без засечек
 Satellite Embedding Datasets	Наборы спутниковых эмбеддингов
@@ -2995,7 +2995,7 @@ Sections	Разделы
 See and set the camera's position and scale.	Просмотр и настройка положения и масштаба камеры.
 See the map as people with colour vision deficiencies do.	Увидеть карту так, как её видят люди с нарушениями цветового зрения.
 See the tools you've run.	Просмотр запущенных инструментов.
-See whether a newer RustGIS has been released.	Проверить, вышла ли более новая версия RustGIS.
+See whether a newer HuaGIS has been released.	Проверить, вышла ли более новая версия HuaGIS.
 SELECT	SELECT
 Select	Выбрать
 Select (click)	Выбрать (щелчком)
@@ -3193,8 +3193,8 @@ Sign-in timed out. Start again and allow the browser to reach this computer's lo
 signed in	вход выполнен
 Signed in to {portal}	Вход выполнен: {portal}
 Signed in to {portal} as {user}	Вход выполнен: {portal}, пользователь {user}
-Signed out on this computer, but OpenAI didn't confirm it. You can disconnect RustGIS in ChatGPT's settings.	Выход на этом компьютере выполнен, но OpenAI его не подтвердил. Вы можете отключить RustGIS в настройках ChatGPT.
-Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect RustGIS in ChatGPT's settings.	Выход на этом компьютере выполнен, но системную связку ключей не удалось прочитать, поэтому OpenAI не получил запрос на завершение сеанса. Вы можете отключить RustGIS в настройках ChatGPT.
+Signed out on this computer, but OpenAI didn't confirm it. You can disconnect HuaGIS in ChatGPT's settings.	Выход на этом компьютере выполнен, но OpenAI его не подтвердил. Вы можете отключить HuaGIS в настройках ChatGPT.
+Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect HuaGIS in ChatGPT's settings.	Выход на этом компьютере выполнен, но системную связку ключей не удалось прочитать, поэтому OpenAI не получил запрос на завершение сеанса. Вы можете отключить HuaGIS в настройках ChatGPT.
 Significance level	Уровень значимости
 Signing in with ChatGPT works in the desktop app.	Вход через ChatGPT работает в настольном приложении.
 Signing the asset (Planetary Computer)…	Подписание ресурса (Planetary Computer)…
@@ -3443,7 +3443,7 @@ The assistant follows a skill's instructions when it uses it. Whatever they say,
 The assistant is busy; stop it or wait for it to finish.	Помощник занят; остановите его или дождитесь завершения.
 The assistant wants to run this, and {why}:	Помощник хочет выполнить следующее, но это действие {why}:
 The Basemaps plugin's tab of public basemaps.	Вкладка модуля «Базовые карты» с публичными базовыми картами.
-The browser didn't give RustGIS the clipboard ({why}): paste with {keys}.	Браузер не предоставил RustGIS буфер обмена ({why}): вставьте с помощью {keys}.
+The browser didn't give HuaGIS the clipboard ({why}): paste with {keys}.	Браузер не предоставил HuaGIS буфер обмена ({why}): вставьте с помощью {keys}.
 the capture failed unexpectedly	снимок неожиданно завершился ошибкой
 The class these label groups and the Labeling pane edit.	Класс, который редактируют эти группы подписей и панель подписей.
 The clipboard came after you moved on, so nothing was pasted: paste with {keys}.	Буфер обмена поступил после вашего перехода, поэтому ничего не вставлено: вставьте с помощью {keys}.
@@ -3451,7 +3451,7 @@ The connection failed; trying again in {seconds} s.	Не удалось подк
 the connection has no id	у подключения нет идентификатора
 The country list couldn't be read ({e}): type a country's code	Не удалось прочитать список стран ({e}): введите код страны
 The current elevation stays in effect while you edit inputs. Click Apply elevation to apply the value and units.	Текущая высота действует, пока вы изменяете поля ввода. Нажмите «Применить высоту», чтобы применить значение и единицы.
-The dataset has nothing RustGIS can add	В наборе данных нет ничего, что RustGIS может добавить
+The dataset has nothing HuaGIS can add	В наборе данных нет ничего, что HuaGIS может добавить
 The desktop app adds data cubes	Кубы данных добавляет настольное приложение
 The distance between two marks along the line	Расстояние между двумя знаками вдоль линии
 The environment (AWS_ACCESS_KEY_ID…)	Окружение (AWS_ACCESS_KEY_ID…)
@@ -3476,14 +3476,14 @@ The layer's fills	Заливки слоя
 The layer's strokes	Обводки слоя
 the layout export failed unexpectedly	экспорт макета неожиданно завершился ошибкой
 The link doesn't say its STAC API: Find Items searches {api}	Ссылка не указывает свой STAC API: «Найти элементы» ищет в {api}
-The list of plugins to browse. Leave it empty for the RustGIS plugin registry.	Список модулей для просмотра. Оставьте пустым, чтобы использовать каталог модулей RustGIS.
+The list of plugins to browse. Leave it empty for the HuaGIS plugin registry.	Список модулей для просмотра. Оставьте пустым, чтобы использовать каталог модулей HuaGIS.
 The map at the left; the title, locator, legend, sources and reference in a panel at the right.	Карта слева; заголовок, локатор, легенда, источники и справка на панели справа.
 the map has no GeoPackage layer loaded for editing (Home › Add Data › Edit GeoPackage Table…)	на карте нет слоя GeoPackage, загруженного для редактирования (Главная › Добавить данные › Редактировать таблицу GeoPackage…)
 the map has no layers	на карте нет слоёв
 the map has no PostGIS layer loaded for editing (Home › Add Data › Database…, Load for editing)	на карте нет слоя PostGIS, загруженного для редактирования (Главная › Добавить данные › База данных…, Загрузить для редактирования)
 The map has no tile archive read from a file.	На карте нет архива тайлов, прочитанного из файла.
 The map is drawn in this coordinate system; layers are projected on the fly.	Карта рисуется в этой системе координат; слои проецируются на лету.
-the map isn't on screen in RustGIS (a layout or the catalog is shown), so it was drawn offscreen	карта не на экране в RustGIS (показан макет или каталог), поэтому она отрисована вне экрана
+the map isn't on screen in HuaGIS (a layout or the catalog is shown), so it was drawn offscreen	карта не на экране в HuaGIS (показан макет или каталог), поэтому она отрисована вне экрана
 The map view as it is now	Вид карты в текущем состоянии
 The map's extent isn't known yet	Экстент карты пока неизвестен
 The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	Вид карты охватывает {n} файлов Overture «{ty}» (не более {max}): приблизьте карту или добавьте тему как тайлы карты
@@ -3551,7 +3551,7 @@ The sign-in is kept in the system keychain, never in the app's settings or a pro
 The sign-in is still kept in the app's settings folder, readable by your user account: the system keychain is unavailable, so it hasn't been moved there yet.	Данные входа всё ещё хранятся в папке настроек приложения и доступны вашей учётной записи: системная связка ключей недоступна, поэтому они ещё не перенесены туда.
 The significance level is a number, such as 0.05	Уровень значимости — число, например 0.05
 The start-up project {path} didn't open: {error}	Не удалось открыть стартовый проект {path}: {error}
-The start-up project {path} isn't a RustGIS project file.	Стартовый проект {path} не является файлом проекта RustGIS.
+The start-up project {path} isn't a HuaGIS project file.	Стартовый проект {path} не является файлом проекта HuaGIS.
 The step's layer {name} isn't in the map.	Слоя {name} из этого шага нет на карте.
 The store has no variables with two or more dimensions.	В хранилище нет переменных с двумя и более измерениями.
 the store is gone	хранилище больше недоступно
@@ -3560,7 +3560,7 @@ The summary failed unexpectedly	Обобщение неожиданно заве
 The summary finished after another project was opened, so it wasn't added	Обобщение завершилось после открытия другого проекта, поэтому не было добавлено
 The system keychain could not complete the request.	Системная связка ключей не смогла выполнить запрос.
 The system keychain is locked or access was refused.	Системная связка ключей заблокирована, или доступ запрещён.
-The system keychain is unavailable, so this sign-in won't be remembered: it lasts until RustGIS closes.	Системная связка ключей недоступна, поэтому этот вход не будет запомнен: он действует до закрытия RustGIS.
+The system keychain is unavailable, so this sign-in won't be remembered: it lasts until HuaGIS closes.	Системная связка ключей недоступна, поэтому этот вход не будет запомнен: он действует до закрытия HuaGIS.
 The system keychain is unavailable.	Системная связка ключей недоступна.
 The task's steps changed, so the step being edited was closed: edit it again.	Шаги задачи изменились, поэтому редактируемый шаг закрыт: измените его снова.
 the time slider is off	ползунок времени выключен
@@ -3608,7 +3608,7 @@ This map has no layers yet.	На этой карте пока нет слоёв.
 This map's thumbnail, from an image.	Эскиз этой карты из изображения.
 This map's thumbnail, from the view.	Эскиз этой карты из вида.
 This plugin can:	Этот модуль может:
-This plugin runs as a program on your computer, outside RustGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	Этот модуль работает как программа на вашем компьютере, вне песочницы RustGIS. Он может всё, что можете вы: читать и изменять ваши файлы, использовать сеть и запускать другие программы. Устанавливайте его, только если доверяете автору.
+This plugin runs as a program on your computer, outside HuaGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	Этот модуль работает как программа на вашем компьютере, вне песочницы HuaGIS. Он может всё, что можете вы: читать и изменять ваши файлы, использовать сеть и запускать другие программы. Устанавливайте его, только если доверяете автору.
 This request has no one-time allow option.	Для этого запроса нет варианта разового разрешения.
 This request uses an unsupported capability. Check the parameter and change the request.	Запрос использует неподдерживаемую функцию. Проверьте параметр и измените запрос.
 This result is kept	Этот результат сохраняется
@@ -3740,7 +3740,7 @@ unknown (an older project)	неизвестно (старый проект)
 Unknown shortcut binding field.	Неизвестное поле назначения сочетания клавиш.
 Unknown shortcut command.	Неизвестная команда сочетания клавиш.
 UNKNOWN TOOL	НЕИЗВЕСТНЫЙ ИНСТРУМЕНТ
-Unload the GeoLibre tools and stop loading them when RustGIS starts.	Выгрузить инструменты GeoLibre и не загружать их при запуске RustGIS.
+Unload the GeoLibre tools and stop loading them when HuaGIS starts.	Выгрузить инструменты GeoLibre и не загружать их при запуске HuaGIS.
 Unsaved changes	Несохранённые изменения
 Unsupervised classes (k-means)	Классы без учителя (k-средних)
 Unsupervised classes (k-means).	Классы без учителя (k-средних).
@@ -3872,13 +3872,13 @@ Web Tool	Веб-инструмент
 Website	Веб-сайт
 Weekly usage	Использование за неделю
 Weights	Веса
-Welcome to RustGIS	Добро пожаловать в RustGIS
+Welcome to HuaGIS	Добро пожаловать в HuaGIS
 West	Запад
 WFS	WFS
 WGS 84 / Globe	WGS 84 / Глобус
 WGS 84 / Web Mercator	WGS 84 / Web Mercator
-What RustGIS opens with: the World Atlas sample or a blank map.	С чем открывается RustGIS: с примером World Atlas или с пустой картой.
-What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	С чем открывается RustGIS: с примером World Atlas, с пустой картой, с выбранным вами проектом или с последним открытым или сохранённым проектом.
+What HuaGIS opens with: the World Atlas sample or a blank map.	С чем открывается HuaGIS: с примером World Atlas или с пустой картой.
+What HuaGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	С чем открывается HuaGIS: с примером World Atlas, с пустой картой, с выбранным вами проектом или с последним открытым или сохранённым проектом.
 What to do, where to find it and why	Что сделать, где это найти и зачем
 What's near a point	Что находится рядом с точкой
 When a file holds several layers, choose the ones to add instead of adding them all.	Если файл содержит несколько слоёв, выбирать нужные, а не добавлять все.

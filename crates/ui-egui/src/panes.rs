@@ -1054,7 +1054,7 @@ fn source_groups(
     for (src, items) in groups {
         match &src {
             Some(s) => group_header(ui, &s.label, Some(&s.hover), t),
-            None => group_header(ui, tl!("In memory"), Some(tl!("Made in RustGIS: samples, drawings and tool outputs")), t),
+            None => group_header(ui, tl!("In memory"), Some(tl!("Made in HuaGIS: samples, drawings and tool outputs")), t),
         }
         for item in items {
             match item {
@@ -3157,9 +3157,9 @@ fn geolibre_uninstall(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         (false, false) => tl!("Uninstall"),
     };
     let tip = if web {
-        tl!("Unload the GeoLibre tools and stop loading them when RustGIS starts.")
+        tl!("Unload the GeoLibre tools and stop loading them when HuaGIS starts.")
     } else {
-        tl!("Delete the GeoLibre runner that RustGIS installed. Install it again at any time.")
+        tl!("Delete the GeoLibre runner that HuaGIS installed. Install it again at any time.")
     };
     let text = egui::RichText::new(label).size(11.0);
     let resp = ui.small_button(if app.gp.confirm_uninstall { text.color(t.red) } else { text }).on_hover_text(tip);
@@ -3471,7 +3471,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         if q.is_empty() {
             // Browsing: one collapsible toolbox per top-level group, like the GeoLibre ones
             // (open: there are only a few built-in tools).
-            ui.label(egui::RichText::new(tl!("RustGIS")).size(11.0).color(t.text_dim));
+            ui.label(egui::RichText::new(tl!("HuaGIS")).size(11.0).color(t.text_dim));
             let mut tops: Vec<&str> = builtin.iter().map(|t| t.toolbox.split(" › ").next().unwrap_or(t.toolbox)).collect();
             tops.sort();
             tops.dedup();

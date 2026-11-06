@@ -487,7 +487,7 @@ fn main() -> eframe::Result {
         // Notices are shown as written: translate this one now that the language is known.
         rustgis_ui_egui::i18n::set_current(app.chosen_lang());
         let text = rustgis_ui_egui::i18n::fmt(
-            "RustGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.",
+            "HuaGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.",
             &[("path", &log.display().to_string())],
         );
         app.session.notify(text, true);
@@ -507,7 +507,7 @@ fn main() -> eframe::Result {
     }
     app.session.mark_saved();
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("RustGIS")
+        .with_title("HuaGIS")
         .with_app_id("org.rustgis.RustGIS")
         .with_inner_size([1480.0, 920.0])
         .with_min_inner_size([900.0, 560.0])

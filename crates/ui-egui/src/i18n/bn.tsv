@@ -60,8 +60,8 @@ A line, or markers or hash marks along it	একটি রেখা, অথব�
 A magnifying lens that follows the pointer.	পয়েন্টারকে অনুসরণ করে এমন একটি বিবর্ধক কাচ।
 A map, feature or coverage service's address: WMS, WMTS, WFS, WCS, OGC API Features or Tiles, or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer (or a services directory, to browse).	মানচিত্র, feature বা coverage সার্ভিসের ঠিকানা: WMS, WMTS, WFS, WCS, OGC API Features বা Tiles; অথবা ArcGIS FeatureServer, MapServer, ImageServer কিংবা VectorTileServer (ব্রাউজ করার জন্য service directory-ও হতে পারে)।
 a name, or owner/name such as giswqs/geospatial	একটি নাম, অথবা giswqs/geospatial-এর মতো owner/name
-A named endpoint you can reuse. Keys and tokens are kept until RustGIS closes, never saved.	পুনরায় ব্যবহারযোগ্য একটি নামযুক্ত endpoint। Key ও token RustGIS বন্ধ হওয়া পর্যন্ত রাখা হয়, কখনো সংরক্ষণ করা হয় না।
-A named endpoint you can reuse. Keys are kept until RustGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	পুনরায় ব্যবহারযোগ্য একটি নামযুক্ত endpoint। এই কম্পিউটারে মনে রাখতে না বললে key RustGIS বন্ধ হওয়া পর্যন্ত রাখা হয়; সংযোগ নিজে কখনো সেগুলো রাখে না।
+A named endpoint you can reuse. Keys and tokens are kept until HuaGIS closes, never saved.	পুনরায় ব্যবহারযোগ্য একটি নামযুক্ত endpoint। Key ও token HuaGIS বন্ধ হওয়া পর্যন্ত রাখা হয়, কখনো সংরক্ষণ করা হয় না।
+A named endpoint you can reuse. Keys are kept until HuaGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	পুনরায় ব্যবহারযোগ্য একটি নামযুক্ত endpoint। এই কম্পিউটারে মনে রাখতে না বললে key HuaGIS বন্ধ হওয়া পর্যন্ত রাখা হয়; সংযোগ নিজে কখনো সেগুলো রাখে না।
 A named endpoint you can reuse. Passwords last for this session unless you choose to remember them in this computer's password store.	পুনরায় ব্যবহারযোগ্য একটি নামযুক্ত endpoint। এই কম্পিউটারের password store-এ মনে রাখতে না বললে পাসওয়ার্ড শুধু এই সেশনের জন্য থাকে।
 A node cannot connect to itself.	একটি node নিজেই নিজের সঙ্গে সংযুক্ত হতে পারে না।
 A notebook of text and command cells.	টেক্সট ও কমান্ড সেলসহ একটি notebook।
@@ -98,8 +98,8 @@ A5 Grid	A5 গ্রিড
 A5's equal-area pentagonal cells at a resolution, over the map's extent, a layer or the world, as polygons with their ids.	নির্বাচিত resolution-এ A5-এর সম-ক্ষেত্রফলবিশিষ্ট পঞ্চভুজ কোষ, মানচিত্রের extent, একটি layer বা পুরো পৃথিবী জুড়ে polygon ও তাদের ID হিসেবে।
 About	সম্পর্কে
 About plugins	প্লাগইন সম্পর্কে
-About RustGIS	RustGIS সম্পর্কে
-About RustGIS.	RustGIS সম্পর্কে।
+About HuaGIS	HuaGIS সম্পর্কে
+About HuaGIS.	HuaGIS সম্পর্কে।
 Above	উপরে
 Above Left	ওপরে বামে
 Above Right	ওপরে ডানে
@@ -276,7 +276,7 @@ Agent input queue is full or disconnected; stop the agent and try again.	Agent-�
 Agent threads	Agent thread-সমূহ
 Agent work	Agent-এর কাজ
 Agents have full access: they may run scripts, tasks, models and plugins. Click to stop the MCP relay	Agent-গুলোর পূর্ণ অ্যাক্সেস আছে: তারা script, task, model ও plugin চালাতে পারে। MCP relay বন্ধ করতে ক্লিক করুন
-Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	এই কম্পিউটারে সংযুক্ত হওয়া agent-গুলো (Claude Code, Codex, Cursor এবং অন্যান্য) এখানে খোলা মানচিত্রে RustGIS-এর টুল ব্যবহার করে কাজ করে: তারা ফাইল খুলতে ও সংরক্ষণ করতে পারে এবং web ব্যবহার করতে পারে। Script ও plugin management বন্ধ থাকে।
+Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with HuaGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	এই কম্পিউটারে সংযুক্ত হওয়া agent-গুলো (Claude Code, Codex, Cursor এবং অন্যান্য) এখানে খোলা মানচিত্রে HuaGIS-এর টুল ব্যবহার করে কাজ করে: তারা ফাইল খুলতে ও সংরক্ষণ করতে পারে এবং web ব্যবহার করতে পারে। Script ও plugin management বন্ধ থাকে।
 Agents then run commands, change files and use the web on this computer without asking you.	এরপর agent-গুলো আপনার অনুমতি না নিয়েই এই কম্পিউটারে command চালায়, ফাইল পরিবর্তন করে এবং web ব্যবহার করে।
 Aggregate Points to A5	বিন্দু A5-এ aggregate করুন
 Aggregation	সমষ্টিকরণ
@@ -301,7 +301,7 @@ Allow Feature Selection	Feature নির্বাচন করার অনু�
 Allow only certain combinations of values across fields.	field-গুলোর মানের মধ্যে শুধু নির্দিষ্ট সমন্বয় অনুমোদন করুন।
 Allow such actions for this conversation	এই কথোপকথনে এ ধরনের কাজের অনুমতি দিন
 Allow this action?	এই কাজের অনুমতি দেবেন?
-Allow this agent's RustGIS action?	এই agent-এর RustGIS action অনুমোদন করবেন?
+Allow this agent's HuaGIS action?	এই agent-এর HuaGIS action অনুমোদন করবেন?
 Along lines	রেখা বরাবর
 Along Selected Line	নির্বাচিত লাইন বরাবর
 Alt+	Alt+
@@ -313,7 +313,7 @@ Alternating bar	বিকল্প বার
 Altitude	উচ্চতা
 Always allow	সব সময় অনুমতি দিন
 Amazon S3	Amazon S3
-Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	endpoint-এর মাধ্যমে Amazon S3 বা S3-সামঞ্জস্যপূর্ণ সার্ভিস (MinIO, Cloudflare R2, Wasabi…)। RustGIS বন্ধ হওয়া পর্যন্ত key রাখা হয়; সংরক্ষিত connection-এ নাম, endpoint ও region থাকে, গোপন key নয়।
+Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until HuaGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	endpoint-এর মাধ্যমে Amazon S3 বা S3-সামঞ্জস্যপূর্ণ সার্ভিস (MinIO, Cloudflare R2, Wasabi…)। HuaGIS বন্ধ হওয়া পর্যন্ত key রাখা হয়; সংরক্ষিত connection-এ নাম, endpoint ও region থাকে, গোপন key নয়।
 amenity=cafe, shop	amenity=cafe, shop
 An agent on this computer asks to:	এই কম্পিউটারের একজন agent অনুমতি চাইছে:
 An ArcGIS Online organization's or an ArcGIS Enterprise portal's address; ArcGIS Online when blank	একটি ArcGIS Online organization বা ArcGIS Enterprise পোর্টালের ঠিকানা; ফাঁকা থাকলে ArcGIS Online
@@ -363,7 +363,7 @@ Arrange	সাজান
 Arrange Element	Element সাজান
 Arrow	তীর
 Arrowheads	তীরের মাথা
-Ask a question about your data, or describe what to do with the map. The assistant runs RustGIS commands for you; every change can be undone.	আপনার ডেটা সম্পর্কে প্রশ্ন করুন, অথবা মানচিত্রে কী করতে হবে তা বলুন। Assistant আপনার হয়ে RustGIS কমান্ড চালায়; প্রতিটি পরিবর্তন ফিরিয়ে নেওয়া যায়।
+Ask a question about your data, or describe what to do with the map. The assistant runs HuaGIS commands for you; every change can be undone.	আপনার ডেটা সম্পর্কে প্রশ্ন করুন, অথবা মানচিত্রে কী করতে হবে তা বলুন। Assistant আপনার হয়ে HuaGIS কমান্ড চালায়; প্রতিটি পরিবর্তন ফিরিয়ে নেওয়া যায়।
 Ask about the map, or tell it what to do…	মানচিত্র সম্পর্কে জিজ্ঞেস করুন, অথবা কী করতে হবে বলুন…
 Ask about your data, or tell the assistant what to do with the map.	আপনার ডেটা সম্পর্কে জিজ্ঞেস করুন, অথবা মানচিত্রে কী করতে হবে assistant-কে বলুন।
 Ask Which Layers to Add	কোন layer যোগ হবে জিজ্ঞাসা করুন
@@ -717,7 +717,7 @@ Color Vision Simulator	রঙ-দৃষ্টির simulator
 Colorbar	রঙের বার
 Colormap	রঙের মানচিত্র
 Colors from the raster's own color table.	raster-এর নিজস্ব color table থেকে রং।
-Colour ramps (RustGIS, QGIS, GDAL, GMT)	রঙের র‍্যাম্প (RustGIS, QGIS, GDAL, GMT)
+Colour ramps (HuaGIS, QGIS, GDAL, GMT)	রঙের র‍্যাম্প (HuaGIS, QGIS, GDAL, GMT)
 Columns named like longitude/latitude, easting/northing or geometry are picked for you.	longitude/latitude, easting/northing অথবা geometry-র মতো নামযুক্ত column-গুলো স্বয়ংক্রিয়ভাবে বেছে নেওয়া হয়।
 Combinations from the box above, one per line	উপরের বাক্সের সমন্বয়গুলো, প্রতি লাইনে একটি
 Combines two polygon layers into every piece either covers, with the attributes of both where they overlap.	দুটি polygon layer-কে এমন সব টুকরোয় মেলায় যা যেকোনো একটি ঢাকে, যেখানে মিলে যায় সেখানে দুটিরই attribute রেখে।
@@ -924,7 +924,7 @@ Delete selected rows	নির্বাচিত সারি মুছুন
 Delete Style	Style মুছুন
 Delete Task	Task মুছুন
 Delete Task Step	Task step মুছুন
-Delete the GeoLibre runner that RustGIS installed. Install it again at any time.	RustGIS যে GeoLibre runner ইনস্টল করেছে তা মুছে ফেলুন। যেকোনো সময় আবার ইনস্টল করা যাবে।
+Delete the GeoLibre runner that HuaGIS installed. Install it again at any time.	HuaGIS যে GeoLibre runner ইনস্টল করেছে তা মুছে ফেলুন। যেকোনো সময় আবার ইনস্টল করা যাবে।
 Delete the layout {name}?	{name} layout মুছে ফেলবেন?
 Delete the map {name}?	{name} মানচিত্র মুছে ফেলবেন?
 Delete the selected features.	নির্বাচিত feature মুছুন।
@@ -1136,7 +1136,7 @@ Element Properties	উপাদানের বৈশিষ্ট্য
 Elevation	উচ্চতা
 Elevation model	উচ্চতা মডেল
 Elevation profiles along lines, cross sections and more.	লাইন বরাবর elevation profile, cross-section এবং আরও অনেক কিছু।
-Eligible requests in RustGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	RustGIS-এ যোগ্য request-গুলো আপনার ChatGPT প্ল্যান ব্যবহার করে। ChatGPT সেটিংসে ব্যবহার পরিচালনা করতে পারেন।
+Eligible requests in HuaGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	HuaGIS-এ যোগ্য request-গুলো আপনার ChatGPT প্ল্যান ব্যবহার করে। ChatGPT সেটিংসে ব্যবহার পরিচালনা করতে পারেন।
 Ellipse	উপবৃত্ত
 Embeddings	এমবেডিং
 Ember	অঙ্গার
@@ -1329,7 +1329,7 @@ Find and run geoprocessing tools.	Geoprocessing tool খুঁজুন ও চ�
 Find any command by name (Ctrl+K).	নাম দিয়ে যেকোনো command খুঁজুন (Ctrl+K)।
 Find Items	Item খুঁজুন
 Find Place	স্থান খুঁজুন
-Find plugins in the RustGIS plugin registry.	RustGIS plugin registry-তে plugin খুঁজুন।
+Find plugins in the HuaGIS plugin registry.	HuaGIS plugin registry-তে plugin খুঁজুন।
 Find Similar	সদৃশ খুঁজুন
 Find Tools	Tool খুঁজুন
 Finding routes…	Route খোঁজা হচ্ছে…
@@ -1363,14 +1363,14 @@ Folder…	ফোল্ডার…
 Follow the time slider	Time slider অনুসরণ করুন
 Font	ফন্ট
 for a store that doesn't say	যে store এটি উল্লেখ করে না তার জন্য
-For ArcGIS Online, the client ID is RustGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	ArcGIS Online-এর জন্য client ID হলো RustGIS-এর নিজস্ব app। ArcGIS Enterprise পোর্টালের জন্য সেখানে একটি OAuth app নিবন্ধন করুন (Content › New item › Developer credentials), যার redirect URL হবে {redirect}, এবং তার client ID দিন।
+For ArcGIS Online, the client ID is HuaGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	ArcGIS Online-এর জন্য client ID হলো HuaGIS-এর নিজস্ব app। ArcGIS Enterprise পোর্টালের জন্য সেখানে একটি OAuth app নিবন্ধন করুন (Content › New item › Developer credentials), যার redirect URL হবে {redirect}, এবং তার client ID দিন।
 for the layers that change with time, as they list their times (2024-06-01, 1995)	সময়ের সঙ্গে বদলানো layer-এর জন্য, যেভাবে তারা তাদের সময় তালিকাভুক্ত করে (2024-06-01, 1995)
 Forest	বন
 Forget Earthdata Login Token	Earthdata Login token ভুলে যান
 Forget Saved Keys	সংরক্ষিত key ভুলে যান
 Forget Saved Password	সংরক্ষিত পাসওয়ার্ড ভুলে যান
 Format	ফরম্যাট
-Found: {names}. An agent works on this map through RustGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › RustGIS › Agent work. It asks you before each action.	পাওয়া গেছে: {names}। একটি agent RustGIS-এর tool ব্যবহার করে এই মানচিত্রে কাজ করে এবং নিজের web, script ও file নিজস্ব folder-এ রাখে, যা Documents › RustGIS › Agent work-এ থাকে। প্রতিটি action-এর আগে এটি আপনাকে জিজ্ঞেস করে।
+Found: {names}. An agent works on this map through HuaGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › HuaGIS › Agent work. It asks you before each action.	পাওয়া গেছে: {names}। একটি agent HuaGIS-এর tool ব্যবহার করে এই মানচিত্রে কাজ করে এবং নিজের web, script ও file নিজস্ব folder-এ রাখে, যা Documents › HuaGIS › Agent work-এ থাকে। প্রতিটি action-এর আগে এটি আপনাকে জিজ্ঞেস করে।
 Frame rate	ফ্রেম রেট
 Frame rate, draw time, data size and memory.	ফ্রেম রেট, আঁকার সময়, ডেটার আকার ও মেমরি।
 France	ফ্রান্স
@@ -1534,7 +1534,7 @@ host=localhost dbname=gis user=postgres	host=localhost dbname=gis user=postgres
 host=… dbname=… user=…	host=… dbname=… user=…
 Hosted Imagery	হোস্টেড ইমেজারি
 Hour	ঘণ্টা
-How often RustGIS keeps a copy of unsaved work, to offer it back after a crash.	Crash-এর পরে ফেরত দিতে RustGIS কত ঘন ঘন অসংরক্ষিত কাজের একটি কপি রাখবে।
+How often HuaGIS keeps a copy of unsaved work, to offer it back after a crash.	Crash-এর পরে ফেরত দিতে HuaGIS কত ঘন ঘন অসংরক্ষিত কাজের একটি কপি রাখবে।
 How the layer's colours combine with the tile layers and basemap beneath.	layer-এর রং নিচের tile layer ও basemap-এর সঙ্গে কীভাবে মিশবে।
 How the layer's colours combine with what's beneath.	layer-এর রং নিচের বিষয়বস্তুর সঙ্গে কীভাবে মিশবে।
 HUB Ocean's Ocean Data Platform: marine datasets, read as features (up to 10,000 each).	HUB Ocean-এর Ocean Data Platform: সামুদ্রিক dataset feature হিসেবে পড়া হয় (প্রতিটিতে সর্বোচ্চ ১০,০০০টি)।
@@ -1601,7 +1601,7 @@ In memory	মেমরিতে
 In Progress	চলমান
 in progress	চলমান
 In project	প্রজেক্টে
-In RustGIS, it can:	RustGIS-এ এটি পারে:
+In HuaGIS, it can:	HuaGIS-এ এটি পারে:
 In the browser, pick the .shp and .dbf together, with any sidecars, or pick a ZIP. The override applies to every Shapefile in the ZIP.	Browser-এ .shp ও .dbf একসাথে, সঙ্গের sidecar file-সহ বেছে নিন, অথবা একটি ZIP বেছে নিন। এই override ZIP-এর প্রতিটি Shapefile-এ প্রযোজ্য।
 In the coordinate system's units: metres for UTM.	স্থানাঙ্ক ব্যবস্থার এককে: UTM-এর জন্য মিটার।
 In the middle	মাঝখানে
@@ -1689,7 +1689,7 @@ Item Pop-ups	Item pop-up
 Item {id}	আইটেম {id}
 its default	এর ডিফল্ট
 Its default: {default}. Its times: {times}	এর ডিফল্ট: {default}। এর সময়: {times}
-Its firewall ({firewall}) blocked RustGIS. The service may only allow some applications: contact its administrator and send them the details below.	এর firewall ({firewall}) RustGIS-কে আটকেছে। service হয়তো শুধু কিছু application অনুমোদন করে: administrator-এর সঙ্গে যোগাযোগ করে নিচের বিবরণ পাঠান।
+Its firewall ({firewall}) blocked HuaGIS. The service may only allow some applications: contact its administrator and send them the details below.	এর firewall ({firewall}) HuaGIS-কে আটকেছে। service হয়তো শুধু কিছু application অনুমোদন করে: administrator-এর সঙ্গে যোগাযোগ করে নিচের বিবরণ পাঠান।
 Its tool isn't available now (a plugin's, not loaded, or a suite's, not installed)	এর tool এখন পাওয়া যাচ্ছে না (plugin-এরটি লোড হয়নি অথবা suite ইনস্টল নেই)
 Jobs	Job-সমূহ
 JOIN	JOIN
@@ -1719,7 +1719,7 @@ Keep Tool	Tool রাখুন
 Keep value	মান রাখুন
 Keeps the access key ID and secret access key in this computer's credential store, never in the connection or the project.	Access key ID ও গোপন access key এই কম্পিউটারের credential store-এ রাখে, কখনো সংযোগ বা প্রজেক্টে নয়।
 Keeps the parts of two polygon layers that only one of them covers, with that layer's attributes.	দুটি polygon layer-এর যে অংশ শুধু একটি ঢাকে সেগুলো রাখে, সেই layer-এর attribute সহ।
-Keeps the token in the system's credential store, so it is there when RustGIS starts again. Unticked, a token remembered before is deleted when you save another.	Token সিস্টেমের credential store-এ রাখে, যাতে RustGIS আবার শুরু হলে এটি থাকে। টিক না দিলে, আগে মনে রাখা token অন্যটি সংরক্ষণ করলে মুছে যায়।
+Keeps the token in the system's credential store, so it is there when HuaGIS starts again. Unticked, a token remembered before is deleted when you save another.	Token সিস্টেমের credential store-এ রাখে, যাতে HuaGIS আবার শুরু হলে এটি থাকে। টিক না দিলে, আগে মনে রাখা token অন্যটি সংরক্ষণ করলে মুছে যায়।
 Kernel Density	কার্নেল ঘনত্ব
 Kernel Type	কার্নেলের ধরন
 Key	কী
@@ -1800,7 +1800,7 @@ Legend label. Clear it to show the value again.	Legend label। মানটি 
 Length	দৈর্ঘ্য
 Length {length} · gain {gain} · loss {loss}	দৈর্ঘ্য {length} · উত্থান {gain} · পতন {loss}
 Let the assistant hand tasks to agents on this computer	এই কম্পিউটারের agent-দের assistant দিয়ে task দেওয়ার অনুমতি দিন
-Let your Agents Control RustGIS	আপনার agent-দের RustGIS নিয়ন্ত্রণ করতে দিন
+Let your Agents Control HuaGIS	আপনার agent-দের HuaGIS নিয়ন্ত্রণ করতে দিন
 Letter spacing	অক্ষরের মধ্যবর্তী ফাঁক
 Level	স্তর
 Library	লাইব্রেরি
@@ -1856,7 +1856,7 @@ List The National Map Services	The National Map service তালিকাভু
 List the provider's models	Provider-এর model তালিকাভুক্ত করুন
 List this layer in the legend	Legend-এ এই layer দেখান
 List what it holds	এর ভেতরের বিষয়বস্তু তালিকাভুক্ত করুন
-Listed for discovery: RustGIS doesn't read this dataset yet. Its data and paper are linked above.	আবিষ্কারের জন্য তালিকাভুক্ত: RustGIS এখনো এই dataset পড়ে না। এর data ও গবেষণাপত্রের লিংক উপরে আছে।
+Listed for discovery: HuaGIS doesn't read this dataset yet. Its data and paper are linked above.	আবিষ্কারের জন্য তালিকাভুক্ত: HuaGIS এখনো এই dataset পড়ে না। এর data ও গবেষণাপত্রের লিংক উপরে আছে।
 Listing datasets…	Dataset তালিকাভুক্ত হচ্ছে…
 Listing…	তালিকা তৈরি হচ্ছে…
 Lit	আলোকিত
@@ -1901,7 +1901,7 @@ Look for {name}, outlined on the ribbon.	Ribbon-এ চিহ্নিত {name}
 Looking up the place…	স্থান খোঁজা হচ্ছে…
 Loop	লুপ
 Lower Priority	অগ্রাধিকার কমান
-Made in RustGIS: samples, drawings and tool outputs	RustGIS-এ তৈরি: নমুনা, অঙ্কন ও tool-এর output
+Made in HuaGIS: samples, drawings and tool outputs	HuaGIS-এ তৈরি: নমুনা, অঙ্কন ও tool-এর output
 Magnifier	বিবর্ধক
 Major Lakes	প্রধান হ্রদ
 Major Rivers	প্রধান নদী
@@ -2157,7 +2157,7 @@ no command	কোনো command নেই
 No data at the points picked.	নির্বাচিত বিন্দুগুলোতে কোনো ডেটা নেই।
 No data cube matches	কোনো data cube মেলে না
 No datasets match.	কোনো dataset মেলেনি।
-No datasets with data RustGIS can add	RustGIS যোগ করতে পারে এমন ডেটাসহ কোনো dataset নেই
+No datasets with data HuaGIS can add	HuaGIS যোগ করতে পারে এমন ডেটাসহ কোনো dataset নেই
 no date in the name	নামে কোনো তারিখ নেই
 no download service	কোনো download service নেই
 No edits since the project was saved	প্রজেক্ট সংরক্ষণের পর কোনো পরিবর্তন নেই
@@ -2219,8 +2219,8 @@ North Polar Stereographic	উত্তর মেরু স্টেরিওগ�
 NOT	NOT
 Not a GeoLibre project	GeoLibre প্রজেক্ট নয়
 not a picture	ছবি নয়
-not a RustGIS layout	RustGIS layout নয়
-not a RustGIS project	RustGIS project নয়
+not a HuaGIS layout	HuaGIS layout নয়
+not a HuaGIS project	HuaGIS project নয়
 Not applied yet.	এখনও প্রয়োগ করা হয়নি।
 Not for texts: a text is edited in the Format pane.	টেক্সটের জন্য নয়: Format pane-এ টেক্সট সম্পাদনা করা হয়।
 not needed	প্রয়োজন নেই
@@ -2291,7 +2291,7 @@ Open a Data Cube	একটি data cube খুলুন
 open a layout first	আগে একটি layout খুলুন
 Open a model file (*.model.json)	একটি model file (*.model.json) খুলুন
 Open a model of this project	এই project-এর একটি model খুলুন
-Open a RustGIS or Jupyter notebook.	RustGIS বা Jupyter notebook খুলুন।
+Open a HuaGIS or Jupyter notebook.	HuaGIS বা Jupyter notebook খুলুন।
 Open an offline area to edit.	সম্পাদনার জন্য offline area খুলুন।
 Open browser again	Browser আবার খুলুন
 Open Custom Template	Custom template খুলুন
@@ -2318,7 +2318,7 @@ Open the layer's attribute table.	Layer-এর attribute table খুলুন�
 Open the layer's table.	Layer-এর table খুলুন।
 Open the plugin's panel.	Plugin-এর panel খুলুন।
 Open the Release Page	Release page খুলুন
-Open the RustGIS user guide.	RustGIS ব্যবহারকারী নির্দেশিকা খুলুন।
+Open the HuaGIS user guide.	HuaGIS ব্যবহারকারী নির্দেশিকা খুলুন।
 Open the selected layer's table.	নির্বাচিত layer-এর table খুলুন।
 Open the Symbology pane.	Symbology pane খুলুন।
 Open the task's steps	Task-এর ধাপগুলো খুলুন
@@ -2494,7 +2494,7 @@ Plugin registry	প্লাগইন রেজিস্ট্রি
 Plugins	Plugin-সমূহ
 Plugins are .rgplugin files. Install only plugins from people you trust.	Plugin হলো .rgplugin file। শুধু বিশ্বাসযোগ্য ব্যক্তির plugin ইনস্টল করুন।
 Plugins marked Not sandboxed run as programs on your computer instead, and can do anything you can.	Not sandboxed হিসেবে চিহ্নিত plugin আপনার কম্পিউটারে সাধারণ program হিসেবে চলে এবং আপনার মতোই সবকিছু করতে পারে।
-Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through RustGIS's own commands, within the permissions you accept.	Plugin sandbox-এ চলে: তারা আপনার file বা network-এ পৌঁছাতে পারে না এবং আপনার অনুমোদিত সীমার মধ্যে শুধু RustGIS-এর নিজস্ব command দিয়েই project বদলায়।
+Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through HuaGIS's own commands, within the permissions you accept.	Plugin sandbox-এ চলে: তারা আপনার file বা network-এ পৌঁছাতে পারে না এবং আপনার অনুমোদিত সীমার মধ্যে শুধু HuaGIS-এর নিজস্ব command দিয়েই project বদলায়।
 PMTiles archive	PMTiles আর্কাইভ
 PNG frames (zip)	PNG ফ্রেম (zip)
 PNG image	PNG ছবি
@@ -2571,7 +2571,7 @@ Project Template	প্রজেক্ট টেমপ্লেট
 project's path is required	project-এর path আবশ্যক
 Projection	অভিক্ষেপ
 Projections	Projection-সমূহ
-Projects and JSON data (RustGIS, QGIS, GeoLibre)	প্রজেক্ট ও JSON ডেটা (RustGIS, QGIS, GeoLibre)
+Projects and JSON data (HuaGIS, QGIS, GeoLibre)	প্রজেক্ট ও JSON ডেটা (HuaGIS, QGIS, GeoLibre)
 Properties	বৈশিষ্ট্য
 Property	বৈশিষ্ট্য
 Proportional Symbols	আনুপাতিক প্রতীক
@@ -2632,7 +2632,7 @@ Read error	পড়ার ত্রুটি
 Read the bands picked for the view (at most about 6 km a side)	view-এর জন্য নির্বাচিত band পড়ুন (প্রতি পাশে সর্বোচ্চ প্রায় ৬ km)
 Read the map's layers and features	মানচিত্রের layer ও feature পড়ুন
 Read the points in the view, coloured by their principal components	view-এর বিন্দুগুলো তাদের principal component অনুযায়ী রঙ করে পড়ুন
-Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	granule-এর file পড়তে Earthdata Login token দরকার, যা NASA-র সব DAAC-এ কাজ করে। মনে রাখুন-এ টিক না দিলে RustGIS বন্ধ হওয়া পর্যন্ত এটি রাখা হয়, project-এ নয়, এবং শুধু NASA Earthdata data server-এ পাঠানো হয়।
+Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until HuaGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	granule-এর file পড়তে Earthdata Login token দরকার, যা NASA-র সব DAAC-এ কাজ করে। মনে রাখুন-এ টিক না দিলে HuaGIS বন্ধ হওয়া পর্যন্ত এটি রাখা হয়, project-এ নয়, এবং শুধু NASA Earthdata data server-এ পাঠানো হয়।
 Reading the catalog: {n} documents read, {m} items found…	Catalog পড়া হচ্ছে: {n}টি নথি পড়া হয়েছে, {m}টি item পাওয়া গেছে…
 Reading the catalog…	Catalog পড়া হচ্ছে…
 Reading the embeddings…	Embedding পড়া হচ্ছে…
@@ -2817,32 +2817,32 @@ Run Tool	Tool চালান
 Run {name}	{name} চালান
 Running the query for the map…	মানচিত্রের জন্য query চালানো হচ্ছে…
 Running…	চলছে…
-RustGIS	RustGIS
-RustGIS bookmarks	RustGIS বুকমার্ক
-RustGIS could not confirm that any previously saved key was deleted from the system keychain.	আগে সংরক্ষিত কোনো key system keychain থেকে মুছে ফেলা হয়েছে কিনা RustGIS তা নিশ্চিত করতে পারেনি।
-RustGIS couldn't reach the server.	RustGIS server-এ পৌঁছাতে পারেনি।
-RustGIS deep learning package	RustGIS ডিপ লার্নিং প্যাকেজ
-RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	গতবার RustGIS সঠিকভাবে বন্ধ হয়নি, তাই আপনার startup project-এর বদলে World Atlas দিয়ে শুরু হয়েছে। প্রস্তুত হলে Project menu থেকে project খুলুন।
-RustGIS didn't close properly last time.	গতবার RustGIS ঠিকমতো বন্ধ হয়নি।
-RustGIS doesn't have this tool. Install the tools it comes from, or delete the node.	RustGIS-এর কাছে এই tool নেই। যে package থেকে এটি এসেছে তার tool ইনস্টল করুন, অথবা node মুছুন।
-RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	RustGIS হলো Rust-এ লেখা একটি মুক্ত ও open-source GIS। এটি desktop ও browser-এ চলে, এবং প্রতিটি action এমন command যা command line থেকেও চালানো যায়।
-RustGIS layer file	RustGIS লেয়ার ফাইল
-RustGIS layers, maps and projects	RustGIS layer, মানচিত্র ও project
-RustGIS layout	RustGIS লেআউট
-RustGIS maps and projects	RustGIS মানচিত্র ও project
-RustGIS model	RustGIS মডেল
-RustGIS or Jupyter notebook	RustGIS বা Jupyter notebook
-RustGIS plugin	RustGIS প্লাগইন
-RustGIS presentation	RustGIS প্রেজেন্টেশন
-RustGIS project	RustGIS প্রকল্প
-RustGIS project template	RustGIS প্রকল্প টেমপ্লেট
-RustGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	গতবার RustGIS একটি অভ্যন্তরীণ ত্রুটিতে পড়েছিল। বিবরণ {path}-এ আছে; bug report-এ যুক্ত করুন।
-RustGIS report or report template	RustGIS report বা report template
-RustGIS styles	RustGIS স্টাইল
-RustGIS task	RustGIS টাস্ক
-RustGIS was quit last time without saving your changes.	গতবার আপনার পরিবর্তন সংরক্ষণ না করেই RustGIS বন্ধ করা হয়েছিল।
-RustGIS {latest} is available.	RustGIS {latest} পাওয়া যাচ্ছে।
-RustGIS {version} is the latest version.	RustGIS {version} সর্বশেষ version।
+HuaGIS	HuaGIS
+HuaGIS bookmarks	HuaGIS বুকমার্ক
+HuaGIS could not confirm that any previously saved key was deleted from the system keychain.	আগে সংরক্ষিত কোনো key system keychain থেকে মুছে ফেলা হয়েছে কিনা HuaGIS তা নিশ্চিত করতে পারেনি।
+HuaGIS couldn't reach the server.	HuaGIS server-এ পৌঁছাতে পারেনি।
+HuaGIS deep learning package	HuaGIS ডিপ লার্নিং প্যাকেজ
+HuaGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	গতবার HuaGIS সঠিকভাবে বন্ধ হয়নি, তাই আপনার startup project-এর বদলে World Atlas দিয়ে শুরু হয়েছে। প্রস্তুত হলে Project menu থেকে project খুলুন।
+HuaGIS didn't close properly last time.	গতবার HuaGIS ঠিকমতো বন্ধ হয়নি।
+HuaGIS doesn't have this tool. Install the tools it comes from, or delete the node.	HuaGIS-এর কাছে এই tool নেই। যে package থেকে এটি এসেছে তার tool ইনস্টল করুন, অথবা node মুছুন।
+HuaGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	HuaGIS হলো Rust-এ লেখা একটি মুক্ত ও open-source GIS। এটি desktop ও browser-এ চলে, এবং প্রতিটি action এমন command যা command line থেকেও চালানো যায়।
+HuaGIS layer file	HuaGIS লেয়ার ফাইল
+HuaGIS layers, maps and projects	HuaGIS layer, মানচিত্র ও project
+HuaGIS layout	HuaGIS লেআউট
+HuaGIS maps and projects	HuaGIS মানচিত্র ও project
+HuaGIS model	HuaGIS মডেল
+HuaGIS or Jupyter notebook	HuaGIS বা Jupyter notebook
+HuaGIS plugin	HuaGIS প্লাগইন
+HuaGIS presentation	HuaGIS প্রেজেন্টেশন
+HuaGIS project	HuaGIS প্রকল্প
+HuaGIS project template	HuaGIS প্রকল্প টেমপ্লেট
+HuaGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	গতবার HuaGIS একটি অভ্যন্তরীণ ত্রুটিতে পড়েছিল। বিবরণ {path}-এ আছে; bug report-এ যুক্ত করুন।
+HuaGIS report or report template	HuaGIS report বা report template
+HuaGIS styles	HuaGIS স্টাইল
+HuaGIS task	HuaGIS টাস্ক
+HuaGIS was quit last time without saving your changes.	গতবার আপনার পরিবর্তন সংরক্ষণ না করেই HuaGIS বন্ধ করা হয়েছিল।
+HuaGIS {latest} is available.	HuaGIS {latest} পাওয়া যাচ্ছে।
+HuaGIS {version} is the latest version.	HuaGIS {version} সর্বশেষ version।
 RUSTGIS_ASSISTANT_MODEL	RUSTGIS_ASSISTANT_MODEL
 RUSTGIS_ASSISTANT_PROVIDER	RUSTGIS_ASSISTANT_PROVIDER
 RUSTGIS_GPU	RUSTGIS_GPU
@@ -2851,7 +2851,7 @@ S3 Buckets	S3 bucket
 S3 Connections	S3 সংযোগ
 S3…	S3…
 Sample data (Natural Earth)	নমুনা ডেটা (Natural Earth)
-Sample data © Natural Earth (public domain). RustGIS is licensed under Apache-2.0.	নমুনা ডেটা © Natural Earth (public domain)। RustGIS Apache-2.0 লাইসেন্সে প্রকাশিত।
+Sample data © Natural Earth (public domain). HuaGIS is licensed under Apache-2.0.	নমুনা ডেটা © Natural Earth (public domain)। HuaGIS Apache-2.0 লাইসেন্সে প্রকাশিত।
 Sample data: Natural Earth (public domain). Licensed under Apache-2.0.	নমুনা ডেটা: Natural Earth (public domain)। Apache-2.0 লাইসেন্সপ্রাপ্ত।
 Sans-serif	স্যান্স-সেরিফ
 Satellite Embedding Datasets	স্যাটেলাইট এমবেডিং ডেটাসেট
@@ -2995,7 +2995,7 @@ Sections	Section
 See and set the camera's position and scale.	ক্যামেরার অবস্থান ও scale দেখুন ও নির্ধারণ করুন।
 See the map as people with colour vision deficiencies do.	রঙ-দৃষ্টির ঘাটতি থাকা ব্যক্তি যেভাবে দেখেন, সেভাবে মানচিত্র দেখুন।
 See the tools you've run.	আপনি যে tool চালিয়েছেন সেগুলো দেখুন।
-See whether a newer RustGIS has been released.	RustGIS-এর নতুন version প্রকাশিত হয়েছে কি না দেখুন।
+See whether a newer HuaGIS has been released.	HuaGIS-এর নতুন version প্রকাশিত হয়েছে কি না দেখুন।
 SELECT	SELECT
 Select	নির্বাচন
 Select (click)	নির্বাচন (ক্লিক)
@@ -3193,8 +3193,8 @@ Sign-in timed out. Start again and allow the browser to reach this computer's lo
 signed in	সাইন ইন করা
 Signed in to {portal}	{portal}-এ সাইন ইন করা
 Signed in to {portal} as {user}	{portal}-এ {user} হিসেবে সাইন ইন করা
-Signed out on this computer, but OpenAI didn't confirm it. You can disconnect RustGIS in ChatGPT's settings.	এই কম্পিউটারে সাইন আউট হয়েছে, কিন্তু OpenAI নিশ্চিত করেনি। ChatGPT-এর setting থেকে RustGIS সংযোগ বিচ্ছিন্ন করতে পারেন।
-Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect RustGIS in ChatGPT's settings.	এই কম্পিউটারে সাইন আউট হয়েছে, কিন্তু system keychain পড়া যায়নি, তাই OpenAI-কে সেশন শেষ করতে বলা হয়নি। ChatGPT-এর setting থেকে RustGIS সংযোগ বিচ্ছিন্ন করতে পারেন।
+Signed out on this computer, but OpenAI didn't confirm it. You can disconnect HuaGIS in ChatGPT's settings.	এই কম্পিউটারে সাইন আউট হয়েছে, কিন্তু OpenAI নিশ্চিত করেনি। ChatGPT-এর setting থেকে HuaGIS সংযোগ বিচ্ছিন্ন করতে পারেন।
+Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect HuaGIS in ChatGPT's settings.	এই কম্পিউটারে সাইন আউট হয়েছে, কিন্তু system keychain পড়া যায়নি, তাই OpenAI-কে সেশন শেষ করতে বলা হয়নি। ChatGPT-এর setting থেকে HuaGIS সংযোগ বিচ্ছিন্ন করতে পারেন।
 Significance level	তাৎপর্য স্তর
 Signing in with ChatGPT works in the desktop app.	ChatGPT দিয়ে সাইন ইন desktop app-এ কাজ করে।
 Signing the asset (Planetary Computer)…	Asset-এ স্বাক্ষর করা হচ্ছে (Planetary Computer)…
@@ -3443,7 +3443,7 @@ The assistant follows a skill's instructions when it uses it. Whatever they say,
 The assistant is busy; stop it or wait for it to finish.	Assistant ব্যস্ত; থামান অথবা শেষ হওয়া পর্যন্ত অপেক্ষা করুন।
 The assistant wants to run this, and {why}:	Assistant এটি চালাতে চায়, এবং {why}:
 The Basemaps plugin's tab of public basemaps.	Basemaps plugin-এর public basemap tab।
-The browser didn't give RustGIS the clipboard ({why}): paste with {keys}.	Browser RustGIS-কে ক্লিপবোর্ড দেয়নি ({why}): {keys} দিয়ে পেস্ট করুন।
+The browser didn't give HuaGIS the clipboard ({why}): paste with {keys}.	Browser HuaGIS-কে ক্লিপবোর্ড দেয়নি ({why}): {keys} দিয়ে পেস্ট করুন।
 the capture failed unexpectedly	ক্যাপচার অপ্রত্যাশিতভাবে ব্যর্থ হয়েছে
 The class these label groups and the Labeling pane edit.	এই লেবেল group ও লেবেলিং প্যান যে শ্রেণি সম্পাদনা করে।
 The clipboard came after you moved on, so nothing was pasted: paste with {keys}.	আপনি এগিয়ে যাওয়ার পরে ক্লিপবোর্ড এসেছে, তাই কিছু পেস্ট হয়নি: {keys} দিয়ে পেস্ট করুন।
@@ -3451,7 +3451,7 @@ The connection failed; trying again in {seconds} s.	সংযোগ ব্যর
 the connection has no id	সংযোগের কোনো ID নেই
 The country list couldn't be read ({e}): type a country's code	দেশের তালিকা পড়া যায়নি ({e}): একটি দেশের code লিখুন
 The current elevation stays in effect while you edit inputs. Click Apply elevation to apply the value and units.	input সম্পাদনা করার সময় বর্তমান elevation কার্যকর থাকে। মান ও একক প্রয়োগ করতে Apply elevation-এ ক্লিক করুন।
-The dataset has nothing RustGIS can add	Dataset-এ RustGIS যোগ করতে পারে এমন কিছু নেই
+The dataset has nothing HuaGIS can add	Dataset-এ HuaGIS যোগ করতে পারে এমন কিছু নেই
 The desktop app adds data cubes	Desktop app data cube যোগ করে
 The distance between two marks along the line	রেখা বরাবর দুটি মার্কের মধ্যে দূরত্ব
 The environment (AWS_ACCESS_KEY_ID…)	এনভায়রনমেন্ট (AWS_ACCESS_KEY_ID…)
@@ -3476,14 +3476,14 @@ The layer's fills	Layer-এর পূরণ
 The layer's strokes	Layer-এর stroke
 the layout export failed unexpectedly	layout export অপ্রত্যাশিতভাবে ব্যর্থ হয়েছে
 The link doesn't say its STAC API: Find Items searches {api}	link-এ STAC API উল্লেখ নেই: Find Items {api}-তে অনুসন্ধান করে
-The list of plugins to browse. Leave it empty for the RustGIS plugin registry.	ব্রাউজ করার plugin-এর তালিকা। RustGIS plugin registry ব্যবহার করতে ফাঁকা রাখুন।
+The list of plugins to browse. Leave it empty for the HuaGIS plugin registry.	ব্রাউজ করার plugin-এর তালিকা। HuaGIS plugin registry ব্যবহার করতে ফাঁকা রাখুন।
 The map at the left; the title, locator, legend, sources and reference in a panel at the right.	বামে মানচিত্র; শিরোনাম, লোকেটর, লেজেন্ড, উৎস ও রেফারেন্স ডানের একটি প্যানেলে।
 the map has no GeoPackage layer loaded for editing (Home › Add Data › Edit GeoPackage Table…)	মানচিত্রে সম্পাদনার জন্য লোড করা কোনো GeoPackage layer নেই (হোম › ডেটা যোগ করুন › GeoPackage টেবিল সম্পাদনা…)
 the map has no layers	মানচিত্রে কোনো layer নেই
 the map has no PostGIS layer loaded for editing (Home › Add Data › Database…, Load for editing)	মানচিত্রে সম্পাদনার জন্য লোড করা কোনো PostGIS layer নেই (হোম › ডেটা যোগ করুন › ডেটাবেস…, সম্পাদনার জন্য লোড করুন)
 The map has no tile archive read from a file.	মানচিত্রে ফাইল থেকে পড়া কোনো tile archive নেই।
 The map is drawn in this coordinate system; layers are projected on the fly.	মানচিত্র এই coordinate system-এ আঁকা হয়; layer-গুলো তাৎক্ষণিকভাবে project করা হয়।
-the map isn't on screen in RustGIS (a layout or the catalog is shown), so it was drawn offscreen	মানচিত্রটি RustGIS-এর পর্দায় নেই (layout বা catalog দেখা যাচ্ছে), তাই এটি পর্দার বাইরে আঁকা হয়েছে
+the map isn't on screen in HuaGIS (a layout or the catalog is shown), so it was drawn offscreen	মানচিত্রটি HuaGIS-এর পর্দায় নেই (layout বা catalog দেখা যাচ্ছে), তাই এটি পর্দার বাইরে আঁকা হয়েছে
 The map view as it is now	এখনকার মানচিত্রের view
 The map's extent isn't known yet	মানচিত্রের extent এখনও জানা যায়নি
 The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	মানচিত্রের view-তে Overture-এর {ty} file-এর {n}টি আছে (সর্বোচ্চ {max}): zoom in করুন অথবা theme-টি map tile হিসেবে যোগ করুন
@@ -3551,7 +3551,7 @@ The sign-in is kept in the system keychain, never in the app's settings or a pro
 The sign-in is still kept in the app's settings folder, readable by your user account: the system keychain is unavailable, so it hasn't been moved there yet.	সাইন-ইন এখনও app-এর settings folder-এ রাখা আছে, আপনার user account পড়তে পারে: system keychain উপলব্ধ নেই, তাই এখনও সেখানে সরানো হয়নি।
 The significance level is a number, such as 0.05	Significance level একটি সংখ্যা, যেমন 0.05
 The start-up project {path} didn't open: {error}	Startup project {path} খোলা যায়নি: {error}
-The start-up project {path} isn't a RustGIS project file.	Startup project {path} RustGIS project file নয়।
+The start-up project {path} isn't a HuaGIS project file.	Startup project {path} HuaGIS project file নয়।
 The step's layer {name} isn't in the map.	ধাপের layer {name} মানচিত্রে নেই।
 The store has no variables with two or more dimensions.	Store-এ দুই বা তার বেশি dimension-যুক্ত কোনো variable নেই।
 the store is gone	Store আর নেই
@@ -3560,7 +3560,7 @@ The summary failed unexpectedly	Summary অপ্রত্যাশিতভা�
 The summary finished after another project was opened, so it wasn't added	অন্য project খোলার পর summary শেষ হয়েছে, তাই এটি যোগ করা হয়নি
 The system keychain could not complete the request.	System keychain অনুরোধটি সম্পন্ন করতে পারেনি।
 The system keychain is locked or access was refused.	System keychain লক করা আছে অথবা অ্যাক্সেস প্রত্যাখ্যাত হয়েছে।
-The system keychain is unavailable, so this sign-in won't be remembered: it lasts until RustGIS closes.	System keychain উপলব্ধ নেই, তাই এই সাইন-ইন মনে রাখা হবে না: এটি RustGIS বন্ধ হওয়া পর্যন্ত থাকবে।
+The system keychain is unavailable, so this sign-in won't be remembered: it lasts until HuaGIS closes.	System keychain উপলব্ধ নেই, তাই এই সাইন-ইন মনে রাখা হবে না: এটি HuaGIS বন্ধ হওয়া পর্যন্ত থাকবে।
 The system keychain is unavailable.	System keychain পাওয়া যাচ্ছে না।
 The task's steps changed, so the step being edited was closed: edit it again.	Task-এর ধাপ বদলেছে, তাই সম্পাদিত ধাপটি বন্ধ হয়েছে: আবার সম্পাদনা করুন।
 the time slider is off	time slider বন্ধ
@@ -3608,7 +3608,7 @@ This map has no layers yet.	এই মানচিত্রে এখনো ক�
 This map's thumbnail, from an image.	ছবি থেকে নেওয়া এই মানচিত্রের thumbnail।
 This map's thumbnail, from the view.	view থেকে নেওয়া এই মানচিত্রের thumbnail।
 This plugin can:	এই plugin পারে:
-This plugin runs as a program on your computer, outside RustGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	এই plugin RustGIS sandbox-এর বাইরে আপনার কম্পিউটারে program হিসেবে চলে। এটি আপনার মতোই সব করতে পারে: file পড়া ও বদলানো, network ব্যবহার এবং অন্য program চালানো। শুধু লেখককে বিশ্বাস করলেই ইনস্টল করুন।
+This plugin runs as a program on your computer, outside HuaGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	এই plugin HuaGIS sandbox-এর বাইরে আপনার কম্পিউটারে program হিসেবে চলে। এটি আপনার মতোই সব করতে পারে: file পড়া ও বদলানো, network ব্যবহার এবং অন্য program চালানো। শুধু লেখককে বিশ্বাস করলেই ইনস্টল করুন।
 This request has no one-time allow option.	এই অনুরোধে একবারের জন্য অনুমতি দেওয়ার option নেই।
 This request uses an unsupported capability. Check the parameter and change the request.	এই অনুরোধ অসমর্থিত capability ব্যবহার করে। Parameter পরীক্ষা করে অনুরোধ বদলান।
 This result is kept	এই ফলাফল রাখা হয়েছে
@@ -3740,7 +3740,7 @@ unknown (an older project)	অজানা (পুরোনো প্রজে�
 Unknown shortcut binding field.	অজানা শর্টকাট বাইন্ডিং ক্ষেত্র।
 Unknown shortcut command.	অজানা শর্টকাট কমান্ড।
 UNKNOWN TOOL	অজানা টুল
-Unload the GeoLibre tools and stop loading them when RustGIS starts.	GeoLibre tool memory থেকে সরিয়ে দিন এবং RustGIS চালুর সময় সেগুলো লোড হওয়া বন্ধ করুন।
+Unload the GeoLibre tools and stop loading them when HuaGIS starts.	GeoLibre tool memory থেকে সরিয়ে দিন এবং HuaGIS চালুর সময় সেগুলো লোড হওয়া বন্ধ করুন।
 Unsaved changes	অসংরক্ষিত পরিবর্তন
 Unsupervised classes (k-means)	অসুপারভাইজড class (k-means)
 Unsupervised classes (k-means).	অসুপারভাইজড class (k-means)।
@@ -3872,13 +3872,13 @@ Web Tool	ওয়েব tool
 Website	ওয়েবসাইট
 Weekly usage	সাপ্তাহিক ব্যবহার
 Weights	ওজন
-Welcome to RustGIS	RustGIS-এ স্বাগতম
+Welcome to HuaGIS	HuaGIS-এ স্বাগতম
 West	পশ্চিম
 WFS	WFS
 WGS 84 / Globe	WGS 84 / গ্লোব
 WGS 84 / Web Mercator	WGS 84 / Web Mercator
-What RustGIS opens with: the World Atlas sample or a blank map.	RustGIS কী দিয়ে খুলবে: World Atlas sample অথবা ফাঁকা মানচিত্র।
-What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	RustGIS কী দিয়ে খুলবে: World Atlas sample, ফাঁকা মানচিত্র, আপনার বেছে নেওয়া project, অথবা সর্বশেষ খোলা বা সংরক্ষিত project।
+What HuaGIS opens with: the World Atlas sample or a blank map.	HuaGIS কী দিয়ে খুলবে: World Atlas sample অথবা ফাঁকা মানচিত্র।
+What HuaGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	HuaGIS কী দিয়ে খুলবে: World Atlas sample, ফাঁকা মানচিত্র, আপনার বেছে নেওয়া project, অথবা সর্বশেষ খোলা বা সংরক্ষিত project।
 What to do, where to find it and why	কী করতে হবে, কোথায় পাবেন এবং কেন
 What's near a point	একটি বিন্দুর কাছে কী আছে
 When a file holds several layers, choose the ones to add instead of adding them all.	একটি ফাইলে একাধিক layer থাকলে, সব যোগ না করে কোনগুলো যোগ হবে বেছে নিন।

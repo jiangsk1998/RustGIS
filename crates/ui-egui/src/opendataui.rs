@@ -214,7 +214,7 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
             st.next = next.map(|n| (w.portal.clone(), n, w.area, w.query.clone(), w.source.clone()));
             let shown = st.found.len().to_string();
             st.info = Some(match total {
-                _ if st.found.is_empty() => tl!("No datasets with data RustGIS can add").to_string(),
+                _ if st.found.is_empty() => tl!("No datasets with data HuaGIS can add").to_string(),
                 Some(t) => crate::i18n::fmt(
                     "Showing {n} of {total} on {portal}",
                     &[("n", &shown), ("total", &t.to_string()), ("portal", &w.source)],
@@ -241,7 +241,7 @@ fn poll_listing(app: &mut RustGisApp, ctx: &egui::Context) {
     match r.and_then(|b| portal.parse_listing(&url, &b)) {
         Ok(files) => {
             if files.is_empty() {
-                st.info = Some(tl!("The dataset has nothing RustGIS can add").to_string());
+                st.info = Some(tl!("The dataset has nothing HuaGIS can add").to_string());
             }
             if let Some(d) = st.found.get_mut(i) {
                 d.resources = files;

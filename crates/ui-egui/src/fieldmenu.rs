@@ -75,7 +75,7 @@ pub fn play(app: &mut RustGisApp, ctx: &Context) {
                 let keys = Chord::parse("Mod+V").map(|c| c.text(ctx.os().is_mac())).unwrap_or_default();
                 app.session.notify(
                     crate::i18n::fmt(
-                        "The browser didn't give RustGIS the clipboard ({why}): paste with {keys}.",
+                        "The browser didn't give HuaGIS the clipboard ({why}): paste with {keys}.",
                         &[("why", &e), ("keys", &keys)],
                     ),
                     false,

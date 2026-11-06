@@ -180,8 +180,8 @@ fn quitting_unasked_keeps_the_work() {
     drop(h);
     let mut h = launch(&dir.0, &prefs);
     h.step();
-    h.get_by_label("RustGIS was quit last time without saving your changes.");
-    assert!(h.query_by_label("RustGIS didn't close properly last time.").is_none());
+    h.get_by_label("HuaGIS was quit last time without saving your changes.");
+    assert!(h.query_by_label("HuaGIS didn't close properly last time.").is_none());
     h.get_by_role_and_label(Role::Button, "Recover").click();
     settle(&mut h);
     assert!(h.state().session.map().layer_by_name("Last").is_some() && h.state().session.dirty());

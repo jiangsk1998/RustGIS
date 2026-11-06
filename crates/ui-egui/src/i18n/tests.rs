@@ -95,9 +95,9 @@ fn start_up_project_strings_have_real_translations() {
         "Last Project",
         "Choose Project…",
         "No project opened or saved yet",
-        "What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.",
-        "RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.",
-        "The start-up project {path} isn't a RustGIS project file.",
+        "What HuaGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.",
+        "HuaGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.",
+        "The start-up project {path} isn't a HuaGIS project file.",
         "The start-up project {path} didn't open: {error}",
     ];
     for l in &LANGUAGES[1..] {
@@ -195,8 +195,8 @@ fn skills_controls_are_in_every_catalog() {
 #[test]
 fn letting_agents_control_rustgis_is_in_every_catalog() {
     let keys = [
-        "Let your Agents Control RustGIS",
-        "Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.",
+        "Let your Agents Control HuaGIS",
+        "Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with HuaGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.",
         "Add this MCP server to your agent:",
         "Or run, for Claude Code or Codex:",
     ];
@@ -215,7 +215,7 @@ fn agents_on_this_computer_are_in_every_catalog() {
         "An agent on this computer asks to:",
         "Always allow",
         "Let the assistant hand tasks to agents on this computer",
-        "Found: {names}. An agent works on this map through RustGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › RustGIS › Agent work. It asks you before each action.",
+        "Found: {names}. An agent works on this map through HuaGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › HuaGIS › Agent work. It asks you before each action.",
         "Approve agents' actions without asking",
         "Agent threads",
         "Waiting for your answer",

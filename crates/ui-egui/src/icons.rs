@@ -837,36 +837,19 @@ pub fn paint(painter: &Painter, r: Rect, name: &str, ink: Color32, accent: Color
         "up" => p.line(&[(6.0, 15.0), (12.0, 9.0), (18.0, 15.0)], 1.8, ink),
         "down" => p.line(&[(6.0, 9.0), (12.0, 15.0), (18.0, 9.0)], 1.8, ink),
         "logo" => {
-            // A small version of the RustGIS logo: a rust cog around a four-colour globe.
-            let rust = crate::theme::BRAND;
-            for k in 0..12 {
-                let a = (k as f32 * 30.0).to_radians();
-                let (c, s2) = (a.cos(), a.sin());
-                let q = |r: f32, w: f32| (12.0 + r * c - w * s2, 12.0 + r * s2 + w * c);
-                p.fill(&[q(9.0, -1.6), q(11.6, -1.1), q(11.6, 1.1), q(9.0, 1.6)], rust);
+            // The HuaGIS mark: an orange H over a blue one, as the logo image draws them.
+            let orange = Color32::from_rgb(0xD5, 0x52, 0x25);
+            let blue = Color32::from_rgb(0x37, 0x3A, 0xFE);
+            for (x, y, w, h, c) in [
+                (0.0, 2.0, 5.2, 17.2, orange),
+                (0.0, 2.0, 18.8, 2.9, orange),
+                (10.1, 4.7, 3.8, 5.4, orange),
+                (18.8, 4.7, 5.2, 17.3, blue),
+                (5.1, 19.2, 18.9, 2.8, blue),
+                (10.1, 13.6, 3.7, 5.6, blue),
+            ] {
+                p.rect(x, y, w, h, Some(c), None, 0.0);
             }
-            p.circle(12.0, 12.0, 9.8, Some(rust), None);
-            p.circle(12.0, 12.0, 8.0, Some(Color32::WHITE), None);
-            let wedge = |a0: f32, a1: f32, col: Color32| {
-                let n = 8;
-                for k in 0..n {
-                    let (b0, b1) = (a0 + (a1 - a0) * k as f32 / n as f32, a0 + (a1 - a0) * (k + 1) as f32 / n as f32);
-                    p.fill(
-                        &[
-                            (12.0, 12.0),
-                            (12.0 + 7.0 * b0.to_radians().cos(), 12.0 + 7.0 * b0.to_radians().sin()),
-                            (12.0 + 7.0 * b1.to_radians().cos(), 12.0 + 7.0 * b1.to_radians().sin()),
-                        ],
-                        col,
-                    );
-                }
-            };
-            wedge(180.0, 275.0, Color32::from_rgb(0x2D, 0x76, 0xC2));
-            wedge(275.0, 365.0, Color32::from_rgb(0x18, 0x9D, 0x8C));
-            wedge(5.0, 95.0, Color32::from_rgb(0xEE, 0xAE, 0x3A));
-            wedge(95.0, 180.0, Color32::from_rgb(0x6C, 0xB3, 0x3F));
-            p.line(&[(11.5, 4.5), (11.0, 12.0), (12.5, 19.5)], 1.2, Color32::WHITE);
-            p.line(&[(4.5, 12.6), (11.0, 12.0), (19.5, 11.0)], 1.2, Color32::WHITE);
         }
         "point_layer" => p.circle(12.0, 12.0, 5.0, Some(accent), Some((1.2, ink))),
         "line_layer" => p.line(&[(3.0, 17.0), (9.0, 8.0), (15.0, 15.0), (21.0, 6.0)], 2.2, accent),

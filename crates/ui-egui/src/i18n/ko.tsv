@@ -60,8 +60,8 @@ A line, or markers or hash marks along it	라인 또는 라인을 따르는 마�
 A magnifying lens that follows the pointer.	포인터를 따라 움직이는 돋보기.
 A map, feature or coverage service's address: WMS, WMTS, WFS, WCS, OGC API Features or Tiles, or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer (or a services directory, to browse).	지도, 피처 또는 커버리지 서비스 주소: WMS, WMTS, WFS, WCS, OGC API Features 또는 Tiles, 또는 ArcGIS FeatureServer, MapServer, ImageServer 또는 VectorTileServer(찾아보려면 서비스 디렉터리).
 a name, or owner/name such as giswqs/geospatial	이름 또는 giswqs/geospatial 같은 소유자/이름
-A named endpoint you can reuse. Keys and tokens are kept until RustGIS closes, never saved.	재사용할 수 있는 이름 있는 엔드포인트입니다. 키와 토큰은 RustGIS를 닫을 때까지 유지되며 저장되지 않습니다.
-A named endpoint you can reuse. Keys are kept until RustGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	재사용할 수 있는 이름 있는 엔드포인트입니다. 이 컴퓨터에 기억하도록 선택하지 않으면 키는 RustGIS를 닫을 때까지 유지됩니다. 연결 자체는 키를 보관하지 않습니다.
+A named endpoint you can reuse. Keys and tokens are kept until HuaGIS closes, never saved.	재사용할 수 있는 이름 있는 엔드포인트입니다. 키와 토큰은 HuaGIS를 닫을 때까지 유지되며 저장되지 않습니다.
+A named endpoint you can reuse. Keys are kept until HuaGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	재사용할 수 있는 이름 있는 엔드포인트입니다. 이 컴퓨터에 기억하도록 선택하지 않으면 키는 HuaGIS를 닫을 때까지 유지됩니다. 연결 자체는 키를 보관하지 않습니다.
 A named endpoint you can reuse. Passwords last for this session unless you choose to remember them in this computer's password store.	재사용할 수 있는 이름 있는 엔드포인트입니다. 이 컴퓨터의 비밀번호 저장소에 기억하도록 선택하지 않으면 비밀번호는 이 세션 동안만 유지됩니다.
 A node cannot connect to itself.	노드는 자기 자신에 연결할 수 없습니다.
 A notebook of text and command cells.	텍스트 셀과 명령 셀로 이루어진 노트북.
@@ -98,8 +98,8 @@ A5 Grid	A5 격자
 A5's equal-area pentagonal cells at a resolution, over the map's extent, a layer or the world, as polygons with their ids.	지정한 해상도의 A5 등면적 오각형 셀을 지도 범위, 레이어 또는 전 세계에 걸쳐 ID가 있는 폴리곤으로 만듭니다.
 About	정보
 About plugins	플러그인 정보
-About RustGIS	RustGIS 정보
-About RustGIS.	RustGIS 정보.
+About HuaGIS	HuaGIS 정보
+About HuaGIS.	HuaGIS 정보.
 Above	위
 Above Left	왼쪽 위
 Above Right	오른쪽 위
@@ -276,7 +276,7 @@ Agent input queue is full or disconnected; stop the agent and try again.	에이�
 Agent threads	에이전트 스레드
 Agent work	Agent work
 Agents have full access: they may run scripts, tasks, models and plugins. Click to stop the MCP relay	에이전트에 전체 액세스 권한이 있습니다: 스크립트, 태스크, 모델, 플러그인을 실행할 수 있습니다. 클릭하면 MCP 릴레이를 중지합니다
-Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	연결된 이 컴퓨터의 에이전트(Claude Code, Codex, Cursor 등)는 RustGIS의 도구로 여기 열린 지도에서 작업하며, 파일을 열고 저장하고 웹을 사용할 수 있습니다. 스크립트와 플러그인 관리는 계속 꺼져 있습니다.
+Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with HuaGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	연결된 이 컴퓨터의 에이전트(Claude Code, Codex, Cursor 등)는 HuaGIS의 도구로 여기 열린 지도에서 작업하며, 파일을 열고 저장하고 웹을 사용할 수 있습니다. 스크립트와 플러그인 관리는 계속 꺼져 있습니다.
 Agents then run commands, change files and use the web on this computer without asking you.	에이전트가 묻지 않고 이 컴퓨터에서 명령을 실행하고, 파일을 변경하고, 웹을 사용합니다.
 Aggregate Points to A5	포인트를 A5로 집계
 Aggregation	집계
@@ -301,7 +301,7 @@ Allow Feature Selection	피처 선택 허용
 Allow only certain combinations of values across fields.	필드 간 특정 값 조합만 허용합니다.
 Allow such actions for this conversation	이 대화에서 이러한 작업 허용
 Allow this action?	이 작업을 허용하시겠습니까?
-Allow this agent's RustGIS action?	이 에이전트의 RustGIS 작업을 허용하시겠습니까?
+Allow this agent's HuaGIS action?	이 에이전트의 HuaGIS 작업을 허용하시겠습니까?
 Along lines	선을 따라
 Along Selected Line	선택한 라인을 따라
 Alt+	Alt+
@@ -313,7 +313,7 @@ Alternating bar	교대 막대
 Altitude	고도
 Always allow	항상 허용
 Amazon S3	Amazon S3
-Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3 또는 엔드포인트로 지정하는 S3 호환 서비스(MinIO, Cloudflare R2, Wasabi…). 키는 RustGIS를 닫을 때까지 유지됩니다. 저장된 연결에는 이름, 엔드포인트, 리전이 유지되며 비밀 정보는 유지되지 않습니다.
+Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until HuaGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3 또는 엔드포인트로 지정하는 S3 호환 서비스(MinIO, Cloudflare R2, Wasabi…). 키는 HuaGIS를 닫을 때까지 유지됩니다. 저장된 연결에는 이름, 엔드포인트, 리전이 유지되며 비밀 정보는 유지되지 않습니다.
 amenity=cafe, shop	amenity=cafe, shop
 An agent on this computer asks to:	이 컴퓨터의 에이전트가 다음을 요청합니다:
 An ArcGIS Online organization's or an ArcGIS Enterprise portal's address; ArcGIS Online when blank	ArcGIS Online 조직 또는 ArcGIS Enterprise 포털의 주소. 비워 두면 ArcGIS Online
@@ -363,7 +363,7 @@ Arrange	정렬
 Arrange Element	요소 정렬
 Arrow	화살표
 Arrowheads	화살촉
-Ask a question about your data, or describe what to do with the map. The assistant runs RustGIS commands for you; every change can be undone.	데이터에 대해 질문하거나 지도로 할 일을 설명하세요. 어시스턴트가 RustGIS 명령을 대신 실행하며, 모든 변경은 실행 취소할 수 있습니다.
+Ask a question about your data, or describe what to do with the map. The assistant runs HuaGIS commands for you; every change can be undone.	데이터에 대해 질문하거나 지도로 할 일을 설명하세요. 어시스턴트가 HuaGIS 명령을 대신 실행하며, 모든 변경은 실행 취소할 수 있습니다.
 Ask about the map, or tell it what to do…	지도에 대해 묻거나 할 일을 알려 주세요…
 Ask about your data, or tell the assistant what to do with the map.	데이터에 대해 묻거나 지도로 할 일을 어시스턴트에게 알려 주세요.
 Ask Which Layers to Add	추가할 레이어 묻기
@@ -717,7 +717,7 @@ Color Vision Simulator	색각 시뮬레이터
 Colorbar	컬러바
 Colormap	컬러맵
 Colors from the raster's own color table.	래스터 자체 색상표의 색상입니다.
-Colour ramps (RustGIS, QGIS, GDAL, GMT)	색상 램프(RustGIS, QGIS, GDAL, GMT)
+Colour ramps (HuaGIS, QGIS, GDAL, GMT)	색상 램프(HuaGIS, QGIS, GDAL, GMT)
 Columns named like longitude/latitude, easting/northing or geometry are picked for you.	longitude/latitude, easting/northing 또는 geometry 같은 이름의 열은 자동으로 선택됩니다.
 Combinations from the box above, one per line	위 상자에 있는 값의 조합, 한 줄에 하나씩
 Combines two polygon layers into every piece either covers, with the attributes of both where they overlap.	두 폴리곤 레이어를 어느 한쪽이 덮는 모든 조각으로 결합하고, 겹치는 곳에는 양쪽 속성을 넣습니다.
@@ -924,7 +924,7 @@ Delete selected rows	선택한 행 삭제
 Delete Style	스타일 삭제
 Delete Task	태스크 삭제
 Delete Task Step	태스크 단계 삭제
-Delete the GeoLibre runner that RustGIS installed. Install it again at any time.	RustGIS가 설치한 GeoLibre 실행기를 삭제합니다. 언제든지 다시 설치할 수 있습니다.
+Delete the GeoLibre runner that HuaGIS installed. Install it again at any time.	HuaGIS가 설치한 GeoLibre 실행기를 삭제합니다. 언제든지 다시 설치할 수 있습니다.
 Delete the layout {name}?	레이아웃 {name}을(를) 삭제할까요?
 Delete the map {name}?	지도 {name}을(를) 삭제할까요?
 Delete the selected features.	선택한 피처를 삭제합니다.
@@ -1136,7 +1136,7 @@ Element Properties	요소 속성
 Elevation	고도
 Elevation model	고도 모델
 Elevation profiles along lines, cross sections and more.	라인을 따른 고도 단면도, 횡단면 등.
-Eligible requests in RustGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	RustGIS의 해당 요청은 ChatGPT 요금제를 사용합니다. 사용량은 ChatGPT 설정에서 관리할 수 있습니다.
+Eligible requests in HuaGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	HuaGIS의 해당 요청은 ChatGPT 요금제를 사용합니다. 사용량은 ChatGPT 설정에서 관리할 수 있습니다.
 Ellipse	타원
 Embeddings	임베딩
 Ember	엠버
@@ -1329,7 +1329,7 @@ Find and run geoprocessing tools.	지오프로세싱 도구를 찾아 실행합�
 Find any command by name (Ctrl+K).	이름으로 명령을 찾습니다(Ctrl+K).
 Find Items	항목 찾기
 Find Place	장소 찾기
-Find plugins in the RustGIS plugin registry.	RustGIS 플러그인 레지스트리에서 플러그인을 찾습니다.
+Find plugins in the HuaGIS plugin registry.	HuaGIS 플러그인 레지스트리에서 플러그인을 찾습니다.
 Find Similar	유사 항목 찾기
 Find Tools	도구 찾기
 Finding routes…	경로를 찾는 중…
@@ -1363,14 +1363,14 @@ Folder…	폴더…
 Follow the time slider	시간 슬라이더 따르기
 Font	글꼴
 for a store that doesn't say	지정하지 않은 저장소의 경우
-For ArcGIS Online, the client ID is RustGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	ArcGIS Online의 경우 클라이언트 ID는 RustGIS 자체 앱입니다. ArcGIS Enterprise 포털의 경우 포털에 OAuth 앱을 등록하고(콘텐츠 › 새 항목 › 개발자 자격 증명) 리디렉션 URL을 {redirect}로 지정한 뒤 해당 클라이언트 ID를 입력하세요.
+For ArcGIS Online, the client ID is HuaGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	ArcGIS Online의 경우 클라이언트 ID는 HuaGIS 자체 앱입니다. ArcGIS Enterprise 포털의 경우 포털에 OAuth 앱을 등록하고(콘텐츠 › 새 항목 › 개발자 자격 증명) 리디렉션 URL을 {redirect}로 지정한 뒤 해당 클라이언트 ID를 입력하세요.
 for the layers that change with time, as they list their times (2024-06-01, 1995)	시간에 따라 변하는 레이어에 대해, 레이어가 나열하는 시간 형식으로(2024-06-01, 1995)
 Forest	숲
 Forget Earthdata Login Token	Earthdata Login 토큰 삭제
 Forget Saved Keys	저장된 키 삭제
 Forget Saved Password	저장된 비밀번호 삭제
 Format	형식
-Found: {names}. An agent works on this map through RustGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › RustGIS › Agent work. It asks you before each action.	찾음: {names}. 에이전트는 RustGIS의 도구와 자체 도구(웹, 스크립트, 파일)로 이 지도에서 작업하며, 문서 › RustGIS › Agent work에 보관되는 전용 폴더를 사용합니다. 작업마다 먼저 확인을 요청합니다.
+Found: {names}. An agent works on this map through HuaGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › HuaGIS › Agent work. It asks you before each action.	찾음: {names}. 에이전트는 HuaGIS의 도구와 자체 도구(웹, 스크립트, 파일)로 이 지도에서 작업하며, 문서 › HuaGIS › Agent work에 보관되는 전용 폴더를 사용합니다. 작업마다 먼저 확인을 요청합니다.
 Frame rate	프레임 속도
 Frame rate, draw time, data size and memory.	프레임 속도, 그리기 시간, 데이터 크기 및 메모리.
 France	프랑스
@@ -1534,7 +1534,7 @@ host=localhost dbname=gis user=postgres	host=localhost dbname=gis user=postgres
 host=… dbname=… user=…	host=… dbname=… user=…
 Hosted Imagery	호스팅 이미지
 Hour	시
-How often RustGIS keeps a copy of unsaved work, to offer it back after a crash.	RustGIS가 저장하지 않은 작업의 사본을 보관하는 주기입니다. 충돌 후 복구를 제안합니다.
+How often HuaGIS keeps a copy of unsaved work, to offer it back after a crash.	HuaGIS가 저장하지 않은 작업의 사본을 보관하는 주기입니다. 충돌 후 복구를 제안합니다.
 How the layer's colours combine with the tile layers and basemap beneath.	레이어의 색상이 아래의 타일 레이어 및 배경지도와 혼합되는 방식.
 How the layer's colours combine with what's beneath.	레이어의 색상이 아래 내용과 혼합되는 방식.
 HUB Ocean's Ocean Data Platform: marine datasets, read as features (up to 10,000 each).	HUB Ocean의 Ocean Data Platform: 해양 데이터 세트를 피처로 읽습니다(각각 최대 10,000개).
@@ -1601,7 +1601,7 @@ In memory	메모리 내
 In Progress	진행 중
 in progress	진행 중
 In project	프로젝트 내
-In RustGIS, it can:	RustGIS에서 할 수 있는 작업:
+In HuaGIS, it can:	HuaGIS에서 할 수 있는 작업:
 In the browser, pick the .shp and .dbf together, with any sidecars, or pick a ZIP. The override applies to every Shapefile in the ZIP.	브라우저에서는 .shp와 .dbf를 부속 파일과 함께 선택하거나 ZIP을 선택하세요. 재정의는 ZIP 안의 모든 Shapefile에 적용됩니다.
 In the coordinate system's units: metres for UTM.	좌표계 단위: UTM은 미터.
 In the middle	가운데
@@ -1689,7 +1689,7 @@ Item Pop-ups	항목 팝업
 Item {id}	항목 {id}
 its default	기본값
 Its default: {default}. Its times: {times}	기본값: {default}. 시간: {times}
-Its firewall ({firewall}) blocked RustGIS. The service may only allow some applications: contact its administrator and send them the details below.	방화벽({firewall})이 RustGIS를 차단했습니다. 이 서비스는 일부 애플리케이션만 허용할 수 있습니다: 관리자에게 연락하여 아래 세부 정보를 보내세요.
+Its firewall ({firewall}) blocked HuaGIS. The service may only allow some applications: contact its administrator and send them the details below.	방화벽({firewall})이 HuaGIS를 차단했습니다. 이 서비스는 일부 애플리케이션만 허용할 수 있습니다: 관리자에게 연락하여 아래 세부 정보를 보내세요.
 Its tool isn't available now (a plugin's, not loaded, or a suite's, not installed)	해당 도구를 지금 사용할 수 없습니다(플러그인이 로드되지 않았거나 도구 모음이 설치되지 않음)
 Jobs	작업
 JOIN	JOIN
@@ -1719,7 +1719,7 @@ Keep Tool	도구 유지
 Keep value	값 유지
 Keeps the access key ID and secret access key in this computer's credential store, never in the connection or the project.	액세스 키 ID와 비밀 액세스 키를 연결이나 프로젝트가 아닌 이 컴퓨터의 자격 증명 저장소에 보관합니다.
 Keeps the parts of two polygon layers that only one of them covers, with that layer's attributes.	두 폴리곤 레이어 중 한쪽만 덮는 부분을 해당 레이어의 속성과 함께 유지합니다.
-Keeps the token in the system's credential store, so it is there when RustGIS starts again. Unticked, a token remembered before is deleted when you save another.	토큰을 시스템의 자격 증명 저장소에 보관하여 RustGIS를 다시 시작해도 사용할 수 있게 합니다. 선택을 해제하면 이전에 기억한 토큰은 다른 토큰을 저장할 때 삭제됩니다.
+Keeps the token in the system's credential store, so it is there when HuaGIS starts again. Unticked, a token remembered before is deleted when you save another.	토큰을 시스템의 자격 증명 저장소에 보관하여 HuaGIS를 다시 시작해도 사용할 수 있게 합니다. 선택을 해제하면 이전에 기억한 토큰은 다른 토큰을 저장할 때 삭제됩니다.
 Kernel Density	커널 밀도
 Kernel Type	커널 유형
 Key	Key
@@ -1800,7 +1800,7 @@ Legend label. Clear it to show the value again.	범례 라벨입니다. 지우�
 Length	길이
 Length {length} · gain {gain} · loss {loss}	길이 {length} · 상승 {gain} · 하강 {loss}
 Let the assistant hand tasks to agents on this computer	어시스턴트가 이 컴퓨터의 에이전트에게 작업을 맡기도록 허용
-Let your Agents Control RustGIS	에이전트가 RustGIS를 제어하게 하기
+Let your Agents Control HuaGIS	에이전트가 HuaGIS를 제어하게 하기
 Letter spacing	자간
 Level	수준
 Library	라이브러리
@@ -1856,7 +1856,7 @@ List The National Map Services	The National Map 서비스 목록
 List the provider's models	공급자의 모델 나열
 List this layer in the legend	이 레이어를 범례에 표시
 List what it holds	내용 목록
-Listed for discovery: RustGIS doesn't read this dataset yet. Its data and paper are linked above.	검색용으로 나열됨: RustGIS는 아직 이 데이터 세트를 읽지 못합니다. 데이터와 논문 링크는 위에 있습니다.
+Listed for discovery: HuaGIS doesn't read this dataset yet. Its data and paper are linked above.	검색용으로 나열됨: HuaGIS는 아직 이 데이터 세트를 읽지 못합니다. 데이터와 논문 링크는 위에 있습니다.
 Listing datasets…	데이터 세트 나열 중…
 Listing…	목록을 가져오는 중…
 Lit	밝은 면
@@ -1901,7 +1901,7 @@ Look for {name}, outlined on the ribbon.	리본에서 테두리로 강조된 {na
 Looking up the place…	장소를 찾는 중…
 Loop	반복
 Lower Priority	우선순위 낮추기
-Made in RustGIS: samples, drawings and tool outputs	RustGIS에서 만든 항목: 샘플, 그리기, 도구 출력
+Made in HuaGIS: samples, drawings and tool outputs	HuaGIS에서 만든 항목: 샘플, 그리기, 도구 출력
 Magnifier	돋보기
 Major Lakes	주요 호수
 Major Rivers	주요 하천
@@ -2157,7 +2157,7 @@ no command	명령 없음
 No data at the points picked.	선택한 포인트에 데이터가 없습니다.
 No data cube matches	일치하는 데이터 큐브 없음
 No datasets match.	일치하는 데이터 세트가 없습니다.
-No datasets with data RustGIS can add	RustGIS가 추가할 수 있는 데이터가 있는 데이터 세트가 없습니다
+No datasets with data HuaGIS can add	HuaGIS가 추가할 수 있는 데이터가 있는 데이터 세트가 없습니다
 no date in the name	이름에 날짜 없음
 no download service	다운로드 서비스 없음
 No edits since the project was saved	프로젝트를 저장한 이후 편집 내용이 없습니다
@@ -2219,8 +2219,8 @@ North Polar Stereographic	북극 평사도법
 NOT	NOT
 Not a GeoLibre project	GeoLibre 프로젝트가 아닙니다
 not a picture	그림이 아닙니다
-not a RustGIS layout	RustGIS 레이아웃이 아닙니다
-not a RustGIS project	RustGIS 프로젝트가 아닙니다
+not a HuaGIS layout	HuaGIS 레이아웃이 아닙니다
+not a HuaGIS project	HuaGIS 프로젝트가 아닙니다
 Not applied yet.	아직 적용되지 않았습니다.
 Not for texts: a text is edited in the Format pane.	텍스트에는 사용할 수 없음: 텍스트는 서식 창에서 편집합니다.
 not needed	필요 없음
@@ -2291,7 +2291,7 @@ Open a Data Cube	데이터 큐브 열기
 open a layout first	먼저 레이아웃을 여세요
 Open a model file (*.model.json)	모델 파일(*.model.json) 열기
 Open a model of this project	이 프로젝트의 모델 열기
-Open a RustGIS or Jupyter notebook.	RustGIS 또는 Jupyter 노트북을 엽니다.
+Open a HuaGIS or Jupyter notebook.	HuaGIS 또는 Jupyter 노트북을 엽니다.
 Open an offline area to edit.	편집할 오프라인 영역을 엽니다.
 Open browser again	브라우저 다시 열기
 Open Custom Template	사용자 지정 템플릿 열기
@@ -2318,7 +2318,7 @@ Open the layer's attribute table.	레이어의 속성 테이블을 엽니다.
 Open the layer's table.	레이어의 테이블을 엽니다.
 Open the plugin's panel.	플러그인 패널을 엽니다.
 Open the Release Page	릴리스 페이지 열기
-Open the RustGIS user guide.	RustGIS 사용자 가이드를 엽니다.
+Open the HuaGIS user guide.	HuaGIS 사용자 가이드를 엽니다.
 Open the selected layer's table.	선택한 레이어의 테이블을 엽니다.
 Open the Symbology pane.	심볼 창을 엽니다.
 Open the task's steps	태스크 단계 열기
@@ -2494,7 +2494,7 @@ Plugin registry	플러그인 레지스트리
 Plugins	플러그인
 Plugins are .rgplugin files. Install only plugins from people you trust.	플러그인은 .rgplugin 파일입니다. 신뢰할 수 있는 사람의 플러그인만 설치하세요.
 Plugins marked Not sandboxed run as programs on your computer instead, and can do anything you can.	'샌드박스 밖'으로 표시된 플러그인은 컴퓨터의 프로그램으로 실행되며 사용자가 할 수 있는 모든 작업을 할 수 있습니다.
-Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through RustGIS's own commands, within the permissions you accept.	플러그인은 샌드박스에서 실행됩니다. 파일이나 네트워크에 접근할 수 없으며, 사용자가 허용한 권한 내에서 RustGIS 자체 명령을 통해서만 프로젝트를 변경합니다.
+Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through HuaGIS's own commands, within the permissions you accept.	플러그인은 샌드박스에서 실행됩니다. 파일이나 네트워크에 접근할 수 없으며, 사용자가 허용한 권한 내에서 HuaGIS 자체 명령을 통해서만 프로젝트를 변경합니다.
 PMTiles archive	PMTiles 아카이브
 PNG frames (zip)	PNG 프레임(zip)
 PNG image	PNG 이미지
@@ -2571,7 +2571,7 @@ Project Template	프로젝트 템플릿
 project's path is required	프로젝트 경로가 필요합니다
 Projection	투영
 Projections	투영
-Projects and JSON data (RustGIS, QGIS, GeoLibre)	프로젝트 및 JSON 데이터 (RustGIS, QGIS, GeoLibre)
+Projects and JSON data (HuaGIS, QGIS, GeoLibre)	프로젝트 및 JSON 데이터 (HuaGIS, QGIS, GeoLibre)
 Properties	속성
 Property	속성
 Proportional Symbols	비례 심볼
@@ -2632,7 +2632,7 @@ Read error	읽기 오류
 Read the bands picked for the view (at most about 6 km a side)	뷰에 선택한 밴드를 읽습니다(한 변 최대 약 6 km)
 Read the map's layers and features	지도의 레이어 및 피처 읽기
 Read the points in the view, coloured by their principal components	뷰에 있는 포인트를 읽고 주성분으로 색칠합니다
-Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	그래뉼의 파일을 읽으려면 Earthdata Login 토큰이 필요하며, 모든 NASA DAAC에서 사용할 수 있습니다. 토큰은 '기억'을 선택하지 않으면 RustGIS를 닫을 때까지 유지되고, 프로젝트에는 저장되지 않으며, NASA의 Earthdata 데이터 서버로만 전송됩니다.
+Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until HuaGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	그래뉼의 파일을 읽으려면 Earthdata Login 토큰이 필요하며, 모든 NASA DAAC에서 사용할 수 있습니다. 토큰은 '기억'을 선택하지 않으면 HuaGIS를 닫을 때까지 유지되고, 프로젝트에는 저장되지 않으며, NASA의 Earthdata 데이터 서버로만 전송됩니다.
 Reading the catalog: {n} documents read, {m} items found…	카탈로그를 읽는 중: 문서 {n}개 읽음, 항목 {m}개 찾음…
 Reading the catalog…	카탈로그를 읽는 중…
 Reading the embeddings…	임베딩을 읽는 중…
@@ -2817,32 +2817,32 @@ Run Tool	도구 실행
 Run {name}	{name} 실행
 Running the query for the map…	지도용 쿼리를 실행하는 중…
 Running…	실행 중…
-RustGIS	RustGIS
-RustGIS bookmarks	RustGIS 북마크
-RustGIS could not confirm that any previously saved key was deleted from the system keychain.	RustGIS는 이전에 저장한 키가 시스템 키체인에서 삭제되었는지 확인할 수 없습니다.
-RustGIS couldn't reach the server.	RustGIS가 서버에 연결할 수 없습니다.
-RustGIS deep learning package	RustGIS 딥러닝 패키지
-RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	지난번에 RustGIS가 제대로 종료되지 않아 시작 프로젝트 대신 World Atlas로 시작했습니다. 준비되면 프로젝트 메뉴에서 프로젝트를 여세요.
-RustGIS didn't close properly last time.	RustGIS가 지난번에 제대로 닫히지 않았습니다.
-RustGIS doesn't have this tool. Install the tools it comes from, or delete the node.	RustGIS에 이 도구가 없습니다. 이 도구를 제공하는 도구 모음을 설치하거나 노드를 삭제하세요.
-RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	RustGIS는 순수 Rust로 작성된 무료 오픈 소스 GIS입니다. 데스크톱과 브라우저에서 실행되며, 모든 작업은 명령줄에서도 실행할 수 있는 명령입니다.
-RustGIS layer file	RustGIS 레이어 파일
-RustGIS layers, maps and projects	RustGIS 레이어, 지도 및 프로젝트
-RustGIS layout	RustGIS 레이아웃
-RustGIS maps and projects	RustGIS 지도 및 프로젝트
-RustGIS model	RustGIS 모델
-RustGIS or Jupyter notebook	RustGIS 또는 Jupyter 노트북
-RustGIS plugin	RustGIS 플러그인
-RustGIS presentation	RustGIS 프레젠테이션
-RustGIS project	RustGIS 프로젝트
-RustGIS project template	RustGIS 프로젝트 템플릿
-RustGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	지난번에 RustGIS에서 내부 오류가 발생했습니다. 자세한 내용은 {path}에 있습니다. 버그 보고서에 첨부해 주세요.
-RustGIS report or report template	RustGIS 보고서 또는 보고서 템플릿
-RustGIS styles	RustGIS 스타일
-RustGIS task	RustGIS 태스크
-RustGIS was quit last time without saving your changes.	RustGIS가 지난번에 변경 내용을 저장하지 않고 종료되었습니다.
-RustGIS {latest} is available.	RustGIS {latest}을(를) 사용할 수 있습니다.
-RustGIS {version} is the latest version.	RustGIS {version}이(가) 최신 버전입니다.
+HuaGIS	HuaGIS
+HuaGIS bookmarks	HuaGIS 북마크
+HuaGIS could not confirm that any previously saved key was deleted from the system keychain.	HuaGIS는 이전에 저장한 키가 시스템 키체인에서 삭제되었는지 확인할 수 없습니다.
+HuaGIS couldn't reach the server.	HuaGIS가 서버에 연결할 수 없습니다.
+HuaGIS deep learning package	HuaGIS 딥러닝 패키지
+HuaGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	지난번에 HuaGIS가 제대로 종료되지 않아 시작 프로젝트 대신 World Atlas로 시작했습니다. 준비되면 프로젝트 메뉴에서 프로젝트를 여세요.
+HuaGIS didn't close properly last time.	HuaGIS가 지난번에 제대로 닫히지 않았습니다.
+HuaGIS doesn't have this tool. Install the tools it comes from, or delete the node.	HuaGIS에 이 도구가 없습니다. 이 도구를 제공하는 도구 모음을 설치하거나 노드를 삭제하세요.
+HuaGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	HuaGIS는 순수 Rust로 작성된 무료 오픈 소스 GIS입니다. 데스크톱과 브라우저에서 실행되며, 모든 작업은 명령줄에서도 실행할 수 있는 명령입니다.
+HuaGIS layer file	HuaGIS 레이어 파일
+HuaGIS layers, maps and projects	HuaGIS 레이어, 지도 및 프로젝트
+HuaGIS layout	HuaGIS 레이아웃
+HuaGIS maps and projects	HuaGIS 지도 및 프로젝트
+HuaGIS model	HuaGIS 모델
+HuaGIS or Jupyter notebook	HuaGIS 또는 Jupyter 노트북
+HuaGIS plugin	HuaGIS 플러그인
+HuaGIS presentation	HuaGIS 프레젠테이션
+HuaGIS project	HuaGIS 프로젝트
+HuaGIS project template	HuaGIS 프로젝트 템플릿
+HuaGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	지난번에 HuaGIS에서 내부 오류가 발생했습니다. 자세한 내용은 {path}에 있습니다. 버그 보고서에 첨부해 주세요.
+HuaGIS report or report template	HuaGIS 보고서 또는 보고서 템플릿
+HuaGIS styles	HuaGIS 스타일
+HuaGIS task	HuaGIS 태스크
+HuaGIS was quit last time without saving your changes.	HuaGIS가 지난번에 변경 내용을 저장하지 않고 종료되었습니다.
+HuaGIS {latest} is available.	HuaGIS {latest}을(를) 사용할 수 있습니다.
+HuaGIS {version} is the latest version.	HuaGIS {version}이(가) 최신 버전입니다.
 RUSTGIS_ASSISTANT_MODEL	RUSTGIS_ASSISTANT_MODEL
 RUSTGIS_ASSISTANT_PROVIDER	RUSTGIS_ASSISTANT_PROVIDER
 RUSTGIS_GPU	RUSTGIS_GPU
@@ -2851,7 +2851,7 @@ S3 Buckets	S3 버킷
 S3 Connections	S3 연결
 S3…	S3…
 Sample data (Natural Earth)	샘플 데이터(Natural Earth)
-Sample data © Natural Earth (public domain). RustGIS is licensed under Apache-2.0.	샘플 데이터 © Natural Earth(퍼블릭 도메인). RustGIS는 Apache-2.0 라이선스를 따릅니다.
+Sample data © Natural Earth (public domain). HuaGIS is licensed under Apache-2.0.	샘플 데이터 © Natural Earth(퍼블릭 도메인). HuaGIS는 Apache-2.0 라이선스를 따릅니다.
 Sample data: Natural Earth (public domain). Licensed under Apache-2.0.	샘플 데이터: Natural Earth(퍼블릭 도메인). Apache-2.0 라이선스.
 Sans-serif	산세리프
 Satellite Embedding Datasets	위성 임베딩 데이터 세트
@@ -2995,7 +2995,7 @@ Sections	섹션
 See and set the camera's position and scale.	카메라의 위치와 축척을 확인하고 설정합니다.
 See the map as people with colour vision deficiencies do.	색각 이상이 있는 사람이 보는 방식으로 지도를 봅니다.
 See the tools you've run.	실행한 도구를 확인합니다.
-See whether a newer RustGIS has been released.	새 RustGIS가 출시되었는지 확인합니다.
+See whether a newer HuaGIS has been released.	새 HuaGIS가 출시되었는지 확인합니다.
 SELECT	SELECT
 Select	선택
 Select (click)	선택(클릭)
@@ -3193,8 +3193,8 @@ Sign-in timed out. Start again and allow the browser to reach this computer's lo
 signed in	로그인됨
 Signed in to {portal}	{portal}에 로그인됨
 Signed in to {portal} as {user}	{portal}에 {user}(으)로 로그인됨
-Signed out on this computer, but OpenAI didn't confirm it. You can disconnect RustGIS in ChatGPT's settings.	이 컴퓨터에서 로그아웃했지만 OpenAI가 확인하지 않았습니다. ChatGPT 설정에서 RustGIS 연결을 해제할 수 있습니다.
-Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect RustGIS in ChatGPT's settings.	이 컴퓨터에서 로그아웃했지만 시스템 키체인을 읽을 수 없어 OpenAI에 세션 종료를 요청하지 않았습니다. ChatGPT 설정에서 RustGIS 연결을 해제할 수 있습니다.
+Signed out on this computer, but OpenAI didn't confirm it. You can disconnect HuaGIS in ChatGPT's settings.	이 컴퓨터에서 로그아웃했지만 OpenAI가 확인하지 않았습니다. ChatGPT 설정에서 HuaGIS 연결을 해제할 수 있습니다.
+Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect HuaGIS in ChatGPT's settings.	이 컴퓨터에서 로그아웃했지만 시스템 키체인을 읽을 수 없어 OpenAI에 세션 종료를 요청하지 않았습니다. ChatGPT 설정에서 HuaGIS 연결을 해제할 수 있습니다.
 Significance level	유의 수준
 Signing in with ChatGPT works in the desktop app.	ChatGPT 로그인은 데스크톱 앱에서 작동합니다.
 Signing the asset (Planetary Computer)…	에셋에 서명하는 중(Planetary Computer)…
@@ -3443,7 +3443,7 @@ The assistant follows a skill's instructions when it uses it. Whatever they say,
 The assistant is busy; stop it or wait for it to finish.	어시스턴트가 작업 중입니다. 중지하거나 완료될 때까지 기다리세요.
 The assistant wants to run this, and {why}:	어시스턴트가 다음 작업을 실행하려고 합니다. 이 작업은 {why} 작업입니다:
 The Basemaps plugin's tab of public basemaps.	배경지도 플러그인의 공개 배경지도 탭.
-The browser didn't give RustGIS the clipboard ({why}): paste with {keys}.	브라우저가 RustGIS에 클립보드를 제공하지 않았습니다({why}). {keys}(으)로 붙여넣으세요.
+The browser didn't give HuaGIS the clipboard ({why}): paste with {keys}.	브라우저가 HuaGIS에 클립보드를 제공하지 않았습니다({why}). {keys}(으)로 붙여넣으세요.
 the capture failed unexpectedly	캡처가 예기치 않게 실패했습니다
 The class these label groups and the Labeling pane edit.	이 라벨 그룹과 라벨링 창이 편집하는 클래스입니다.
 The clipboard came after you moved on, so nothing was pasted: paste with {keys}.	다른 작업으로 넘어간 뒤 클립보드가 도착해 붙여넣지 않았습니다. {keys}(으)로 붙여넣으세요.
@@ -3451,7 +3451,7 @@ The connection failed; trying again in {seconds} s.	연결에 실패했습니다
 the connection has no id	연결에 ID가 없음
 The country list couldn't be read ({e}): type a country's code	국가 목록을 읽을 수 없습니다({e}): 국가 코드를 입력하세요
 The current elevation stays in effect while you edit inputs. Click Apply elevation to apply the value and units.	입력을 편집하는 동안에는 현재 고도가 그대로 적용됩니다. 값과 단위를 적용하려면 고도 적용을 클릭하세요.
-The dataset has nothing RustGIS can add	이 데이터 세트에는 RustGIS가 추가할 수 있는 것이 없습니다
+The dataset has nothing HuaGIS can add	이 데이터 세트에는 HuaGIS가 추가할 수 있는 것이 없습니다
 The desktop app adds data cubes	데이터 큐브는 데스크톱 앱에서 추가합니다
 The distance between two marks along the line	라인을 따른 두 마크 사이의 거리
 The environment (AWS_ACCESS_KEY_ID…)	환경 변수(AWS_ACCESS_KEY_ID…)
@@ -3476,14 +3476,14 @@ The layer's fills	레이어의 채우기
 The layer's strokes	레이어의 선
 the layout export failed unexpectedly	레이아웃 내보내기가 예기치 않게 실패했습니다
 The link doesn't say its STAC API: Find Items searches {api}	링크에 STAC API가 지정되지 않았습니다: 항목 찾기는 {api}을(를) 검색합니다
-The list of plugins to browse. Leave it empty for the RustGIS plugin registry.	둘러볼 플러그인 목록입니다. 비워 두면 RustGIS 플러그인 레지스트리를 사용합니다.
+The list of plugins to browse. Leave it empty for the HuaGIS plugin registry.	둘러볼 플러그인 목록입니다. 비워 두면 HuaGIS 플러그인 레지스트리를 사용합니다.
 The map at the left; the title, locator, legend, sources and reference in a panel at the right.	왼쪽에 지도, 오른쪽 패널에 제목, 로케이터, 범례, 출처, 참조 정보를 배치합니다.
 the map has no GeoPackage layer loaded for editing (Home › Add Data › Edit GeoPackage Table…)	지도에 편집용으로 불러온 GeoPackage 레이어가 없습니다(홈 › 데이터 추가 › GeoPackage 테이블 편집…)
 the map has no layers	지도에 레이어가 없습니다
 the map has no PostGIS layer loaded for editing (Home › Add Data › Database…, Load for editing)	지도에 편집용으로 불러온 PostGIS 레이어가 없습니다(홈 › 데이터 추가 › 데이터베이스…, 편집용으로 불러오기)
 The map has no tile archive read from a file.	지도에 파일에서 읽은 타일 아카이브가 없습니다.
 The map is drawn in this coordinate system; layers are projected on the fly.	지도는 이 좌표계로 그려지며 레이어는 즉석에서 투영됩니다.
-the map isn't on screen in RustGIS (a layout or the catalog is shown), so it was drawn offscreen	RustGIS에서 지도가 화면에 표시되지 않아(레이아웃 또는 카탈로그가 표시됨) 화면 밖에서 그렸습니다
+the map isn't on screen in HuaGIS (a layout or the catalog is shown), so it was drawn offscreen	HuaGIS에서 지도가 화면에 표시되지 않아(레이아웃 또는 카탈로그가 표시됨) 화면 밖에서 그렸습니다
 The map view as it is now	현재 상태의 지도 뷰
 The map's extent isn't known yet	지도 범위를 아직 알 수 없습니다
 The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	지도 보기에 Overture {ty} 파일 {n}개가 필요합니다(최대 {max}): 확대하거나 테마를 지도 타일로 추가하세요
@@ -3551,7 +3551,7 @@ The sign-in is kept in the system keychain, never in the app's settings or a pro
 The sign-in is still kept in the app's settings folder, readable by your user account: the system keychain is unavailable, so it hasn't been moved there yet.	로그인 정보는 아직 앱의 설정 폴더에 보관되어 사용자 계정으로 읽을 수 있습니다. 시스템 키체인을 사용할 수 없어 아직 옮기지 못했습니다.
 The significance level is a number, such as 0.05	유의 수준은 숫자입니다(예: 0.05)
 The start-up project {path} didn't open: {error}	시작 프로젝트 {path}을(를) 열지 못했습니다: {error}
-The start-up project {path} isn't a RustGIS project file.	시작 프로젝트 {path}은(는) RustGIS 프로젝트 파일이 아닙니다.
+The start-up project {path} isn't a HuaGIS project file.	시작 프로젝트 {path}은(는) HuaGIS 프로젝트 파일이 아닙니다.
 The step's layer {name} isn't in the map.	단계의 레이어 {name}이(가) 지도에 없습니다.
 The store has no variables with two or more dimensions.	저장소에 2차원 이상의 변수가 없습니다.
 the store is gone	저장소가 없어졌습니다
@@ -3560,7 +3560,7 @@ The summary failed unexpectedly	요약이 예기치 않게 실패했습니다
 The summary finished after another project was opened, so it wasn't added	다른 프로젝트를 연 뒤에 요약이 완료되어 추가되지 않았습니다
 The system keychain could not complete the request.	시스템 키체인이 요청을 완료할 수 없습니다.
 The system keychain is locked or access was refused.	시스템 키체인이 잠겨 있거나 액세스가 거부되었습니다.
-The system keychain is unavailable, so this sign-in won't be remembered: it lasts until RustGIS closes.	시스템 키체인을 사용할 수 없어 이 로그인은 기억되지 않으며 RustGIS를 닫을 때까지만 유지됩니다.
+The system keychain is unavailable, so this sign-in won't be remembered: it lasts until HuaGIS closes.	시스템 키체인을 사용할 수 없어 이 로그인은 기억되지 않으며 HuaGIS를 닫을 때까지만 유지됩니다.
 The system keychain is unavailable.	시스템 키체인을 사용할 수 없습니다.
 The task's steps changed, so the step being edited was closed: edit it again.	태스크 단계가 변경되어 편집 중인 단계를 닫았습니다. 다시 편집하세요.
 the time slider is off	시간 슬라이더가 꺼져 있습니다
@@ -3608,7 +3608,7 @@ This map has no layers yet.	이 지도에는 아직 레이어가 없습니다.
 This map's thumbnail, from an image.	이미지로 만든 이 지도의 썸네일.
 This map's thumbnail, from the view.	뷰로 만든 이 지도의 썸네일.
 This plugin can:	이 플러그인이 할 수 있는 작업:
-This plugin runs as a program on your computer, outside RustGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	이 플러그인은 RustGIS 샌드박스 밖에서 컴퓨터의 프로그램으로 실행됩니다. 파일 읽기 및 변경, 네트워크 사용, 다른 프로그램 실행 등 사용자가 할 수 있는 모든 작업을 할 수 있습니다. 작성자를 신뢰하는 경우에만 설치하세요.
+This plugin runs as a program on your computer, outside HuaGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	이 플러그인은 HuaGIS 샌드박스 밖에서 컴퓨터의 프로그램으로 실행됩니다. 파일 읽기 및 변경, 네트워크 사용, 다른 프로그램 실행 등 사용자가 할 수 있는 모든 작업을 할 수 있습니다. 작성자를 신뢰하는 경우에만 설치하세요.
 This request has no one-time allow option.	이 요청에는 1회 허용 옵션이 없습니다.
 This request uses an unsupported capability. Check the parameter and change the request.	이 요청은 지원되지 않는 기능을 사용합니다. 매개변수를 확인하고 요청을 변경하세요.
 This result is kept	이 결과는 유지됩니다
@@ -3740,7 +3740,7 @@ unknown (an older project)	알 수 없음 (이전 프로젝트)
 Unknown shortcut binding field.	알 수 없는 단축키 할당 필드입니다.
 Unknown shortcut command.	알 수 없는 단축키 명령입니다.
 UNKNOWN TOOL	알 수 없는 도구
-Unload the GeoLibre tools and stop loading them when RustGIS starts.	GeoLibre 도구를 언로드하고 RustGIS 시작 시 더 이상 불러오지 않습니다.
+Unload the GeoLibre tools and stop loading them when HuaGIS starts.	GeoLibre 도구를 언로드하고 HuaGIS 시작 시 더 이상 불러오지 않습니다.
 Unsaved changes	저장하지 않은 변경 내용
 Unsupervised classes (k-means)	비지도 클래스(k-means)
 Unsupervised classes (k-means).	비지도 클래스(k-means).
@@ -3872,13 +3872,13 @@ Web Tool	웹 도구
 Website	웹사이트
 Weekly usage	주간 사용량
 Weights	가중치
-Welcome to RustGIS	RustGIS에 오신 것을 환영합니다
+Welcome to HuaGIS	HuaGIS에 오신 것을 환영합니다
 West	서
 WFS	WFS
 WGS 84 / Globe	WGS 84 / 지구본
 WGS 84 / Web Mercator	WGS 84 / Web Mercator
-What RustGIS opens with: the World Atlas sample or a blank map.	RustGIS가 시작할 때 여는 것: World Atlas 예제 또는 빈 지도.
-What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	RustGIS가 시작할 때 여는 것: World Atlas 예제, 빈 지도, 선택한 프로젝트 또는 마지막으로 열거나 저장한 프로젝트.
+What HuaGIS opens with: the World Atlas sample or a blank map.	HuaGIS가 시작할 때 여는 것: World Atlas 예제 또는 빈 지도.
+What HuaGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	HuaGIS가 시작할 때 여는 것: World Atlas 예제, 빈 지도, 선택한 프로젝트 또는 마지막으로 열거나 저장한 프로젝트.
 What to do, where to find it and why	할 일, 위치 및 이유
 What's near a point	지점 주변에 있는 것
 When a file holds several layers, choose the ones to add instead of adding them all.	파일에 레이어가 여러 개 있으면 모두 추가하는 대신 추가할 레이어를 선택합니다.

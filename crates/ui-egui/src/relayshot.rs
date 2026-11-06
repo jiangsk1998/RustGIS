@@ -120,7 +120,7 @@ pub fn drive(app: &mut RustGisApp, ctx: &egui::Context) {
             let Some(at) = rect else {
                 return finish(
                     app,
-                    Err("the map isn't on screen in RustGIS (a layout or the catalog is shown), so it was drawn offscreen".into()),
+                    Err("the map isn't on screen in HuaGIS (a layout or the catalog is shown), so it was drawn offscreen".into()),
                     false,
                 );
             };

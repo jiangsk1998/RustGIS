@@ -332,9 +332,9 @@ pub(crate) fn offer(app: &mut RustGisApp, ctx: &egui::Context) {
         ui.add_space(4.0);
         // Why there is a copy, then what it is.
         ui.label(if r.quit {
-            tl!("RustGIS was quit last time without saving your changes.")
+            tl!("HuaGIS was quit last time without saving your changes.")
         } else {
-            tl!("RustGIS didn't close properly last time.")
+            tl!("HuaGIS didn't close properly last time.")
         });
         ui.label(kept_line(&name, r.time));
         ui.add_space(4.0);

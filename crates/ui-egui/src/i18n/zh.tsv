@@ -60,8 +60,8 @@ A line, or markers or hash marks along it	一条线，或沿线的标记或短�
 A magnifying lens that follows the pointer.	跟随指针的放大镜。
 A map, feature or coverage service's address: WMS, WMTS, WFS, WCS, OGC API Features or Tiles, or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer (or a services directory, to browse).	地图、要素或覆盖服务的地址：WMS、WMTS、WFS、WCS、OGC API Features 或 Tiles，或者 ArcGIS FeatureServer、MapServer、ImageServer 或 VectorTileServer（也可以是服务目录，以便浏览）。
 a name, or owner/name such as giswqs/geospatial	名称，或 owner/name 形式，例如 giswqs/geospatial
-A named endpoint you can reuse. Keys and tokens are kept until RustGIS closes, never saved.	可重复使用的命名端点。密钥和令牌保留到 RustGIS 关闭为止，从不保存。
-A named endpoint you can reuse. Keys are kept until RustGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	可重复使用的命名端点。除非选择在此计算机上记住，否则密钥保留到 RustGIS 关闭为止；连接本身从不保存密钥。
+A named endpoint you can reuse. Keys and tokens are kept until HuaGIS closes, never saved.	可重复使用的命名端点。密钥和令牌保留到 HuaGIS 关闭为止，从不保存。
+A named endpoint you can reuse. Keys are kept until HuaGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	可重复使用的命名端点。除非选择在此计算机上记住，否则密钥保留到 HuaGIS 关闭为止；连接本身从不保存密钥。
 A named endpoint you can reuse. Passwords last for this session unless you choose to remember them in this computer's password store.	可重复使用的命名端点。除非选择在此计算机的密码存储中记住，否则密码仅在本次会话中有效。
 A node cannot connect to itself.	节点不能连接到自身。
 A notebook of text and command cells.	由文本单元格和命令单元格组成的笔记本。
@@ -98,8 +98,8 @@ A5 Grid	A5 格网
 A5's equal-area pentagonal cells at a resolution, over the map's extent, a layer or the world, as polygons with their ids.	按指定分辨率在地图范围、某个图层或全球范围内生成 A5 等积五边形单元，以带 id 的多边形输出。
 About	关于
 About plugins	关于插件
-About RustGIS	关于 RustGIS
-About RustGIS.	关于 RustGIS。
+About HuaGIS	关于 HuaGIS
+About HuaGIS.	关于 HuaGIS。
 Above	上方
 Above Left	左上方
 Above Right	右上方
@@ -276,7 +276,7 @@ Agent input queue is full or disconnected; stop the agent and try again.	智能�
 Agent threads	智能体线程
 Agent work	Agent work
 Agents have full access: they may run scripts, tasks, models and plugins. Click to stop the MCP relay	智能体拥有完全访问权限：它们可以运行脚本、任务、模型和插件。单击以停止 MCP 中继
-Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	已连接的本机智能体（Claude Code、Codex、Cursor 等）使用 RustGIS 的工具处理此处打开的地图：它们可以打开和保存文件并使用网络。脚本和插件管理保持关闭。
+Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with HuaGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	已连接的本机智能体（Claude Code、Codex、Cursor 等）使用 HuaGIS 的工具处理此处打开的地图：它们可以打开和保存文件并使用网络。脚本和插件管理保持关闭。
 Agents then run commands, change files and use the web on this computer without asking you.	智能体将不经询问就在这台电脑上运行命令、更改文件并使用网络。
 Aggregate Points to A5	将点聚合到 A5
 Aggregation	聚合
@@ -301,7 +301,7 @@ Allow Feature Selection	允许要素选择
 Allow only certain combinations of values across fields.	仅允许字段间的特定值组合。
 Allow such actions for this conversation	在本次对话中允许此类操作
 Allow this action?	允许此操作？
-Allow this agent's RustGIS action?	允许此智能体的 RustGIS 操作？
+Allow this agent's HuaGIS action?	允许此智能体的 HuaGIS 操作？
 Along lines	沿线
 Along Selected Line	沿所选线
 Alt+	Alt+
@@ -313,7 +313,7 @@ Alternating bar	交替条
 Altitude	高度角
 Always allow	始终允许
 Amazon S3	Amazon S3
-Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3，或通过端点指定的 S3 兼容服务（MinIO、Cloudflare R2、Wasabi…）。密钥保留到 RustGIS 关闭为止；保存的连接只保存其名称、端点和区域，从不保存私密密钥。
+Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until HuaGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3，或通过端点指定的 S3 兼容服务（MinIO、Cloudflare R2、Wasabi…）。密钥保留到 HuaGIS 关闭为止；保存的连接只保存其名称、端点和区域，从不保存私密密钥。
 amenity=cafe, shop	amenity=cafe, shop
 An agent on this computer asks to:	这台电脑上的一个智能体请求：
 An ArcGIS Online organization's or an ArcGIS Enterprise portal's address; ArcGIS Online when blank	ArcGIS Online 组织或 ArcGIS Enterprise 门户的地址；留空时为 ArcGIS Online
@@ -363,7 +363,7 @@ Arrange	排列
 Arrange Element	排列元素
 Arrow	箭头
 Arrowheads	箭头样式
-Ask a question about your data, or describe what to do with the map. The assistant runs RustGIS commands for you; every change can be undone.	提出有关数据的问题，或描述要对地图进行的操作。助手会为您运行 RustGIS 命令；每项更改都可以撤销。
+Ask a question about your data, or describe what to do with the map. The assistant runs HuaGIS commands for you; every change can be undone.	提出有关数据的问题，或描述要对地图进行的操作。助手会为您运行 HuaGIS 命令；每项更改都可以撤销。
 Ask about the map, or tell it what to do…	询问有关地图的问题，或告诉它要做什么…
 Ask about your data, or tell the assistant what to do with the map.	询问有关数据的问题，或告诉助手要对地图做什么。
 Ask Which Layers to Add	询问要添加的图层
@@ -717,7 +717,7 @@ Color Vision Simulator	色觉模拟器
 Colorbar	色带图例
 Colormap	色彩映射表
 Colors from the raster's own color table.	使用栅格自带颜色表中的颜色。
-Colour ramps (RustGIS, QGIS, GDAL, GMT)	色带（RustGIS、QGIS、GDAL、GMT）
+Colour ramps (HuaGIS, QGIS, GDAL, GMT)	色带（HuaGIS、QGIS、GDAL、GMT）
 Columns named like longitude/latitude, easting/northing or geometry are picked for you.	名为 longitude/latitude、easting/northing 或 geometry 等的列会自动选中。
 Combinations from the box above, one per line	上方框中的组合，每行一个
 Combines two polygon layers into every piece either covers, with the attributes of both where they overlap.	将两个多边形图层合并为任一图层覆盖的所有部分，重叠处带有两者的属性。
@@ -924,7 +924,7 @@ Delete selected rows	删除所选行
 Delete Style	删除样式
 Delete Task	删除任务
 Delete Task Step	删除任务步骤
-Delete the GeoLibre runner that RustGIS installed. Install it again at any time.	删除 RustGIS 安装的 GeoLibre 运行器。可随时重新安装。
+Delete the GeoLibre runner that HuaGIS installed. Install it again at any time.	删除 HuaGIS 安装的 GeoLibre 运行器。可随时重新安装。
 Delete the layout {name}?	删除布局 {name}?
 Delete the map {name}?	删除地图 {name}?
 Delete the selected features.	删除所选要素。
@@ -1136,7 +1136,7 @@ Element Properties	元素属性
 Elevation	高程
 Elevation model	高程模型
 Elevation profiles along lines, cross sections and more.	沿线高程剖面、横截面等。
-Eligible requests in RustGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	RustGIS 中符合条件的请求会使用你的 ChatGPT 套餐。你可以在 ChatGPT 设置中管理用量。
+Eligible requests in HuaGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	HuaGIS 中符合条件的请求会使用你的 ChatGPT 套餐。你可以在 ChatGPT 设置中管理用量。
 Ellipse	椭圆
 Embeddings	嵌入向量
 Ember	余烬
@@ -1329,7 +1329,7 @@ Find and run geoprocessing tools.	查找并运行地理处理工具。
 Find any command by name (Ctrl+K).	按名称查找任意命令（Ctrl+K）。
 Find Items	查找项目
 Find Place	查找地点
-Find plugins in the RustGIS plugin registry.	在 RustGIS 插件库中查找插件。
+Find plugins in the HuaGIS plugin registry.	在 HuaGIS 插件库中查找插件。
 Find Similar	查找相似
 Find Tools	查找工具
 Finding routes…	正在查找路线…
@@ -1363,14 +1363,14 @@ Folder…	文件夹…
 Follow the time slider	跟随时间滑块
 Font	字体
 for a store that doesn't say	用于未注明的存储
-For ArcGIS Online, the client ID is RustGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	对于 ArcGIS Online，客户端 ID 是 RustGIS 自带的应用。对于 ArcGIS Enterprise 门户，请在门户上注册一个 OAuth 应用（内容 › 新建项目 › 开发者凭据），其重定向 URL 为 {redirect}，并填写其客户端 ID。
+For ArcGIS Online, the client ID is HuaGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	对于 ArcGIS Online，客户端 ID 是 HuaGIS 自带的应用。对于 ArcGIS Enterprise 门户，请在门户上注册一个 OAuth 应用（内容 › 新建项目 › 开发者凭据），其重定向 URL 为 {redirect}，并填写其客户端 ID。
 for the layers that change with time, as they list their times (2024-06-01, 1995)	用于随时间变化的图层，按其列出时间的形式（2024-06-01、1995）
 Forest	森林
 Forget Earthdata Login Token	清除 Earthdata Login 令牌
 Forget Saved Keys	清除已保存的密钥
 Forget Saved Password	清除已保存的密码
 Format	格式
-Found: {names}. An agent works on this map through RustGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › RustGIS › Agent work. It asks you before each action.	已找到：{names}。智能体通过 RustGIS 的工具和它自己的工具（网络、脚本、文件）处理这张地图，在它自己的文件夹中工作，该文件夹保存在 文档 › RustGIS › Agent work 中。每次操作前都会征求你的同意。
+Found: {names}. An agent works on this map through HuaGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › HuaGIS › Agent work. It asks you before each action.	已找到：{names}。智能体通过 HuaGIS 的工具和它自己的工具（网络、脚本、文件）处理这张地图，在它自己的文件夹中工作，该文件夹保存在 文档 › HuaGIS › Agent work 中。每次操作前都会征求你的同意。
 Frame rate	帧率
 Frame rate, draw time, data size and memory.	帧率、绘制时间、数据大小和内存。
 France	法国
@@ -1534,7 +1534,7 @@ host=localhost dbname=gis user=postgres	host=localhost dbname=gis user=postgres
 host=… dbname=… user=…	host=… dbname=… user=…
 Hosted Imagery	托管影像
 Hour	小时
-How often RustGIS keeps a copy of unsaved work, to offer it back after a crash.	RustGIS 保留未保存工作副本的频率，以便在崩溃后提供恢复。
+How often HuaGIS keeps a copy of unsaved work, to offer it back after a crash.	HuaGIS 保留未保存工作副本的频率，以便在崩溃后提供恢复。
 How the layer's colours combine with the tile layers and basemap beneath.	图层颜色与下方瓦片图层和底图的混合方式。
 How the layer's colours combine with what's beneath.	图层颜色与下方内容的混合方式。
 HUB Ocean's Ocean Data Platform: marine datasets, read as features (up to 10,000 each).	HUB Ocean 的 Ocean Data Platform：海洋数据集，读取为要素（每个最多 10,000 个）。
@@ -1601,7 +1601,7 @@ In memory	内存中
 In Progress	进行中
 in progress	进行中
 In project	在工程中
-In RustGIS, it can:	在 RustGIS 中，它可以：
+In HuaGIS, it can:	在 HuaGIS 中，它可以：
 In the browser, pick the .shp and .dbf together, with any sidecars, or pick a ZIP. The override applies to every Shapefile in the ZIP.	在浏览器中，请同时选择 .shp 和 .dbf 及所有附属文件，或选择一个 ZIP。该覆盖设置适用于 ZIP 中的每个 Shapefile。
 In the coordinate system's units: metres for UTM.	以坐标系单位表示：UTM 为米。
 In the middle	中间
@@ -1689,7 +1689,7 @@ Item Pop-ups	项目弹出窗口
 Item {id}	项目 {id}
 its default	默认值
 Its default: {default}. Its times: {times}	默认值：{default}。时间：{times}
-Its firewall ({firewall}) blocked RustGIS. The service may only allow some applications: contact its administrator and send them the details below.	其防火墙（{firewall}）阻止了 RustGIS。该服务可能只允许部分应用程序访问：请联系其管理员并将以下详细信息发送给他们。
+Its firewall ({firewall}) blocked HuaGIS. The service may only allow some applications: contact its administrator and send them the details below.	其防火墙（{firewall}）阻止了 HuaGIS。该服务可能只允许部分应用程序访问：请联系其管理员并将以下详细信息发送给他们。
 Its tool isn't available now (a plugin's, not loaded, or a suite's, not installed)	其工具当前不可用（插件的工具未加载，或工具套件未安装）
 Jobs	作业
 JOIN	JOIN
@@ -1719,7 +1719,7 @@ Keep Tool	保持工具
 Keep value	保留值
 Keeps the access key ID and secret access key in this computer's credential store, never in the connection or the project.	将访问密钥 ID 和私密访问密钥保存在此计算机的凭据存储中，从不保存在连接或工程中。
 Keeps the parts of two polygon layers that only one of them covers, with that layer's attributes.	保留两个多边形图层中仅一方覆盖的部分，并带有该图层的属性。
-Keeps the token in the system's credential store, so it is there when RustGIS starts again. Unticked, a token remembered before is deleted when you save another.	将令牌保存在系统凭据存储中，以便 RustGIS 再次启动时仍可使用。取消勾选后，保存其他令牌时会删除之前记住的令牌。
+Keeps the token in the system's credential store, so it is there when HuaGIS starts again. Unticked, a token remembered before is deleted when you save another.	将令牌保存在系统凭据存储中，以便 HuaGIS 再次启动时仍可使用。取消勾选后，保存其他令牌时会删除之前记住的令牌。
 Kernel Density	核密度
 Kernel Type	核类型
 Key	Key
@@ -1800,7 +1800,7 @@ Legend label. Clear it to show the value again.	图例标签。清除后将重�
 Length	长度
 Length {length} · gain {gain} · loss {loss}	长度 {length} · 上升 {gain} · 下降 {loss}
 Let the assistant hand tasks to agents on this computer	允许助手把任务交给这台电脑上的智能体
-Let your Agents Control RustGIS	让你的智能体控制 RustGIS
+Let your Agents Control HuaGIS	让你的智能体控制 HuaGIS
 Letter spacing	字间距
 Level	级别
 Library	资源库
@@ -1856,7 +1856,7 @@ List The National Map Services	列出 The National Map 服务
 List the provider's models	列出提供商的模型
 List this layer in the legend	在图例中列出此图层
 List what it holds	列出其内容
-Listed for discovery: RustGIS doesn't read this dataset yet. Its data and paper are linked above.	仅供发现：RustGIS 尚不能读取此数据集。其数据和论文链接见上方。
+Listed for discovery: HuaGIS doesn't read this dataset yet. Its data and paper are linked above.	仅供发现：HuaGIS 尚不能读取此数据集。其数据和论文链接见上方。
 Listing datasets…	正在列出数据集…
 Listing…	正在列出…
 Lit	亮面
@@ -1901,7 +1901,7 @@ Look for {name}, outlined on the ribbon.	在功能区上查找带轮廓突出显
 Looking up the place…	正在查找地点…
 Loop	循环
 Lower Priority	降低优先级
-Made in RustGIS: samples, drawings and tool outputs	在 RustGIS 中创建：示例、绘图和工具输出
+Made in HuaGIS: samples, drawings and tool outputs	在 HuaGIS 中创建：示例、绘图和工具输出
 Magnifier	放大镜
 Major Lakes	主要湖泊
 Major Rivers	主要河流
@@ -2157,7 +2157,7 @@ no command	没有命令
 No data at the points picked.	所选点处无数据。
 No data cube matches	没有匹配的数据立方体
 No datasets match.	没有匹配的数据集。
-No datasets with data RustGIS can add	没有包含 RustGIS 可添加数据的数据集
+No datasets with data HuaGIS can add	没有包含 HuaGIS 可添加数据的数据集
 no date in the name	名称中没有日期
 no download service	无下载服务
 No edits since the project was saved	自工程保存以来没有编辑
@@ -2219,8 +2219,8 @@ North Polar Stereographic	北极球面投影
 NOT	NOT
 Not a GeoLibre project	不是 GeoLibre 工程
 not a picture	不是图片
-not a RustGIS layout	不是 RustGIS 布局
-not a RustGIS project	不是 RustGIS 工程
+not a HuaGIS layout	不是 HuaGIS 布局
+not a HuaGIS project	不是 HuaGIS 工程
 Not applied yet.	尚未应用。
 Not for texts: a text is edited in the Format pane.	不适用于文本：文本在格式窗格中编辑。
 not needed	无需填写
@@ -2291,7 +2291,7 @@ Open a Data Cube	打开数据立方体
 open a layout first	请先打开布局
 Open a model file (*.model.json)	打开模型文件（*.model.json）
 Open a model of this project	打开此工程的模型
-Open a RustGIS or Jupyter notebook.	打开 RustGIS 或 Jupyter 笔记本。
+Open a HuaGIS or Jupyter notebook.	打开 HuaGIS 或 Jupyter 笔记本。
 Open an offline area to edit.	打开要编辑的离线区域。
 Open browser again	重新打开浏览器
 Open Custom Template	打开自定义模板
@@ -2318,7 +2318,7 @@ Open the layer's attribute table.	打开图层的属性表。
 Open the layer's table.	打开图层的表。
 Open the plugin's panel.	打开插件的面板。
 Open the Release Page	打开发布页面
-Open the RustGIS user guide.	打开 RustGIS 用户指南。
+Open the HuaGIS user guide.	打开 HuaGIS 用户指南。
 Open the selected layer's table.	打开所选图层的表。
 Open the Symbology pane.	打开符号系统窗格。
 Open the task's steps	打开任务的步骤
@@ -2494,7 +2494,7 @@ Plugin registry	插件库
 Plugins	插件
 Plugins are .rgplugin files. Install only plugins from people you trust.	插件是 .rgplugin 文件。请只安装来自您信任的人的插件。
 Plugins marked Not sandboxed run as programs on your computer instead, and can do anything you can.	标为“未沙箱隔离”的插件则作为程序在您的计算机上运行，能做您能做的任何事。
-Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through RustGIS's own commands, within the permissions you accept.	插件在沙箱中运行：它们无法访问您的文件或网络，只能在您接受的权限范围内通过 RustGIS 自身的命令更改工程。
+Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through HuaGIS's own commands, within the permissions you accept.	插件在沙箱中运行：它们无法访问您的文件或网络，只能在您接受的权限范围内通过 HuaGIS 自身的命令更改工程。
 PMTiles archive	PMTiles 归档
 PNG frames (zip)	PNG 帧（zip）
 PNG image	PNG 图像
@@ -2571,7 +2571,7 @@ Project Template	工程模板
 project's path is required	需要提供工程的路径
 Projection	投影
 Projections	投影
-Projects and JSON data (RustGIS, QGIS, GeoLibre)	工程和 JSON 数据（RustGIS、QGIS、GeoLibre）
+Projects and JSON data (HuaGIS, QGIS, GeoLibre)	工程和 JSON 数据（HuaGIS、QGIS、GeoLibre）
 Properties	属性
 Property	属性
 Proportional Symbols	比例符号
@@ -2632,7 +2632,7 @@ Read error	读取错误
 Read the bands picked for the view (at most about 6 km a side)	读取为视图选定的波段（每边最多约 6 km）
 Read the map's layers and features	读取地图的图层和要素
 Read the points in the view, coloured by their principal components	读取视图中的点，按其主成分着色
-Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	读取颗粒的文件需要 Earthdata Login 令牌，该令牌适用于所有 NASA DAAC。除非勾选“记住”，它会保留到 RustGIS 关闭，绝不保存在工程中，并且只发送到 NASA 的 Earthdata 数据服务器。
+Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until HuaGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	读取颗粒的文件需要 Earthdata Login 令牌，该令牌适用于所有 NASA DAAC。除非勾选“记住”，它会保留到 HuaGIS 关闭，绝不保存在工程中，并且只发送到 NASA 的 Earthdata 数据服务器。
 Reading the catalog: {n} documents read, {m} items found…	正在读取目录：已读取 {n} 个文档，找到 {m} 个项目…
 Reading the catalog…	正在读取目录…
 Reading the embeddings…	正在读取嵌入向量…
@@ -2817,32 +2817,32 @@ Run Tool	运行工具
 Run {name}	运行 {name}
 Running the query for the map…	正在为地图运行查询…
 Running…	正在运行…
-RustGIS	RustGIS
-RustGIS bookmarks	RustGIS 书签
-RustGIS could not confirm that any previously saved key was deleted from the system keychain.	RustGIS 无法确认之前保存的密钥是否已从系统钥匙串中删除。
-RustGIS couldn't reach the server.	RustGIS 无法连接到服务器。
-RustGIS deep learning package	RustGIS 深度学习包
-RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	RustGIS 上次未正常关闭，因此本次以 World Atlas 启动，而不是你的启动工程。准备好后，请从“工程”菜单打开该工程。
-RustGIS didn't close properly last time.	RustGIS 上次未正常关闭。
-RustGIS doesn't have this tool. Install the tools it comes from, or delete the node.	RustGIS 没有此工具。请安装提供该工具的工具集，或删除该节点。
-RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	RustGIS 是一款用纯 Rust 编写的免费开源 GIS。它可在桌面和浏览器中运行，并且每个操作都是一条命令，也可以在命令行中运行。
-RustGIS layer file	RustGIS 图层文件
-RustGIS layers, maps and projects	RustGIS 图层、地图和工程
-RustGIS layout	RustGIS 布局
-RustGIS maps and projects	RustGIS 地图和工程
-RustGIS model	RustGIS 模型
-RustGIS or Jupyter notebook	RustGIS 或 Jupyter 笔记本
-RustGIS plugin	RustGIS 插件
-RustGIS presentation	RustGIS 演示文稿
-RustGIS project	RustGIS 工程
-RustGIS project template	RustGIS 工程模板
-RustGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	RustGIS 上次运行时发生内部错误。详细信息在 {path} 中，请将其附加到错误报告。
-RustGIS report or report template	RustGIS 报表或报表模板
-RustGIS styles	RustGIS 样式
-RustGIS task	RustGIS 任务
-RustGIS was quit last time without saving your changes.	RustGIS 上次退出时未保存您的更改。
-RustGIS {latest} is available.	RustGIS {latest} 已发布。
-RustGIS {version} is the latest version.	RustGIS {version} 是最新版本。
+HuaGIS	HuaGIS
+HuaGIS bookmarks	HuaGIS 书签
+HuaGIS could not confirm that any previously saved key was deleted from the system keychain.	HuaGIS 无法确认之前保存的密钥是否已从系统钥匙串中删除。
+HuaGIS couldn't reach the server.	HuaGIS 无法连接到服务器。
+HuaGIS deep learning package	HuaGIS 深度学习包
+HuaGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	HuaGIS 上次未正常关闭，因此本次以 World Atlas 启动，而不是你的启动工程。准备好后，请从“工程”菜单打开该工程。
+HuaGIS didn't close properly last time.	HuaGIS 上次未正常关闭。
+HuaGIS doesn't have this tool. Install the tools it comes from, or delete the node.	HuaGIS 没有此工具。请安装提供该工具的工具集，或删除该节点。
+HuaGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	HuaGIS 是一款用纯 Rust 编写的免费开源 GIS。它可在桌面和浏览器中运行，并且每个操作都是一条命令，也可以在命令行中运行。
+HuaGIS layer file	HuaGIS 图层文件
+HuaGIS layers, maps and projects	HuaGIS 图层、地图和工程
+HuaGIS layout	HuaGIS 布局
+HuaGIS maps and projects	HuaGIS 地图和工程
+HuaGIS model	HuaGIS 模型
+HuaGIS or Jupyter notebook	HuaGIS 或 Jupyter 笔记本
+HuaGIS plugin	HuaGIS 插件
+HuaGIS presentation	HuaGIS 演示文稿
+HuaGIS project	HuaGIS 工程
+HuaGIS project template	HuaGIS 工程模板
+HuaGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	HuaGIS 上次运行时发生内部错误。详细信息在 {path} 中，请将其附加到错误报告。
+HuaGIS report or report template	HuaGIS 报表或报表模板
+HuaGIS styles	HuaGIS 样式
+HuaGIS task	HuaGIS 任务
+HuaGIS was quit last time without saving your changes.	HuaGIS 上次退出时未保存您的更改。
+HuaGIS {latest} is available.	HuaGIS {latest} 已发布。
+HuaGIS {version} is the latest version.	HuaGIS {version} 是最新版本。
 RUSTGIS_ASSISTANT_MODEL	RUSTGIS_ASSISTANT_MODEL
 RUSTGIS_ASSISTANT_PROVIDER	RUSTGIS_ASSISTANT_PROVIDER
 RUSTGIS_GPU	RUSTGIS_GPU
@@ -2851,7 +2851,7 @@ S3 Buckets	S3 存储桶
 S3 Connections	S3 连接
 S3…	S3…
 Sample data (Natural Earth)	示例数据（Natural Earth）
-Sample data © Natural Earth (public domain). RustGIS is licensed under Apache-2.0.	示例数据 © Natural Earth（公有领域）。RustGIS 采用 Apache-2.0 许可证。
+Sample data © Natural Earth (public domain). HuaGIS is licensed under Apache-2.0.	示例数据 © Natural Earth（公有领域）。HuaGIS 采用 Apache-2.0 许可证。
 Sample data: Natural Earth (public domain). Licensed under Apache-2.0.	示例数据：Natural Earth（公有领域）。采用 Apache-2.0 许可证。
 Sans-serif	无衬线
 Satellite Embedding Datasets	卫星嵌入向量数据集
@@ -2995,7 +2995,7 @@ Sections	节
 See and set the camera's position and scale.	查看并设置相机的位置和比例。
 See the map as people with colour vision deficiencies do.	以色觉缺陷人士的视角查看地图。
 See the tools you've run.	查看已运行的工具。
-See whether a newer RustGIS has been released.	检查是否发布了更新的 RustGIS。
+See whether a newer HuaGIS has been released.	检查是否发布了更新的 HuaGIS。
 SELECT	SELECT
 Select	选择
 Select (click)	选择（单击）
@@ -3193,8 +3193,8 @@ Sign-in timed out. Start again and allow the browser to reach this computer's lo
 signed in	已登录
 Signed in to {portal}	已登录 {portal}
 Signed in to {portal} as {user}	已以 {user} 身份登录 {portal}
-Signed out on this computer, but OpenAI didn't confirm it. You can disconnect RustGIS in ChatGPT's settings.	已在此电脑上退出，但 OpenAI 未确认。你可以在 ChatGPT 设置中断开 RustGIS。
-Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect RustGIS in ChatGPT's settings.	已在此电脑上退出，但无法读取系统钥匙串，因此未请求 OpenAI 结束会话。你可以在 ChatGPT 设置中断开 RustGIS。
+Signed out on this computer, but OpenAI didn't confirm it. You can disconnect HuaGIS in ChatGPT's settings.	已在此电脑上退出，但 OpenAI 未确认。你可以在 ChatGPT 设置中断开 HuaGIS。
+Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect HuaGIS in ChatGPT's settings.	已在此电脑上退出，但无法读取系统钥匙串，因此未请求 OpenAI 结束会话。你可以在 ChatGPT 设置中断开 HuaGIS。
 Significance level	显著性水平
 Signing in with ChatGPT works in the desktop app.	使用 ChatGPT 登录仅适用于桌面应用。
 Signing the asset (Planetary Computer)…	正在为资产签名（Planetary Computer）…
@@ -3443,7 +3443,7 @@ The assistant follows a skill's instructions when it uses it. Whatever they say,
 The assistant is busy; stop it or wait for it to finish.	助手正忙；请停止它或等待其完成。
 The assistant wants to run this, and {why}:	助手想要执行以下操作，由于{why}，需要您确认：
 The Basemaps plugin's tab of public basemaps.	底图插件中列出公共底图的选项卡。
-The browser didn't give RustGIS the clipboard ({why}): paste with {keys}.	浏览器未向 RustGIS 提供剪贴板（{why}）：请使用 {keys} 粘贴。
+The browser didn't give HuaGIS the clipboard ({why}): paste with {keys}.	浏览器未向 HuaGIS 提供剪贴板（{why}）：请使用 {keys} 粘贴。
 the capture failed unexpectedly	捕获意外失败
 The class these label groups and the Labeling pane edit.	这些标注组和标注窗格所编辑的类。
 The clipboard came after you moved on, so nothing was pasted: paste with {keys}.	剪贴板在您移到其他位置后才到达，因此未粘贴任何内容：请使用 {keys} 粘贴。
@@ -3451,7 +3451,7 @@ The connection failed; trying again in {seconds} s.	连接失败；将在 {secon
 the connection has no id	连接没有 ID
 The country list couldn't be read ({e}): type a country's code	无法读取国家列表（{e}）：请输入国家代码
 The current elevation stays in effect while you edit inputs. Click Apply elevation to apply the value and units.	编辑输入时当前高程保持有效。单击“应用高程”以应用该值和单位。
-The dataset has nothing RustGIS can add	该数据集中没有 RustGIS 可添加的内容
+The dataset has nothing HuaGIS can add	该数据集中没有 HuaGIS 可添加的内容
 The desktop app adds data cubes	桌面应用可添加数据立方体
 The distance between two marks along the line	沿线两个标记之间的距离
 The environment (AWS_ACCESS_KEY_ID…)	环境变量（AWS_ACCESS_KEY_ID…）
@@ -3476,14 +3476,14 @@ The layer's fills	图层的填充
 The layer's strokes	图层的描边
 the layout export failed unexpectedly	布局导出意外失败
 The link doesn't say its STAC API: Find Items searches {api}	该链接未注明其 STAC API：“查找项目”将搜索 {api}
-The list of plugins to browse. Leave it empty for the RustGIS plugin registry.	要浏览的插件列表。留空则使用 RustGIS 插件库。
+The list of plugins to browse. Leave it empty for the HuaGIS plugin registry.	要浏览的插件列表。留空则使用 HuaGIS 插件库。
 The map at the left; the title, locator, legend, sources and reference in a panel at the right.	地图在左侧；标题、定位器、图例、来源和参考信息在右侧面板中。
 the map has no GeoPackage layer loaded for editing (Home › Add Data › Edit GeoPackage Table…)	地图中没有已加载以供编辑的 GeoPackage 图层（主页 › 添加数据 › 编辑 GeoPackage 表…）
 the map has no layers	地图中没有图层
 the map has no PostGIS layer loaded for editing (Home › Add Data › Database…, Load for editing)	地图中没有已加载以供编辑的 PostGIS 图层（主页 › 添加数据 › 数据库…，加载以供编辑）
 The map has no tile archive read from a file.	地图中没有从文件读取的瓦片归档。
 The map is drawn in this coordinate system; layers are projected on the fly.	地图以此坐标系绘制；图层将实时投影。
-the map isn't on screen in RustGIS (a layout or the catalog is shown), so it was drawn offscreen	RustGIS 中地图未显示在屏幕上（正在显示布局或目录），因此已在屏幕外绘制
+the map isn't on screen in HuaGIS (a layout or the catalog is shown), so it was drawn offscreen	HuaGIS 中地图未显示在屏幕上（正在显示布局或目录），因此已在屏幕外绘制
 The map view as it is now	当前的地图视图
 The map's extent isn't known yet	地图范围尚未知
 The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	地图视图涉及 Overture 的 {n} 个 {ty} 文件（上限 {max}）：请放大，或将该主题添加为地图瓦片
@@ -3551,7 +3551,7 @@ The sign-in is kept in the system keychain, never in the app's settings or a pro
 The sign-in is still kept in the app's settings folder, readable by your user account: the system keychain is unavailable, so it hasn't been moved there yet.	登录信息仍保存在应用的设置文件夹中，您的用户账户可读取：系统钥匙串不可用，因此尚未移入。
 The significance level is a number, such as 0.05	显著性水平为一个数字，例如 0.05
 The start-up project {path} didn't open: {error}	无法打开启动工程 {path}：{error}
-The start-up project {path} isn't a RustGIS project file.	启动工程 {path} 不是 RustGIS 工程文件。
+The start-up project {path} isn't a HuaGIS project file.	启动工程 {path} 不是 HuaGIS 工程文件。
 The step's layer {name} isn't in the map.	此步骤的图层 {name} 不在地图中。
 The store has no variables with two or more dimensions.	该存储中没有二维或更多维的变量。
 the store is gone	该存储已不存在
@@ -3560,7 +3560,7 @@ The summary failed unexpectedly	汇总意外失败
 The summary finished after another project was opened, so it wasn't added	汇总完成时已打开另一个工程，因此未添加
 The system keychain could not complete the request.	系统钥匙串无法完成该请求。
 The system keychain is locked or access was refused.	系统钥匙串已锁定或访问被拒绝。
-The system keychain is unavailable, so this sign-in won't be remembered: it lasts until RustGIS closes.	系统钥匙串不可用，因此不会记住此登录：它在 RustGIS 关闭前有效。
+The system keychain is unavailable, so this sign-in won't be remembered: it lasts until HuaGIS closes.	系统钥匙串不可用，因此不会记住此登录：它在 HuaGIS 关闭前有效。
 The system keychain is unavailable.	系统钥匙串不可用。
 The task's steps changed, so the step being edited was closed: edit it again.	任务的步骤已更改，因此正在编辑的步骤已关闭：请重新编辑。
 the time slider is off	时间滑块已关闭
@@ -3608,7 +3608,7 @@ This map has no layers yet.	此地图中还没有图层。
 This map's thumbnail, from an image.	此地图的缩略图，来自图像。
 This map's thumbnail, from the view.	此地图的缩略图，来自视图。
 This plugin can:	此插件可以：
-This plugin runs as a program on your computer, outside RustGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	此插件作为程序在您的计算机上运行，位于 RustGIS 沙箱之外。它能做您能做的任何事：读取和更改您的文件、使用网络以及运行其他程序。请仅在信任其作者时安装。
+This plugin runs as a program on your computer, outside HuaGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	此插件作为程序在您的计算机上运行，位于 HuaGIS 沙箱之外。它能做您能做的任何事：读取和更改您的文件、使用网络以及运行其他程序。请仅在信任其作者时安装。
 This request has no one-time allow option.	此请求没有“仅允许一次”选项。
 This request uses an unsupported capability. Check the parameter and change the request.	此请求使用了不受支持的功能。请检查参数并修改请求。
 This result is kept	此结果将被保留
@@ -3740,7 +3740,7 @@ unknown (an older project)	未知（旧版工程）
 Unknown shortcut binding field.	未知的快捷键绑定字段。
 Unknown shortcut command.	未知的快捷键命令。
 UNKNOWN TOOL	未知工具
-Unload the GeoLibre tools and stop loading them when RustGIS starts.	卸载 GeoLibre 工具，并在 RustGIS 启动时不再加载。
+Unload the GeoLibre tools and stop loading them when HuaGIS starts.	卸载 GeoLibre 工具，并在 HuaGIS 启动时不再加载。
 Unsaved changes	未保存的更改
 Unsupervised classes (k-means)	非监督分类（k-means）
 Unsupervised classes (k-means).	非监督分类（k-means）。
@@ -3872,13 +3872,13 @@ Web Tool	Web 工具
 Website	网站
 Weekly usage	每周用量
 Weights	权重
-Welcome to RustGIS	欢迎使用 RustGIS
+Welcome to HuaGIS	欢迎使用 HuaGIS
 West	西
 WFS	WFS
 WGS 84 / Globe	WGS 84 / 地球仪
 WGS 84 / Web Mercator	WGS 84 / Web Mercator
-What RustGIS opens with: the World Atlas sample or a blank map.	RustGIS 启动时打开的内容：World Atlas 示例或空白地图。
-What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	RustGIS 启动时打开的内容：World Atlas 示例、空白地图、你选择的工程，或上次打开或保存的工程。
+What HuaGIS opens with: the World Atlas sample or a blank map.	HuaGIS 启动时打开的内容：World Atlas 示例或空白地图。
+What HuaGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	HuaGIS 启动时打开的内容：World Atlas 示例、空白地图、你选择的工程，或上次打开或保存的工程。
 What to do, where to find it and why	做什么、在哪里找到以及原因
 What's near a point	某点附近有什么
 When a file holds several layers, choose the ones to add instead of adding them all.	当文件包含多个图层时，选择要添加的图层，而不是全部添加。

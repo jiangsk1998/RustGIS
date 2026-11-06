@@ -455,7 +455,7 @@ fn auth(app: &mut RustGisApp, ui: &mut egui::Ui, w: f32) {
         } else if earthdata::expired_forgotten() {
             ui.label(egui::RichText::new(tl!("The token expired and was forgotten. Paste a new one.")).small());
         }
-        ui.label(egui::RichText::new(tl!("Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.")).small().weak());
+        ui.label(egui::RichText::new(tl!("Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until HuaGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.")).small().weak());
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut app.ui.earthaccess.token).password(true).hint_text(tl!("Paste a token")).desired_width(w - 80.0));
             if ui.button(tl!("Save")).clicked() && !app.ui.earthaccess.token.trim().is_empty() {
@@ -467,7 +467,7 @@ fn auth(app: &mut RustGisApp, ui: &mut egui::Ui, w: f32) {
         });
         if app.services.secrets.is_some() {
             ui.checkbox(&mut app.ui.earthaccess.remember, tl!("Remember on this computer")).on_hover_text(tl!(
-                "Keeps the token in the system's credential store, so it is there when RustGIS starts again. Unticked, a token remembered before is deleted when you save another."
+                "Keeps the token in the system's credential store, so it is there when HuaGIS starts again. Unticked, a token remembered before is deleted when you save another."
             ));
         }
         ui.hyperlink_to(tl!("Generate a token"), earthdata::TOKEN_PAGE);

@@ -60,8 +60,8 @@ A line, or markers or hash marks along it	یک خط، یا نشانه‌ها ی�
 A magnifying lens that follows the pointer.	یک لنز بزرگنمایی که نشانگر را دنبال می‌کند.
 A map, feature or coverage service's address: WMS, WMTS, WFS, WCS, OGC API Features or Tiles, or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer (or a services directory, to browse).	آدرس یک سرویس نقشه، عنصر یا پوشش: WMS، WMTS، WFS، WCS، OGC API Features or Tiles، یا یک FeatureServer، MapServer، ImageServer یا VectorTileServer ArcGIS (یا یک فهرست سرویس، برای مرور).
 a name, or owner/name such as giswqs/geospatial	یک نام، یا مالک/نامی مانند giswqs/geospatial
-A named endpoint you can reuse. Keys and tokens are kept until RustGIS closes, never saved.	یک نقطه پایانی نام‌دار که می‌توانید دوباره استفاده کنید. کلیدها و توکن‌ها تا بسته‌شدن RustGIS نگه داشته می‌شوند و هرگز ذخیره نمی‌شوند.
-A named endpoint you can reuse. Keys are kept until RustGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	یک نقطه پایانی نام‌دار که می‌توانید دوباره استفاده کنید. کلیدها تا بسته‌شدن RustGIS نگه داشته می‌شوند، مگر اینکه به خاطر سپردنشان روی این رایانه را انتخاب کنید؛ خود اتصال هرگز آن‌ها را نگه نمی‌دارد.
+A named endpoint you can reuse. Keys and tokens are kept until HuaGIS closes, never saved.	یک نقطه پایانی نام‌دار که می‌توانید دوباره استفاده کنید. کلیدها و توکن‌ها تا بسته‌شدن HuaGIS نگه داشته می‌شوند و هرگز ذخیره نمی‌شوند.
+A named endpoint you can reuse. Keys are kept until HuaGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	یک نقطه پایانی نام‌دار که می‌توانید دوباره استفاده کنید. کلیدها تا بسته‌شدن HuaGIS نگه داشته می‌شوند، مگر اینکه به خاطر سپردنشان روی این رایانه را انتخاب کنید؛ خود اتصال هرگز آن‌ها را نگه نمی‌دارد.
 A named endpoint you can reuse. Passwords last for this session unless you choose to remember them in this computer's password store.	یک نقطه پایانی نام‌دار که می‌توانید دوباره استفاده کنید. رمزها برای همین نشست می‌مانند، مگر اینکه به خاطر سپردنشان در انبار رمز این رایانه را انتخاب کنید.
 A node cannot connect to itself.	یک گره نمی‌تواند به خودش متصل شود.
 A notebook of text and command cells.	یک دفترچه متنی از سلول‌های متن و دستور.
@@ -98,8 +98,8 @@ A5 Grid	شبکه A5
 A5's equal-area pentagonal cells at a resolution, over the map's extent, a layer or the world, as polygons with their ids.	سلول‌های پنج‌ضلعی هم‌مساحت A5 در یک تفکیک‌پذیری، روی گستره نقشه، یک لایه یا کل جهان، به‌صورت چندضلعی همراه با شناسه‌هایشان.
 About	درباره
 About plugins	درباره‌ی افزونه‌ها
-About RustGIS	درباره‌ی RustGIS
-About RustGIS.	درباره‌ی RustGIS.
+About HuaGIS	درباره‌ی HuaGIS
+About HuaGIS.	درباره‌ی HuaGIS.
 Above	بالا
 Above Left	بالا چپ
 Above Right	بالا راست
@@ -276,7 +276,7 @@ Agent input queue is full or disconnected; stop the agent and try again.	صف و
 Agent threads	رشته‌های گفت‌وگوی ایجنت
 Agent work	کار ایجنت
 Agents have full access: they may run scripts, tasks, models and plugins. Click to stop the MCP relay	ایجنت‌ها دسترسی کامل دارند: آن‌ها می‌توانند اسکریپت، وظیفه، مدل و افزونه اجرا کنند. برای متوقف کردن رله MCP کلیک کنید
-Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	ایجنت‌های روی این رایانه که متصل می‌شوند (Claude Code، Codex، Cursor و دیگران) روی نقشه باز این‌جا با ابزارهای RustGIS کار می‌کنند: می‌توانند فایل‌ها را باز و ذخیره کنند و از وب استفاده کنند. اسکریپت‌ها و مدیریت افزونه‌ها خاموش می‌مانند.
+Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with HuaGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	ایجنت‌های روی این رایانه که متصل می‌شوند (Claude Code، Codex، Cursor و دیگران) روی نقشه باز این‌جا با ابزارهای HuaGIS کار می‌کنند: می‌توانند فایل‌ها را باز و ذخیره کنند و از وب استفاده کنند. اسکریپت‌ها و مدیریت افزونه‌ها خاموش می‌مانند.
 Agents then run commands, change files and use the web on this computer without asking you.	آنگاه ایجنت‌ها بدون پرسیدن از شما، روی این رایانه دستور اجرا می‌کنند، فایل‌ها را تغییر می‌دهند و از وب استفاده می‌کنند.
 Aggregate Points to A5	تجمیع نقاط در A5
 Aggregation	تراکم
@@ -301,7 +301,7 @@ Allow Feature Selection	اجازه انتخاب عنصر
 Allow only certain combinations of values across fields.	فقط ترکیب‌های خاصی از مقادیر در بین فیلدها را مجاز کن.
 Allow such actions for this conversation	اجازه چنین اقداماتی را برای این گفت‌وگو بده
 Allow this action?	این عمل مجاز است؟
-Allow this agent's RustGIS action?	اجازه عمل RustGIS این ایجنت را بدهید؟
+Allow this agent's HuaGIS action?	اجازه عمل HuaGIS این ایجنت را بدهید؟
 Along lines	در امتداد خطوط
 Along Selected Line	در امتاز خط انتخاب شده
 Alt+	Alt+
@@ -313,7 +313,7 @@ Alternating bar	نوار متناوب
 Altitude	ارتفاع
 Always allow	همیشه اجازه بده
 Amazon S3	Amazon S3
-Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3، یا یک سرویس سازگار با S3 (MinIO، Cloudflare R2، Wasabi…) از طریق نقطه پایانی آن. کلیدها تا بسته‌شدن RustGIS نگه داشته می‌شوند؛ یک اتصال ذخیره‌شده نام، نقطه پایانی و منطقه خود را نگه می‌دارد، هرگز اطلاعات محرمانه‌اش را.
+Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until HuaGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3، یا یک سرویس سازگار با S3 (MinIO، Cloudflare R2، Wasabi…) از طریق نقطه پایانی آن. کلیدها تا بسته‌شدن HuaGIS نگه داشته می‌شوند؛ یک اتصال ذخیره‌شده نام، نقطه پایانی و منطقه خود را نگه می‌دارد، هرگز اطلاعات محرمانه‌اش را.
 amenity=cafe, shop	امنیت=کافه، فروشگاه
 An agent on this computer asks to:	ایجنتی روی این رایانه درخواست می‌کند:
 An ArcGIS Online organization's or an ArcGIS Enterprise portal's address; ArcGIS Online when blank	نشانی یک سازمان ArcGIS Online یا یک پورتال ArcGIS Enterprise؛ اگر خالی باشد ArcGIS Online
@@ -363,7 +363,7 @@ Arrange	چینش
 Arrange Element	چینش عنصر
 Arrow	فلش
 Arrowheads	نوک فلش‌ها
-Ask a question about your data, or describe what to do with the map. The assistant runs RustGIS commands for you; every change can be undone.	در مورد داده‌های خود سوال بپرسید یا توضیح دهید که می‌خواهید با نقشه چه کنید. دستیار RustGIS دستورات را برای شما اجرا می‌کند؛ هر تغییری قابل بازگشت است.
+Ask a question about your data, or describe what to do with the map. The assistant runs HuaGIS commands for you; every change can be undone.	در مورد داده‌های خود سوال بپرسید یا توضیح دهید که می‌خواهید با نقشه چه کنید. دستیار HuaGIS دستورات را برای شما اجرا می‌کند؛ هر تغییری قابل بازگشت است.
 Ask about the map, or tell it what to do…	در مورد نقشه بپرسید یا بگویید که می‌خواهید چه کاری انجام دهد…
 Ask about your data, or tell the assistant what to do with the map.	در مورد داده‌های خود سوال بپرسید یا به دستیار بگویید که می‌خواهید با نقشه چه کاری انجام دهد.
 Ask Which Layers to Add	پرسیدن لایه‌های افزودنی
@@ -717,7 +717,7 @@ Color Vision Simulator	شبیه‌ساز دید رنگی
 Colorbar	نوار رنگ
 Colormap	رنگ‌نگاشت
 Colors from the raster's own color table.	رنگ‌ها از جدول رنگ خود رستر.
-Colour ramps (RustGIS, QGIS, GDAL, GMT)	طیف‌های رنگی (RustGIS، QGIS، GDAL، GMT)
+Colour ramps (HuaGIS, QGIS, GDAL, GMT)	طیف‌های رنگی (HuaGIS، QGIS، GDAL، GMT)
 Columns named like longitude/latitude, easting/northing or geometry are picked for you.	ستون‌هایی که نامشان مثل longitude/latitude، easting/northing یا geometry باشد خودکار انتخاب می‌شوند.
 Combinations from the box above, one per line	ترکیب‌های داخل کادر بالا، هر خط یکی
 Combines two polygon layers into every piece either covers, with the attributes of both where they overlap.	دو لایه چندضلعی را به همه‌ی قطعاتی که هر کدام می‌پوشانند تبدیل می‌کند و در محل هم‌پوشانی ویژگی‌های هر دو را نگه می‌دارد.
@@ -924,7 +924,7 @@ Delete selected rows	حذف ردیف‌های انتخاب‌شده
 Delete Style	حذف Style
 Delete Task	حذف تسک
 Delete Task Step	حذف گام تسک
-Delete the GeoLibre runner that RustGIS installed. Install it again at any time.	اجراکننده GeoLibre‌ای که RustGIS نصب کرده را حذف می‌کند. هر وقت بخواهید می‌توانید دوباره نصبش کنید.
+Delete the GeoLibre runner that HuaGIS installed. Install it again at any time.	اجراکننده GeoLibre‌ای که HuaGIS نصب کرده را حذف می‌کند. هر وقت بخواهید می‌توانید دوباره نصبش کنید.
 Delete the layout {name}?	صفحه‌آرایی {name} حذف شود؟
 Delete the map {name}?	نقشه {name} حذف شود؟
 Delete the selected features.	عناصر انتخاب‌شده را حذف می‌کند.
@@ -1136,7 +1136,7 @@ Element Properties	ویژگی‌های عنصر
 Elevation	ارتفاع
 Elevation model	مدل ارتفاعی
 Elevation profiles along lines, cross sections and more.	نیم‌رخ‌های ارتفاعی در طول خط‌ها، مقاطع عرضی و بیشتر.
-Eligible requests in RustGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	درخواست‌های واجد شرایط در RustGIS از طرح ChatGPT شما استفاده می‌کنند. مصرف را می‌توانید در تنظیمات ChatGPT مدیریت کنید.
+Eligible requests in HuaGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	درخواست‌های واجد شرایط در HuaGIS از طرح ChatGPT شما استفاده می‌کنند. مصرف را می‌توانید در تنظیمات ChatGPT مدیریت کنید.
 Ellipse	بیضی
 Embeddings	Embeddings
 Ember	Ember
@@ -1329,7 +1329,7 @@ Find and run geoprocessing tools.	یافتن و اجرای ابزارهای زم
 Find any command by name (Ctrl+K).	یافتن هر دستوری با نام (Ctrl+K).
 Find Items	یافتن آیتم‌ها
 Find Place	یافتن مکان
-Find plugins in the RustGIS plugin registry.	یافتن افزونه‌ها در فهرست افزونه‌های RustGIS.
+Find plugins in the HuaGIS plugin registry.	یافتن افزونه‌ها در فهرست افزونه‌های HuaGIS.
 Find Similar	یافتن مشابه‌ها
 Find Tools	یافتن ابزارها
 Finding routes…	در حال یافتن مسیرها…
@@ -1363,14 +1363,14 @@ Folder…	پوشه…
 Follow the time slider	دنبال‌کردن لغزنده زمان
 Font	فونت
 for a store that doesn't say	برای فروشگاهی که نامش را ننوشته
-For ArcGIS Online, the client ID is RustGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	برای ArcGIS Online، شناسه کلاینت همان برنامه خود RustGIS است. برای یک پورتال ArcGIS Enterprise، یک برنامه OAuth روی آن ثبت کنید (Content › New item › Developer credentials) که نشانی بازگشت آن {redirect} باشد و شناسه کلاینت آن را وارد کنید.
+For ArcGIS Online, the client ID is HuaGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	برای ArcGIS Online، شناسه کلاینت همان برنامه خود HuaGIS است. برای یک پورتال ArcGIS Enterprise، یک برنامه OAuth روی آن ثبت کنید (Content › New item › Developer credentials) که نشانی بازگشت آن {redirect} باشد و شناسه کلاینت آن را وارد کنید.
 for the layers that change with time, as they list their times (2024-06-01, 1995)	برای لایه‌هایی که با زمان تغییر می‌کنند، به همان صورتی که زمان‌هایشان را فهرست می‌کنند (۲۰۲۴-۰۶-۰۱، ۱۹۹۵)
 Forest	جنگل
 Forget Earthdata Login Token	فراموش‌کردن توکن ورود Earthdata
 Forget Saved Keys	فراموش‌کردن کلیدهای ذخیره‌شده
 Forget Saved Password	فراموش‌کردن رمز ذخیره‌شده
 Format	فرمت
-Found: {names}. An agent works on this map through RustGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › RustGIS › Agent work. It asks you before each action.	پیدا شد: {names}. ایجنتی از طریق ابزارهای RustGIS روی این نقشه کار می‌کند و از ابزارهای خودش (وب، اسکریپت، فایل) در پوشه مخصوص به خود استفاده می‌کند که در Documents › RustGIS › Agent work نگه‌داری می‌شود. پیش از هر اقدام از شما می‌پرسد.
+Found: {names}. An agent works on this map through HuaGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › HuaGIS › Agent work. It asks you before each action.	پیدا شد: {names}. ایجنتی از طریق ابزارهای HuaGIS روی این نقشه کار می‌کند و از ابزارهای خودش (وب، اسکریپت، فایل) در پوشه مخصوص به خود استفاده می‌کند که در Documents › HuaGIS › Agent work نگه‌داری می‌شود. پیش از هر اقدام از شما می‌پرسد.
 Frame rate	نرخ فریم
 Frame rate, draw time, data size and memory.	نرخ فریم، زمان ترسیم، حجم داده و حافظه.
 France	فرانسه
@@ -1534,7 +1534,7 @@ host=localhost dbname=gis user=postgres	host=localhost dbname=gis user=postgres
 host=… dbname=… user=…	host=… dbname=… user=…
 Hosted Imagery	تصاویر میزبانی‌شده
 Hour	ساعت
-How often RustGIS keeps a copy of unsaved work, to offer it back after a crash.	هر چند وقت RustGIS یک نسخه از کار ذخیره‌نشده نگه می‌دارد تا پس از خرابی آن را برگرداند.
+How often HuaGIS keeps a copy of unsaved work, to offer it back after a crash.	هر چند وقت HuaGIS یک نسخه از کار ذخیره‌نشده نگه می‌دارد تا پس از خرابی آن را برگرداند.
 How the layer's colours combine with the tile layers and basemap beneath.	نحوه ترکیب رنگ‌های لایه با لایه‌های کاشی و نقشه پایه زیر آن.
 How the layer's colours combine with what's beneath.	نحوه ترکیب رنگ‌های لایه با چیزی که زیر آن است.
 HUB Ocean's Ocean Data Platform: marine datasets, read as features (up to 10,000 each).	پلتفرم داده اقیانوس HUB Ocean: مجموعه داده‌های دریایی، خوانده‌شده به‌عنوان عناصر (تا 10,000 در هر کدام).
@@ -1601,7 +1601,7 @@ In memory	در حافظه
 In Progress	در حال انجام
 in progress	در حال انجام
 In project	در پروژه
-In RustGIS, it can:	در RustGIS می‌تواند:
+In HuaGIS, it can:	در HuaGIS می‌تواند:
 In the browser, pick the .shp and .dbf together, with any sidecars, or pick a ZIP. The override applies to every Shapefile in the ZIP.	در مرورگر، فایل‌های .shp و .dbf را همراه با هر فایل جانبی با هم انتخاب کنید، یا یک ZIP برگزینید. این جایگزینی روی همه Shapefileهای داخل ZIP اعمال می‌شود.
 In the coordinate system's units: metres for UTM.	به واحدهای سیستم مختصات: متر برای UTM.
 In the middle	در میانه
@@ -1689,7 +1689,7 @@ Item Pop-ups	پاپ‌آپ‌های آیتم
 Item {id}	آیتم {id}
 its default	پیش‌فرض آن
 Its default: {default}. Its times: {times}	پیش‌فرض آن: {default}. زمان‌های آن: {times}
-Its firewall ({firewall}) blocked RustGIS. The service may only allow some applications: contact its administrator and send them the details below.	فایروال آن ({firewall}) RustGIS را مسدود کرد. ممکن است سرویس فقط به بعضی برنامه‌ها اجازه بدهد: با مدیر آن تماس بگیرید و جزئیات زیر را برایش بفرستید.
+Its firewall ({firewall}) blocked HuaGIS. The service may only allow some applications: contact its administrator and send them the details below.	فایروال آن ({firewall}) HuaGIS را مسدود کرد. ممکن است سرویس فقط به بعضی برنامه‌ها اجازه بدهد: با مدیر آن تماس بگیرید و جزئیات زیر را برایش بفرستید.
 Its tool isn't available now (a plugin's, not loaded, or a suite's, not installed)	ابزار آن اکنون در دسترس نیست (ابزار یک افزونه که بارگذاری نشده، یا یک مجموعه که نصب نشده)
 Jobs	کارها
 JOIN	JOIN
@@ -1719,7 +1719,7 @@ Keep Tool	نگه‌داشتن ابزار
 Keep value	نگه‌داشتن مقدار
 Keeps the access key ID and secret access key in this computer's credential store, never in the connection or the project.	شناسه کلید دسترسی و کلید دسترسی محرمانه را در انبار اعتبارنامه این رایانه نگه می‌دارد، هرگز در اتصال یا پروژه.
 Keeps the parts of two polygon layers that only one of them covers, with that layer's attributes.	بخش‌هایی از دو لایه چندضلعی را نگه می‌دارد که فقط یکی از آن‌ها می‌پوشاند، با ویژگی‌های همان لایه.
-Keeps the token in the system's credential store, so it is there when RustGIS starts again. Unticked, a token remembered before is deleted when you save another.	توکن را در مخزن اعتبارنامه‌های سیستم نگه می‌دارد تا هنگام اجرای دوباره RustGIS در دسترس باشد. اگر تیک نخورد، توکنی که قبلاً به خاطر سپرده شده با ذخیره‌ی توکن دیگر حذف می‌شود.
+Keeps the token in the system's credential store, so it is there when HuaGIS starts again. Unticked, a token remembered before is deleted when you save another.	توکن را در مخزن اعتبارنامه‌های سیستم نگه می‌دارد تا هنگام اجرای دوباره HuaGIS در دسترس باشد. اگر تیک نخورد، توکنی که قبلاً به خاطر سپرده شده با ذخیره‌ی توکن دیگر حذف می‌شود.
 Kernel Density	تراکم کرنل
 Kernel Type	نوع کرنل
 Key	Key
@@ -1800,7 +1800,7 @@ Legend label. Clear it to show the value again.	برچسب راهنما. برا�
 Length	طول
 Length {length} · gain {gain} · loss {loss}	طول {length} · افزایش {gain} · کاهش {loss}
 Let the assistant hand tasks to agents on this computer	اجازه بده دستیار کارها را به ایجنت‌های این رایانه بسپارد
-Let your Agents Control RustGIS	اجازه دهید ایجنت‌های شما RustGIS را کنترل کنند
+Let your Agents Control HuaGIS	اجازه دهید ایجنت‌های شما HuaGIS را کنترل کنند
 Letter spacing	فاصله حروف
 Level	سطح
 Library	کتابخانه
@@ -1856,7 +1856,7 @@ List The National Map Services	فهرست سرویس‌های The National Map
 List the provider's models	فهرست مدل‌های ارائه‌دهنده
 List this layer in the legend	این لایه در راهنما فهرست شود
 List what it holds	فهرست محتویاتش
-Listed for discovery: RustGIS doesn't read this dataset yet. Its data and paper are linked above.	برای شناسایی فهرست شده: RustGIS هنوز این مجموعه داده را نمی‌خواند. داده و مقاله آن بالا پیوند شده‌اند.
+Listed for discovery: HuaGIS doesn't read this dataset yet. Its data and paper are linked above.	برای شناسایی فهرست شده: HuaGIS هنوز این مجموعه داده را نمی‌خواند. داده و مقاله آن بالا پیوند شده‌اند.
 Listing datasets…	در حال فهرست‌کردن مجموعه‌های داده…
 Listing…	در حال فهرست‌کردن…
 Lit	روشن‌شده
@@ -1901,7 +1901,7 @@ Look for {name}, outlined on the ribbon.	ابزار {name} را پیدا کنی�
 Looking up the place…	در حال جستجوی مکان…
 Loop	حلقه
 Lower Priority	اولویت پایین‌تر
-Made in RustGIS: samples, drawings and tool outputs	ساخته‌شده در RustGIS: نمونه‌ها، ترسیم‌ها و خروجی ابزارها
+Made in HuaGIS: samples, drawings and tool outputs	ساخته‌شده در HuaGIS: نمونه‌ها، ترسیم‌ها و خروجی ابزارها
 Magnifier	ذره‌بین
 Major Lakes	دریاچه‌های بزرگ
 Major Rivers	رودهای بزرگ
@@ -2157,7 +2157,7 @@ no command	بدون دستور
 No data at the points picked.	در نقاط انتخاب‌شده داده‌ای نیست.
 No data cube matches	هیچ مکعب داده‌ای مطابقت ندارد
 No datasets match.	هیچ مجموعه داده‌ای مطابقت ندارد.
-No datasets with data RustGIS can add	هیچ مجموعه داده‌ای با داده قابل افزودن به RustGIS نیست
+No datasets with data HuaGIS can add	هیچ مجموعه داده‌ای با داده قابل افزودن به HuaGIS نیست
 no date in the name	تاریخی در نام نیست
 no download service	سرویس دانلود نیست
 No edits since the project was saved	از ذخیره پروژه ویرایشی نبوده است
@@ -2219,8 +2219,8 @@ North Polar Stereographic	قطبی استریوگرافیک شمالی
 NOT	NOT
 Not a GeoLibre project	پروژه GeoLibre نیست
 not a picture	تصویر نیست
-not a RustGIS layout	صفحه‌آرایی RustGIS نیست
-not a RustGIS project	پروژه RustGIS نیست
+not a HuaGIS layout	صفحه‌آرایی HuaGIS نیست
+not a HuaGIS project	پروژه HuaGIS نیست
 Not applied yet.	هنوز اعمال نشده است.
 Not for texts: a text is edited in the Format pane.	برای متن‌ها نیست: متن در پنل Format ویرایش می‌شود.
 not needed	لازم نیست
@@ -2291,7 +2291,7 @@ Open a Data Cube	بازکردن مکعب داده
 open a layout first	اول یک صفحه‌آرایی باز کنید
 Open a model file (*.model.json)	بازکردن یک فایل مدل (*.model.json)
 Open a model of this project	بازکردن مدلی از این پروژه
-Open a RustGIS or Jupyter notebook.	بازکردن یک Notebook از RustGIS یا Jupyter.
+Open a HuaGIS or Jupyter notebook.	بازکردن یک Notebook از HuaGIS یا Jupyter.
 Open an offline area to edit.	بازکردن یک پهنه آفلاین برای ویرایش.
 Open browser again	بازکردن دوباره مرورگر
 Open Custom Template	بازکردن قالب سفارشی
@@ -2318,7 +2318,7 @@ Open the layer's attribute table.	بازکردن جدول ویژگی لایه.
 Open the layer's table.	بازکردن جدول لایه.
 Open the plugin's panel.	بازکردن پنل افزونه.
 Open the Release Page	بازکردن صفحه انتشار
-Open the RustGIS user guide.	بازکردن راهنمای کاربر RustGIS.
+Open the HuaGIS user guide.	بازکردن راهنمای کاربر HuaGIS.
 Open the selected layer's table.	بازکردن جدول لایه انتخاب‌شده.
 Open the Symbology pane.	بازکردن پنل Symbology.
 Open the task's steps	بازکردن گام‌های تسک
@@ -2494,7 +2494,7 @@ Plugin registry	فهرست افزونه‌ها
 Plugins	افزونه‌ها
 Plugins are .rgplugin files. Install only plugins from people you trust.	افزونه‌ها فایل‌های .rgplugin هستند. فقط افزونه‌های افراد مورد اعتماد را نصب کنید.
 Plugins marked Not sandboxed run as programs on your computer instead, and can do anything you can.	افزونه‌های «بدون سندباکس» به‌جای آن، مثل یک برنامه روی رایانه شما اجرا می‌شوند و هر کاری را که شما می‌توانید، می‌کنند.
-Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through RustGIS's own commands, within the permissions you accept.	افزونه‌ها در سندباکس اجرا می‌شوند: به فایل‌ها یا شبکه شما دسترسی ندارند و پروژه را فقط از طریق دستورهای خود RustGIS و در محدوده مجوزهایی که می‌پذیرید تغییر می‌دهند.
+Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through HuaGIS's own commands, within the permissions you accept.	افزونه‌ها در سندباکس اجرا می‌شوند: به فایل‌ها یا شبکه شما دسترسی ندارند و پروژه را فقط از طریق دستورهای خود HuaGIS و در محدوده مجوزهایی که می‌پذیرید تغییر می‌دهند.
 PMTiles archive	بایگانی PMTiles
 PNG frames (zip)	فریم‌های PNG (zip)
 PNG image	تصویر PNG
@@ -2571,7 +2571,7 @@ Project Template	قالب پروژه
 project's path is required	مسیر پروژه الزامی است
 Projection	تصویر نقشه
 Projections	تصویرها
-Projects and JSON data (RustGIS, QGIS, GeoLibre)	پروژه‌ها و داده‌های JSON (RustGIS، QGIS، GeoLibre)
+Projects and JSON data (HuaGIS, QGIS, GeoLibre)	پروژه‌ها و داده‌های JSON (HuaGIS، QGIS، GeoLibre)
 Properties	ویژگی‌ها
 Property	ویژگی
 Proportional Symbols	نمادهای تناسبی
@@ -2632,7 +2632,7 @@ Read error	خطای خواندن
 Read the bands picked for the view (at most about 6 km a side)	خواندن باند انتخاب‌شده برای نما (حداکثر حدود 6 کیلومتر هر طرف)
 Read the map's layers and features	خواندن لایه‌ها و عناصر نقشه
 Read the points in the view, coloured by their principal components	خواندن نقاط داخل نما، رنگ‌آمیزی‌شده با مؤلفه‌های اصلی‌شان
-Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	خواندن فایل‌های یک گرانول به توکن ورود Earthdata نیاز دارد که برای همه DAACهای ناسا کار می‌کند. این توکن تا بسته‌شدن RustGIS نگه داشته می‌شود مگر اینکه «به خاطر سپردن» را تیک بزنید، هرگز داخل پروژه ذخیره نمی‌شود و فقط به سرورهای داده Earthdata ناسا فرستاده می‌شود.
+Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until HuaGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	خواندن فایل‌های یک گرانول به توکن ورود Earthdata نیاز دارد که برای همه DAACهای ناسا کار می‌کند. این توکن تا بسته‌شدن HuaGIS نگه داشته می‌شود مگر اینکه «به خاطر سپردن» را تیک بزنید، هرگز داخل پروژه ذخیره نمی‌شود و فقط به سرورهای داده Earthdata ناسا فرستاده می‌شود.
 Reading the catalog: {n} documents read, {m} items found…	در حال خواندن فهرست: {n} سند خوانده شد، {m} آیتم پیدا شد…
 Reading the catalog…	در حال خواندن فهرست…
 Reading the embeddings…	در حال خواندن Embeddings…
@@ -2817,32 +2817,32 @@ Run Tool	اجرای ابزار
 Run {name}	اجرای {name}
 Running the query for the map…	در حال اجرای پرس‌وجو برای نقشه…
 Running…	در حال اجرا…
-RustGIS	RustGIS
-RustGIS bookmarks	نشانک‌های RustGIS
-RustGIS could not confirm that any previously saved key was deleted from the system keychain.	RustGIS نتوانست تأیید کند که کلیدهای ذخیره‌شده قبلی از جاکلیدی سیستم حذف شده‌اند.
-RustGIS couldn't reach the server.	دسترسی RustGIS به سرور ممکن نشد.
-RustGIS deep learning package	بسته یادگیری عمیق RustGIS
-RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	دفعهٔ پیش RustGIS به‌درستی بسته نشد، بنابراین به‌جای پروژهٔ آغازین شما با اطلس جهانی شروع کرد. هر وقت آماده بودید، پروژه را از منوی Project باز کنید.
-RustGIS didn't close properly last time.	RustGIS دفعه‌ی قبل درست بسته نشد.
-RustGIS doesn't have this tool. Install the tools it comes from, or delete the node.	این ابزار در RustGIS موجود نیست. ابزارهایی را که از آن‌ها می‌آید نصب کنید، یا گره را حذف کنید.
-RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	یک GIS آزاد و متن‌باز که به Rust خالص نوشته شده است: RustGIS روی دسکتاپ و در مرورگر اجرا می‌شود و هر اقدام آن، دستوری است که می‌توانید از خط فرمان هم اجرا کنید.
-RustGIS layer file	فایل لایه RustGIS
-RustGIS layers, maps and projects	لایه‌ها، نقشه‌ها و پروژه‌های RustGIS
-RustGIS layout	صفحه‌آرایی RustGIS
-RustGIS maps and projects	نقشه‌ها و پروژه‌های RustGIS
-RustGIS model	مدل RustGIS
-RustGIS or Jupyter notebook	نوت‌بوک RustGIS یا Jupyter
-RustGIS plugin	افزونه RustGIS
-RustGIS presentation	ارائهٔ RustGIS
-RustGIS project	پروژه RustGIS
-RustGIS project template	قالب پروژه RustGIS
-RustGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	دفعهٔ پیش RustGIS به خطای داخلی خورد. جزئیات در {path} است؛ لطفاً آن را به گزارش اشکال ضمیمه کنید.
-RustGIS report or report template	گزارش یا قالب گزارش RustGIS
-RustGIS styles	استایل‌های RustGIS
-RustGIS task	تسک RustGIS
-RustGIS was quit last time without saving your changes.	RustGIS دفعه‌ی قبل بدون ذخیره تغییرات شما بسته شد.
-RustGIS {latest} is available.	به‌روزرسانی RustGIS {latest} در دسترس است.
-RustGIS {version} is the latest version.	آخرین نسخه، RustGIS {version} است.
+HuaGIS	HuaGIS
+HuaGIS bookmarks	نشانک‌های HuaGIS
+HuaGIS could not confirm that any previously saved key was deleted from the system keychain.	HuaGIS نتوانست تأیید کند که کلیدهای ذخیره‌شده قبلی از جاکلیدی سیستم حذف شده‌اند.
+HuaGIS couldn't reach the server.	دسترسی HuaGIS به سرور ممکن نشد.
+HuaGIS deep learning package	بسته یادگیری عمیق HuaGIS
+HuaGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	دفعهٔ پیش HuaGIS به‌درستی بسته نشد، بنابراین به‌جای پروژهٔ آغازین شما با اطلس جهانی شروع کرد. هر وقت آماده بودید، پروژه را از منوی Project باز کنید.
+HuaGIS didn't close properly last time.	HuaGIS دفعه‌ی قبل درست بسته نشد.
+HuaGIS doesn't have this tool. Install the tools it comes from, or delete the node.	این ابزار در HuaGIS موجود نیست. ابزارهایی را که از آن‌ها می‌آید نصب کنید، یا گره را حذف کنید.
+HuaGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	یک GIS آزاد و متن‌باز که به Rust خالص نوشته شده است: HuaGIS روی دسکتاپ و در مرورگر اجرا می‌شود و هر اقدام آن، دستوری است که می‌توانید از خط فرمان هم اجرا کنید.
+HuaGIS layer file	فایل لایه HuaGIS
+HuaGIS layers, maps and projects	لایه‌ها، نقشه‌ها و پروژه‌های HuaGIS
+HuaGIS layout	صفحه‌آرایی HuaGIS
+HuaGIS maps and projects	نقشه‌ها و پروژه‌های HuaGIS
+HuaGIS model	مدل HuaGIS
+HuaGIS or Jupyter notebook	نوت‌بوک HuaGIS یا Jupyter
+HuaGIS plugin	افزونه HuaGIS
+HuaGIS presentation	ارائهٔ HuaGIS
+HuaGIS project	پروژه HuaGIS
+HuaGIS project template	قالب پروژه HuaGIS
+HuaGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	دفعهٔ پیش HuaGIS به خطای داخلی خورد. جزئیات در {path} است؛ لطفاً آن را به گزارش اشکال ضمیمه کنید.
+HuaGIS report or report template	گزارش یا قالب گزارش HuaGIS
+HuaGIS styles	استایل‌های HuaGIS
+HuaGIS task	تسک HuaGIS
+HuaGIS was quit last time without saving your changes.	HuaGIS دفعه‌ی قبل بدون ذخیره تغییرات شما بسته شد.
+HuaGIS {latest} is available.	به‌روزرسانی HuaGIS {latest} در دسترس است.
+HuaGIS {version} is the latest version.	آخرین نسخه، HuaGIS {version} است.
 RUSTGIS_ASSISTANT_MODEL	RUSTGIS_ASSISTANT_MODEL
 RUSTGIS_ASSISTANT_PROVIDER	RUSTGIS_ASSISTANT_PROVIDER
 RUSTGIS_GPU	RUSTGIS_GPU
@@ -2851,7 +2851,7 @@ S3 Buckets	باکت‌های S3
 S3 Connections	اتصال‌های S3
 S3…	S3…
 Sample data (Natural Earth)	داده نمونه (Natural Earth)
-Sample data © Natural Earth (public domain). RustGIS is licensed under Apache-2.0.	داده نمونه © Natural Earth (مالکیت عمومی). RustGIS با مجوز Apache-2.0 منتشر شده است.
+Sample data © Natural Earth (public domain). HuaGIS is licensed under Apache-2.0.	داده نمونه © Natural Earth (مالکیت عمومی). HuaGIS با مجوز Apache-2.0 منتشر شده است.
 Sample data: Natural Earth (public domain). Licensed under Apache-2.0.	داده نمونه: Natural Earth (مالکیت عمومی). با مجوز Apache-2.0.
 Sans-serif	بدون سریف
 Satellite Embedding Datasets	مجموعه داده Embedding ماهواره‌ای
@@ -2995,7 +2995,7 @@ Sections	بخش‌ها
 See and set the camera's position and scale.	دیدن و تنظیم موقعیت و مقیاس دوربین.
 See the map as people with colour vision deficiencies do.	دیدن نقشه همان‌طور که افراد با اختلال دید رنگی می‌بینند.
 See the tools you've run.	دیدن ابزارهایی که اجرا کرده‌اید.
-See whether a newer RustGIS has been released.	ببینید آیا RustGIS تازه‌تری منتشر شده است.
+See whether a newer HuaGIS has been released.	ببینید آیا HuaGIS تازه‌تری منتشر شده است.
 SELECT	SELECT
 Select	انتخاب
 Select (click)	انتخاب (کلیک)
@@ -3193,8 +3193,8 @@ Sign-in timed out. Start again and allow the browser to reach this computer's lo
 signed in	وارد شده
 Signed in to {portal}	وارد {portal} شده‌اید
 Signed in to {portal} as {user}	با نام {user} وارد {portal} شده‌اید
-Signed out on this computer, but OpenAI didn't confirm it. You can disconnect RustGIS in ChatGPT's settings.	روی این رایانه خارج شدید، ولی OpenAI آن را تأیید نکرد. می‌توانید RustGIS را در تنظیمات ChatGPT قطع کنید.
-Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect RustGIS in ChatGPT's settings.	روی این رایانه خارج شدید، ولی جاکلیدی سیستم خوانده نشد، پس از OpenAI خواسته نشد نشست را پایان دهد. می‌توانید RustGIS را در تنظیمات ChatGPT قطع کنید.
+Signed out on this computer, but OpenAI didn't confirm it. You can disconnect HuaGIS in ChatGPT's settings.	روی این رایانه خارج شدید، ولی OpenAI آن را تأیید نکرد. می‌توانید HuaGIS را در تنظیمات ChatGPT قطع کنید.
+Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect HuaGIS in ChatGPT's settings.	روی این رایانه خارج شدید، ولی جاکلیدی سیستم خوانده نشد، پس از OpenAI خواسته نشد نشست را پایان دهد. می‌توانید HuaGIS را در تنظیمات ChatGPT قطع کنید.
 Significance level	سطح معناداری
 Signing in with ChatGPT works in the desktop app.	ورود با ChatGPT در برنامه دسکتاپ کار می‌کند.
 Signing the asset (Planetary Computer)…	در حال امضای asset (Planetary Computer)…
@@ -3443,7 +3443,7 @@ The assistant follows a skill's instructions when it uses it. Whatever they say,
 The assistant is busy; stop it or wait for it to finish.	دستیار مشغول است؛ متوقفش کنید یا صبر کنید تا تمام شود.
 The assistant wants to run this, and {why}:	دستیار می‌خواهد این را اجرا کند، و {why}:
 The Basemaps plugin's tab of public basemaps.	برگه نقشه‌های پایه عمومی افزونه Basemaps.
-The browser didn't give RustGIS the clipboard ({why}): paste with {keys}.	مرورگر کلیپ‌بورد را به RustGIS نداد ({why}): با {keys} بچسبانید.
+The browser didn't give HuaGIS the clipboard ({why}): paste with {keys}.	مرورگر کلیپ‌بورد را به HuaGIS نداد ({why}): با {keys} بچسبانید.
 the capture failed unexpectedly	گرفتن تصویر به‌طور غیرمنتظره‌ای ناموفق شد
 The class these label groups and the Labeling pane edit.	کلاسی که این گروه‌های برچسب و پنل برچسب‌گذاری ویرایش می‌کنند.
 The clipboard came after you moved on, so nothing was pasted: paste with {keys}.	کلیپ‌بورد پس از رفتن شما رسید، پس چیزی چسبانده نشد: با {keys} بچسبانید.
@@ -3451,7 +3451,7 @@ The connection failed; trying again in {seconds} s.	اتصال ناموفق بو
 the connection has no id	اتصال شناسه ندارد
 The country list couldn't be read ({e}): type a country's code	فهرست کشورها خوانده نشد ({e}): کد یک کشور را بنویسید
 The current elevation stays in effect while you edit inputs. Click Apply elevation to apply the value and units.	ارتفاع فعلی هنگام ویرایش ورودی‌ها برقرار می‌ماند. برای اعمال مقدار و واحدها روی «اعمال ارتفاع» کلیک کنید.
-The dataset has nothing RustGIS can add	این مجموعه داده چیزی برای افزودن به RustGIS ندارد
+The dataset has nothing HuaGIS can add	این مجموعه داده چیزی برای افزودن به HuaGIS ندارد
 The desktop app adds data cubes	برنامه دسکتاپ مکعب‌های داده را می‌افزاید
 The distance between two marks along the line	فاصله بین دو نشان در امتداد خط
 The environment (AWS_ACCESS_KEY_ID…)	محیط (AWS_ACCESS_KEY_ID…)
@@ -3476,14 +3476,14 @@ The layer's fills	پرکننده‌های لایه
 The layer's strokes	ضربه‌های لایه
 the layout export failed unexpectedly	برون‌بری صفحه‌آرایی به‌طور غیرمنتظره‌ای ناموفق شد
 The link doesn't say its STAC API: Find Items searches {api}	پیوند، API STAC خودش را نگفته: Find Items در {api} جستجو می‌کند
-The list of plugins to browse. Leave it empty for the RustGIS plugin registry.	فهرست افزونه‌ها برای مرور. برای فهرست افزونه RustGIS، خالی بگذارید.
+The list of plugins to browse. Leave it empty for the HuaGIS plugin registry.	فهرست افزونه‌ها برای مرور. برای فهرست افزونه HuaGIS، خالی بگذارید.
 The map at the left; the title, locator, legend, sources and reference in a panel at the right.	نقشه در چپ؛ عنوان، مکان‌یاب، شرح، منابع و مرجع در پنلی در راست.
 the map has no GeoPackage layer loaded for editing (Home › Add Data › Edit GeoPackage Table…)	نقشه هیچ لایه GeoPackage بارگذاری‌شده برای ویرایش ندارد (خانه › افزودن داده › ویرایش جدول GeoPackage…)
 the map has no layers	نقشه لایه‌ای ندارد
 the map has no PostGIS layer loaded for editing (Home › Add Data › Database…, Load for editing)	نقشه هیچ لایه PostGIS بارگذاری‌شده برای ویرایش ندارد (خانه › افزودن داده › پایگاه داده…، بارگذاری برای ویرایش)
 The map has no tile archive read from a file.	نقشه هیچ بایگانی کاشی خوانده‌شده از فایل ندارد.
 The map is drawn in this coordinate system; layers are projected on the fly.	نقشه در این سیستم مختصات ترسیم می‌شود؛ لایه‌ها به‌صورت لحظه‌ای تصویر می‌شوند.
-the map isn't on screen in RustGIS (a layout or the catalog is shown), so it was drawn offscreen	نقشه در صفحه RustGIS نیست (صفحه‌آرایی یا فهرست نمایش داده می‌شود)، پس بیرون از دید ترسیم شد
+the map isn't on screen in HuaGIS (a layout or the catalog is shown), so it was drawn offscreen	نقشه در صفحه HuaGIS نیست (صفحه‌آرایی یا فهرست نمایش داده می‌شود)، پس بیرون از دید ترسیم شد
 The map view as it is now	نمای نقشه، همان‌طور که الان است
 The map's extent isn't known yet	گستره نقشه هنوز معلوم نیست
 The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	نمای نقشه {n} فایل {ty} اوورت را می‌گیرد (تا {max}): بزرگ‌نمایی کنید، یا تم را به‌عنوان کاشی نقشه اضافه کنید
@@ -3551,7 +3551,7 @@ The sign-in is kept in the system keychain, never in the app's settings or a pro
 The sign-in is still kept in the app's settings folder, readable by your user account: the system keychain is unavailable, so it hasn't been moved there yet.	اطلاعات ورود هنوز در پوشه تنظیمات برنامه نگه داشته می‌شود و با حساب کاربری شما خواناست: جاکلیدی سیستم در دسترس نیست، پس هنوز به آنجا منتقل نشده است.
 The significance level is a number, such as 0.05	سطح معناداری یک عدد است، مانند 0.05
 The start-up project {path} didn't open: {error}	پروژه آغازین {path} باز نشد: {error}
-The start-up project {path} isn't a RustGIS project file.	پروژه آغازین {path} یک فایل پروژه RustGIS نیست.
+The start-up project {path} isn't a HuaGIS project file.	پروژه آغازین {path} یک فایل پروژه HuaGIS نیست.
 The step's layer {name} isn't in the map.	لایه گام، یعنی {name}، در نقشه نیست.
 The store has no variables with two or more dimensions.	مخزن هیچ متغیری با دو بعد یا بیشتر ندارد.
 the store is gone	مخزن از دست رفته است
@@ -3560,7 +3560,7 @@ The summary failed unexpectedly	خلاصه‌سازی به‌طور غیرمنت
 The summary finished after another project was opened, so it wasn't added	خلاصه‌سازی پس از بازشدن پروژه دیگری تمام شد، پس اضافه نشد
 The system keychain could not complete the request.	جاکلیدی سیستم نتوانست درخواست را کامل کند.
 The system keychain is locked or access was refused.	جاکلیدی سیستم قفل است یا دسترسی رد شد.
-The system keychain is unavailable, so this sign-in won't be remembered: it lasts until RustGIS closes.	جاکلیدی سیستم در دسترس نیست، پس این ورود به خاطر سپرده نمی‌شود: تا بسته‌شدن RustGIS می‌ماند.
+The system keychain is unavailable, so this sign-in won't be remembered: it lasts until HuaGIS closes.	جاکلیدی سیستم در دسترس نیست، پس این ورود به خاطر سپرده نمی‌شود: تا بسته‌شدن HuaGIS می‌ماند.
 The system keychain is unavailable.	جاکلیدی سیستم در دسترس نیست.
 The task's steps changed, so the step being edited was closed: edit it again.	گام‌های تسک تغییر کردند، پس گامِ در حال ویرایش بسته شد: دوباره ویرایشش کنید.
 the time slider is off	لغزنده زمان خاموش است
@@ -3608,7 +3608,7 @@ This map has no layers yet.	این نقشه هنوز لایه‌ای ندارد.
 This map's thumbnail, from an image.	تصویر بندانگشتی این نقشه، از یک تصویر.
 This map's thumbnail, from the view.	تصویر بندانگشتی این نقشه، از نما.
 This plugin can:	این افزونه می‌تواند:
-This plugin runs as a program on your computer, outside RustGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	این افزونه مثل یک برنامه روی رایانه شما، بیرون از سندباکس RustGIS اجرا می‌شود. هر کاری را که شما می‌توانید می‌کند: خواندن و تغییر فایل‌هایتان، استفاده از شبکه و اجرای برنامه‌های دیگر. فقط اگر به نویسنده‌اش اعتماد دارید نصبش کنید.
+This plugin runs as a program on your computer, outside HuaGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	این افزونه مثل یک برنامه روی رایانه شما، بیرون از سندباکس HuaGIS اجرا می‌شود. هر کاری را که شما می‌توانید می‌کند: خواندن و تغییر فایل‌هایتان، استفاده از شبکه و اجرای برنامه‌های دیگر. فقط اگر به نویسنده‌اش اعتماد دارید نصبش کنید.
 This request has no one-time allow option.	این درخواست گزینه اجازه یک‌باره ندارد.
 This request uses an unsupported capability. Check the parameter and change the request.	این درخواست از قابلیتی پشتیبانی‌نشده استفاده می‌کند. پارامتر را بررسی کنید و درخواست را تغییر دهید.
 This result is kept	این نتیجه نگه داشته می‌شود
@@ -3740,7 +3740,7 @@ unknown (an older project)	نامشخص (یک پروژه قدیمی‌تر)
 Unknown shortcut binding field.	فیلد ناشناخته در پیوند میان‌بر.
 Unknown shortcut command.	فرمان میان‌بر ناشناخته.
 UNKNOWN TOOL	ابزار ناشناخته
-Unload the GeoLibre tools and stop loading them when RustGIS starts.	تخلیه ابزارهای GeoLibre و توقف بارگذاری‌شان هنگام راه‌اندازی RustGIS.
+Unload the GeoLibre tools and stop loading them when HuaGIS starts.	تخلیه ابزارهای GeoLibre و توقف بارگذاری‌شان هنگام راه‌اندازی HuaGIS.
 Unsaved changes	تغییرات ذخیره‌نشده
 Unsupervised classes (k-means)	طبقه‌های بدون نظارت (k-means)
 Unsupervised classes (k-means).	طبقه‌های بدون نظارت (k-means).
@@ -3872,13 +3872,13 @@ Web Tool	ابزار وب
 Website	وب‌سایت
 Weekly usage	مصرف هفتگی
 Weights	وزن‌ها
-Welcome to RustGIS	به RustGIS خوش آمدید
+Welcome to HuaGIS	به HuaGIS خوش آمدید
 West	غرب
 WFS	WFS
 WGS 84 / Globe	کره (WGS 84)
 WGS 84 / Web Mercator	مرکاتور وب (WGS 84)
-What RustGIS opens with: the World Atlas sample or a blank map.	شروع RustGIS با چه چیزی باشد: نمونهٔ اطلس جهانی یا یک نقشهٔ خالی.
-What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	شروع RustGIS با چه چیزی باشد: نمونهٔ اطلس جهانی، یک نقشهٔ خالی، پروژه‌ای که خودتان انتخاب می‌کنید، یا آخرین پروژهٔ باز یا ذخیره‌شده.
+What HuaGIS opens with: the World Atlas sample or a blank map.	شروع HuaGIS با چه چیزی باشد: نمونهٔ اطلس جهانی یا یک نقشهٔ خالی.
+What HuaGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	شروع HuaGIS با چه چیزی باشد: نمونهٔ اطلس جهانی، یک نقشهٔ خالی، پروژه‌ای که خودتان انتخاب می‌کنید، یا آخرین پروژهٔ باز یا ذخیره‌شده.
 What to do, where to find it and why	چه کاری انجام شود، کجا پیدایش کنید و چرا
 What's near a point	چه چیزهایی نزدیک یک نقطه است
 When a file holds several layers, choose the ones to add instead of adding them all.	وقتی فایلی چند لایه دارد، به‌جای افزودن همه، لایه‌های افزودنی را انتخاب کنید.

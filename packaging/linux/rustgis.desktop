@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=RustGIS
+Name=HuaGIS
 GenericName=Geographic Information System
 Comment=Make maps and analyse spatial data
 Exec=rustgis %F

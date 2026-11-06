@@ -2986,7 +2986,7 @@ fn letting_agents_control_rustgis_starts_the_relay_and_shows_how_to_connect() {
     // Whether the default port is free decides which path the box takes here: a RustGIS already
     // open on this machine may hold it.
     let free = std::net::TcpListener::bind(("127.0.0.1", rustgis_ui_egui::rustgis_assistant::relay::DEFAULT_PORT)).is_ok();
-    h.get_by_label("Let your Agents Control RustGIS").click();
+    h.get_by_label("Let your Agents Control HuaGIS").click();
     h.step();
     h.step();
     let last = |key: &str| saved.lock().unwrap().iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.clone());
@@ -3008,7 +3008,7 @@ fn letting_agents_control_rustgis_starts_the_relay_and_shows_how_to_connect() {
         })
         .is_some()
     );
-    h.get_by_label("Let your Agents Control RustGIS").click();
+    h.get_by_label("Let your Agents Control HuaGIS").click();
     h.step();
     assert!(h.state().relay.is_none(), "unticking stops the relay");
     assert_eq!(last("agents_control").as_deref(), Some("off"));

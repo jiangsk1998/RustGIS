@@ -60,8 +60,8 @@ A line, or markers or hash marks along it	ライン、またはそれに沿っ�
 A magnifying lens that follows the pointer.	ポインターに追従する拡大鏡。
 A map, feature or coverage service's address: WMS, WMTS, WFS, WCS, OGC API Features or Tiles, or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer (or a services directory, to browse).	マップ、フィーチャ、またはカバレッジ サービスのアドレス: WMS、WMTS、WFS、WCS、OGC API Features または Tiles、あるいは ArcGIS FeatureServer、MapServer、ImageServer または VectorTileServer (参照する場合はサービス ディレクトリ)。
 a name, or owner/name such as giswqs/geospatial	名前、または giswqs/geospatial のような所有者/名前
-A named endpoint you can reuse. Keys and tokens are kept until RustGIS closes, never saved.	再利用できる名前付きエンドポイントです。キーとトークンは RustGIS を閉じるまで保持され、保存されることはありません。
-A named endpoint you can reuse. Keys are kept until RustGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	再利用できる名前付きエンドポイントです。このコンピューターに保存することを選ばない限り、キーは RustGIS を閉じるまで保持されます。接続自体がキーを保持することはありません。
+A named endpoint you can reuse. Keys and tokens are kept until HuaGIS closes, never saved.	再利用できる名前付きエンドポイントです。キーとトークンは HuaGIS を閉じるまで保持され、保存されることはありません。
+A named endpoint you can reuse. Keys are kept until HuaGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	再利用できる名前付きエンドポイントです。このコンピューターに保存することを選ばない限り、キーは HuaGIS を閉じるまで保持されます。接続自体がキーを保持することはありません。
 A named endpoint you can reuse. Passwords last for this session unless you choose to remember them in this computer's password store.	再利用できる名前付きエンドポイントです。このコンピューターのパスワード ストアに保存することを選ばない限り、パスワードはこのセッションの間だけ有効です。
 A node cannot connect to itself.	ノードを自分自身に接続することはできません。
 A notebook of text and command cells.	テキスト セルとコマンド セルからなるノートブック。
@@ -98,8 +98,8 @@ A5 Grid	A5 グリッド
 A5's equal-area pentagonal cells at a resolution, over the map's extent, a layer or the world, as polygons with their ids.	指定した解像度の A5 の等面積五角形セルを、マップの範囲、レイヤー、または全世界にわたって ID 付きのポリゴンとして作成します。
 About	バージョン情報
 About plugins	プラグインについて
-About RustGIS	RustGIS について
-About RustGIS.	RustGIS について。
+About HuaGIS	HuaGIS について
+About HuaGIS.	HuaGIS について。
 Above	上
 Above Left	左上
 Above Right	右上
@@ -276,7 +276,7 @@ Agent input queue is full or disconnected; stop the agent and try again.	エー�
 Agent threads	エージェントのスレッド
 Agent work	Agent work
 Agents have full access: they may run scripts, tasks, models and plugins. Click to stop the MCP relay	エージェントはフル アクセス権を持ち、スクリプト、タスク、モデル、プラグインを実行できます。クリックすると MCP リレーを停止します
-Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	接続したこのコンピューターのエージェント (Claude Code、Codex、Cursor など) は、RustGIS のツールでここで開いている地図を操作し、ファイルを開いて保存したり Web を使ったりできます。スクリプトとプラグイン管理はオフのままです。
+Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with HuaGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	接続したこのコンピューターのエージェント (Claude Code、Codex、Cursor など) は、HuaGIS のツールでここで開いている地図を操作し、ファイルを開いて保存したり Web を使ったりできます。スクリプトとプラグイン管理はオフのままです。
 Agents then run commands, change files and use the web on this computer without asking you.	エージェントは確認なしで、このコンピューター上でコマンドを実行し、ファイルを変更し、Web を使用します。
 Aggregate Points to A5	ポイントを A5 に集約
 Aggregation	集約
@@ -301,7 +301,7 @@ Allow Feature Selection	フィーチャの選択を許可
 Allow only certain combinations of values across fields.	フィールド間で特定の値の組み合わせのみを許可します。
 Allow such actions for this conversation	この会話ではこの種の操作を許可する
 Allow this action?	この操作を許可しますか？
-Allow this agent's RustGIS action?	このエージェントの RustGIS 操作を許可しますか？
+Allow this agent's HuaGIS action?	このエージェントの HuaGIS 操作を許可しますか？
 Along lines	線に沿う
 Along Selected Line	選択したラインに沿って
 Alt+	Alt+
@@ -313,7 +313,7 @@ Alternating bar	交互バー
 Altitude	高度
 Always allow	常に許可
 Amazon S3	Amazon S3
-Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3、またはエンドポイントで指定する S3 互換サービス (MinIO、Cloudflare R2、Wasabi…)。キーは RustGIS を閉じるまで保持されます。保存した接続には名前、エンドポイント、リージョンが保持され、シークレットは保持されません。
+Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until HuaGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3、またはエンドポイントで指定する S3 互換サービス (MinIO、Cloudflare R2、Wasabi…)。キーは HuaGIS を閉じるまで保持されます。保存した接続には名前、エンドポイント、リージョンが保持され、シークレットは保持されません。
 amenity=cafe, shop	amenity=cafe, shop
 An agent on this computer asks to:	このコンピューターのエージェントが次の操作を求めています:
 An ArcGIS Online organization's or an ArcGIS Enterprise portal's address; ArcGIS Online when blank	ArcGIS Online 組織または ArcGIS Enterprise ポータルのアドレス。空白の場合は ArcGIS Online
@@ -363,7 +363,7 @@ Arrange	配置
 Arrange Element	エレメントの配置
 Arrow	矢印
 Arrowheads	矢じり
-Ask a question about your data, or describe what to do with the map. The assistant runs RustGIS commands for you; every change can be undone.	データについて質問するか、マップで行いたいことを説明してください。アシスタントが RustGIS のコマンドを代わりに実行します。変更はすべて元に戻せます。
+Ask a question about your data, or describe what to do with the map. The assistant runs HuaGIS commands for you; every change can be undone.	データについて質問するか、マップで行いたいことを説明してください。アシスタントが HuaGIS のコマンドを代わりに実行します。変更はすべて元に戻せます。
 Ask about the map, or tell it what to do…	マップについて質問するか、操作を指示してください…
 Ask about your data, or tell the assistant what to do with the map.	データについて質問するか、マップで行うことをアシスタントに指示してください。
 Ask Which Layers to Add	追加するレイヤーを確認
@@ -717,7 +717,7 @@ Color Vision Simulator	色覚シミュレーター
 Colorbar	カラーバー
 Colormap	カラーマップ
 Colors from the raster's own color table.	ラスター自身のカラー テーブルの色。
-Colour ramps (RustGIS, QGIS, GDAL, GMT)	カラー ランプ (RustGIS、QGIS、GDAL、GMT)
+Colour ramps (HuaGIS, QGIS, GDAL, GMT)	カラー ランプ (HuaGIS、QGIS、GDAL、GMT)
 Columns named like longitude/latitude, easting/northing or geometry are picked for you.	longitude/latitude、easting/northing、geometry のような名前の列は自動的に選択されます。
 Combinations from the box above, one per line	上のボックスの値の組み合わせ (1 行に 1 つ)
 Combines two polygon layers into every piece either covers, with the attributes of both where they overlap.	2 つのポリゴン レイヤーを、いずれかが覆うすべての部分に結合し、重なる部分には両方の属性を付与します。
@@ -924,7 +924,7 @@ Delete selected rows	選択した行を削除
 Delete Style	スタイルの削除
 Delete Task	タスクの削除
 Delete Task Step	タスク ステップの削除
-Delete the GeoLibre runner that RustGIS installed. Install it again at any time.	RustGIS がインストールした GeoLibre ランナーを削除します。いつでも再インストールできます。
+Delete the GeoLibre runner that HuaGIS installed. Install it again at any time.	HuaGIS がインストールした GeoLibre ランナーを削除します。いつでも再インストールできます。
 Delete the layout {name}?	レイアウト {name} を削除しますか?
 Delete the map {name}?	マップ {name} を削除しますか?
 Delete the selected features.	選択したフィーチャを削除します。
@@ -1136,7 +1136,7 @@ Element Properties	エレメントのプロパティ
 Elevation	標高
 Elevation model	標高モデル
 Elevation profiles along lines, cross sections and more.	ラインに沿った標高プロファイル、断面など。
-Eligible requests in RustGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	RustGIS の対象となるリクエストには ChatGPT プランが使われます。使用量は ChatGPT の設定で管理できます。
+Eligible requests in HuaGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	HuaGIS の対象となるリクエストには ChatGPT プランが使われます。使用量は ChatGPT の設定で管理できます。
 Ellipse	楕円
 Embeddings	埋め込み
 Ember	残り火
@@ -1329,7 +1329,7 @@ Find and run geoprocessing tools.	ジオプロセシング ツールを検索し
 Find any command by name (Ctrl+K).	名前で任意のコマンドを検索します（Ctrl+K）。
 Find Items	アイテムを検索
 Find Place	場所の検索
-Find plugins in the RustGIS plugin registry.	RustGIS プラグイン レジストリでプラグインを探します。
+Find plugins in the HuaGIS plugin registry.	HuaGIS プラグイン レジストリでプラグインを探します。
 Find Similar	類似の検索
 Find Tools	ツールの検索
 Finding routes…	ルートを検索しています…
@@ -1363,14 +1363,14 @@ Folder…	フォルダー…
 Follow the time slider	タイム スライダーに追従
 Font	フォント
 for a store that doesn't say	指定のないストアの場合
-For ArcGIS Online, the client ID is RustGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	ArcGIS Online の場合、クライアント ID は RustGIS 独自のアプリです。ArcGIS Enterprise ポータルの場合は、ポータルに OAuth アプリを登録し (コンテンツ › 新しいアイテム › 開発者資格情報)、リダイレクト URL を {redirect} にして、そのクライアント ID を入力してください。
+For ArcGIS Online, the client ID is HuaGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	ArcGIS Online の場合、クライアント ID は HuaGIS 独自のアプリです。ArcGIS Enterprise ポータルの場合は、ポータルに OAuth アプリを登録し (コンテンツ › 新しいアイテム › 開発者資格情報)、リダイレクト URL を {redirect} にして、そのクライアント ID を入力してください。
 for the layers that change with time, as they list their times (2024-06-01, 1995)	時間とともに変化するレイヤーで、時刻の一覧形式に合わせて (2024-06-01、1995)
 Forest	森林
 Forget Earthdata Login Token	Earthdata Login トークンを削除
 Forget Saved Keys	保存したキーを削除
 Forget Saved Password	保存したパスワードを削除
 Format	形式
-Found: {names}. An agent works on this map through RustGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › RustGIS › Agent work. It asks you before each action.	見つかったエージェント: {names}。エージェントは RustGIS のツールと自身のツール (Web、スクリプト、ファイル) を使ってこの地図を操作し、専用フォルダー (ドキュメント › RustGIS › Agent work に保存) で作業します。操作のたびに確認を求めます。
+Found: {names}. An agent works on this map through HuaGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › HuaGIS › Agent work. It asks you before each action.	見つかったエージェント: {names}。エージェントは HuaGIS のツールと自身のツール (Web、スクリプト、ファイル) を使ってこの地図を操作し、専用フォルダー (ドキュメント › HuaGIS › Agent work に保存) で作業します。操作のたびに確認を求めます。
 Frame rate	フレーム レート
 Frame rate, draw time, data size and memory.	フレーム レート、描画時間、データ サイズ、メモリ。
 France	フランス
@@ -1534,7 +1534,7 @@ host=localhost dbname=gis user=postgres	host=localhost dbname=gis user=postgres
 host=… dbname=… user=…	host=… dbname=… user=…
 Hosted Imagery	ホスト イメージ
 Hour	時
-How often RustGIS keeps a copy of unsaved work, to offer it back after a crash.	RustGIS が未保存の作業のコピーを保持する頻度です。クラッシュ後に復元を提案します。
+How often HuaGIS keeps a copy of unsaved work, to offer it back after a crash.	HuaGIS が未保存の作業のコピーを保持する頻度です。クラッシュ後に復元を提案します。
 How the layer's colours combine with the tile layers and basemap beneath.	レイヤーの色と、下にあるタイル レイヤーやベースマップとの合成方法。
 How the layer's colours combine with what's beneath.	レイヤーの色と下にあるものとの合成方法。
 HUB Ocean's Ocean Data Platform: marine datasets, read as features (up to 10,000 each).	HUB Ocean の Ocean Data Platform: 海洋データセットをフィーチャとして読み込みます (各最大 10,000 件)。
@@ -1601,7 +1601,7 @@ In memory	メモリ内
 In Progress	進行中
 in progress	進行中
 In project	プロジェクト内
-In RustGIS, it can:	RustGIS 内でできること:
+In HuaGIS, it can:	HuaGIS 内でできること:
 In the browser, pick the .shp and .dbf together, with any sidecars, or pick a ZIP. The override applies to every Shapefile in the ZIP.	ブラウザーでは、.shp と .dbf を付随ファイルと一緒に選択するか、ZIP を選択してください。指定は ZIP 内のすべての Shapefile に適用されます。
 In the coordinate system's units: metres for UTM.	座標系の単位: UTM ではメートル。
 In the middle	中央
@@ -1689,7 +1689,7 @@ Item Pop-ups	アイテムのポップアップ
 Item {id}	アイテム {id}
 its default	既定値
 Its default: {default}. Its times: {times}	既定値: {default}。時刻: {times}
-Its firewall ({firewall}) blocked RustGIS. The service may only allow some applications: contact its administrator and send them the details below.	ファイアウォール ({firewall}) が RustGIS をブロックしました。このサービスは一部のアプリケーションのみを許可している可能性があります: 管理者に連絡し、以下の詳細を送ってください。
+Its firewall ({firewall}) blocked HuaGIS. The service may only allow some applications: contact its administrator and send them the details below.	ファイアウォール ({firewall}) が HuaGIS をブロックしました。このサービスは一部のアプリケーションのみを許可している可能性があります: 管理者に連絡し、以下の詳細を送ってください。
 Its tool isn't available now (a plugin's, not loaded, or a suite's, not installed)	そのツールは現在使用できません (プラグインが読み込まれていないか、ツール スイートがインストールされていません)
 Jobs	ジョブ
 JOIN	JOIN
@@ -1719,7 +1719,7 @@ Keep Tool	ツールを保持
 Keep value	値を残す
 Keeps the access key ID and secret access key in this computer's credential store, never in the connection or the project.	アクセス キー ID とシークレット アクセス キーを、接続やプロジェクトではなく、このコンピューターの資格情報ストアに保持します。
 Keeps the parts of two polygon layers that only one of them covers, with that layer's attributes.	2 つのポリゴン レイヤーのうち一方のみが覆う部分を、そのレイヤーの属性とともに保持します。
-Keeps the token in the system's credential store, so it is there when RustGIS starts again. Unticked, a token remembered before is deleted when you save another.	トークンをシステムの資格情報ストアに保持し、RustGIS の次回起動時にも使えるようにします。チェックを外すと、以前に保存したトークンは別のトークンの保存時に削除されます。
+Keeps the token in the system's credential store, so it is there when HuaGIS starts again. Unticked, a token remembered before is deleted when you save another.	トークンをシステムの資格情報ストアに保持し、HuaGIS の次回起動時にも使えるようにします。チェックを外すと、以前に保存したトークンは別のトークンの保存時に削除されます。
 Kernel Density	カーネル密度
 Kernel Type	カーネルの種類
 Key	Key
@@ -1800,7 +1800,7 @@ Legend label. Clear it to show the value again.	凡例ラベル。クリアす�
 Length	長さ
 Length {length} · gain {gain} · loss {loss}	長さ {length} · 上昇 {gain} · 下降 {loss}
 Let the assistant hand tasks to agents on this computer	このコンピューターのエージェントにアシスタントがタスクを任せられるようにする
-Let your Agents Control RustGIS	エージェントに RustGIS を操作させる
+Let your Agents Control HuaGIS	エージェントに HuaGIS を操作させる
 Letter spacing	文字間隔
 Level	レベル
 Library	ライブラリ
@@ -1856,7 +1856,7 @@ List The National Map Services	The National Map サービスを一覧表示
 List the provider's models	プロバイダーのモデルを一覧表示
 List this layer in the legend	このレイヤーを凡例に表示
 List what it holds	内容を一覧表示
-Listed for discovery: RustGIS doesn't read this dataset yet. Its data and paper are linked above.	検索用に掲載: RustGIS はまだこのデータセットを読み込めません。データと論文へのリンクは上にあります。
+Listed for discovery: HuaGIS doesn't read this dataset yet. Its data and paper are linked above.	検索用に掲載: HuaGIS はまだこのデータセットを読み込めません。データと論文へのリンクは上にあります。
 Listing datasets…	データセットを一覧表示しています…
 Listing…	一覧を取得しています…
 Lit	明部
@@ -1901,7 +1901,7 @@ Look for {name}, outlined on the ribbon.	リボン上で枠で囲まれた {name
 Looking up the place…	場所を検索しています…
 Loop	ループ
 Lower Priority	優先度を下げる
-Made in RustGIS: samples, drawings and tool outputs	RustGIS で作成: サンプル、描画、ツールの出力
+Made in HuaGIS: samples, drawings and tool outputs	HuaGIS で作成: サンプル、描画、ツールの出力
 Magnifier	拡大鏡
 Major Lakes	主要な湖沼
 Major Rivers	主要な河川
@@ -2157,7 +2157,7 @@ no command	コマンドがありません
 No data at the points picked.	選択したポイントにデータがありません。
 No data cube matches	一致するデータ キューブがありません
 No datasets match.	一致するデータセットがありません。
-No datasets with data RustGIS can add	RustGIS が追加できるデータを含むデータセットはありません
+No datasets with data HuaGIS can add	HuaGIS が追加できるデータを含むデータセットはありません
 no date in the name	名前に日付なし
 no download service	ダウンロード サービスなし
 No edits since the project was saved	プロジェクトの保存後の編集はありません
@@ -2219,8 +2219,8 @@ North Polar Stereographic	北極ステレオ図法
 NOT	NOT
 Not a GeoLibre project	GeoLibre プロジェクトではありません
 not a picture	画像ではありません
-not a RustGIS layout	RustGIS レイアウトではありません
-not a RustGIS project	RustGIS プロジェクトではありません
+not a HuaGIS layout	HuaGIS レイアウトではありません
+not a HuaGIS project	HuaGIS プロジェクトではありません
 Not applied yet.	まだ適用されていません。
 Not for texts: a text is edited in the Format pane.	テキストには使用できません: テキストは書式ウィンドウで編集します。
 not needed	不要
@@ -2291,7 +2291,7 @@ Open a Data Cube	データ キューブを開く
 open a layout first	先にレイアウトを開いてください
 Open a model file (*.model.json)	モデル ファイル (*.model.json) を開く
 Open a model of this project	このプロジェクトのモデルを開く
-Open a RustGIS or Jupyter notebook.	RustGIS または Jupyter のノートブックを開きます。
+Open a HuaGIS or Jupyter notebook.	HuaGIS または Jupyter のノートブックを開きます。
 Open an offline area to edit.	編集するオフライン エリアを開きます。
 Open browser again	ブラウザーを再度開く
 Open Custom Template	カスタム テンプレートを開く
@@ -2318,7 +2318,7 @@ Open the layer's attribute table.	レイヤーの属性テーブルを開きま�
 Open the layer's table.	レイヤーのテーブルを開きます。
 Open the plugin's panel.	プラグインのパネルを開きます。
 Open the Release Page	リリース ページを開く
-Open the RustGIS user guide.	RustGIS ユーザー ガイドを開きます。
+Open the HuaGIS user guide.	HuaGIS ユーザー ガイドを開きます。
 Open the selected layer's table.	選択したレイヤーのテーブルを開きます。
 Open the Symbology pane.	シンボル ウィンドウを開きます。
 Open the task's steps	タスクのステップを開く
@@ -2494,7 +2494,7 @@ Plugin registry	プラグイン レジストリ
 Plugins	プラグイン
 Plugins are .rgplugin files. Install only plugins from people you trust.	プラグインは .rgplugin ファイルです。信頼できる相手のプラグインのみインストールしてください。
 Plugins marked Not sandboxed run as programs on your computer instead, and can do anything you can.	「サンドボックス外」と表示されたプラグインは、コンピューター上のプログラムとして実行され、あなたができることは何でもできます。
-Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through RustGIS's own commands, within the permissions you accept.	プラグインはサンドボックス内で実行されます。ファイルやネットワークにはアクセスできず、プロジェクトの変更は、許可した権限の範囲内で RustGIS 自身のコマンドを通じてのみ行います。
+Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through HuaGIS's own commands, within the permissions you accept.	プラグインはサンドボックス内で実行されます。ファイルやネットワークにはアクセスできず、プロジェクトの変更は、許可した権限の範囲内で HuaGIS 自身のコマンドを通じてのみ行います。
 PMTiles archive	PMTiles アーカイブ
 PNG frames (zip)	PNG フレーム (zip)
 PNG image	PNG 画像
@@ -2571,7 +2571,7 @@ Project Template	プロジェクト テンプレート
 project's path is required	プロジェクトのパスが必要です
 Projection	投影法
 Projections	投影法
-Projects and JSON data (RustGIS, QGIS, GeoLibre)	プロジェクトと JSON データ (RustGIS、QGIS、GeoLibre)
+Projects and JSON data (HuaGIS, QGIS, GeoLibre)	プロジェクトと JSON データ (HuaGIS、QGIS、GeoLibre)
 Properties	プロパティ
 Property	プロパティ
 Proportional Symbols	比例シンボル
@@ -2632,7 +2632,7 @@ Read error	読み込みエラー
 Read the bands picked for the view (at most about 6 km a side)	ビュー用に選択したバンドを読み込みます (一辺最大約 6 km)
 Read the map's layers and features	マップのレイヤーとフィーチャの読み取り
 Read the points in the view, coloured by their principal components	ビュー内のポイントを読み込み、主成分で色分けします
-Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	グラニュールのファイルを読み込むには Earthdata Login トークンが必要です。これはすべての NASA DAAC で使えます。トークンは「保存する」にチェックを入れない限り RustGIS を閉じるまで保持され、プロジェクトには保存されず、NASA の Earthdata データ サーバーにのみ送信されます。
+Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until HuaGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	グラニュールのファイルを読み込むには Earthdata Login トークンが必要です。これはすべての NASA DAAC で使えます。トークンは「保存する」にチェックを入れない限り HuaGIS を閉じるまで保持され、プロジェクトには保存されず、NASA の Earthdata データ サーバーにのみ送信されます。
 Reading the catalog: {n} documents read, {m} items found…	カタログを読み込んでいます: {n} 件のドキュメントを読み込み、{m} 件のアイテムが見つかりました…
 Reading the catalog…	カタログを読み込んでいます…
 Reading the embeddings…	埋め込みを読み込んでいます…
@@ -2817,32 +2817,32 @@ Run Tool	ツールの実行
 Run {name}	{name} を実行
 Running the query for the map…	マップ用のクエリを実行しています…
 Running…	実行中…
-RustGIS	RustGIS
-RustGIS bookmarks	RustGIS ブックマーク
-RustGIS could not confirm that any previously saved key was deleted from the system keychain.	RustGIS は、以前に保存したキーがシステム キーチェーンから削除されたことを確認できませんでした。
-RustGIS couldn't reach the server.	RustGIS はサーバーに接続できませんでした。
-RustGIS deep learning package	RustGIS ディープ ラーニング パッケージ
-RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	前回 RustGIS が正しく終了しなかったため、起動時のプロジェクトの代わりに World Atlas で起動しました。準備ができたら、プロジェクト メニューからプロジェクトを開いてください。
-RustGIS didn't close properly last time.	RustGIS は前回正常に終了しませんでした。
-RustGIS doesn't have this tool. Install the tools it comes from, or delete the node.	RustGIS にはこのツールがありません。提供元のツールをインストールするか、ノードを削除してください。
-RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	RustGIS は純粋な Rust で書かれた無料のオープンソース GIS です。デスクトップとブラウザーで動作し、すべての操作はコマンドであり、コマンド ラインからも実行できます。
-RustGIS layer file	RustGIS レイヤー ファイル
-RustGIS layers, maps and projects	RustGIS のレイヤー、マップ、プロジェクト
-RustGIS layout	RustGIS レイアウト
-RustGIS maps and projects	RustGIS のマップとプロジェクト
-RustGIS model	RustGIS モデル
-RustGIS or Jupyter notebook	RustGIS または Jupyter のノートブック
-RustGIS plugin	RustGIS プラグイン
-RustGIS presentation	RustGIS プレゼンテーション
-RustGIS project	RustGIS プロジェクト
-RustGIS project template	RustGIS プロジェクト テンプレート
-RustGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	前回、RustGIS で内部エラーが発生しました。詳細は {path} にあります。バグ報告に添付してください。
-RustGIS report or report template	RustGIS レポートまたはレポート テンプレート
-RustGIS styles	RustGIS スタイル
-RustGIS task	RustGIS タスク
-RustGIS was quit last time without saving your changes.	RustGIS は前回、変更を保存せずに終了しました。
-RustGIS {latest} is available.	RustGIS {latest} が利用できます。
-RustGIS {version} is the latest version.	RustGIS {version} が最新バージョンです。
+HuaGIS	HuaGIS
+HuaGIS bookmarks	HuaGIS ブックマーク
+HuaGIS could not confirm that any previously saved key was deleted from the system keychain.	HuaGIS は、以前に保存したキーがシステム キーチェーンから削除されたことを確認できませんでした。
+HuaGIS couldn't reach the server.	HuaGIS はサーバーに接続できませんでした。
+HuaGIS deep learning package	HuaGIS ディープ ラーニング パッケージ
+HuaGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	前回 HuaGIS が正しく終了しなかったため、起動時のプロジェクトの代わりに World Atlas で起動しました。準備ができたら、プロジェクト メニューからプロジェクトを開いてください。
+HuaGIS didn't close properly last time.	HuaGIS は前回正常に終了しませんでした。
+HuaGIS doesn't have this tool. Install the tools it comes from, or delete the node.	HuaGIS にはこのツールがありません。提供元のツールをインストールするか、ノードを削除してください。
+HuaGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	HuaGIS は純粋な Rust で書かれた無料のオープンソース GIS です。デスクトップとブラウザーで動作し、すべての操作はコマンドであり、コマンド ラインからも実行できます。
+HuaGIS layer file	HuaGIS レイヤー ファイル
+HuaGIS layers, maps and projects	HuaGIS のレイヤー、マップ、プロジェクト
+HuaGIS layout	HuaGIS レイアウト
+HuaGIS maps and projects	HuaGIS のマップとプロジェクト
+HuaGIS model	HuaGIS モデル
+HuaGIS or Jupyter notebook	HuaGIS または Jupyter のノートブック
+HuaGIS plugin	HuaGIS プラグイン
+HuaGIS presentation	HuaGIS プレゼンテーション
+HuaGIS project	HuaGIS プロジェクト
+HuaGIS project template	HuaGIS プロジェクト テンプレート
+HuaGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	前回、HuaGIS で内部エラーが発生しました。詳細は {path} にあります。バグ報告に添付してください。
+HuaGIS report or report template	HuaGIS レポートまたはレポート テンプレート
+HuaGIS styles	HuaGIS スタイル
+HuaGIS task	HuaGIS タスク
+HuaGIS was quit last time without saving your changes.	HuaGIS は前回、変更を保存せずに終了しました。
+HuaGIS {latest} is available.	HuaGIS {latest} が利用できます。
+HuaGIS {version} is the latest version.	HuaGIS {version} が最新バージョンです。
 RUSTGIS_ASSISTANT_MODEL	RUSTGIS_ASSISTANT_MODEL
 RUSTGIS_ASSISTANT_PROVIDER	RUSTGIS_ASSISTANT_PROVIDER
 RUSTGIS_GPU	RUSTGIS_GPU
@@ -2851,7 +2851,7 @@ S3 Buckets	S3 バケット
 S3 Connections	S3 接続
 S3…	S3…
 Sample data (Natural Earth)	サンプル データ（Natural Earth）
-Sample data © Natural Earth (public domain). RustGIS is licensed under Apache-2.0.	サンプル データ © Natural Earth（パブリック ドメイン）。RustGIS は Apache-2.0 ライセンスで提供されています。
+Sample data © Natural Earth (public domain). HuaGIS is licensed under Apache-2.0.	サンプル データ © Natural Earth（パブリック ドメイン）。HuaGIS は Apache-2.0 ライセンスで提供されています。
 Sample data: Natural Earth (public domain). Licensed under Apache-2.0.	サンプル データ：Natural Earth（パブリック ドメイン）。Apache-2.0 ライセンス。
 Sans-serif	サンセリフ
 Satellite Embedding Datasets	衛星埋め込みデータセット
@@ -2995,7 +2995,7 @@ Sections	セクション
 See and set the camera's position and scale.	カメラの位置と縮尺を表示、設定します。
 See the map as people with colour vision deficiencies do.	色覚特性を持つ人の見え方でマップを表示します。
 See the tools you've run.	実行したツールを表示します。
-See whether a newer RustGIS has been released.	新しい RustGIS がリリースされているか確認します。
+See whether a newer HuaGIS has been released.	新しい HuaGIS がリリースされているか確認します。
 SELECT	SELECT
 Select	選択
 Select (click)	選択（クリック）
@@ -3193,8 +3193,8 @@ Sign-in timed out. Start again and allow the browser to reach this computer's lo
 signed in	サインイン済み
 Signed in to {portal}	{portal} にサインイン済み
 Signed in to {portal} as {user}	{portal} に {user} としてサインイン済み
-Signed out on this computer, but OpenAI didn't confirm it. You can disconnect RustGIS in ChatGPT's settings.	このコンピューターではサインアウトしましたが、OpenAI による確認は取れませんでした。ChatGPT の設定で RustGIS の接続を解除できます。
-Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect RustGIS in ChatGPT's settings.	このコンピューターではサインアウトしましたが、システムのキーチェーンを読み取れなかったため、OpenAI にセッションの終了を要求していません。ChatGPT の設定で RustGIS の接続を解除できます。
+Signed out on this computer, but OpenAI didn't confirm it. You can disconnect HuaGIS in ChatGPT's settings.	このコンピューターではサインアウトしましたが、OpenAI による確認は取れませんでした。ChatGPT の設定で HuaGIS の接続を解除できます。
+Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect HuaGIS in ChatGPT's settings.	このコンピューターではサインアウトしましたが、システムのキーチェーンを読み取れなかったため、OpenAI にセッションの終了を要求していません。ChatGPT の設定で HuaGIS の接続を解除できます。
 Significance level	有意水準
 Signing in with ChatGPT works in the desktop app.	ChatGPT でのサインインはデスクトップアプリで使えます。
 Signing the asset (Planetary Computer)…	アセットに署名しています (Planetary Computer)…
@@ -3443,7 +3443,7 @@ The assistant follows a skill's instructions when it uses it. Whatever they say,
 The assistant is busy; stop it or wait for it to finish.	アシスタントは処理中です。停止するか、完了するまでお待ちください。
 The assistant wants to run this, and {why}:	アシスタントが次の操作を実行しようとしています（{why}ため、確認が必要です）:
 The Basemaps plugin's tab of public basemaps.	ベースマップ プラグインの公開ベースマップのタブ。
-The browser didn't give RustGIS the clipboard ({why}): paste with {keys}.	ブラウザーが RustGIS にクリップボードを渡しませんでした ({why}): {keys} で貼り付けてください。
+The browser didn't give HuaGIS the clipboard ({why}): paste with {keys}.	ブラウザーが HuaGIS にクリップボードを渡しませんでした ({why}): {keys} で貼り付けてください。
 the capture failed unexpectedly	キャプチャが予期せず失敗しました
 The class these label groups and the Labeling pane edit.	これらのラベル グループとラベリング ウィンドウで編集するクラス。
 The clipboard came after you moved on, so nothing was pasted: paste with {keys}.	移動後にクリップボードが届いたため、貼り付けられませんでした: {keys} で貼り付けてください。
@@ -3451,7 +3451,7 @@ The connection failed; trying again in {seconds} s.	接続に失敗しました�
 the connection has no id	接続に ID がありません
 The country list couldn't be read ({e}): type a country's code	国のリストを読み込めませんでした ({e}): 国コードを入力してください
 The current elevation stays in effect while you edit inputs. Click Apply elevation to apply the value and units.	入力を編集している間は現在の標高が有効なままです。値と単位を適用するには [標高を適用] をクリックしてください。
-The dataset has nothing RustGIS can add	このデータセットには RustGIS が追加できるものがありません
+The dataset has nothing HuaGIS can add	このデータセットには HuaGIS が追加できるものがありません
 The desktop app adds data cubes	データ キューブはデスクトップ アプリで追加します
 The distance between two marks along the line	ライン上の 2 つのマークの間隔
 The environment (AWS_ACCESS_KEY_ID…)	環境変数 (AWS_ACCESS_KEY_ID…)
@@ -3476,14 +3476,14 @@ The layer's fills	レイヤーの塗りつぶし
 The layer's strokes	レイヤーのストローク
 the layout export failed unexpectedly	レイアウトのエクスポートが予期せず失敗しました
 The link doesn't say its STAC API: Find Items searches {api}	リンクに STAC API が示されていません: [アイテムを検索] は {api} を検索します
-The list of plugins to browse. Leave it empty for the RustGIS plugin registry.	参照するプラグインの一覧です。空欄にすると RustGIS プラグイン レジストリを使用します。
+The list of plugins to browse. Leave it empty for the HuaGIS plugin registry.	参照するプラグインの一覧です。空欄にすると HuaGIS プラグイン レジストリを使用します。
 The map at the left; the title, locator, legend, sources and reference in a panel at the right.	左にマップ。タイトル、ロケーター、凡例、ソース、参照情報は右のパネルに配置します。
 the map has no GeoPackage layer loaded for editing (Home › Add Data › Edit GeoPackage Table…)	マップに編集用に読み込まれた GeoPackage レイヤーがありません (ホーム › データの追加 › GeoPackage テーブルの編集…)
 the map has no layers	マップにレイヤーがありません
 the map has no PostGIS layer loaded for editing (Home › Add Data › Database…, Load for editing)	マップに編集用に読み込まれた PostGIS レイヤーがありません (ホーム › データの追加 › データベース…、編集用に読み込む)
 The map has no tile archive read from a file.	マップにファイルから読み込んだタイル アーカイブがありません。
 The map is drawn in this coordinate system; layers are projected on the fly.	マップはこの座標系で描画され、レイヤーはその場で投影されます。
-the map isn't on screen in RustGIS (a layout or the catalog is shown), so it was drawn offscreen	RustGIS でマップが画面に表示されていない (レイアウトまたはカタログが表示されている) ため、オフスクリーンで描画しました
+the map isn't on screen in HuaGIS (a layout or the catalog is shown), so it was drawn offscreen	HuaGIS でマップが画面に表示されていない (レイアウトまたはカタログが表示されている) ため、オフスクリーンで描画しました
 The map view as it is now	現在のマップ ビュー
 The map's extent isn't known yet	マップの範囲がまだわかりません
 The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	マップの表示範囲には Overture の {ty} ファイルが {n} 個必要です (上限 {max}): 拡大するか、テーマをマップ タイルとして追加してください
@@ -3551,7 +3551,7 @@ The sign-in is kept in the system keychain, never in the app's settings or a pro
 The sign-in is still kept in the app's settings folder, readable by your user account: the system keychain is unavailable, so it hasn't been moved there yet.	サインイン情報はまだアプリの設定フォルダーに保存されており、あなたのユーザー アカウントで読み取れます: システムのキーチェーンを利用できないため、まだ移動されていません。
 The significance level is a number, such as 0.05	有意水準は数値で指定します (例: 0.05)
 The start-up project {path} didn't open: {error}	起動時のプロジェクト {path} を開けませんでした: {error}
-The start-up project {path} isn't a RustGIS project file.	起動時のプロジェクト {path} は RustGIS のプロジェクト ファイルではありません。
+The start-up project {path} isn't a HuaGIS project file.	起動時のプロジェクト {path} は HuaGIS のプロジェクト ファイルではありません。
 The step's layer {name} isn't in the map.	ステップのレイヤー {name} がマップにありません。
 The store has no variables with two or more dimensions.	ストアに 2 次元以上の変数がありません。
 the store is gone	ストアがなくなりました
@@ -3560,7 +3560,7 @@ The summary failed unexpectedly	集計が予期せず失敗しました
 The summary finished after another project was opened, so it wasn't added	別のプロジェクトを開いた後に集計が完了したため、追加されませんでした
 The system keychain could not complete the request.	システム キーチェーンは要求を完了できませんでした。
 The system keychain is locked or access was refused.	システム キーチェーンがロックされているか、アクセスが拒否されました。
-The system keychain is unavailable, so this sign-in won't be remembered: it lasts until RustGIS closes.	システムのキーチェーンを利用できないため、このサインインは記憶されません: RustGIS を閉じるまで有効です。
+The system keychain is unavailable, so this sign-in won't be remembered: it lasts until HuaGIS closes.	システムのキーチェーンを利用できないため、このサインインは記憶されません: HuaGIS を閉じるまで有効です。
 The system keychain is unavailable.	システム キーチェーンを利用できません。
 The task's steps changed, so the step being edited was closed: edit it again.	タスクのステップが変更されたため、編集中のステップを閉じました。もう一度編集してください。
 the time slider is off	タイム スライダーはオフです
@@ -3608,7 +3608,7 @@ This map has no layers yet.	このマップにはまだレイヤーがありま�
 This map's thumbnail, from an image.	画像から作成するこのマップのサムネイル。
 This map's thumbnail, from the view.	ビューから作成するこのマップのサムネイル。
 This plugin can:	このプラグインでできること:
-This plugin runs as a program on your computer, outside RustGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	このプラグインは RustGIS のサンドボックスの外で、コンピューター上のプログラムとして実行されます。ファイルの読み取りや変更、ネットワークの使用、他のプログラムの実行など、あなたができることは何でもできます。作者を信頼できる場合にのみインストールしてください。
+This plugin runs as a program on your computer, outside HuaGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	このプラグインは HuaGIS のサンドボックスの外で、コンピューター上のプログラムとして実行されます。ファイルの読み取りや変更、ネットワークの使用、他のプログラムの実行など、あなたができることは何でもできます。作者を信頼できる場合にのみインストールしてください。
 This request has no one-time allow option.	この要求には「今回のみ許可」のオプションがありません。
 This request uses an unsupported capability. Check the parameter and change the request.	このリクエストは未対応の機能を使用しています。パラメーターを確認してリクエストを変更してください。
 This result is kept	この結果は残されます
@@ -3740,7 +3740,7 @@ unknown (an older project)	不明 (古いプロジェクト)
 Unknown shortcut binding field.	ショートカットの割り当てに不明なフィールドがあります。
 Unknown shortcut command.	不明なショートカット コマンドです。
 UNKNOWN TOOL	不明なツール
-Unload the GeoLibre tools and stop loading them when RustGIS starts.	GeoLibre ツールをアンロードし、RustGIS の起動時に読み込まないようにします。
+Unload the GeoLibre tools and stop loading them when HuaGIS starts.	GeoLibre ツールをアンロードし、HuaGIS の起動時に読み込まないようにします。
 Unsaved changes	未保存の変更
 Unsupervised classes (k-means)	教師なし分類 (k-means)
 Unsupervised classes (k-means).	教師なし分類 (k-means)。
@@ -3872,13 +3872,13 @@ Web Tool	Web ツール
 Website	ウェブサイト
 Weekly usage	週間使用量
 Weights	重み
-Welcome to RustGIS	RustGIS へようこそ
+Welcome to HuaGIS	HuaGIS へようこそ
 West	西
 WFS	WFS
 WGS 84 / Globe	WGS 84 / 地球儀
 WGS 84 / Web Mercator	WGS 84 / Web Mercator
-What RustGIS opens with: the World Atlas sample or a blank map.	RustGIS の起動時に開くもの: World Atlas サンプルまたは空白のマップ。
-What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	RustGIS の起動時に開くもの: World Atlas サンプル、空白のマップ、選択したプロジェクト、または最後に開いたか保存したプロジェクト。
+What HuaGIS opens with: the World Atlas sample or a blank map.	HuaGIS の起動時に開くもの: World Atlas サンプルまたは空白のマップ。
+What HuaGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	HuaGIS の起動時に開くもの: World Atlas サンプル、空白のマップ、選択したプロジェクト、または最後に開いたか保存したプロジェクト。
 What to do, where to find it and why	何をするか、どこにあるか、その理由
 What's near a point	ポイントの近くにあるもの
 When a file holds several layers, choose the ones to add instead of adding them all.	ファイルに複数のレイヤーがある場合、すべて追加せず、追加するレイヤーを選択します。

@@ -75,9 +75,9 @@ use Entry::{Item, Separator};
 /// into the catalogs by hand (docs/i18n.md).
 const MENUS: &[(&str, &[Entry])] = &[
     (
-        "RustGIS",
+        "HuaGIS",
         &[
-            Item("About RustGIS", Command("ui.about", ""), None),
+            Item("About HuaGIS", Command("ui.about", ""), None),
             Item("Check for Updates…", Command("ui.checkUpdate", ""), None),
             Separator,
             Item("Settings…", Command("ui.tab", r#"{"tab":"Settings"}"#), Some((Key::Comma, false))),
@@ -88,7 +88,7 @@ const MENUS: &[(&str, &[Entry])] = &[
             Entry::Std(Std::HideOthers),
             Entry::Std(Std::ShowAll),
             Separator,
-            Item("Quit RustGIS", Command("ui.quit", ""), Some((Key::Q, false))),
+            Item("Quit HuaGIS", Command("ui.quit", ""), Some((Key::Q, false))),
         ],
     ),
     (
@@ -141,7 +141,7 @@ const MENUS: &[(&str, &[Entry])] = &[
     (
         "Help",
         &[
-            Item("RustGIS Help", Command("ui.learn", ""), None),
+            Item("HuaGIS Help", Command("ui.learn", ""), None),
             Item("Keyboard Shortcuts", Command("ui.shortcuts", ""), None),
             Separator,
             Item("Report an Issue", Command("ui.learn", r#"{"url":"https://github.com/opengeos/RustGIS/issues/new/choose"}"#), None),

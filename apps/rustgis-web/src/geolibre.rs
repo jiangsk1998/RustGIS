@@ -62,7 +62,7 @@ export async function geolibre_manifests() {
       }
     }
   } catch (e) {
-    console.warn("RustGIS couldn't keep the GeoLibre tool list; it will be listed again next visit", e);
+    console.warn("HuaGIS couldn't keep the GeoLibre tool list; it will be listed again next visit", e);
   }
   return text;
 }

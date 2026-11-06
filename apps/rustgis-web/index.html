@@ -3,20 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
-  <title>RustGIS</title>
-  <link rel="icon" href="https://assets.rustgis.app/images/favicon.png">
+  <title>HuaGIS</title>
+  <link rel="icon" href="huagis-logo.png">
   <!-- Installable as an app (docs/installation.md › Install the web app). -->
+  <link data-trunk rel="copy-file" href="../../crates/render/assets/huagis-logo.png" />
   <link data-trunk rel="copy-file" href="manifest.webmanifest" />
   <link data-trunk rel="copy-file" href="oauth-callback.html" />
   <link data-trunk rel="copy-file" href="../../LICENSE" />
   <link data-trunk rel="copy-file" href="../../THIRD-PARTY-LICENSES.txt" />
   <link rel="manifest" href="manifest.webmanifest">
   <meta name="theme-color" content="#e4e8ee">
-  <link rel="apple-touch-icon" href="https://assets.rustgis.app/images/apple-touch-icon.png">
+  <link rel="apple-touch-icon" href="huagis-logo.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="apple-mobile-web-app-title" content="RustGIS">
+  <meta name="apple-mobile-web-app-title" content="HuaGIS">
   <link data-trunk rel="rust" data-bin="rustgis-web" data-cargo-profile="web" data-wasm-opt="z" data-weak-refs />
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #e4e8ee; }
@@ -26,7 +27,7 @@
       height: calc(100% - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); display: block; }
     #rustgis_loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
       gap: 14px; color: #4a5563; font: 14px system-ui, sans-serif; pointer-events: none; }
-    #rustgis_loading img { width: 96px; height: 96px; animation: spin 6s linear infinite; }
+    #rustgis_loading img { width: 96px; height: 96px; object-fit: contain; animation: spin 6s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     #rustgis_local { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px;
       box-sizing: border-box; color: #2b313b; font: 14px/1.5 system-ui, sans-serif; }
@@ -44,15 +45,15 @@
 </head>
 <body>
   <canvas id="rustgis_canvas"></canvas>
-  <div id="rustgis_loading"><img src="https://assets.rustgis.app/images/logo.svg" alt=""><div>Loading RustGIS&hellip;</div></div>
+  <div id="rustgis_loading"><img src="huagis-logo.png" alt=""><div>Loading HuaGIS&hellip;</div></div>
   <div id="rustgis_local" role="alert" hidden><div>
-    <h1>RustGIS needs a web server</h1>
+    <h1>HuaGIS needs a web server</h1>
     <p>Browsers do not let a page opened as a local file start the app. In this folder, run:</p>
     <code>python3 -m http.server 8080</code>
-    <p>Then open <a href="http://localhost:8080/">http://localhost:8080/</a>. Or use RustGIS at <a href="https://web.rustgis.app">web.rustgis.app</a>; there is <a href="https://rustgis.app/installation/#self-host-the-static-build">more on self-hosting</a> in the documentation.</p>
+    <p>Then open <a href="http://localhost:8080/">http://localhost:8080/</a>. Or use HuaGIS at <a href="https://web.rustgis.app">web.rustgis.app</a>; there is <a href="https://rustgis.app/installation/#self-host-the-static-build">more on self-hosting</a> in the documentation.</p>
   </div></div>
   <div id="rustgis_update" role="status" hidden>
-    <span>A new version of RustGIS is available.</span>
+    <span>A new version of HuaGIS is available.</span>
     <button type="button" class="reload">Reload</button>
     <button type="button" class="dismiss" aria-label="Dismiss">&times;</button>
   </div>

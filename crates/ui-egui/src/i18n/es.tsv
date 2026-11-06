@@ -60,8 +60,8 @@ A line, or markers or hash marks along it	Una línea, o marcadores o marcas tran
 A magnifying lens that follows the pointer.	Una lupa que sigue al puntero.
 A map, feature or coverage service's address: WMS, WMTS, WFS, WCS, OGC API Features or Tiles, or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer (or a services directory, to browse).	La dirección de un servicio de mapas, entidades o coberturas: WMS, WMTS, WFS, WCS, OGC API Features o Tiles, o un ArcGIS FeatureServer, MapServer, ImageServer o VectorTileServer (o un directorio de servicios, para explorar).
 a name, or owner/name such as giswqs/geospatial	un nombre, o propietario/nombre como giswqs/geospatial
-A named endpoint you can reuse. Keys and tokens are kept until RustGIS closes, never saved.	Un punto de conexión con nombre que puede reutilizar. Las claves y los tokens se conservan hasta que se cierra RustGIS y nunca se guardan.
-A named endpoint you can reuse. Keys are kept until RustGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	Un punto de conexión con nombre que puede reutilizar. Las claves se conservan hasta que se cierra RustGIS, salvo que elija recordarlas en este equipo; la conexión en sí nunca las guarda.
+A named endpoint you can reuse. Keys and tokens are kept until HuaGIS closes, never saved.	Un punto de conexión con nombre que puede reutilizar. Las claves y los tokens se conservan hasta que se cierra HuaGIS y nunca se guardan.
+A named endpoint you can reuse. Keys are kept until HuaGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	Un punto de conexión con nombre que puede reutilizar. Las claves se conservan hasta que se cierra HuaGIS, salvo que elija recordarlas en este equipo; la conexión en sí nunca las guarda.
 A named endpoint you can reuse. Passwords last for this session unless you choose to remember them in this computer's password store.	Un punto de conexión con nombre que puede reutilizar. Las contraseñas duran esta sesión, salvo que elija recordarlas en el almacén de contraseñas de este equipo.
 A node cannot connect to itself.	Un nodo no puede conectarse consigo mismo.
 A notebook of text and command cells.	Un cuaderno de celdas de texto y de comandos.
@@ -98,8 +98,8 @@ A5 Grid	Cuadrícula A5
 A5's equal-area pentagonal cells at a resolution, over the map's extent, a layer or the world, as polygons with their ids.	Las celdas pentagonales de áreas iguales de A5 a una resolución, sobre la extensión del mapa, una capa o el mundo, como polígonos con sus identificadores.
 About	Acerca de
 About plugins	Acerca de los complementos
-About RustGIS	Acerca de RustGIS
-About RustGIS.	Acerca de RustGIS.
+About HuaGIS	Acerca de HuaGIS
+About HuaGIS.	Acerca de HuaGIS.
 Above	Arriba
 Above Left	Arriba a la izquierda
 Above Right	Arriba a la derecha
@@ -276,7 +276,7 @@ Agent input queue is full or disconnected; stop the agent and try again.	La cola
 Agent threads	Hilos de agentes
 Agent work	Agent work
 Agents have full access: they may run scripts, tasks, models and plugins. Click to stop the MCP relay	Los agentes tienen acceso total: pueden ejecutar scripts, tareas, modelos y complementos. Haga clic para detener el relé MCP
-Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	Los agentes de este equipo que se conecten (Claude Code, Codex, Cursor y otros) trabajan en el mapa abierto aquí con las herramientas de RustGIS: pueden abrir y guardar archivos y usar la web. Los scripts y la gestión de complementos siguen desactivados.
+Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with HuaGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	Los agentes de este equipo que se conecten (Claude Code, Codex, Cursor y otros) trabajan en el mapa abierto aquí con las herramientas de HuaGIS: pueden abrir y guardar archivos y usar la web. Los scripts y la gestión de complementos siguen desactivados.
 Agents then run commands, change files and use the web on this computer without asking you.	Los agentes ejecutarán comandos, cambiarán archivos y usarán la web en este equipo sin preguntarte.
 Aggregate Points to A5	Agregar puntos en A5
 Aggregation	Agregación
@@ -301,7 +301,7 @@ Allow Feature Selection	Permitir la selección de entidades
 Allow only certain combinations of values across fields.	Permitir solo ciertas combinaciones de valores entre campos.
 Allow such actions for this conversation	Permitir este tipo de acciones en esta conversación
 Allow this action?	¿Permitir esta acción?
-Allow this agent's RustGIS action?	¿Permitir esta acción de RustGIS del agente?
+Allow this agent's HuaGIS action?	¿Permitir esta acción de HuaGIS del agente?
 Along lines	A lo largo de líneas
 Along Selected Line	A lo largo de la línea seleccionada
 Alt+	Alt+
@@ -313,7 +313,7 @@ Alternating bar	Barra alterna
 Altitude	Altitud
 Always allow	Permitir siempre
 Amazon S3	Amazon S3
-Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3, o un servicio compatible con S3 (MinIO, Cloudflare R2, Wasabi…) por su punto de conexión. Las claves se conservan hasta que se cierra RustGIS; una conexión guardada conserva su nombre, punto de conexión y región, nunca su secreto.
+Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until HuaGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3, o un servicio compatible con S3 (MinIO, Cloudflare R2, Wasabi…) por su punto de conexión. Las claves se conservan hasta que se cierra HuaGIS; una conexión guardada conserva su nombre, punto de conexión y región, nunca su secreto.
 amenity=cafe, shop	amenity=cafe, shop
 An agent on this computer asks to:	Un agente de este equipo pide:
 An ArcGIS Online organization's or an ArcGIS Enterprise portal's address; ArcGIS Online when blank	La dirección de una organización de ArcGIS Online o de un portal de ArcGIS Enterprise; ArcGIS Online si está en blanco
@@ -363,7 +363,7 @@ Arrange	Organizar
 Arrange Element	Organizar elemento
 Arrow	Flecha
 Arrowheads	Puntas de flecha
-Ask a question about your data, or describe what to do with the map. The assistant runs RustGIS commands for you; every change can be undone.	Haga una pregunta sobre sus datos, o describa qué hacer con el mapa. El asistente ejecuta comandos de RustGIS por usted; cada cambio se puede deshacer.
+Ask a question about your data, or describe what to do with the map. The assistant runs HuaGIS commands for you; every change can be undone.	Haga una pregunta sobre sus datos, o describa qué hacer con el mapa. El asistente ejecuta comandos de HuaGIS por usted; cada cambio se puede deshacer.
 Ask about the map, or tell it what to do…	Pregunte sobre el mapa, o dígale qué hacer…
 Ask about your data, or tell the assistant what to do with the map.	Pregunte sobre sus datos, o diga al asistente qué hacer con el mapa.
 Ask Which Layers to Add	Preguntar qué capas añadir
@@ -717,7 +717,7 @@ Color Vision Simulator	Simulador de visión del color
 Colorbar	Barra de colores
 Colormap	Mapa de colores
 Colors from the raster's own color table.	Colores de la propia tabla de colores del ráster.
-Colour ramps (RustGIS, QGIS, GDAL, GMT)	Rampas de color (RustGIS, QGIS, GDAL, GMT)
+Colour ramps (HuaGIS, QGIS, GDAL, GMT)	Rampas de color (HuaGIS, QGIS, GDAL, GMT)
 Columns named like longitude/latitude, easting/northing or geometry are picked for you.	Las columnas con nombres como longitude/latitude, easting/northing o geometry se seleccionan automáticamente.
 Combinations from the box above, one per line	Combinaciones del cuadro de arriba, una por línea
 Combines two polygon layers into every piece either covers, with the attributes of both where they overlap.	Combina dos capas de polígonos en todas las partes que cubre cualquiera de ellas, con los atributos de ambas donde se superponen.
@@ -924,7 +924,7 @@ Delete selected rows	Eliminar las filas seleccionadas
 Delete Style	Eliminar estilo
 Delete Task	Eliminar tarea
 Delete Task Step	Eliminar paso de tarea
-Delete the GeoLibre runner that RustGIS installed. Install it again at any time.	Eliminar el ejecutor de GeoLibre que instaló RustGIS. Puede volver a instalarlo en cualquier momento.
+Delete the GeoLibre runner that HuaGIS installed. Install it again at any time.	Eliminar el ejecutor de GeoLibre que instaló HuaGIS. Puede volver a instalarlo en cualquier momento.
 Delete the layout {name}?	¿Eliminar el diseño {name}?
 Delete the map {name}?	¿Eliminar el mapa {name}?
 Delete the selected features.	Eliminar las entidades seleccionadas.
@@ -1136,7 +1136,7 @@ Element Properties	Propiedades del elemento
 Elevation	Elevación
 Elevation model	Modelo de elevación
 Elevation profiles along lines, cross sections and more.	Perfiles de elevación a lo largo de líneas, secciones transversales y más.
-Eligible requests in RustGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	Las solicitudes admitidas en RustGIS usan tu plan de ChatGPT. Puedes gestionar el uso en la configuración de ChatGPT.
+Eligible requests in HuaGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	Las solicitudes admitidas en HuaGIS usan tu plan de ChatGPT. Puedes gestionar el uso en la configuración de ChatGPT.
 Ellipse	Elipse
 Embeddings	Incrustaciones
 Ember	Brasa
@@ -1329,7 +1329,7 @@ Find and run geoprocessing tools.	Buscar y ejecutar herramientas de geoprocesami
 Find any command by name (Ctrl+K).	Buscar cualquier comando por su nombre (Ctrl+K).
 Find Items	Buscar ítems
 Find Place	Buscar lugar
-Find plugins in the RustGIS plugin registry.	Buscar complementos en el registro de complementos de RustGIS.
+Find plugins in the HuaGIS plugin registry.	Buscar complementos en el registro de complementos de HuaGIS.
 Find Similar	Buscar similares
 Find Tools	Buscar herramientas
 Finding routes…	Buscando rutas…
@@ -1363,14 +1363,14 @@ Folder…	Carpeta…
 Follow the time slider	Seguir el control deslizante de tiempo
 Font	Fuente
 for a store that doesn't say	para un almacén que no lo indica
-For ArcGIS Online, the client ID is RustGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	Para ArcGIS Online, el ID de cliente es la propia aplicación de RustGIS. Para un portal de ArcGIS Enterprise, registre en él una aplicación OAuth (Contenido › Nuevo elemento › Credenciales de desarrollador) cuya URL de redirección sea {redirect} e indique su ID de cliente.
+For ArcGIS Online, the client ID is HuaGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	Para ArcGIS Online, el ID de cliente es la propia aplicación de HuaGIS. Para un portal de ArcGIS Enterprise, registre en él una aplicación OAuth (Contenido › Nuevo elemento › Credenciales de desarrollador) cuya URL de redirección sea {redirect} e indique su ID de cliente.
 for the layers that change with time, as they list their times (2024-06-01, 1995)	para las capas que cambian con el tiempo, tal como enumeran sus tiempos (2024-06-01, 1995)
 Forest	Bosque
 Forget Earthdata Login Token	Olvidar token de Earthdata Login
 Forget Saved Keys	Olvidar claves guardadas
 Forget Saved Password	Olvidar contraseña guardada
 Format	Formato
-Found: {names}. An agent works on this map through RustGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › RustGIS › Agent work. It asks you before each action.	Encontrados: {names}. Un agente trabaja en este mapa con las herramientas de RustGIS y con las suyas (web, scripts, archivos), en una carpeta propia que se conserva en Documentos › RustGIS › Agent work. Te pregunta antes de cada acción.
+Found: {names}. An agent works on this map through HuaGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › HuaGIS › Agent work. It asks you before each action.	Encontrados: {names}. Un agente trabaja en este mapa con las herramientas de HuaGIS y con las suyas (web, scripts, archivos), en una carpeta propia que se conserva en Documentos › HuaGIS › Agent work. Te pregunta antes de cada acción.
 Frame rate	Velocidad de fotogramas
 Frame rate, draw time, data size and memory.	Velocidad de fotogramas, tiempo de dibujo, tamaño de los datos y memoria.
 France	Francia
@@ -1534,7 +1534,7 @@ host=localhost dbname=gis user=postgres	host=localhost dbname=gis user=postgres
 host=… dbname=… user=…	host=… dbname=… user=…
 Hosted Imagery	Imágenes alojadas
 Hour	Hora
-How often RustGIS keeps a copy of unsaved work, to offer it back after a crash.	Con qué frecuencia RustGIS guarda una copia del trabajo sin guardar, para ofrecerla de nuevo tras un fallo.
+How often HuaGIS keeps a copy of unsaved work, to offer it back after a crash.	Con qué frecuencia HuaGIS guarda una copia del trabajo sin guardar, para ofrecerla de nuevo tras un fallo.
 How the layer's colours combine with the tile layers and basemap beneath.	Cómo se combinan los colores de la capa con las capas de teselas y el mapa base de debajo.
 How the layer's colours combine with what's beneath.	Cómo se combinan los colores de la capa con lo que hay debajo.
 HUB Ocean's Ocean Data Platform: marine datasets, read as features (up to 10,000 each).	Ocean Data Platform de HUB Ocean: conjuntos de datos marinos, leídos como entidades (hasta 10 000 cada uno).
@@ -1601,7 +1601,7 @@ In memory	En memoria
 In Progress	En curso
 in progress	en curso
 In project	En el proyecto
-In RustGIS, it can:	En RustGIS, puede:
+In HuaGIS, it can:	En HuaGIS, puede:
 In the browser, pick the .shp and .dbf together, with any sidecars, or pick a ZIP. The override applies to every Shapefile in the ZIP.	En el navegador, seleccione los .shp y .dbf a la vez, con los archivos auxiliares que haya, o seleccione un ZIP. La sustitución se aplica a todos los Shapefile del ZIP.
 In the coordinate system's units: metres for UTM.	En las unidades del sistema de coordenadas: metros para UTM.
 In the middle	En el centro
@@ -1689,7 +1689,7 @@ Item Pop-ups	Ventanas emergentes de elementos
 Item {id}	Ítem {id}
 its default	su valor predeterminado
 Its default: {default}. Its times: {times}	Su valor predeterminado: {default}. Sus tiempos: {times}
-Its firewall ({firewall}) blocked RustGIS. The service may only allow some applications: contact its administrator and send them the details below.	Su cortafuegos ({firewall}) bloqueó RustGIS. Es posible que el servicio solo permita algunas aplicaciones: contacte con su administrador y envíele los detalles de abajo.
+Its firewall ({firewall}) blocked HuaGIS. The service may only allow some applications: contact its administrator and send them the details below.	Su cortafuegos ({firewall}) bloqueó HuaGIS. Es posible que el servicio solo permita algunas aplicaciones: contacte con su administrador y envíele los detalles de abajo.
 Its tool isn't available now (a plugin's, not loaded, or a suite's, not installed)	Su herramienta no está disponible ahora (de un complemento no cargado o de un conjunto no instalado)
 Jobs	Trabajos
 JOIN	JOIN
@@ -1719,7 +1719,7 @@ Keep Tool	Mantener herramienta
 Keep value	Conservar valor
 Keeps the access key ID and secret access key in this computer's credential store, never in the connection or the project.	Guarda el ID de clave de acceso y la clave de acceso secreta en el almacén de credenciales de este equipo, nunca en la conexión ni en el proyecto.
 Keeps the parts of two polygon layers that only one of them covers, with that layer's attributes.	Conserva las partes de dos capas de polígonos que solo cubre una de ellas, con los atributos de esa capa.
-Keeps the token in the system's credential store, so it is there when RustGIS starts again. Unticked, a token remembered before is deleted when you save another.	Conserva el token en el almacén de credenciales del sistema, para que esté disponible cuando RustGIS se inicie de nuevo. Sin marcar, un token recordado antes se elimina al guardar otro.
+Keeps the token in the system's credential store, so it is there when HuaGIS starts again. Unticked, a token remembered before is deleted when you save another.	Conserva el token en el almacén de credenciales del sistema, para que esté disponible cuando HuaGIS se inicie de nuevo. Sin marcar, un token recordado antes se elimina al guardar otro.
 Kernel Density	Densidad kernel
 Kernel Type	Tipo de kernel
 Key	Key
@@ -1800,7 +1800,7 @@ Legend label. Clear it to show the value again.	Etiqueta de la leyenda. Bórrela
 Length	Longitud
 Length {length} · gain {gain} · loss {loss}	Longitud {length} · ascenso {gain} · descenso {loss}
 Let the assistant hand tasks to agents on this computer	Permitir que el asistente encargue tareas a agentes de este equipo
-Let your Agents Control RustGIS	Deja que tus agentes controlen RustGIS
+Let your Agents Control HuaGIS	Deja que tus agentes controlen HuaGIS
 Letter spacing	Espaciado entre letras
 Level	Nivel
 Library	Biblioteca
@@ -1856,7 +1856,7 @@ List The National Map Services	Listar servicios de The National Map
 List the provider's models	Listar los modelos del proveedor
 List this layer in the legend	Mostrar esta capa en la leyenda
 List what it holds	Listar su contenido
-Listed for discovery: RustGIS doesn't read this dataset yet. Its data and paper are linked above.	Listado para descubrimiento: RustGIS aún no lee este conjunto de datos. Sus datos y su artículo están enlazados arriba.
+Listed for discovery: HuaGIS doesn't read this dataset yet. Its data and paper are linked above.	Listado para descubrimiento: HuaGIS aún no lee este conjunto de datos. Sus datos y su artículo están enlazados arriba.
 Listing datasets…	Listando conjuntos de datos…
 Listing…	Listando…
 Lit	Iluminado
@@ -1901,7 +1901,7 @@ Look for {name}, outlined on the ribbon.	Busque {name}, resaltado en la cinta.
 Looking up the place…	Buscando el lugar…
 Loop	Bucle
 Lower Priority	Bajar prioridad
-Made in RustGIS: samples, drawings and tool outputs	Creadas en RustGIS: ejemplos, dibujos y resultados de herramientas
+Made in HuaGIS: samples, drawings and tool outputs	Creadas en HuaGIS: ejemplos, dibujos y resultados de herramientas
 Magnifier	Lupa
 Major Lakes	Lagos principales
 Major Rivers	Ríos principales
@@ -2157,7 +2157,7 @@ no command	ningún comando
 No data at the points picked.	No hay datos en los puntos elegidos.
 No data cube matches	Ningún cubo de datos coincide
 No datasets match.	Ningún conjunto de datos coincide.
-No datasets with data RustGIS can add	No hay conjuntos de datos con datos que RustGIS pueda añadir
+No datasets with data HuaGIS can add	No hay conjuntos de datos con datos que HuaGIS pueda añadir
 no date in the name	sin fecha en el nombre
 no download service	sin servicio de descarga
 No edits since the project was saved	No hay ediciones desde que se guardó el proyecto
@@ -2219,8 +2219,8 @@ North Polar Stereographic	Estereográfica polar norte
 NOT	NOT
 Not a GeoLibre project	No es un proyecto de GeoLibre
 not a picture	no es una imagen
-not a RustGIS layout	no es un diseño de RustGIS
-not a RustGIS project	no es un proyecto de RustGIS
+not a HuaGIS layout	no es un diseño de HuaGIS
+not a HuaGIS project	no es un proyecto de HuaGIS
 Not applied yet.	Aún no se ha aplicado.
 Not for texts: a text is edited in the Format pane.	No para textos: un texto se edita en el panel Formato.
 not needed	no es necesaria
@@ -2291,7 +2291,7 @@ Open a Data Cube	Abrir un cubo de datos
 open a layout first	abra primero un diseño
 Open a model file (*.model.json)	Abrir un archivo de modelo (*.model.json)
 Open a model of this project	Abrir un modelo de este proyecto
-Open a RustGIS or Jupyter notebook.	Abrir un cuaderno de RustGIS o de Jupyter.
+Open a HuaGIS or Jupyter notebook.	Abrir un cuaderno de HuaGIS o de Jupyter.
 Open an offline area to edit.	Abrir un área sin conexión para editarla.
 Open browser again	Abrir el navegador de nuevo
 Open Custom Template	Abrir plantilla personalizada
@@ -2318,7 +2318,7 @@ Open the layer's attribute table.	Abrir la tabla de atributos de la capa.
 Open the layer's table.	Abrir la tabla de la capa.
 Open the plugin's panel.	Abrir el panel del complemento.
 Open the Release Page	Abrir la página de la versión
-Open the RustGIS user guide.	Abrir la guía del usuario de RustGIS.
+Open the HuaGIS user guide.	Abrir la guía del usuario de HuaGIS.
 Open the selected layer's table.	Abrir la tabla de la capa seleccionada.
 Open the Symbology pane.	Abrir el panel Simbología.
 Open the task's steps	Abrir los pasos de la tarea
@@ -2494,7 +2494,7 @@ Plugin registry	Registro de complementos
 Plugins	Complementos
 Plugins are .rgplugin files. Install only plugins from people you trust.	Los complementos son archivos .rgplugin. Instale solo complementos de personas de confianza.
 Plugins marked Not sandboxed run as programs on your computer instead, and can do anything you can.	Los complementos marcados como «Sin aislamiento» se ejecutan, en cambio, como programas en su equipo y pueden hacer todo lo que usted puede.
-Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through RustGIS's own commands, within the permissions you accept.	Los complementos se ejecutan en un entorno aislado: no pueden acceder a sus archivos ni a la red, y solo modifican el proyecto mediante los propios comandos de RustGIS, dentro de los permisos que usted acepte.
+Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through HuaGIS's own commands, within the permissions you accept.	Los complementos se ejecutan en un entorno aislado: no pueden acceder a sus archivos ni a la red, y solo modifican el proyecto mediante los propios comandos de HuaGIS, dentro de los permisos que usted acepte.
 PMTiles archive	Archivo PMTiles
 PNG frames (zip)	Fotogramas PNG (zip)
 PNG image	Imagen PNG
@@ -2571,7 +2571,7 @@ Project Template	Plantilla de proyecto
 project's path is required	se requiere la ruta del proyecto
 Projection	Proyección
 Projections	Proyecciones
-Projects and JSON data (RustGIS, QGIS, GeoLibre)	Proyectos y datos JSON (RustGIS, QGIS, GeoLibre)
+Projects and JSON data (HuaGIS, QGIS, GeoLibre)	Proyectos y datos JSON (HuaGIS, QGIS, GeoLibre)
 Properties	Propiedades
 Property	Propiedad
 Proportional Symbols	Símbolos proporcionales
@@ -2632,7 +2632,7 @@ Read error	Error de lectura
 Read the bands picked for the view (at most about 6 km a side)	Leer las bandas elegidas para la vista (como máximo unos 6 km de lado)
 Read the map's layers and features	Leer las capas y entidades del mapa
 Read the points in the view, coloured by their principal components	Leer los puntos de la vista, coloreados por sus componentes principales
-Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	Leer los archivos de un gránulo requiere un token de Earthdata Login, que sirve para todos los DAAC de la NASA. Se conserva hasta que RustGIS se cierra salvo que marque Recordar, nunca en el proyecto, y solo se envía a los servidores de datos Earthdata de la NASA.
+Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until HuaGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	Leer los archivos de un gránulo requiere un token de Earthdata Login, que sirve para todos los DAAC de la NASA. Se conserva hasta que HuaGIS se cierra salvo que marque Recordar, nunca en el proyecto, y solo se envía a los servidores de datos Earthdata de la NASA.
 Reading the catalog: {n} documents read, {m} items found…	Leyendo el catálogo: {n} documentos leídos, {m} ítems encontrados…
 Reading the catalog…	Leyendo el catálogo…
 Reading the embeddings…	Leyendo las incrustaciones…
@@ -2817,32 +2817,32 @@ Run Tool	Ejecutar herramienta
 Run {name}	Ejecutar {name}
 Running the query for the map…	Ejecutando la consulta para el mapa…
 Running…	Ejecutando…
-RustGIS	RustGIS
-RustGIS bookmarks	Marcadores de RustGIS
-RustGIS could not confirm that any previously saved key was deleted from the system keychain.	RustGIS no pudo confirmar que se eliminara del llavero del sistema alguna clave guardada anteriormente.
-RustGIS couldn't reach the server.	RustGIS no pudo conectar con el servidor.
-RustGIS deep learning package	Paquete de aprendizaje profundo de RustGIS
-RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	RustGIS no se cerró correctamente la última vez, así que se abrió con World Atlas en lugar de su proyecto de inicio. Abra el proyecto desde el menú Proyecto cuando lo desee.
-RustGIS didn't close properly last time.	RustGIS no se cerró correctamente la última vez.
-RustGIS doesn't have this tool. Install the tools it comes from, or delete the node.	RustGIS no tiene esta herramienta. Instale las herramientas de las que procede o elimine el nodo.
-RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	RustGIS es un SIG libre y de código abierto escrito en Rust puro. Funciona en el escritorio y en el navegador, y cada acción es un comando que también puede ejecutar desde la línea de comandos.
-RustGIS layer file	Archivo de capa de RustGIS
-RustGIS layers, maps and projects	Capas, mapas y proyectos de RustGIS
-RustGIS layout	Diseño de RustGIS
-RustGIS maps and projects	Mapas y proyectos de RustGIS
-RustGIS model	Modelo de RustGIS
-RustGIS or Jupyter notebook	Cuaderno de RustGIS o de Jupyter
-RustGIS plugin	Complemento de RustGIS
-RustGIS presentation	Presentación de RustGIS
-RustGIS project	Proyecto de RustGIS
-RustGIS project template	Plantilla de proyecto de RustGIS
-RustGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	RustGIS encontró un error interno la última vez. Los detalles están en {path}; adjúntelos a un informe de error.
-RustGIS report or report template	Informe o plantilla de informe de RustGIS
-RustGIS styles	Estilos de RustGIS
-RustGIS task	Tarea de RustGIS
-RustGIS was quit last time without saving your changes.	La última vez se salió de RustGIS sin guardar sus cambios.
-RustGIS {latest} is available.	RustGIS {latest} está disponible.
-RustGIS {version} is the latest version.	RustGIS {version} es la versión más reciente.
+HuaGIS	HuaGIS
+HuaGIS bookmarks	Marcadores de HuaGIS
+HuaGIS could not confirm that any previously saved key was deleted from the system keychain.	HuaGIS no pudo confirmar que se eliminara del llavero del sistema alguna clave guardada anteriormente.
+HuaGIS couldn't reach the server.	HuaGIS no pudo conectar con el servidor.
+HuaGIS deep learning package	Paquete de aprendizaje profundo de HuaGIS
+HuaGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	HuaGIS no se cerró correctamente la última vez, así que se abrió con World Atlas en lugar de su proyecto de inicio. Abra el proyecto desde el menú Proyecto cuando lo desee.
+HuaGIS didn't close properly last time.	HuaGIS no se cerró correctamente la última vez.
+HuaGIS doesn't have this tool. Install the tools it comes from, or delete the node.	HuaGIS no tiene esta herramienta. Instale las herramientas de las que procede o elimine el nodo.
+HuaGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	HuaGIS es un SIG libre y de código abierto escrito en Rust puro. Funciona en el escritorio y en el navegador, y cada acción es un comando que también puede ejecutar desde la línea de comandos.
+HuaGIS layer file	Archivo de capa de HuaGIS
+HuaGIS layers, maps and projects	Capas, mapas y proyectos de HuaGIS
+HuaGIS layout	Diseño de HuaGIS
+HuaGIS maps and projects	Mapas y proyectos de HuaGIS
+HuaGIS model	Modelo de HuaGIS
+HuaGIS or Jupyter notebook	Cuaderno de HuaGIS o de Jupyter
+HuaGIS plugin	Complemento de HuaGIS
+HuaGIS presentation	Presentación de HuaGIS
+HuaGIS project	Proyecto de HuaGIS
+HuaGIS project template	Plantilla de proyecto de HuaGIS
+HuaGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	HuaGIS encontró un error interno la última vez. Los detalles están en {path}; adjúntelos a un informe de error.
+HuaGIS report or report template	Informe o plantilla de informe de HuaGIS
+HuaGIS styles	Estilos de HuaGIS
+HuaGIS task	Tarea de HuaGIS
+HuaGIS was quit last time without saving your changes.	La última vez se salió de HuaGIS sin guardar sus cambios.
+HuaGIS {latest} is available.	HuaGIS {latest} está disponible.
+HuaGIS {version} is the latest version.	HuaGIS {version} es la versión más reciente.
 RUSTGIS_ASSISTANT_MODEL	RUSTGIS_ASSISTANT_MODEL
 RUSTGIS_ASSISTANT_PROVIDER	RUSTGIS_ASSISTANT_PROVIDER
 RUSTGIS_GPU	RUSTGIS_GPU
@@ -2851,7 +2851,7 @@ S3 Buckets	Buckets de S3
 S3 Connections	Conexiones S3
 S3…	S3…
 Sample data (Natural Earth)	Datos de ejemplo (Natural Earth)
-Sample data © Natural Earth (public domain). RustGIS is licensed under Apache-2.0.	Datos de ejemplo © Natural Earth (dominio público). RustGIS se distribuye bajo la licencia Apache-2.0.
+Sample data © Natural Earth (public domain). HuaGIS is licensed under Apache-2.0.	Datos de ejemplo © Natural Earth (dominio público). HuaGIS se distribuye bajo la licencia Apache-2.0.
 Sample data: Natural Earth (public domain). Licensed under Apache-2.0.	Datos de ejemplo: Natural Earth (dominio público). Con licencia Apache-2.0.
 Sans-serif	Sans-serif
 Satellite Embedding Datasets	Conjuntos de datos de incrustaciones satelitales
@@ -2995,7 +2995,7 @@ Sections	Secciones
 See and set the camera's position and scale.	Ver y establecer la posición y la escala de la cámara.
 See the map as people with colour vision deficiencies do.	Ver el mapa como lo ven las personas con deficiencias en la visión del color.
 See the tools you've run.	Ver las herramientas que ha ejecutado.
-See whether a newer RustGIS has been released.	Comprobar si se ha publicado una versión más reciente de RustGIS.
+See whether a newer HuaGIS has been released.	Comprobar si se ha publicado una versión más reciente de HuaGIS.
 SELECT	SELECT
 Select	Seleccionar
 Select (click)	Seleccionar (clic)
@@ -3193,8 +3193,8 @@ Sign-in timed out. Start again and allow the browser to reach this computer's lo
 signed in	sesión iniciada
 Signed in to {portal}	Sesión iniciada en {portal}
 Signed in to {portal} as {user}	Sesión iniciada en {portal} como {user}
-Signed out on this computer, but OpenAI didn't confirm it. You can disconnect RustGIS in ChatGPT's settings.	Sesión cerrada en este equipo, pero OpenAI no lo confirmó. Puedes desconectar RustGIS en la configuración de ChatGPT.
-Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect RustGIS in ChatGPT's settings.	Sesión cerrada en este equipo, pero no se pudo leer el llavero del sistema, así que no se pidió a OpenAI que terminara la sesión. Puede desconectar RustGIS en la configuración de ChatGPT.
+Signed out on this computer, but OpenAI didn't confirm it. You can disconnect HuaGIS in ChatGPT's settings.	Sesión cerrada en este equipo, pero OpenAI no lo confirmó. Puedes desconectar HuaGIS en la configuración de ChatGPT.
+Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect HuaGIS in ChatGPT's settings.	Sesión cerrada en este equipo, pero no se pudo leer el llavero del sistema, así que no se pidió a OpenAI que terminara la sesión. Puede desconectar HuaGIS en la configuración de ChatGPT.
 Significance level	Nivel de significancia
 Signing in with ChatGPT works in the desktop app.	El inicio de sesión con ChatGPT funciona en la aplicación de escritorio.
 Signing the asset (Planetary Computer)…	Firmando el recurso (Planetary Computer)…
@@ -3443,7 +3443,7 @@ The assistant follows a skill's instructions when it uses it. Whatever they say,
 The assistant is busy; stop it or wait for it to finish.	El asistente está ocupado; deténgalo o espere a que termine.
 The assistant wants to run this, and {why}:	El asistente quiere ejecutar lo siguiente, y {why}:
 The Basemaps plugin's tab of public basemaps.	La pestaña de mapas base públicos del complemento Mapas base.
-The browser didn't give RustGIS the clipboard ({why}): paste with {keys}.	El navegador no dio a RustGIS el portapapeles ({why}): pegue con {keys}.
+The browser didn't give HuaGIS the clipboard ({why}): paste with {keys}.	El navegador no dio a HuaGIS el portapapeles ({why}): pegue con {keys}.
 the capture failed unexpectedly	la captura falló inesperadamente
 The class these label groups and the Labeling pane edit.	La clase que editan estos grupos de etiquetas y el panel Etiquetado.
 The clipboard came after you moved on, so nothing was pasted: paste with {keys}.	El portapapeles llegó cuando ya había pasado a otra cosa, así que no se pegó nada: pegue con {keys}.
@@ -3451,7 +3451,7 @@ The connection failed; trying again in {seconds} s.	La conexión falló; se rein
 the connection has no id	la conexión no tiene id
 The country list couldn't be read ({e}): type a country's code	No se pudo leer la lista de países ({e}): escriba el código de un país
 The current elevation stays in effect while you edit inputs. Click Apply elevation to apply the value and units.	La elevación actual sigue vigente mientras edita los valores. Haga clic en Aplicar elevación para aplicar el valor y las unidades.
-The dataset has nothing RustGIS can add	El conjunto de datos no tiene nada que RustGIS pueda añadir
+The dataset has nothing HuaGIS can add	El conjunto de datos no tiene nada que HuaGIS pueda añadir
 The desktop app adds data cubes	La aplicación de escritorio añade cubos de datos
 The distance between two marks along the line	La distancia entre dos marcas a lo largo de la línea
 The environment (AWS_ACCESS_KEY_ID…)	El entorno (AWS_ACCESS_KEY_ID…)
@@ -3476,14 +3476,14 @@ The layer's fills	Los rellenos de la capa
 The layer's strokes	Los trazos de la capa
 the layout export failed unexpectedly	la exportación del diseño falló inesperadamente
 The link doesn't say its STAC API: Find Items searches {api}	El enlace no indica su STAC API: Buscar ítems busca en {api}
-The list of plugins to browse. Leave it empty for the RustGIS plugin registry.	La lista de complementos que explorar. Déjela vacía para usar el registro de complementos de RustGIS.
+The list of plugins to browse. Leave it empty for the HuaGIS plugin registry.	La lista de complementos que explorar. Déjela vacía para usar el registro de complementos de HuaGIS.
 The map at the left; the title, locator, legend, sources and reference in a panel at the right.	El mapa a la izquierda; el título, el localizador, la leyenda, las fuentes y la referencia en un panel a la derecha.
 the map has no GeoPackage layer loaded for editing (Home › Add Data › Edit GeoPackage Table…)	el mapa no tiene ninguna capa de GeoPackage cargada para editar (Inicio › Añadir datos › Editar tabla de GeoPackage…)
 the map has no layers	el mapa no tiene capas
 the map has no PostGIS layer loaded for editing (Home › Add Data › Database…, Load for editing)	el mapa no tiene ninguna capa PostGIS cargada para editar (Inicio › Añadir datos › Base de datos…, Cargar para editar)
 The map has no tile archive read from a file.	El mapa no tiene ningún archivo de teselas leído de un archivo.
 The map is drawn in this coordinate system; layers are projected on the fly.	El mapa se dibuja en este sistema de coordenadas; las capas se proyectan al vuelo.
-the map isn't on screen in RustGIS (a layout or the catalog is shown), so it was drawn offscreen	el mapa no está en pantalla en RustGIS (se muestra un diseño o el catálogo), así que se dibujó fuera de pantalla
+the map isn't on screen in HuaGIS (a layout or the catalog is shown), so it was drawn offscreen	el mapa no está en pantalla en HuaGIS (se muestra un diseño o el catálogo), así que se dibujó fuera de pantalla
 The map view as it is now	La vista del mapa tal como está ahora
 The map's extent isn't known yet	La extensión del mapa aún no se conoce
 The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	La vista del mapa abarca {n} archivos de {ty} de Overture (hasta {max}): acerque o añada el tema como teselas de mapa
@@ -3551,7 +3551,7 @@ The sign-in is kept in the system keychain, never in the app's settings or a pro
 The sign-in is still kept in the app's settings folder, readable by your user account: the system keychain is unavailable, so it hasn't been moved there yet.	El inicio de sesión sigue guardado en la carpeta de configuración de la aplicación, legible por su cuenta de usuario: el llavero del sistema no está disponible, así que aún no se ha movido allí.
 The significance level is a number, such as 0.05	El nivel de significancia es un número, por ejemplo 0.05
 The start-up project {path} didn't open: {error}	El proyecto de inicio {path} no se abrió: {error}
-The start-up project {path} isn't a RustGIS project file.	El proyecto de inicio {path} no es un archivo de proyecto de RustGIS.
+The start-up project {path} isn't a HuaGIS project file.	El proyecto de inicio {path} no es un archivo de proyecto de HuaGIS.
 The step's layer {name} isn't in the map.	La capa {name} del paso no está en el mapa.
 The store has no variables with two or more dimensions.	El almacén no tiene variables con dos o más dimensiones.
 the store is gone	el almacén ya no existe
@@ -3560,7 +3560,7 @@ The summary failed unexpectedly	El resumen falló de forma inesperada
 The summary finished after another project was opened, so it wasn't added	El resumen terminó después de abrir otro proyecto, así que no se añadió
 The system keychain could not complete the request.	El llavero del sistema no pudo completar la solicitud.
 The system keychain is locked or access was refused.	El llavero del sistema está bloqueado o se denegó el acceso.
-The system keychain is unavailable, so this sign-in won't be remembered: it lasts until RustGIS closes.	El llavero del sistema no está disponible, así que este inicio de sesión no se recordará: dura hasta que RustGIS se cierre.
+The system keychain is unavailable, so this sign-in won't be remembered: it lasts until HuaGIS closes.	El llavero del sistema no está disponible, así que este inicio de sesión no se recordará: dura hasta que HuaGIS se cierre.
 The system keychain is unavailable.	El llavero del sistema no está disponible.
 The task's steps changed, so the step being edited was closed: edit it again.	Los pasos de la tarea cambiaron, así que se cerró el paso que se estaba editando: edítelo de nuevo.
 the time slider is off	el control deslizante de tiempo está desactivado
@@ -3608,7 +3608,7 @@ This map has no layers yet.	Este mapa aún no tiene capas.
 This map's thumbnail, from an image.	La miniatura de este mapa, a partir de una imagen.
 This map's thumbnail, from the view.	La miniatura de este mapa, a partir de la vista.
 This plugin can:	Este complemento puede:
-This plugin runs as a program on your computer, outside RustGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	Este complemento se ejecuta como un programa en su equipo, fuera del entorno aislado de RustGIS. Puede hacer todo lo que usted puede: leer y modificar sus archivos, usar la red y ejecutar otros programas. Instálelo solo si confía en su autor.
+This plugin runs as a program on your computer, outside HuaGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	Este complemento se ejecuta como un programa en su equipo, fuera del entorno aislado de HuaGIS. Puede hacer todo lo que usted puede: leer y modificar sus archivos, usar la red y ejecutar otros programas. Instálelo solo si confía en su autor.
 This request has no one-time allow option.	Esta solicitud no tiene opción de permitir una sola vez.
 This request uses an unsupported capability. Check the parameter and change the request.	Esta solicitud usa una función no compatible. Comprueba el parámetro y modifica la solicitud.
 This result is kept	Este resultado se conserva
@@ -3740,7 +3740,7 @@ unknown (an older project)	desconocido (un proyecto anterior)
 Unknown shortcut binding field.	Campo de asignación de atajo desconocido.
 Unknown shortcut command.	Comando de atajo desconocido.
 UNKNOWN TOOL	HERRAMIENTA DESCONOCIDA
-Unload the GeoLibre tools and stop loading them when RustGIS starts.	Descargar las herramientas de GeoLibre y dejar de cargarlas al iniciar RustGIS.
+Unload the GeoLibre tools and stop loading them when HuaGIS starts.	Descargar las herramientas de GeoLibre y dejar de cargarlas al iniciar HuaGIS.
 Unsaved changes	Cambios sin guardar
 Unsupervised classes (k-means)	Clases no supervisadas (k-means)
 Unsupervised classes (k-means).	Clases no supervisadas (k-means).
@@ -3872,13 +3872,13 @@ Web Tool	Herramienta web
 Website	Sitio web
 Weekly usage	Uso semanal
 Weights	Pesos
-Welcome to RustGIS	Bienvenido a RustGIS
+Welcome to HuaGIS	Bienvenido a HuaGIS
 West	Oeste
 WFS	WFS
 WGS 84 / Globe	WGS 84 / Globo
 WGS 84 / Web Mercator	WGS 84 / Web Mercator
-What RustGIS opens with: the World Atlas sample or a blank map.	Con qué se abre RustGIS: el ejemplo World Atlas o un mapa en blanco.
-What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	Con qué se abre RustGIS: el ejemplo World Atlas, un mapa en blanco, un proyecto que usted elija o el último proyecto abierto o guardado.
+What HuaGIS opens with: the World Atlas sample or a blank map.	Con qué se abre HuaGIS: el ejemplo World Atlas o un mapa en blanco.
+What HuaGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	Con qué se abre HuaGIS: el ejemplo World Atlas, un mapa en blanco, un proyecto que usted elija o el último proyecto abierto o guardado.
 What to do, where to find it and why	Qué hacer, dónde encontrarlo y por qué
 What's near a point	Qué hay cerca de un punto
 When a file holds several layers, choose the ones to add instead of adding them all.	Cuando un archivo contiene varias capas, elegir las que se añaden en lugar de añadirlas todas.

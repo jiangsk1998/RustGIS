@@ -609,10 +609,10 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         )
     } else if app.ui.connection.kind == "s3" {
         tl!(
-            "A named endpoint you can reuse. Keys are kept until RustGIS closes unless you choose to remember them on this computer; the connection itself never keeps them."
+            "A named endpoint you can reuse. Keys are kept until HuaGIS closes unless you choose to remember them on this computer; the connection itself never keeps them."
         )
     } else {
-        tl!("A named endpoint you can reuse. Keys and tokens are kept until RustGIS closes, never saved.")
+        tl!("A named endpoint you can reuse. Keys and tokens are kept until HuaGIS closes, never saved.")
     };
     ui.label(egui::RichText::new(intro).weak());
     let store = app.session.database_logins.has_store();

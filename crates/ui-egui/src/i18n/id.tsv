@@ -60,8 +60,8 @@ A line, or markers or hash marks along it	Garis, atau marker atau tanda garis di
 A magnifying lens that follows the pointer.	Lensa pembesar yang mengikuti penunjuk.
 A map, feature or coverage service's address: WMS, WMTS, WFS, WCS, OGC API Features or Tiles, or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer (or a services directory, to browse).	Alamat layanan peta, fitur, atau coverage: WMS, WMTS, WFS, WCS, OGC API Features atau Tiles, atau ArcGIS FeatureServer, MapServer, ImageServer, atau VectorTileServer (atau direktori layanan, untuk dijelajahi).
 a name, or owner/name such as giswqs/geospatial	nama, atau pemilik/nama seperti giswqs/geospatial
-A named endpoint you can reuse. Keys and tokens are kept until RustGIS closes, never saved.	Endpoint bernama yang dapat Anda gunakan kembali. Kunci dan token disimpan sampai RustGIS ditutup, tidak pernah disimpan permanen.
-A named endpoint you can reuse. Keys are kept until RustGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	Endpoint bernama yang dapat Anda gunakan kembali. Kunci disimpan sampai RustGIS ditutup kecuali Anda memilih untuk mengingatnya di komputer ini; koneksi itu sendiri tidak pernah menyimpannya.
+A named endpoint you can reuse. Keys and tokens are kept until HuaGIS closes, never saved.	Endpoint bernama yang dapat Anda gunakan kembali. Kunci dan token disimpan sampai HuaGIS ditutup, tidak pernah disimpan permanen.
+A named endpoint you can reuse. Keys are kept until HuaGIS closes unless you choose to remember them on this computer; the connection itself never keeps them.	Endpoint bernama yang dapat Anda gunakan kembali. Kunci disimpan sampai HuaGIS ditutup kecuali Anda memilih untuk mengingatnya di komputer ini; koneksi itu sendiri tidak pernah menyimpannya.
 A named endpoint you can reuse. Passwords last for this session unless you choose to remember them in this computer's password store.	Endpoint bernama yang dapat Anda gunakan kembali. Kata sandi berlaku untuk sesi ini kecuali Anda memilih untuk mengingatnya di penyimpanan kata sandi komputer ini.
 A node cannot connect to itself.	Node tidak dapat terhubung ke dirinya sendiri.
 A notebook of text and command cells.	Buku catatan berisi sel teks dan sel perintah.
@@ -98,8 +98,8 @@ A5 Grid	Grid A5
 A5's equal-area pentagonal cells at a resolution, over the map's extent, a layer or the world, as polygons with their ids.	Sel pentagonal luas sama A5 pada suatu resolusi, di atas cakupan peta, sebuah layer, atau seluruh dunia, sebagai poligon beserta id-nya.
 About	Tentang
 About plugins	Tentang plugin
-About RustGIS	Tentang RustGIS
-About RustGIS.	Tentang RustGIS.
+About HuaGIS	Tentang HuaGIS
+About HuaGIS.	Tentang HuaGIS.
 Above	Atas
 Above Left	Kiri Atas
 Above Right	Kanan Atas
@@ -276,7 +276,7 @@ Agent input queue is full or disconnected; stop the agent and try again.	Antrean
 Agent threads	Utas agen
 Agent work	Agent work
 Agents have full access: they may run scripts, tasks, models and plugins. Click to stop the MCP relay	Agen memiliki akses penuh: mereka dapat menjalankan skrip, tugas, model, dan plugin. Klik untuk menghentikan relay MCP
-Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	Agen di komputer ini yang terhubung (Claude Code, Codex, Cursor, dan lainnya) bekerja pada peta yang terbuka di sini dengan alat RustGIS: mereka dapat membuka dan menyimpan file serta menggunakan web. Skrip dan pengelolaan plugin tetap nonaktif.
+Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with HuaGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	Agen di komputer ini yang terhubung (Claude Code, Codex, Cursor, dan lainnya) bekerja pada peta yang terbuka di sini dengan alat HuaGIS: mereka dapat membuka dan menyimpan file serta menggunakan web. Skrip dan pengelolaan plugin tetap nonaktif.
 Agents then run commands, change files and use the web on this computer without asking you.	Agen akan menjalankan perintah, mengubah file, dan menggunakan web di komputer ini tanpa bertanya kepada Anda.
 Aggregate Points to A5	Agregasi Titik ke A5
 Aggregation	Agregasi
@@ -301,7 +301,7 @@ Allow Feature Selection	Izinkan Seleksi Fitur
 Allow only certain combinations of values across fields.	Izinkan hanya kombinasi nilai tertentu di antara kolom.
 Allow such actions for this conversation	Izinkan tindakan seperti ini untuk percakapan ini
 Allow this action?	Izinkan tindakan ini?
-Allow this agent's RustGIS action?	Izinkan tindakan RustGIS dari agen ini?
+Allow this agent's HuaGIS action?	Izinkan tindakan HuaGIS dari agen ini?
 Along lines	Sepanjang garis
 Along Selected Line	Sepanjang Garis Terpilih
 Alt+	Alt+
@@ -313,7 +313,7 @@ Alternating bar	Bilah berselang-seling
 Altitude	Ketinggian
 Always allow	Selalu izinkan
 Amazon S3	Amazon S3
-Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3, atau layanan yang kompatibel dengan S3 (MinIO, Cloudflare R2, Wasabi…) melalui endpoint-nya. Kunci disimpan hingga RustGIS ditutup; koneksi tersimpan menyimpan nama, endpoint, dan wilayahnya, tidak pernah rahasianya.
+Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until HuaGIS closes; a saved connection keeps its name, endpoint and region, never its secret.	Amazon S3, atau layanan yang kompatibel dengan S3 (MinIO, Cloudflare R2, Wasabi…) melalui endpoint-nya. Kunci disimpan hingga HuaGIS ditutup; koneksi tersimpan menyimpan nama, endpoint, dan wilayahnya, tidak pernah rahasianya.
 amenity=cafe, shop	amenity=cafe, shop
 An agent on this computer asks to:	Agen di komputer ini meminta untuk:
 An ArcGIS Online organization's or an ArcGIS Enterprise portal's address; ArcGIS Online when blank	Alamat organisasi ArcGIS Online atau portal ArcGIS Enterprise; ArcGIS Online jika kosong
@@ -363,7 +363,7 @@ Arrange	Atur
 Arrange Element	Atur Elemen
 Arrow	Panah
 Arrowheads	Kepala panah
-Ask a question about your data, or describe what to do with the map. The assistant runs RustGIS commands for you; every change can be undone.	Ajukan pertanyaan tentang data Anda, atau jelaskan apa yang harus dilakukan pada peta. Asisten menjalankan perintah RustGIS untuk Anda; setiap perubahan dapat diurungkan.
+Ask a question about your data, or describe what to do with the map. The assistant runs HuaGIS commands for you; every change can be undone.	Ajukan pertanyaan tentang data Anda, atau jelaskan apa yang harus dilakukan pada peta. Asisten menjalankan perintah HuaGIS untuk Anda; setiap perubahan dapat diurungkan.
 Ask about the map, or tell it what to do…	Tanyakan tentang peta, atau beri tahu apa yang harus dilakukan…
 Ask about your data, or tell the assistant what to do with the map.	Tanyakan tentang data Anda, atau beri tahu asisten apa yang harus dilakukan pada peta.
 Ask Which Layers to Add	Tanyakan Layer yang Ditambahkan
@@ -717,7 +717,7 @@ Color Vision Simulator	Simulator Penglihatan Warna
 Colorbar	Bilah Warna
 Colormap	Peta Warna
 Colors from the raster's own color table.	Warna dari tabel warna raster itu sendiri.
-Colour ramps (RustGIS, QGIS, GDAL, GMT)	Ramp warna (RustGIS, QGIS, GDAL, GMT)
+Colour ramps (HuaGIS, QGIS, GDAL, GMT)	Ramp warna (HuaGIS, QGIS, GDAL, GMT)
 Columns named like longitude/latitude, easting/northing or geometry are picked for you.	Kolom bernama seperti longitude/latitude, easting/northing atau geometry dipilih secara otomatis.
 Combinations from the box above, one per line	Kombinasi dari kotak di atas, satu per baris
 Combines two polygon layers into every piece either covers, with the attributes of both where they overlap.	Menggabungkan dua layer poligon menjadi setiap bagian yang dicakup salah satunya, dengan atribut keduanya di area yang bertampalan.
@@ -924,7 +924,7 @@ Delete selected rows	Hapus baris terpilih
 Delete Style	Hapus Gaya
 Delete Task	Hapus Tugas
 Delete Task Step	Hapus Langkah Tugas
-Delete the GeoLibre runner that RustGIS installed. Install it again at any time.	Hapus runner GeoLibre yang dipasang RustGIS. Pasang lagi kapan saja.
+Delete the GeoLibre runner that HuaGIS installed. Install it again at any time.	Hapus runner GeoLibre yang dipasang HuaGIS. Pasang lagi kapan saja.
 Delete the layout {name}?	Hapus tata letak {name}?
 Delete the map {name}?	Hapus peta {name}?
 Delete the selected features.	Hapus fitur terpilih.
@@ -1136,7 +1136,7 @@ Element Properties	Properti Elemen
 Elevation	Elevasi
 Elevation model	Model elevasi
 Elevation profiles along lines, cross sections and more.	Profil elevasi di sepanjang garis, penampang melintang, dan lainnya.
-Eligible requests in RustGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	Permintaan yang memenuhi syarat di RustGIS menggunakan paket ChatGPT Anda. Anda dapat mengelola penggunaan di pengaturan ChatGPT.
+Eligible requests in HuaGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	Permintaan yang memenuhi syarat di HuaGIS menggunakan paket ChatGPT Anda. Anda dapat mengelola penggunaan di pengaturan ChatGPT.
 Ellipse	Elips
 Embeddings	Embedding
 Ember	Bara
@@ -1329,7 +1329,7 @@ Find and run geoprocessing tools.	Temukan dan jalankan alat geoprosesing.
 Find any command by name (Ctrl+K).	Temukan perintah apa pun berdasarkan nama (Ctrl+K).
 Find Items	Cari Item
 Find Place	Cari Tempat
-Find plugins in the RustGIS plugin registry.	Temukan plugin di registri plugin RustGIS.
+Find plugins in the HuaGIS plugin registry.	Temukan plugin di registri plugin HuaGIS.
 Find Similar	Cari yang Mirip
 Find Tools	Cari Alat
 Finding routes…	Mencari rute…
@@ -1363,14 +1363,14 @@ Folder…	Folder…
 Follow the time slider	Ikuti penggeser waktu
 Font	Fon
 for a store that doesn't say	untuk penyimpanan yang tidak menyebutkannya
-For ArcGIS Online, the client ID is RustGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	Untuk ArcGIS Online, ID klien adalah aplikasi milik RustGIS. Untuk portal ArcGIS Enterprise, daftarkan aplikasi OAuth di portal tersebut (Content › New item › Developer credentials) dengan URL pengalihan {redirect}, lalu berikan ID kliennya.
+For ArcGIS Online, the client ID is HuaGIS's own app. For an ArcGIS Enterprise portal, register an OAuth app on it (Content › New item › Developer credentials) whose redirect URL is {redirect}, and give its client ID.	Untuk ArcGIS Online, ID klien adalah aplikasi milik HuaGIS. Untuk portal ArcGIS Enterprise, daftarkan aplikasi OAuth di portal tersebut (Content › New item › Developer credentials) dengan URL pengalihan {redirect}, lalu berikan ID kliennya.
 for the layers that change with time, as they list their times (2024-06-01, 1995)	untuk layer yang berubah menurut waktu, sesuai waktu yang didaftarkannya (2024-06-01, 1995)
 Forest	Hutan
 Forget Earthdata Login Token	Lupakan Token Earthdata Login
 Forget Saved Keys	Lupakan Kunci Tersimpan
 Forget Saved Password	Lupakan Kata Sandi Tersimpan
 Format	Format
-Found: {names}. An agent works on this map through RustGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › RustGIS › Agent work. It asks you before each action.	Ditemukan: {names}. Agen bekerja pada peta ini dengan alat RustGIS dan alatnya sendiri (web, skrip, file), di folder miliknya yang disimpan di Dokumen › RustGIS › Agent work. Agen meminta izin Anda sebelum setiap tindakan.
+Found: {names}. An agent works on this map through HuaGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › HuaGIS › Agent work. It asks you before each action.	Ditemukan: {names}. Agen bekerja pada peta ini dengan alat HuaGIS dan alatnya sendiri (web, skrip, file), di folder miliknya yang disimpan di Dokumen › HuaGIS › Agent work. Agen meminta izin Anda sebelum setiap tindakan.
 Frame rate	Laju bingkai
 Frame rate, draw time, data size and memory.	Laju bingkai, waktu gambar, ukuran data, dan memori.
 France	Prancis
@@ -1534,7 +1534,7 @@ host=localhost dbname=gis user=postgres	host=localhost dbname=gis user=postgres
 host=… dbname=… user=…	host=… dbname=… user=…
 Hosted Imagery	Citra Terhosting
 Hour	Jam
-How often RustGIS keeps a copy of unsaved work, to offer it back after a crash.	Seberapa sering RustGIS menyimpan salinan pekerjaan yang belum disimpan, untuk ditawarkan kembali setelah crash.
+How often HuaGIS keeps a copy of unsaved work, to offer it back after a crash.	Seberapa sering HuaGIS menyimpan salinan pekerjaan yang belum disimpan, untuk ditawarkan kembali setelah crash.
 How the layer's colours combine with the tile layers and basemap beneath.	Cara warna layer berpadu dengan layer ubin dan peta dasar di bawahnya.
 How the layer's colours combine with what's beneath.	Cara warna layer berpadu dengan yang ada di bawahnya.
 HUB Ocean's Ocean Data Platform: marine datasets, read as features (up to 10,000 each).	Ocean Data Platform dari HUB Ocean: dataset kelautan, dibaca sebagai fitur (masing-masing hingga 10.000).
@@ -1601,7 +1601,7 @@ In memory	Di memori
 In Progress	Sedang Berjalan
 in progress	sedang berjalan
 In project	Dalam proyek
-In RustGIS, it can:	Di RustGIS, plugin ini dapat:
+In HuaGIS, it can:	Di HuaGIS, plugin ini dapat:
 In the browser, pick the .shp and .dbf together, with any sidecars, or pick a ZIP. The override applies to every Shapefile in the ZIP.	Di browser, pilih .shp dan .dbf sekaligus beserta file pendampingnya, atau pilih ZIP. Penggantian berlaku untuk setiap Shapefile di dalam ZIP.
 In the coordinate system's units: metres for UTM.	Dalam satuan sistem koordinat: meter untuk UTM.
 In the middle	Di tengah
@@ -1689,7 +1689,7 @@ Item Pop-ups	Pop-up Item
 Item {id}	Item {id}
 its default	nilai bawaannya
 Its default: {default}. Its times: {times}	Bawaannya: {default}. Waktunya: {times}
-Its firewall ({firewall}) blocked RustGIS. The service may only allow some applications: contact its administrator and send them the details below.	Firewall-nya ({firewall}) memblokir RustGIS. Layanan ini mungkin hanya mengizinkan beberapa aplikasi: hubungi administratornya dan kirimkan detail di bawah.
+Its firewall ({firewall}) blocked HuaGIS. The service may only allow some applications: contact its administrator and send them the details below.	Firewall-nya ({firewall}) memblokir HuaGIS. Layanan ini mungkin hanya mengizinkan beberapa aplikasi: hubungi administratornya dan kirimkan detail di bawah.
 Its tool isn't available now (a plugin's, not loaded, or a suite's, not installed)	Alatnya tidak tersedia sekarang (milik plugin yang tidak dimuat, atau milik suite yang tidak dipasang)
 Jobs	Pekerjaan
 JOIN	JOIN
@@ -1719,7 +1719,7 @@ Keep Tool	Pertahankan Alat
 Keep value	Simpan nilai
 Keeps the access key ID and secret access key in this computer's credential store, never in the connection or the project.	Menyimpan ID kunci akses dan kunci akses rahasia di penyimpanan kredensial komputer ini, tidak pernah di koneksi atau proyek.
 Keeps the parts of two polygon layers that only one of them covers, with that layer's attributes.	Menyimpan bagian dua layer poligon yang hanya dicakup salah satunya, dengan atribut layer tersebut.
-Keeps the token in the system's credential store, so it is there when RustGIS starts again. Unticked, a token remembered before is deleted when you save another.	Menyimpan token di penyimpanan kredensial sistem, sehingga tetap ada saat RustGIS dimulai lagi. Jika tidak dicentang, token yang diingat sebelumnya dihapus saat Anda menyimpan token lain.
+Keeps the token in the system's credential store, so it is there when HuaGIS starts again. Unticked, a token remembered before is deleted when you save another.	Menyimpan token di penyimpanan kredensial sistem, sehingga tetap ada saat HuaGIS dimulai lagi. Jika tidak dicentang, token yang diingat sebelumnya dihapus saat Anda menyimpan token lain.
 Kernel Density	Kepadatan Kernel
 Kernel Type	Jenis Kernel
 Key	Key
@@ -1800,7 +1800,7 @@ Legend label. Clear it to show the value again.	Label legenda. Kosongkan untuk m
 Length	Panjang
 Length {length} · gain {gain} · loss {loss}	Panjang {length} · naik {gain} · turun {loss}
 Let the assistant hand tasks to agents on this computer	Izinkan asisten menyerahkan tugas ke agen di komputer ini
-Let your Agents Control RustGIS	Biarkan agen Anda mengendalikan RustGIS
+Let your Agents Control HuaGIS	Biarkan agen Anda mengendalikan HuaGIS
 Letter spacing	Spasi huruf
 Level	Tingkat
 Library	Pustaka
@@ -1856,7 +1856,7 @@ List The National Map Services	Daftar Layanan The National Map
 List the provider's models	Tampilkan daftar model penyedia
 List this layer in the legend	Cantumkan layer ini di legenda
 List what it holds	Daftar isinya
-Listed for discovery: RustGIS doesn't read this dataset yet. Its data and paper are linked above.	Dicantumkan untuk penemuan: RustGIS belum dapat membaca dataset ini. Data dan makalahnya ditautkan di atas.
+Listed for discovery: HuaGIS doesn't read this dataset yet. Its data and paper are linked above.	Dicantumkan untuk penemuan: HuaGIS belum dapat membaca dataset ini. Data dan makalahnya ditautkan di atas.
 Listing datasets…	Mendaftar dataset…
 Listing…	Membuat daftar…
 Lit	Terang
@@ -1901,7 +1901,7 @@ Look for {name}, outlined on the ribbon.	Cari {name}, yang diberi garis tepi di 
 Looking up the place…	Mencari tempat…
 Loop	Ulang
 Lower Priority	Prioritas Lebih Rendah
-Made in RustGIS: samples, drawings and tool outputs	Dibuat di RustGIS: sampel, gambar, dan keluaran alat
+Made in HuaGIS: samples, drawings and tool outputs	Dibuat di HuaGIS: sampel, gambar, dan keluaran alat
 Magnifier	Kaca Pembesar
 Major Lakes	Danau Utama
 Major Rivers	Sungai Utama
@@ -2157,7 +2157,7 @@ no command	tidak ada perintah
 No data at the points picked.	Tidak ada data di titik yang dipilih.
 No data cube matches	Tidak ada kubus data yang cocok
 No datasets match.	Tidak ada dataset yang cocok.
-No datasets with data RustGIS can add	Tidak ada dataset dengan data yang dapat ditambahkan RustGIS
+No datasets with data HuaGIS can add	Tidak ada dataset dengan data yang dapat ditambahkan HuaGIS
 no date in the name	tidak ada tanggal di nama
 no download service	tidak ada layanan unduhan
 No edits since the project was saved	Tidak ada suntingan sejak proyek disimpan
@@ -2219,8 +2219,8 @@ North Polar Stereographic	Stereografis Kutub Utara
 NOT	NOT
 Not a GeoLibre project	Bukan proyek GeoLibre
 not a picture	bukan gambar
-not a RustGIS layout	bukan tata letak RustGIS
-not a RustGIS project	bukan proyek RustGIS
+not a HuaGIS layout	bukan tata letak HuaGIS
+not a HuaGIS project	bukan proyek HuaGIS
 Not applied yet.	Belum diterapkan.
 Not for texts: a text is edited in the Format pane.	Bukan untuk teks: teks diedit di panel Format.
 not needed	tidak diperlukan
@@ -2291,7 +2291,7 @@ Open a Data Cube	Buka Kubus Data
 open a layout first	buka tata letak terlebih dahulu
 Open a model file (*.model.json)	Buka file model (*.model.json)
 Open a model of this project	Buka model dari proyek ini
-Open a RustGIS or Jupyter notebook.	Buka notebook RustGIS atau Jupyter.
+Open a HuaGIS or Jupyter notebook.	Buka notebook HuaGIS atau Jupyter.
 Open an offline area to edit.	Buka area offline untuk disunting.
 Open browser again	Buka browser lagi
 Open Custom Template	Buka Templat Kustom
@@ -2318,7 +2318,7 @@ Open the layer's attribute table.	Buka tabel atribut layer.
 Open the layer's table.	Buka tabel layer.
 Open the plugin's panel.	Buka panel plugin.
 Open the Release Page	Buka Halaman Rilis
-Open the RustGIS user guide.	Buka panduan pengguna RustGIS.
+Open the HuaGIS user guide.	Buka panduan pengguna HuaGIS.
 Open the selected layer's table.	Buka tabel layer terpilih.
 Open the Symbology pane.	Buka panel Simbologi.
 Open the task's steps	Buka langkah-langkah tugas
@@ -2494,7 +2494,7 @@ Plugin registry	Registri plugin
 Plugins	Plugin
 Plugins are .rgplugin files. Install only plugins from people you trust.	Plugin adalah file .rgplugin. Pasang hanya plugin dari orang yang Anda percaya.
 Plugins marked Not sandboxed run as programs on your computer instead, and can do anything you can.	Plugin bertanda "Tanpa sandbox" berjalan sebagai program di komputer Anda dan dapat melakukan apa pun yang dapat Anda lakukan.
-Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through RustGIS's own commands, within the permissions you accept.	Plugin berjalan di sandbox: plugin tidak dapat mengakses file Anda atau jaringan, dan hanya mengubah proyek melalui perintah RustGIS sendiri, dalam batas izin yang Anda setujui.
+Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through HuaGIS's own commands, within the permissions you accept.	Plugin berjalan di sandbox: plugin tidak dapat mengakses file Anda atau jaringan, dan hanya mengubah proyek melalui perintah HuaGIS sendiri, dalam batas izin yang Anda setujui.
 PMTiles archive	Arsip PMTiles
 PNG frames (zip)	Bingkai PNG (zip)
 PNG image	Gambar PNG
@@ -2571,7 +2571,7 @@ Project Template	Templat Proyek
 project's path is required	path project wajib diisi
 Projection	Proyeksi
 Projections	Proyeksi
-Projects and JSON data (RustGIS, QGIS, GeoLibre)	Proyek dan data JSON (RustGIS, QGIS, GeoLibre)
+Projects and JSON data (HuaGIS, QGIS, GeoLibre)	Proyek dan data JSON (HuaGIS, QGIS, GeoLibre)
 Properties	Properti
 Property	Properti
 Proportional Symbols	Simbol Proporsional
@@ -2632,7 +2632,7 @@ Read error	Galat baca
 Read the bands picked for the view (at most about 6 km a side)	Baca band yang dipilih untuk tampilan (paling banyak sekitar 6 km per sisi)
 Read the map's layers and features	Membaca layer dan fitur peta
 Read the points in the view, coloured by their principal components	Baca titik di tampilan, diwarnai menurut komponen utamanya
-Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	Membaca file granule memerlukan token Earthdata Login, yang berlaku untuk setiap DAAC NASA. Token disimpan hingga RustGIS ditutup kecuali Anda mencentang Ingat, tidak pernah di dalam proyek, dan hanya dikirim ke server data Earthdata NASA.
+Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until HuaGIS closes unless you tick Remember, never in the project, and sent only to NASA's Earthdata data servers.	Membaca file granule memerlukan token Earthdata Login, yang berlaku untuk setiap DAAC NASA. Token disimpan hingga HuaGIS ditutup kecuali Anda mencentang Ingat, tidak pernah di dalam proyek, dan hanya dikirim ke server data Earthdata NASA.
 Reading the catalog: {n} documents read, {m} items found…	Membaca katalog: {n} dokumen dibaca, {m} item ditemukan…
 Reading the catalog…	Membaca katalog…
 Reading the embeddings…	Membaca embedding…
@@ -2817,32 +2817,32 @@ Run Tool	Jalankan Alat
 Run {name}	Jalankan {name}
 Running the query for the map…	Menjalankan kueri untuk peta…
 Running…	Berjalan…
-RustGIS	RustGIS
-RustGIS bookmarks	Penanda RustGIS
-RustGIS could not confirm that any previously saved key was deleted from the system keychain.	RustGIS tidak dapat memastikan bahwa kunci yang disimpan sebelumnya telah dihapus dari keychain sistem.
-RustGIS couldn't reach the server.	RustGIS tidak dapat menjangkau server.
-RustGIS deep learning package	Paket deep learning RustGIS
-RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	RustGIS tidak ditutup dengan benar terakhir kali, jadi RustGIS dimulai dengan World Atlas, bukan proyek awal Anda. Buka proyek dari menu Proyek saat Anda siap.
-RustGIS didn't close properly last time.	RustGIS tidak ditutup dengan benar terakhir kali.
-RustGIS doesn't have this tool. Install the tools it comes from, or delete the node.	RustGIS tidak memiliki alat ini. Instal alat asalnya, atau hapus node ini.
-RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	RustGIS adalah SIG bebas dan sumber terbuka yang ditulis dalam Rust murni. Aplikasi ini berjalan di desktop dan di peramban, dan setiap tindakan adalah perintah yang juga dapat Anda jalankan dari baris perintah.
-RustGIS layer file	File layer RustGIS
-RustGIS layers, maps and projects	Layer, peta, dan proyek RustGIS
-RustGIS layout	Tata letak RustGIS
-RustGIS maps and projects	Peta dan proyek RustGIS
-RustGIS model	Model RustGIS
-RustGIS or Jupyter notebook	Notebook RustGIS atau Jupyter
-RustGIS plugin	Plugin RustGIS
-RustGIS presentation	Presentasi RustGIS
-RustGIS project	Proyek RustGIS
-RustGIS project template	Templat proyek RustGIS
-RustGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	RustGIS mengalami kesalahan internal terakhir kali. Detailnya ada di {path}; lampirkan ke laporan bug.
-RustGIS report or report template	Laporan atau templat laporan RustGIS
-RustGIS styles	Gaya RustGIS
-RustGIS task	Tugas RustGIS
-RustGIS was quit last time without saving your changes.	RustGIS ditutup terakhir kali tanpa menyimpan perubahan Anda.
-RustGIS {latest} is available.	RustGIS {latest} tersedia.
-RustGIS {version} is the latest version.	RustGIS {version} adalah versi terbaru.
+HuaGIS	HuaGIS
+HuaGIS bookmarks	Penanda HuaGIS
+HuaGIS could not confirm that any previously saved key was deleted from the system keychain.	HuaGIS tidak dapat memastikan bahwa kunci yang disimpan sebelumnya telah dihapus dari keychain sistem.
+HuaGIS couldn't reach the server.	HuaGIS tidak dapat menjangkau server.
+HuaGIS deep learning package	Paket deep learning HuaGIS
+HuaGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	HuaGIS tidak ditutup dengan benar terakhir kali, jadi HuaGIS dimulai dengan World Atlas, bukan proyek awal Anda. Buka proyek dari menu Proyek saat Anda siap.
+HuaGIS didn't close properly last time.	HuaGIS tidak ditutup dengan benar terakhir kali.
+HuaGIS doesn't have this tool. Install the tools it comes from, or delete the node.	HuaGIS tidak memiliki alat ini. Instal alat asalnya, atau hapus node ini.
+HuaGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	HuaGIS adalah SIG bebas dan sumber terbuka yang ditulis dalam Rust murni. Aplikasi ini berjalan di desktop dan di peramban, dan setiap tindakan adalah perintah yang juga dapat Anda jalankan dari baris perintah.
+HuaGIS layer file	File layer HuaGIS
+HuaGIS layers, maps and projects	Layer, peta, dan proyek HuaGIS
+HuaGIS layout	Tata letak HuaGIS
+HuaGIS maps and projects	Peta dan proyek HuaGIS
+HuaGIS model	Model HuaGIS
+HuaGIS or Jupyter notebook	Notebook HuaGIS atau Jupyter
+HuaGIS plugin	Plugin HuaGIS
+HuaGIS presentation	Presentasi HuaGIS
+HuaGIS project	Proyek HuaGIS
+HuaGIS project template	Templat proyek HuaGIS
+HuaGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	HuaGIS mengalami kesalahan internal terakhir kali. Detailnya ada di {path}; lampirkan ke laporan bug.
+HuaGIS report or report template	Laporan atau templat laporan HuaGIS
+HuaGIS styles	Gaya HuaGIS
+HuaGIS task	Tugas HuaGIS
+HuaGIS was quit last time without saving your changes.	HuaGIS ditutup terakhir kali tanpa menyimpan perubahan Anda.
+HuaGIS {latest} is available.	HuaGIS {latest} tersedia.
+HuaGIS {version} is the latest version.	HuaGIS {version} adalah versi terbaru.
 RUSTGIS_ASSISTANT_MODEL	RUSTGIS_ASSISTANT_MODEL
 RUSTGIS_ASSISTANT_PROVIDER	RUSTGIS_ASSISTANT_PROVIDER
 RUSTGIS_GPU	RUSTGIS_GPU
@@ -2851,7 +2851,7 @@ S3 Buckets	Bucket S3
 S3 Connections	Koneksi S3
 S3…	S3…
 Sample data (Natural Earth)	Data contoh (Natural Earth)
-Sample data © Natural Earth (public domain). RustGIS is licensed under Apache-2.0.	Data contoh © Natural Earth (domain publik). RustGIS dilisensikan di bawah Apache-2.0.
+Sample data © Natural Earth (public domain). HuaGIS is licensed under Apache-2.0.	Data contoh © Natural Earth (domain publik). HuaGIS dilisensikan di bawah Apache-2.0.
 Sample data: Natural Earth (public domain). Licensed under Apache-2.0.	Data contoh: Natural Earth (domain publik). Dilisensikan di bawah Apache-2.0.
 Sans-serif	Sans-serif
 Satellite Embedding Datasets	Dataset Embedding Satelit
@@ -2995,7 +2995,7 @@ Sections	Bagian
 See and set the camera's position and scale.	Lihat dan atur posisi serta skala kamera.
 See the map as people with colour vision deficiencies do.	Lihat peta seperti yang dilihat penyandang gangguan penglihatan warna.
 See the tools you've run.	Lihat alat yang telah Anda jalankan.
-See whether a newer RustGIS has been released.	Periksa apakah RustGIS yang lebih baru telah dirilis.
+See whether a newer HuaGIS has been released.	Periksa apakah HuaGIS yang lebih baru telah dirilis.
 SELECT	SELECT
 Select	Pilih
 Select (click)	Pilih (klik)
@@ -3193,8 +3193,8 @@ Sign-in timed out. Start again and allow the browser to reach this computer's lo
 signed in	sudah masuk
 Signed in to {portal}	Sudah masuk ke {portal}
 Signed in to {portal} as {user}	Sudah masuk ke {portal} sebagai {user}
-Signed out on this computer, but OpenAI didn't confirm it. You can disconnect RustGIS in ChatGPT's settings.	Keluar di komputer ini, tetapi OpenAI tidak mengonfirmasinya. Anda dapat memutus RustGIS di pengaturan ChatGPT.
-Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect RustGIS in ChatGPT's settings.	Keluar di komputer ini, tetapi gantungan kunci sistem tidak dapat dibaca, jadi OpenAI tidak diminta mengakhiri sesi. Anda dapat memutus RustGIS di pengaturan ChatGPT.
+Signed out on this computer, but OpenAI didn't confirm it. You can disconnect HuaGIS in ChatGPT's settings.	Keluar di komputer ini, tetapi OpenAI tidak mengonfirmasinya. Anda dapat memutus HuaGIS di pengaturan ChatGPT.
+Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect HuaGIS in ChatGPT's settings.	Keluar di komputer ini, tetapi gantungan kunci sistem tidak dapat dibaca, jadi OpenAI tidak diminta mengakhiri sesi. Anda dapat memutus HuaGIS di pengaturan ChatGPT.
 Significance level	Tingkat signifikansi
 Signing in with ChatGPT works in the desktop app.	Masuk dengan ChatGPT berfungsi di aplikasi desktop.
 Signing the asset (Planetary Computer)…	Menandatangani aset (Planetary Computer)…
@@ -3443,7 +3443,7 @@ The assistant follows a skill's instructions when it uses it. Whatever they say,
 The assistant is busy; stop it or wait for it to finish.	Asisten sedang sibuk; hentikan atau tunggu hingga selesai.
 The assistant wants to run this, and {why}:	Asisten ingin menjalankan tindakan berikut, yang {why}:
 The Basemaps plugin's tab of public basemaps.	Tab peta dasar publik dari plugin Peta dasar.
-The browser didn't give RustGIS the clipboard ({why}): paste with {keys}.	Peramban tidak memberikan papan klip kepada RustGIS ({why}): tempel dengan {keys}.
+The browser didn't give HuaGIS the clipboard ({why}): paste with {keys}.	Peramban tidak memberikan papan klip kepada HuaGIS ({why}): tempel dengan {keys}.
 the capture failed unexpectedly	penangkapan gagal secara tak terduga
 The class these label groups and the Labeling pane edit.	Kelas yang diedit oleh grup label ini dan panel Pelabelan.
 The clipboard came after you moved on, so nothing was pasted: paste with {keys}.	Papan klip datang setelah Anda beralih, jadi tidak ada yang ditempel: tempel dengan {keys}.
@@ -3451,7 +3451,7 @@ The connection failed; trying again in {seconds} s.	Koneksi gagal; mencoba lagi 
 the connection has no id	koneksi tidak memiliki id
 The country list couldn't be read ({e}): type a country's code	Daftar negara tidak dapat dibaca ({e}): ketik kode negara
 The current elevation stays in effect while you edit inputs. Click Apply elevation to apply the value and units.	Elevasi saat ini tetap berlaku selama Anda mengedit masukan. Klik Terapkan elevasi untuk menerapkan nilai dan satuannya.
-The dataset has nothing RustGIS can add	Dataset ini tidak berisi apa pun yang dapat ditambahkan RustGIS
+The dataset has nothing HuaGIS can add	Dataset ini tidak berisi apa pun yang dapat ditambahkan HuaGIS
 The desktop app adds data cubes	Aplikasi desktop menambahkan kubus data
 The distance between two marks along the line	Jarak antara dua tanda di sepanjang garis
 The environment (AWS_ACCESS_KEY_ID…)	Lingkungan (AWS_ACCESS_KEY_ID…)
@@ -3476,14 +3476,14 @@ The layer's fills	Isian layer
 The layer's strokes	Goresan layer
 the layout export failed unexpectedly	ekspor tata letak gagal secara tak terduga
 The link doesn't say its STAC API: Find Items searches {api}	Tautan tidak menyebutkan STAC API-nya: Cari Item mencari di {api}
-The list of plugins to browse. Leave it empty for the RustGIS plugin registry.	Daftar plugin untuk dijelajahi. Biarkan kosong untuk registri plugin RustGIS.
+The list of plugins to browse. Leave it empty for the HuaGIS plugin registry.	Daftar plugin untuk dijelajahi. Biarkan kosong untuk registri plugin HuaGIS.
 The map at the left; the title, locator, legend, sources and reference in a panel at the right.	Peta di kiri; judul, lokator, legenda, sumber, dan referensi dalam panel di kanan.
 the map has no GeoPackage layer loaded for editing (Home › Add Data › Edit GeoPackage Table…)	peta tidak memiliki layer GeoPackage yang dimuat untuk penyuntingan (Beranda › Tambah Data › Edit Tabel GeoPackage…)
 the map has no layers	peta tidak memiliki layer
 the map has no PostGIS layer loaded for editing (Home › Add Data › Database…, Load for editing)	peta tidak memiliki layer PostGIS yang dimuat untuk penyuntingan (Beranda › Tambah Data › Basis Data…, Muat untuk penyuntingan)
 The map has no tile archive read from a file.	Peta tidak memiliki arsip ubin yang dibaca dari file.
 The map is drawn in this coordinate system; layers are projected on the fly.	Peta digambar dalam sistem koordinat ini; lapisan diproyeksikan secara langsung.
-the map isn't on screen in RustGIS (a layout or the catalog is shown), so it was drawn offscreen	peta tidak tampil di layar RustGIS (tata letak atau katalog sedang ditampilkan), sehingga digambar di luar layar
+the map isn't on screen in HuaGIS (a layout or the catalog is shown), so it was drawn offscreen	peta tidak tampil di layar HuaGIS (tata letak atau katalog sedang ditampilkan), sehingga digambar di luar layar
 The map view as it is now	Tampilan peta seperti sekarang
 The map's extent isn't known yet	Cakupan peta belum diketahui
 The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	Tampilan peta mencakup {n} file {ty} Overture (maksimum {max}): perbesar, atau tambahkan tema sebagai ubin peta
@@ -3551,7 +3551,7 @@ The sign-in is kept in the system keychain, never in the app's settings or a pro
 The sign-in is still kept in the app's settings folder, readable by your user account: the system keychain is unavailable, so it hasn't been moved there yet.	Info masuk masih disimpan di folder pengaturan aplikasi, dapat dibaca oleh akun pengguna Anda: gantungan kunci sistem tidak tersedia, jadi belum dipindahkan ke sana.
 The significance level is a number, such as 0.05	Tingkat signifikansi berupa angka, misalnya 0.05
 The start-up project {path} didn't open: {error}	Proyek awal {path} tidak dapat dibuka: {error}
-The start-up project {path} isn't a RustGIS project file.	Proyek awal {path} bukan file proyek RustGIS.
+The start-up project {path} isn't a HuaGIS project file.	Proyek awal {path} bukan file proyek HuaGIS.
 The step's layer {name} isn't in the map.	Layer langkah ini, {name}, tidak ada di peta.
 The store has no variables with two or more dimensions.	Penyimpanan tidak memiliki variabel dengan dua dimensi atau lebih.
 the store is gone	penyimpanan sudah tidak ada
@@ -3560,7 +3560,7 @@ The summary failed unexpectedly	Ringkasan gagal secara tak terduga
 The summary finished after another project was opened, so it wasn't added	Ringkasan selesai setelah proyek lain dibuka, sehingga tidak ditambahkan
 The system keychain could not complete the request.	Keychain sistem tidak dapat menyelesaikan permintaan.
 The system keychain is locked or access was refused.	Keychain sistem terkunci atau akses ditolak.
-The system keychain is unavailable, so this sign-in won't be remembered: it lasts until RustGIS closes.	Gantungan kunci sistem tidak tersedia, jadi info masuk ini tidak akan diingat: berlaku hingga RustGIS ditutup.
+The system keychain is unavailable, so this sign-in won't be remembered: it lasts until HuaGIS closes.	Gantungan kunci sistem tidak tersedia, jadi info masuk ini tidak akan diingat: berlaku hingga HuaGIS ditutup.
 The system keychain is unavailable.	Keychain sistem tidak tersedia.
 The task's steps changed, so the step being edited was closed: edit it again.	Langkah tugas berubah, jadi langkah yang sedang diedit ditutup: edit lagi.
 the time slider is off	penggeser waktu nonaktif
@@ -3608,7 +3608,7 @@ This map has no layers yet.	Peta ini belum memiliki layer.
 This map's thumbnail, from an image.	Thumbnail peta ini, dari sebuah gambar.
 This map's thumbnail, from the view.	Thumbnail peta ini, dari tampilan.
 This plugin can:	Plugin ini dapat:
-This plugin runs as a program on your computer, outside RustGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	Plugin ini berjalan sebagai program di komputer Anda, di luar sandbox RustGIS. Plugin ini dapat melakukan apa pun yang dapat Anda lakukan: membaca dan mengubah file Anda, menggunakan jaringan, dan menjalankan program lain. Pasang hanya jika Anda memercayai pembuatnya.
+This plugin runs as a program on your computer, outside HuaGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	Plugin ini berjalan sebagai program di komputer Anda, di luar sandbox HuaGIS. Plugin ini dapat melakukan apa pun yang dapat Anda lakukan: membaca dan mengubah file Anda, menggunakan jaringan, dan menjalankan program lain. Pasang hanya jika Anda memercayai pembuatnya.
 This request has no one-time allow option.	Permintaan ini tidak memiliki opsi izinkan sekali.
 This request uses an unsupported capability. Check the parameter and change the request.	Permintaan ini menggunakan kemampuan yang tidak didukung. Periksa parameter dan ubah permintaan.
 This result is kept	Hasil ini disimpan
@@ -3740,7 +3740,7 @@ unknown (an older project)	tidak diketahui (proyek lama)
 Unknown shortcut binding field.	Bidang penetapan pintasan tidak dikenal.
 Unknown shortcut command.	Perintah pintasan tidak dikenal.
 UNKNOWN TOOL	ALAT TIDAK DIKENAL
-Unload the GeoLibre tools and stop loading them when RustGIS starts.	Lepas alat GeoLibre dan berhenti memuatnya saat RustGIS dimulai.
+Unload the GeoLibre tools and stop loading them when HuaGIS starts.	Lepas alat GeoLibre dan berhenti memuatnya saat HuaGIS dimulai.
 Unsaved changes	Perubahan belum disimpan
 Unsupervised classes (k-means)	Kelas tak terbimbing (k-means)
 Unsupervised classes (k-means).	Kelas tak terbimbing (k-means).
@@ -3872,13 +3872,13 @@ Web Tool	Alat Web
 Website	Situs web
 Weekly usage	Penggunaan mingguan
 Weights	Bobot
-Welcome to RustGIS	Selamat datang di RustGIS
+Welcome to HuaGIS	Selamat datang di HuaGIS
 West	Barat
 WFS	WFS
 WGS 84 / Globe	WGS 84 / Globe
 WGS 84 / Web Mercator	WGS 84 / Web Mercator
-What RustGIS opens with: the World Atlas sample or a blank map.	Apa yang dibuka RustGIS: contoh World Atlas atau peta kosong.
-What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	Apa yang dibuka RustGIS: contoh World Atlas, peta kosong, proyek yang Anda pilih, atau proyek terakhir yang dibuka atau disimpan.
+What HuaGIS opens with: the World Atlas sample or a blank map.	Apa yang dibuka HuaGIS: contoh World Atlas atau peta kosong.
+What HuaGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	Apa yang dibuka HuaGIS: contoh World Atlas, peta kosong, proyek yang Anda pilih, atau proyek terakhir yang dibuka atau disimpan.
 What to do, where to find it and why	Apa yang dilakukan, di mana menemukannya, dan mengapa
 What's near a point	Apa yang ada di dekat suatu titik
 When a file holds several layers, choose the ones to add instead of adding them all.	Jika file berisi beberapa layer, pilih yang akan ditambahkan alih-alih menambahkan semuanya.

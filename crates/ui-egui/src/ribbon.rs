@@ -1318,16 +1318,7 @@ fn notebook_group(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Notebook", |ui| {
         big(ui, app, "python", "New\nNotebook", "A notebook of text and command cells.", "ui.newNotebook", Value::Null, false, false);
         col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "open",
-                "Add and Open",
-                "Open a RustGIS or Jupyter notebook.",
-                "ui.openItem",
-                json!({"kind": "notebook"}),
-                false,
-            );
+            small(ui, app, "open", "Add and Open", "Open a HuaGIS or Jupyter notebook.", "ui.openItem", json!({"kind": "notebook"}), false);
             small(
                 ui,
                 app,
@@ -3256,7 +3247,7 @@ fn plugins_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 app,
                 "search",
                 "Browse Plugins",
-                "Find plugins in the RustGIS plugin registry.",
+                "Find plugins in the HuaGIS plugin registry.",
                 "ui.plugins",
                 json!({"open": true, "tab": "browse"}),
                 false,
@@ -3514,7 +3505,7 @@ fn autosave_interval(minutes: u32) -> String {
 fn autosave_menu(app: &mut RustGisApp, ui: &mut Ui) {
     let minutes = app.autosave.minutes;
     let label = format!("{}\n{}", tl!("Autosave"), autosave_interval(minutes));
-    let tip = "How often RustGIS keeps a copy of unsaved work, to offer it back after a crash.";
+    let tip = "How often HuaGIS keeps a copy of unsaved work, to offer it back after a crash.";
     big_menu(ui, app, "save", &label, tip, move |ui, app| {
         for m in crate::autosave::CHOICES {
             if ui.add(egui::Button::selectable(minutes == m, autosave_interval(m))).clicked() {
@@ -3544,9 +3535,9 @@ fn start_project_menu(app: &mut RustGisApp, ui: &mut Ui) {
     let label = format!("{}\n{current}", tl!("Start With"));
     let files = app.opens_files();
     let tip = if files {
-        "What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved."
+        "What HuaGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved."
     } else {
-        "What RustGIS opens with: the World Atlas sample or a blank map."
+        "What HuaGIS opens with: the World Atlas sample or a blank map."
     };
     big_menu(ui, app, "map", &label, tip, move |ui, app| {
         for (w, name) in [(StartWith::Sample, tl!("World Atlas")), (StartWith::Blank, tl!("Blank Map"))] {
@@ -3576,7 +3567,7 @@ fn start_project_menu(app: &mut RustGisApp, ui: &mut Ui) {
         let item = if chosen.is_empty() { item } else { item.on_hover_text(chosen) };
         if item.clicked() {
             ui.close();
-            if let Some(path) = crate::dialogs::pick_open(&["rgis", "rgisx"], tl!("RustGIS project"))
+            if let Some(path) = crate::dialogs::pick_open(&["rgis", "rgisx"], tl!("HuaGIS project"))
                 && let Err(e) = app.run("ui.startup", json!({"project": {"path": path}}))
             {
                 app.session.notify(e, true);
@@ -3669,17 +3660,17 @@ fn help_tab(app: &mut RustGisApp, ui: &mut Ui) {
         );
     });
     group(ui, "Learn", |ui| {
-        big(ui, app, "help", "Learning\nResources", "Open the RustGIS user guide.", "ui.learn", Value::Null, false, false);
+        big(ui, app, "help", "Learning\nResources", "Open the HuaGIS user guide.", "ui.learn", Value::Null, false, false);
     });
     group(ui, "Help", |ui| {
-        big(ui, app, "help", "About", "About RustGIS.", "ui.about", Value::Null, false, false);
+        big(ui, app, "help", "About", "About HuaGIS.", "ui.about", Value::Null, false, false);
         if !cfg!(target_arch = "wasm32") {
             big(
                 ui,
                 app,
                 "update",
                 "Check for\nUpdates",
-                "See whether a newer RustGIS has been released.",
+                "See whether a newer HuaGIS has been released.",
                 "ui.checkUpdate",
                 Value::Null,
                 false,
