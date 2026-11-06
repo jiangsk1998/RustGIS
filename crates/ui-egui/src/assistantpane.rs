@@ -2016,9 +2016,7 @@ fn transcript(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, ctx: &egui::Context
         }
         return;
     }
-    let mut go_on = false;
-    let last = agent.transcript.len().saturating_sub(1);
-    for (i, e) in agent.transcript.iter().enumerate() {
+    for e in agent.transcript.iter() {
         match e {
             Entry::User(text) => {
                 ui.add_space(6.0);
@@ -2056,10 +2054,6 @@ fn transcript(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, ctx: &egui::Context
             Entry::Note(n) => {
                 let args: Vec<(&str, &str)> = n.args.iter().map(|(k, v)| (*k, v.as_str())).collect();
                 ui.label(RichText::new(crate::i18n::fmt(n.template, &args)).small().italics().color(t.text_dim));
-                // At the step limit, the note offers to go on without typing the word.
-                if i == last && n.template == provider::STEP_LIMIT_NOTE && ui.button(tl!("Continue")).clicked() {
-                    go_on = true;
-                }
             }
             // A picture the model was sent: its thumbnail, and what it is.
             Entry::Image { summary, data } => {
@@ -2084,9 +2078,6 @@ fn transcript(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, ctx: &egui::Context
             ui.spinner();
             ui.label(RichText::new(tl!("Thinking…")).small().color(t.text_dim));
         });
-    }
-    if go_on && !app.assistant.agent.as_ref().is_some_and(Agent::busy) {
-        send(app, "continue".to_string(), ctx);
     }
 }
 

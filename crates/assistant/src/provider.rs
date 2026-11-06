@@ -632,9 +632,6 @@ impl Note {
     }
 }
 
-/// The note that says the run reached [`crate::agent::MAX_STEPS`]: the interface offers to go on.
-pub const STEP_LIMIT_NOTE: &str = "Stopped after {steps} steps; say \"continue\" to go on.";
-
 /// Every [`Note`] template RustGIS writes (the interface's catalogs translate each).
 pub const NOTE_TEMPLATES: &[&str] = &[
     "The reply reached its length limit.",
@@ -649,7 +646,6 @@ pub const NOTE_TEMPLATES: &[&str] = &[
     "The provider returned HTTP {status}; trying again in {seconds} s.",
     "The connection failed; trying again in {seconds} s.",
     "The model sent an empty reply; ask again, or try another model.",
-    STEP_LIMIT_NOTE,
     "Stopped.",
     "The model refused the pictures as too large; shrank them to {side} pixels a side and trying again.",
     "The model can't take pictures; only their descriptions were sent. Choose a model with vision to have it read them.",

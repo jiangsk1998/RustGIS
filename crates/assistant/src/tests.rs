@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use rustgis_engine::{Project, Session};
 use serde_json::{Value, json};
 
-use crate::agent::{Agent, Entry, INTERNAL_ERROR, MAX_RETRIES, MAX_STEPS, Step, run_blocking};
+use crate::agent::{Agent, Entry, INTERNAL_ERROR, MAX_RETRIES, Step, run_blocking};
 use crate::chatgpt;
 use crate::provider::*;
 use crate::tools;
@@ -873,22 +873,23 @@ fn gemini_format() {
 }
 
 #[test]
-fn steps_are_bounded_and_stop_works() {
+fn a_long_run_is_not_capped_and_stop_works() {
     let mut s = sample();
     let mut a = Agent::new(cfg("openai"), &s);
     let mut n = 0;
     run_blocking(
         &mut a,
-        "loop forever",
+        "work through a batch",
         &mut s,
         |_| {
             n += 1;
-            ok(call(&format!("c{n}"), "list_layers", json!({})))
+            // Past the forty steps a run used to be cut off at: only the model's own end stops it.
+            if n < 60 { ok(call(&format!("c{n}"), "list_layers", json!({}))) } else { ok(say("done")) }
         },
         |_, _, _| true,
     );
-    assert_eq!(n, MAX_STEPS as usize);
-    assert!(matches!(a.transcript.last(), Some(Entry::Note(_))));
+    assert_eq!(n, 60);
+    assert!(!a.transcript.iter().any(|e| matches!(e, Entry::Note(_))));
     // A stale response (after a stop) is dropped.
     let Step::Send(_) = a.ask("again", &s) else { panic!("expected a request") };
     let g = a.generation();

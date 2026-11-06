@@ -8,9 +8,6 @@ use crate::provider::{self, Config, HttpRequest, HttpResponse, Note, ToolCall, T
 use crate::{acp, compact, skills, tools};
 use rustgis_engine::Session;
 
-/// Model requests per user message before the agent stops and reports back.
-pub const MAX_STEPS: u32 = 40;
-
 /// What the main assistant is told about subagents, after RustGIS's own instructions.
 const DELEGATE_PROMPT: &str = "\n\nSubagents: hand multi-step work whose details needn't stay in this conversation (exploring a \
 dataset, a chain of geoprocessing steps, a layout) to a subagent with delegate, giving it a complete task; its short \
@@ -28,7 +25,6 @@ then end with a short report of what you did and found (layer names, numbers, id
 all the main assistant sees. Don't ask questions; where something is unclear, make a sensible choice and say which.";
 
 /// Retries per provider request (see [`provider::retry_delay`]), reset after an accepted response.
-/// This is not a whole-conversation/run allowance; [`MAX_STEPS`] separately bounds a user run.
 pub const MAX_RETRIES: u32 = 3;
 
 /// What the caller does next.
@@ -92,7 +88,6 @@ pub struct Agent {
     turns: Vec<Turn>,
     pub transcript: Vec<Entry>,
     state: State,
-    steps: u32,
     /// The map context last given to the model (sent again only when it changes).
     last_context: String,
     /// Goes up when a run is stopped or cleared: responses to older requests are dropped.
@@ -134,8 +129,6 @@ pub struct Agent {
     allowed: Vec<String>,
     /// The agents on this computer the model may delegate to ([`acp`]).
     harnesses: Vec<&'static acp::AgentSpec>,
-    /// Model requests left for this message (a subagent shares its parent's budget).
-    max_steps: u32,
     /// Agent threads on this computer, working or waiting for a follow-up.
     threads: Vec<Thread>,
     threads_started: u32,
@@ -182,7 +175,6 @@ impl Agent {
             turns: Vec::new(),
             transcript: Vec::new(),
             state: State::Idle,
-            steps: 0,
             last_context: String::new(),
             generation: 0,
             always: Vec::new(),
@@ -207,7 +199,6 @@ impl Agent {
             threads_started: 0,
             delegations: Vec::new(),
             reports: Vec::new(),
-            max_steps: MAX_STEPS,
             pending_images: Vec::new(),
             pending_image_texts: Vec::new(),
             pending_thumbs: Vec::new(),
@@ -296,7 +287,6 @@ impl Agent {
                 }
                 _ => a.turns.push(Turn::User(message)),
             }
-            a.steps = 0;
             a.retries = 0;
             a.overflow_compacted = false;
             a.send()
@@ -312,8 +302,6 @@ impl Agent {
         child.always = self.always.clone();
         child.no_reasoning = self.no_reasoning.clone();
         child.image_sides = self.image_sides.clone();
-        // The budget is the main assistant's: what's left of it for this message.
-        child.max_steps = self.max_steps.saturating_sub(self.steps).max(1);
         child.base_system = system_prompt(s) + SUBAGENT_PROMPT;
         child.set_skills(self.skills.clone());
         child
@@ -459,7 +447,6 @@ impl Agent {
         self.turns.clear();
         self.transcript.clear();
         self.state = State::Idle;
-        self.steps = 0;
         self.last_context.clear();
         self.always.clear();
         self.retries = 0;
@@ -517,7 +504,6 @@ impl Agent {
             }
             _ => self.turns.push(Turn::User(message)),
         }
-        self.steps = 0;
         self.retries = 0;
         self.overflow_compacted = false;
         self.send()
@@ -920,11 +906,6 @@ impl Agent {
             let images = std::mem::take(&mut self.pending_images);
             self.turns.push(Turn::Image { text, images });
         }
-        self.steps += 1;
-        if self.steps >= self.max_steps {
-            self.transcript.push(Entry::Note(Note::with(provider::STEP_LIMIT_NOTE, [("steps", self.max_steps.to_string())])));
-            return Step::Done;
-        }
         self.send()
     }
 
@@ -1054,8 +1035,7 @@ impl Agent {
             return step;
         }
         let Some(child) = self.child.take() else { return Step::Done };
-        // Its steps count against this message's budget; its "always" approvals stay.
-        self.steps = self.steps.saturating_add(child.steps);
+        // Its "always" approvals stay.
         for key in &child.always {
             if !self.always.contains(key) {
                 self.always.push(key.clone());
