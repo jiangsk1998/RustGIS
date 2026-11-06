@@ -1046,9 +1046,13 @@ fn zonal_stats(s: &mut Session, p: &Value) -> CmdResult {
     run_tool(s, "zonalStats", p)
 }
 
-/// Runs a (built-in) tool and applies its result, as `gp.run` does.
+/// Runs a (built-in) tool and applies its result, as `gp.run` does. Where a person at a terminal
+/// can stop it with Ctrl-C ([`Session::stoppable`](crate::Session::stoppable)), it takes no work
+/// cap ([`rustgis_analysis::control::Control::stoppable`]).
 pub fn run_tool(s: &mut Session, tool: &str, params: &Value) -> CmdResult {
-    run_tool_with(s, tool, params, &rustgis_analysis::control::Control::new())
+    use rustgis_analysis::control::Control;
+    let control = if s.stoppable { Control::stoppable() } else { Control::new() };
+    run_tool_with(s, tool, params, &control)
 }
 
 /// [`run_tool`] under `control`: setting its flag from another thread stops the tool at its next
@@ -1139,7 +1143,7 @@ fn file_delivered(s: &mut Session, p: &Value) -> CmdResult {
         s.notify(message.clone(), !file.record.ok);
     }
     let out = json!({"file": file.file_name, "delivered": file.record.ok, "messages": file.record.messages});
-    s.project.gp_history.push(file.record);
+    s.project.gp_history.push(file.record.scrubbed());
     if s.project.gp_history.len() > 500 {
         s.project.gp_history.remove(0);
     }
@@ -1231,17 +1235,10 @@ fn apply(s: &mut Session, ran: Ran, params: Value, res: Result<rustgis_analysis:
     let at = started / 1000;
     let mut result = match res {
         Err(e) => {
-            s.project.gp_history.push(GpRecord {
-                tool: name,
-                id,
-                params,
-                command,
-                at,
-                ok: false,
-                messages: vec![e.clone()],
-                millis,
-                outputs: Vec::new(),
-            });
+            s.project.gp_history.push(
+                GpRecord { tool: name, id, params, command, at, ok: false, messages: vec![e.clone()], millis, outputs: Vec::new() }
+                    .scrubbed(),
+            );
             return Err(e);
         }
         Ok(r) => r,
@@ -1263,17 +1260,10 @@ fn apply(s: &mut Session, ran: Ran, params: Value, res: Result<rustgis_analysis:
                 if let Err(error) = write_file_output(s, std::path::Path::new(path), &bytes) {
                     let error = format!("{path}: {error}");
                     result.messages.push(error.clone());
-                    s.project.gp_history.push(GpRecord {
-                        tool: name,
-                        id,
-                        params,
-                        command,
-                        at,
-                        ok: false,
-                        messages: result.messages,
-                        millis,
-                        outputs: Vec::new(),
-                    });
+                    s.project.gp_history.push(
+                        GpRecord { tool: name, id, params, command, at, ok: false, messages: result.messages, millis, outputs: Vec::new() }
+                            .scrubbed(),
+                    );
                     return Err(error);
                 }
                 json!({"file": path, "bytes": bytes.len()})
@@ -1354,7 +1344,9 @@ fn apply(s: &mut Session, ran: Ran, params: Value, res: Result<rustgis_analysis:
         _ => Vec::new(),
     };
     let outputs = ids.iter().filter_map(|id| s.map().layer(*id).map(|l| l.name.clone())).collect();
-    s.project.gp_history.push(GpRecord { tool: name, id, params, command, at, ok: true, messages: result.messages, millis, outputs });
+    s.project
+        .gp_history
+        .push(GpRecord { tool: name, id, params, command, at, ok: true, messages: result.messages, millis, outputs }.scrubbed());
     if s.project.gp_history.len() > 500 {
         s.project.gp_history.remove(0);
     }

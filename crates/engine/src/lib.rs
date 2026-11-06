@@ -18,6 +18,7 @@ pub mod s3_keys;
 #[cfg(test)]
 mod s3_saved_tests;
 pub mod sample;
+pub mod service_logins;
 pub mod sources;
 #[cfg(test)]
 mod tests;
@@ -36,6 +37,9 @@ use rustgis_map::{Camera, Map};
 use serde_json::Value;
 
 pub type CmdResult = Result<Value, String>;
+
+/// A download that landed read already: its layer, and what reading it skipped or noticed.
+pub(crate) type LandedRead = Box<(rustgis_data::Dataset, rustgis_data::ReadReport)>;
 
 /// A command.
 #[derive(Clone, Copy)]
@@ -291,6 +295,9 @@ pub enum Tool {
     CreatePolygon,
     /// Moves, inserts and deletes the vertices of the selected features.
     EditVertices,
+    /// Drags a layer's label to where it should be (`labels.move`), as QGIS's Move Label tool;
+    /// dragging anything else pans the map.
+    MoveLabel,
     /// Draws a line across the selected polygons to cut them (`edit.cutPolygon`).
     CutPolygon,
     /// Draws a line across the selected feature's boundary to reshape it (`edit.reshape`).
@@ -329,6 +336,7 @@ impl Tool {
             Tool::CreateLine => "createLine",
             Tool::CreatePolygon => "createPolygon",
             Tool::EditVertices => "editVertices",
+            Tool::MoveLabel => "moveLabel",
             Tool::CutPolygon => "cutPolygon",
             Tool::Reshape => "reshape",
             Tool::Graphic(shape) => GRAPHIC_TOOLS.iter().find(|g| g.0 == shape).map_or("graphicPoint", |g| g.1),
@@ -351,6 +359,7 @@ impl Tool {
             Tool::CreateLine,
             Tool::CreatePolygon,
             Tool::EditVertices,
+            Tool::MoveLabel,
             Tool::CutPolygon,
             Tool::Reshape,
         ]
@@ -371,6 +380,7 @@ impl Tool {
             Tool::CreateLine => "Create Line",
             Tool::CreatePolygon => "Create Polygon",
             Tool::EditVertices => "Edit Vertices",
+            Tool::MoveLabel => "Move Label",
             Tool::CutPolygon => "Cut Polygon",
             Tool::Reshape => "Reshape",
             Tool::Graphic(shape) => GRAPHIC_TOOLS.iter().find(|g| g.0 == shape).map_or("Point", |g| g.2),
@@ -411,6 +421,17 @@ pub struct GpRecord {
     pub outputs: Vec<String>,
 }
 
+impl GpRecord {
+    /// The record with its messages scrubbed of login bindings and secrets: a tool's error can
+    /// quote a bound address, and history rows are saved with the project and exported.
+    pub(crate) fn scrubbed(mut self) -> Self {
+        for message in &mut self.messages {
+            *message = render::rustgis_tiles::logins::scrub(message);
+        }
+        self
+    }
+}
+
 fn is_zero(v: &u64) -> bool {
     *v == 0
 }
@@ -430,6 +451,8 @@ pub struct TopologyIssue {
 pub struct Notice {
     pub text: String,
     pub error: bool,
+    /// How the troubleshooting history files it (an error, a warning or information).
+    pub(crate) severity: rustgis_data::diagnostics::Severity,
 }
 
 const UNDO_LIMIT: usize = 40;
@@ -492,10 +515,11 @@ struct PutAside {
     plugin_runs: Vec<cmd::gp::StartedRun>,
     downloading: Vec<u64>,
     downloaded: Vec<(u64, Vec<u8>)>,
+    landed_reads: Vec<(u64, LandedRead)>,
     url_requests: Vec<serde_json::Value>,
     plugin_retries: Vec<cmd::plugins::fetch::Retry>,
     /// A style of the project still loading, which mustn't move the next one's view.
-    style_view: Option<(String, Camera)>,
+    style_view: Option<(rustgis_map::TileLayer, Camera, u64)>,
     #[cfg(not(target_arch = "wasm32"))]
     sql_results: Vec<(u64, String, Option<String>, rustgis_data::source::duckdb::Output)>,
     trend_results: Vec<(u64, Vec<rustgis_data::raster::Raster>, usize)>,
@@ -538,6 +562,9 @@ pub struct Session {
     /// and login requests. S3 uses the same store through `DatabaseLogins::secret_store`.
     /// Never saved; see [`connections::DatabaseLogins`].
     pub database_logins: connections::DatabaseLogins,
+    /// The web-service logins this session made the ones sent to an origin, which the process's
+    /// fetches share: they end with it (see [`service_logins`]).
+    pub(crate) web_logins: service_logins::SessionLogins,
     /// How rasters added from now on are drawn (`raster.setDefaultStyle`; kept with the app's
     /// preferences, not the project).
     pub raster_defaults: rustgis_map::RasterDefaults,
@@ -562,10 +589,10 @@ pub struct Session {
     layer_selection_of: Option<u32>,
     /// Map view size in logical points (set by the UI each frame).
     pub view_size: (f64, f64),
-    /// A MapLibre style tile layer (by its address) whose own view the map goes to once it loads
-    /// (`map.addTiles` with `"view": true`), or a PMTiles archive whose bounds it goes to, and the
-    /// camera then: moved since, the map stays.
-    pub style_view: Option<(String, Camera)>,
+    /// A MapLibre style tile layer (the added layer snapshot) whose own view the map goes to once it loads
+    /// (`map.addTiles` with `"view": true`), or a PMTiles/MBTiles archive whose bounds it goes to, and the
+    /// camera and owning map instance then: moved or switched since, the map stays.
+    pub style_view: Option<(rustgis_map::TileLayer, Camera, u64)>,
     pub notices: Vec<Notice>,
     /// Troubleshooting history, independent of the active pane, project files and undo.
     pub diagnostics: rustgis_data::diagnostics::History,
@@ -614,6 +641,10 @@ pub struct Session {
     /// A notebook is running: it may not start another, even through a task or model (no
     /// unbounded recursion).
     pub(crate) notebook_running: bool,
+    /// How many commands are running other commands as their steps by calling them directly
+    /// (a script's lines, a plugin's host calls): what those steps do is the script's, not the
+    /// user's own move, so a Zarr step they move to is read before the next line runs.
+    pub(crate) steps_running: u32,
     /// How many geoprocessing history records came with the opened project (from its file).
     pub history_from_file: usize,
     /// The report open in the Report pane, if any.
@@ -638,9 +669,9 @@ pub struct Session {
     /// What the project replaced during the command running held beside itself, to give back if
     /// the command fails ([`PutAside`]); and how deep commands run within commands now.
     put_aside: Option<Box<PutAside>>,
-    depth: u32,
+    pub(crate) depth: u32,
     /// Only the command's registered id, never its parameters. Nested commands restore this.
-    diagnostic_source: Option<&'static str>,
+    pub(crate) diagnostic_source: Option<&'static str>,
     /// How many of the commands running now restore the project if they fail: a replacement is
     /// put aside only under one of them, as only then can it be rolled back.
     restorable: u32,
@@ -674,6 +705,9 @@ pub struct Session {
     downloading: Vec<u64>,
     /// Downloads that landed, waiting for `layer.addDownload`.
     pub(crate) downloaded: Vec<(u64, Vec<u8>)>,
+    /// Downloads that landed already read (an ArcGIS layer's protocol buffer pages, joined),
+    /// waiting for `layer.addDownload` too.
+    pub(crate) landed_reads: Vec<(u64, LandedRead)>,
     /// Downloads a command asked for where nothing may wait (the browser): the parameters of
     /// `layer.addUrl` calls, for the front end to fetch and add (see [`Session::take_url_requests`]).
     pub(crate) url_requests: Vec<serde_json::Value>,
@@ -709,6 +743,21 @@ pub struct Session {
     /// one succeeds) through this. Python leaves it unset: a run there holds the interpreter's
     /// lock and can't be interrupted, so it keeps the Script pane's bounds.
     pub long_runs: Option<fn(&str, f64)>,
+    /// Zarr layers that follow the time slider read a step not read yet on a thread of their
+    /// own, showing the step before until it lands (the desktop app; see
+    /// [`Session::follow_time_landed`]). Off, as for scripts and the command line, a slider move
+    /// waits for the step.
+    pub zarr_off_frame: bool,
+    /// The Zarr steps landed that [`Session::follow_time_landed`] has seen.
+    zarr_seen: u64,
+    /// A read the app made on a thread of its own for the command it runs next, which takes it
+    /// instead of reading again ([`cmd::reads`]).
+    pub(crate) read_ahead: Option<cmd::reads::Read>,
+    /// Set where a person at a terminal waits on a command (`rustgis-cli run` with stdin and
+    /// stderr a terminal), who can stop it with Ctrl-C: tools and rasters take no work cap
+    /// ([`rustgis_analysis::control::Control::stoppable`]). A program that calls it (an agent, a
+    /// CI job) may wait with a timeout, so there they keep their caps.
+    pub stoppable: bool,
 }
 
 /// The most `layer.addUrl` requests kept for the front end at a time.
@@ -801,21 +850,25 @@ fn fresh_source_ids(before: &Project, after: &mut Project) {
 
 /// A lock names each label by its feature's id, and [`rustgis_data::Dataset::push`] hands the
 /// largest id out again once its feature is deleted: the new feature would take the lock's place
-/// without having been placed (#1135). So a command that removes features removes their entries,
+/// without having been placed (#1135). Saved moved-label positions have the same identity rule.
+/// So a command that removes features removes their locks, line anchors and saved moves,
 /// whichever way it removes them. Undo brings them back with the rest of the project. A streamed
 /// layer holds only the window in view, so its other features aren't gone. It compares ids, so an
 /// id a single command both removes and hands out stays locked: only restoring from an archive can.
-fn forget_locks_of_removed_features(before: &Project, after: &mut Project) {
+/// A command that removes a layer removes its locks and line anchors too, or each frame would read
+/// them for nothing.
+fn forget_label_state_of_removed_features(before: &Project, after: &mut Project) {
     for (i, m) in after.maps.iter_mut().enumerate() {
         let was = before.maps.get(i).filter(|o| o.name == m.name);
-        let Some(lock) = m.label_lock.as_mut() else { continue };
-        for l in m.layers.iter().filter(|l| !l.is_streamed()) {
+        for l in m.layers.iter_mut().filter(|l| !l.is_streamed()) {
             if was.and_then(|o| o.layers.iter().find(|o| o.id == l.id)).is_some_and(|o| o.dataset.features.shares(&l.dataset.features)) {
                 continue;
             }
-            // The lock's ids for this layer, less those it still has: sized by the lock, not the layer.
-            let mut gone: std::collections::HashSet<u64> =
-                lock.iter().filter(|((layer, ..), _)| *layer == l.id).map(|((_, id, ..), _)| *id).collect();
+            // Bound the lookup by saved label state, not the feature count. Off-window ids stay put.
+            let mut gone: std::collections::HashSet<u64> = l.labels.in_order().flat_map(|c| c.moved.iter().map(|m| m.id)).collect();
+            if let Some(lock) = &m.label_lock {
+                gone.extend(lock.iter().filter(|((layer, ..), _)| *layer == l.id).map(|((_, id, ..), _)| *id));
+            }
             if gone.is_empty() {
                 continue;
             }
@@ -825,8 +878,19 @@ fn forget_locks_of_removed_features(before: &Project, after: &mut Project) {
                     break;
                 }
             }
-            lock.retain(|((layer, id, ..), _)| *layer != l.id || !gone.contains(id));
+            for c in std::iter::once(&mut l.labels.default).chain(l.labels.classes.iter_mut()) {
+                c.moved.retain(|entry| !gone.contains(&entry.id));
+            }
+            if let Some(lock) = &mut m.label_lock {
+                lock.retain(|((layer, id, ..), _)| *layer != l.id || !gone.contains(id));
+            }
+            m.label_lock_line_anchors.retain(|(layer, id, ..), _| *layer != l.id || !gone.contains(id));
         }
+        let kept: std::collections::HashSet<u32> = m.layers.iter().map(|l| l.id).collect();
+        if let Some(lock) = &mut m.label_lock {
+            lock.retain(|((layer, ..), _)| kept.contains(layer));
+        }
+        m.label_lock_line_anchors.retain(|(layer, ..), _| kept.contains(layer));
     }
 }
 
@@ -844,7 +908,7 @@ fn edits_features(id: &str) -> bool {
 }
 
 impl Session {
-    pub fn new(project: Project) -> Self {
+    pub fn new(mut project: Project) -> Self {
         // The engine's tests never add Shapefile indexes to the user's cache (#1230).
         #[cfg(all(test, not(target_arch = "wasm32")))]
         rustgis_data::source::shp::use_temporary_index_dir();
@@ -857,7 +921,8 @@ impl Session {
         rustgis_data::diagnostics::set_clock(|| {
             web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
         });
-        Session {
+        let label_notices = std::mem::take(&mut project.label_read_notices);
+        let mut session = Session {
             project,
             path: None,
             log: project_log::SessionLog::default(),
@@ -871,6 +936,7 @@ impl Session {
             s3_bindings: std::collections::BTreeMap::new(),
             s3_pending: Vec::new(),
             database_logins: connections::DatabaseLogins::default(),
+            web_logins: service_logins::SessionLogins::new(),
             raster_defaults: rustgis_map::RasterDefaults::default(),
             layout_favourite: serde_json::Value::String("classic".into()),
             registry: Registry { commands: cmd::all() },
@@ -898,6 +964,7 @@ impl Session {
             project_starts: 0,
             trusted_notebooks: Default::default(),
             notebook_running: false,
+            steps_running: 0,
             history_from_file: 0,
             active_report: None,
             active_presentation: None,
@@ -929,6 +996,7 @@ impl Session {
             plugin_panels: std::collections::BTreeMap::new(),
             downloading: Vec::new(),
             downloaded: Vec::new(),
+            landed_reads: Vec::new(),
             url_requests: Vec::new(),
             file_outputs: Vec::new(),
             #[cfg(test)]
@@ -944,7 +1012,15 @@ impl Session {
             raster_results: Vec::new(),
             raster_runs: Vec::new(),
             long_runs: None,
+            zarr_off_frame: false,
+            zarr_seen: 0,
+            read_ahead: None,
+            stoppable: false,
+        };
+        for text in label_notices {
+            session.notify(text, false);
         }
+        session
     }
 
     /// Keeps a query's result the app ran off the frame, for `layer.addSql {"ran": id}`, with the
@@ -977,9 +1053,29 @@ impl Session {
     /// Hands over a download's bytes, for `layer.addDownload {"id"}`; `false` when it was dropped
     /// (another project was opened meanwhile).
     pub fn download_landed(&mut self, id: u64, bytes: Vec<u8>) -> bool {
+        let landed = self.landed(id);
+        if landed {
+            self.downloaded.push((id, bytes));
+        }
+        landed
+    }
+
+    /// Hands over a download read already (an ArcGIS layer's protocol buffer pages, joined, see
+    /// [`ogc::Step::Decoded`](rustgis_data::ogc::Step::Decoded)), for `layer.addDownload {"id"}`
+    /// as [`Session::download_landed`] does.
+    pub fn download_landed_read(&mut self, id: u64, dataset: rustgis_data::Dataset, report: rustgis_data::ReadReport) -> bool {
+        let landed = self.landed(id);
+        if landed {
+            self.landed_reads.push((id, Box::new((dataset, report))));
+        }
+        landed
+    }
+
+    /// Takes a download off those under way: `false` when it isn't one of them (another project
+    /// was opened meanwhile).
+    fn landed(&mut self, id: u64) -> bool {
         let Some(i) = self.downloading.iter().position(|d| *d == id) else { return false };
         self.downloading.remove(i);
-        self.downloaded.push((id, bytes));
         true
     }
 
@@ -1003,11 +1099,17 @@ impl Session {
     /// requests the next is refused rather than silently dropping one already promised.
     pub fn request_url(&mut self, p: &serde_json::Value) -> Result<serde_json::Value, String> {
         let url = p.get("url").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-        if !self.url_requests.iter().any(|q| q == p) {
+        // The front end runs the queued request after the plugin's anonymous scope has ended.
+        // Keep its opt-out through probes, whole-file fallbacks and the eventual addDownload.
+        let mut p = std::borrow::Cow::Borrowed(p);
+        if self.web_logins.is_anonymous() {
+            p.to_mut().as_object_mut().ok_or("download parameters must be an object")?.insert("anonymous".into(), serde_json::json!(true));
+        }
+        if !self.url_requests.iter().any(|q| q == p.as_ref()) {
             if self.url_requests.len() >= MAX_URL_REQUESTS {
                 return Err(format!("{url}: {MAX_URL_REQUESTS} downloads are already waiting; try again when they have landed"));
             }
-            self.url_requests.push(p.clone());
+            self.url_requests.push(p.into_owned());
         }
         self.request_only = true;
         Ok(serde_json::json!({"pending": true, "url": url}))
@@ -1045,6 +1147,28 @@ impl Session {
     }
     pub fn map_mut(&mut self) -> &mut Map {
         self.project.map_mut()
+    }
+
+    /// Whether a Zarr layer on the active map that follows the time slider is waiting for its
+    /// step to be read off the frame ([`Session::zarr_off_frame`]): playing holds its next step.
+    pub fn zarr_waiting(&self) -> bool {
+        self.zarr_off_frame && cmd::zarr::waiting(self)
+    }
+
+    /// Drops a read placed for a command ([`cmd::reads::Read::placed`]) that the command didn't
+    /// take: one refused before it read, or that read another way.
+    pub fn drop_read(&mut self) {
+        self.read_ahead = None;
+    }
+
+    /// Shows the Zarr steps read off the frame ([`Session::zarr_off_frame`]) once they land: the
+    /// app asks each frame. True when one landed, so the map draws again.
+    pub fn follow_time_landed(&mut self) -> bool {
+        if !cmd::zarr::landed_since(&mut self.zarr_seen) {
+            return false;
+        }
+        cmd::zarr::follow_time(self);
+        true
     }
 
     /// Moves the map to the view of a style added with `"view": true` once the style has loaded,
@@ -1121,7 +1245,7 @@ impl Session {
             }
             // A refused command is said once, without secrets, as the front ends show it.
             if let Err(error) = &res {
-                let text = rustgis_data::diagnostics::Redacted::new(error);
+                let text = Session::redacted(error);
                 if !self.notices_since(notice_mark).iter().any(|notice| notice.error && notice.text == text.as_str()) {
                     self.notify_redacted(text, true);
                 }
@@ -1186,7 +1310,22 @@ impl Session {
             return Err(e);
         }
         self.merge = merge;
-        let res = self.guarded(label, mutates, |s| run(s, params));
+        // A layer added from a saved web-service connection records it, inside the command's step.
+        let res = self.guarded(label, mutates, |s| {
+            let add = |s: &mut Session| {
+                let before = service_logins::before(s, id, params)?;
+                let out = run(s, params)?;
+                if let Some(before) = before {
+                    service_logins::tag(s, params, before, &out)?;
+                }
+                Ok(out)
+            };
+            if matches!(id, "layer.addUrl" | "layer.addDownload") && params.get("anonymous").and_then(Value::as_bool) == Some(true) {
+                service_logins::anonymously(s, true, add).unwrap_or_else(|_| Err(format!("{label} failed unexpectedly")))
+            } else {
+                add(s)
+            }
+        });
         if id == "layer.addDownload"
             && res.is_ok()
             && let Some(token) = params.get("geolibreLayer").and_then(|v| v.get("token")).and_then(serde_json::Value::as_str)
@@ -1199,7 +1338,8 @@ impl Session {
         {
             self.sources.note(src);
         }
-        res
+        // An error never quotes a web-service connection's password or key.
+        res.map_err(|e| render::rustgis_tiles::logins::scrub(&e))
     }
 
     /// Retires only this consumed reservation, preserving unrelated pending imports in history.
@@ -1269,7 +1409,7 @@ impl Session {
             (Ok(_), Some(_)) if std::mem::take(&mut self.request_only) => {}
             (Ok(_), Some(mut snap)) => {
                 fresh_source_ids(&snap, &mut self.project);
-                forget_locks_of_removed_features(&snap, &mut self.project);
+                forget_label_state_of_removed_features(&snap, &mut self.project);
                 // An edit may change the dates the time slider's window filters on: bound layers
                 // whose features or fields the command changed (features are shared with the
                 // snapshot until written) take the window again.
@@ -1351,7 +1491,7 @@ impl Session {
                     .skip(history_from)
                     .filter(|record| !record.ok && rustgis_analysis::tool(&record.id).is_some_and(cmd::gp::writes_files))
                 {
-                    self.project.gp_history.push(record);
+                    self.project.gp_history.push(record.scrubbed());
                     recorded_failure = true;
                 }
                 if recorded_failure {
@@ -1435,6 +1575,7 @@ impl Session {
             plugin_runs: take(&mut self.plugin_runs),
             downloading: take(&mut self.downloading),
             downloaded: take(&mut self.downloaded),
+            landed_reads: take(&mut self.landed_reads),
             url_requests: take(&mut self.url_requests),
             plugin_retries: take(&mut self.plugin_retries),
             style_view: self.style_view.take(),
@@ -1485,6 +1626,7 @@ impl Session {
             plugin_runs,
             downloading,
             downloaded,
+            landed_reads,
             url_requests,
             plugin_retries,
             style_view,
@@ -1509,6 +1651,7 @@ impl Session {
         (self.pending, self.plugin_runs, self.plugin_retries) = (pending, plugin_runs, plugin_retries);
         self.file_outputs = file_outputs;
         (self.downloading, self.downloaded, self.url_requests) = (downloading, downloaded, url_requests);
+        self.landed_reads = landed_reads;
         (self.trend_results, self.raster_results, self.raster_runs) = (trend_results, raster_results, raster_runs);
         #[cfg(feature = "geolibre")]
         {
@@ -1532,14 +1675,24 @@ impl Session {
     }
 
     fn notice(&mut self, text: String, severity: rustgis_data::diagnostics::Severity) {
-        // Redacted for the status bar and the history alike. `redact` bounds the notice to 8 KiB
-        // (an ellipsis marks the cut) and omits one over 16 KiB whole, so a clipped credential
-        // can't survive; the history's copy is bounded further, to a record's 2 KiB.
-        self.notice_redacted(rustgis_data::diagnostics::Redacted::new(&text), severity);
+        // A web-service connection's password or key never shows, whatever quoted it: scrubbed
+        // first, as its login values are known only here, then redacted for the status bar and
+        // the history alike. `redact` bounds the notice to 8 KiB (an ellipsis marks the cut) and
+        // omits one over 16 KiB whole, so a clipped credential can't survive; the history's copy
+        // is bounded further, to a record's 2 KiB.
+        self.notice_redacted(Self::redacted(&text), severity);
     }
 
-    /// [`Session::notify`] for text already redacted (a failure the caller redacted to compare it
-    /// with the notices): the type says so, so it isn't redacted again.
+    /// `text` scrubbed of every active web-service login (and any login capability), then
+    /// redacted: what a notice or history record may show. Login values are known only here, so
+    /// a failure redacted by [`Session::notify_redacted`]'s callers goes through this first.
+    pub fn redacted(text: &str) -> rustgis_data::diagnostics::Redacted {
+        rustgis_data::diagnostics::Redacted::new(&render::rustgis_tiles::logins::scrub(text))
+    }
+
+    /// [`Session::notify`] for text already scrubbed and redacted by [`Session::redacted`] (a
+    /// failure the caller redacted to compare it with the notices): the type says so, so it isn't
+    /// redacted again.
     pub fn notify_redacted(&mut self, text: rustgis_data::diagnostics::Redacted, error: bool) {
         use rustgis_data::diagnostics::Severity;
         self.notice_redacted(text, if error { Severity::Error } else { Severity::Info });
@@ -1547,11 +1700,16 @@ impl Session {
 
     fn notice_redacted(&mut self, text: rustgis_data::diagnostics::Redacted, severity: rustgis_data::diagnostics::Severity) {
         self.diagnostics.push_redacted(severity, self.diagnostic_source.unwrap_or("Application"), &text);
-        self.notices.push(Notice { text: text.into_string(), error: severity == rustgis_data::diagnostics::Severity::Error });
+        self.notices.push(Notice { text: text.into_string(), error: severity == rustgis_data::diagnostics::Severity::Error, severity });
         self.notices_given += 1;
         if self.notices.len() > 200 {
             self.notices.remove(0);
         }
+    }
+
+    /// How many notices were given in this session, including ones no longer kept.
+    pub(crate) fn notices_given(&self) -> u64 {
+        self.notices_given
     }
 
     /// A mark to pass to [`Session::notices_since`].

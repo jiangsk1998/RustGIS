@@ -192,17 +192,14 @@ fn show(app: &mut RustGisApp, r: Result<Value, String>) {
 }
 
 /// The workflows that run on a thread of their own on the desktop, as their command and name:
-/// their work grows with the raster and the points, and the parallel helpers spread it over the
-/// cores from that thread.
+/// Zonal Statistics, and those that make a raster
+/// ([`rustgis_engine::cmd::workflows::runs_in_background`]). Their work grows with the raster and
+/// the points, and the parallel helpers spread it over the cores from that thread.
 #[cfg(not(target_arch = "wasm32"))]
 fn background(id: &str) -> Option<(&'static str, &'static str)> {
     match id {
         "gp.zonalStats" => Some(("gp.zonalStats", "Zonal Statistics")),
-        "analysis.viewshed" => Some(("analysis.viewshed", "Viewshed")),
-        "analysis.interpolate" => Some(("analysis.interpolate", "Interpolate (IDW)")),
-        "raster.classify" => Some(("raster.classify", "Classification Wizard")),
-        "dl.classify" => Some(("dl.classify", "Deep Learning")),
-        _ => None,
+        _ => rustgis_engine::cmd::workflows::runs_in_background(id),
     }
 }
 
@@ -215,7 +212,8 @@ fn start(app: &mut RustGisApp, command: &'static str, name: &'static str, p: Val
         app.workflow.error = Some(crate::i18n::fmt("{tool} is still running: wait for it, or cancel it.", &[("tool", tl_raw!(job.name))]));
         return;
     }
-    let control = rustgis_engine::analysis::control::Control::new();
+    // Cancel stops it, so it takes no work cap.
+    let control = rustgis_engine::analysis::control::Control::stoppable();
     let ctl = control.clone();
     let kind = if command == "gp.zonalStats" {
         gp::tool_start(&mut app.session, "zonalStats", &p).and_then(|run| {
@@ -1357,7 +1355,7 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     #[cfg(target_arch = "wasm32")]
     run(app, "cube.trend", p);
     #[cfg(not(target_arch = "wasm32"))]
-    match rustgis_engine::cmd::cube::trend_start(&app.session, &p) {
+    match rustgis_engine::cmd::cube::trend_start(&mut app.session, &p) {
         Ok(job) => {
             let id = app.session.download_started();
             let r = Trending {
