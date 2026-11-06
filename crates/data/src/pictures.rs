@@ -246,8 +246,8 @@ pub fn thumbnail(bytes: &[u8]) -> Result<String> {
     Ok(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(out)))
 }
 
-/// A full image decoded for a viewer, with its sides bounded by `max_side` and its allocation by
-/// [`MAX_ALLOC`].
+/// A full image decoded for the viewer or a thumbnail, with its pixels bounded by `max_side` and
+/// its allocation by [`MAX_ALLOC`]. A picture larger than `max_side` is shrunk, not refused.
 pub fn decode(bytes: &[u8], max_side: u32) -> Result<image::RgbaImage> {
     if bytes.len() > MAX_BYTES {
         return Err(DataError::Format(format!("the picture is larger than {} MB", MAX_BYTES >> 20)));
@@ -255,12 +255,16 @@ pub fn decode(bytes: &[u8], max_side: u32) -> Result<image::RgbaImage> {
     let format = format(bytes).ok_or_else(|| DataError::Format("the value isn't an image".into()))?;
     let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format.image());
     let mut limits = image::Limits::default();
-    let side = max_side.clamp(1, MAX_SIDE);
-    limits.max_image_width = Some(side);
-    limits.max_image_height = Some(side);
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
     limits.max_alloc = Some(MAX_ALLOC);
     reader.limits(limits);
-    Ok(reader.decode().map_err(|e| DataError::Format(format!("the picture: {e}")))?.to_rgba8())
+    let img = reader.decode().map_err(|e| DataError::Format(format!("the picture: {e}")))?;
+    let side = max_side.clamp(1, MAX_SIDE);
+    // A friendly 1920 × 1080 photo asks for a 160-pixel thumbnail: the decode is bounded by
+    // MAX_SIDE, and the pixels handed out are bounded by `side`.
+    let img = if img.width() > side || img.height() > side { img.thumbnail(side, side) } else { img };
+    Ok(img.to_rgba8())
 }
 
 /// An image re-encoded no larger than `max_side` on its longer side, as JPEG bytes. Used when a
@@ -334,5 +338,15 @@ mod tests {
         assert!(text.starts_with("data:image/jpeg;base64,"));
         assert!(text.len() < 40_000);
         assert!(thumbnail(b"junk").is_err());
+    }
+
+    #[test]
+    fn a_picture_larger_than_the_asked_side_is_shrunk_not_refused() {
+        // The identify pop-up and the attribute table decode a photo at THUMB_SIZE: a photo
+        // bigger than that used to fail with "image size exceeds limit".
+        let img = decode(&png(500, 200), THUMB_SIZE).unwrap();
+        assert_eq!((img.width(), img.height()), (THUMB_SIZE, 200 * THUMB_SIZE / 500));
+        assert_eq!(decode(&png(8, 8), THUMB_SIZE).unwrap().dimensions(), (8, 8));
+        assert!(decode(b"junk", THUMB_SIZE).is_err());
     }
 }
