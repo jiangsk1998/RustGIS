@@ -16,10 +16,10 @@ use rusqlite::config::DbConfig;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::types::{Value as Sql, ValueRef};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params_from_iter};
-use rustgis_geom::Extent;
+use rustgis_geom::{Coord, Extent};
 
 use super::{SqliteSource, err, gpkg_named, gpkg_quote as quote, sample_blobs, spatialite_named, without_rowid};
-use crate::raster::Crs;
+use crate::raster::{Crs, Transformer};
 use crate::source::SourceInfo;
 use crate::source::edits::{Conflict, Edits, Saved};
 use crate::source::gpkg::{sql_value, value};
@@ -77,6 +77,49 @@ pub struct SqliteEditTable {
     key: String,
     geometry: Option<String>,
     storage: Option<Storage>,
+    /// Points made from two numeric columns, for a table with no geometry column.
+    synthetic: Option<Points>,
+}
+
+/// Points made from two numeric columns of a table with no geometry column: the fields that
+/// hold X and Y, and the coordinate system they are in (converted to longitude/latitude for
+/// display and back to those columns when a point moves).
+#[derive(Clone, Debug)]
+struct Points {
+    /// The columns' positions in `SqliteEditTable::columns`.
+    x: usize,
+    y: usize,
+    x_name: String,
+    y_name: String,
+    crs: Crs,
+    transformer: Transformer,
+}
+
+impl Points {
+    /// The point a row's two values make, in longitude/latitude; `None` when either isn't a
+    /// number or the conversion fails.
+    fn point(&self, x: ValueRef<'_>, y: ValueRef<'_>) -> Option<Geometry> {
+        let x = number(x)?;
+        let y = number(y)?;
+        Some(Geometry::Point(self.transformer.to_lonlat(Coord::new(x, y))?))
+    }
+
+    /// The two coordinates a longitude/latitude point is stored as.
+    fn values(&self, g: &Geometry) -> Option<(f64, f64)> {
+        let Geometry::Point(c) = g else { return None };
+        let c = self.transformer.from_lonlat(*c)?;
+        Some((c.x, c.y))
+    }
+}
+
+/// A column's value as a number, for coordinates; text isn't parsed, so a coordinate column
+/// that holds text isn't silently read as one.
+fn number(v: ValueRef<'_>) -> Option<f64> {
+    match v {
+        ValueRef::Integer(i) => Some(i as f64),
+        ValueRef::Real(r) if r.is_finite() => Some(r),
+        _ => None,
+    }
 }
 
 impl SqliteEditTable {
@@ -127,7 +170,7 @@ impl SqliteEditTable {
             }
             None => None,
         };
-        Ok(Self { src, path: path.to_path_buf(), columns, key, geometry, storage })
+        Ok(Self { src, path: path.to_path_buf(), columns, key, geometry, storage, synthetic: None })
     }
 
     pub fn info(&self) -> &SourceInfo {
@@ -148,6 +191,53 @@ impl SqliteEditTable {
 
     pub fn geometry_column(&self) -> Option<&str> {
         self.geometry.as_deref()
+    }
+
+    /// Reads points from two numeric columns, for a table that has no geometry column: `x` and
+    /// `y` hold coordinates in `crs` (longitude/latitude when `None`), converted to
+    /// longitude/latitude for display and back when a point is saved.
+    pub fn set_points(&mut self, x: &str, y: &str, crs: Option<&str>) -> Result<()> {
+        if let Some(g) = &self.geometry {
+            return Err(DataError::Format(format!(
+                "{}: it has a geometry column ({g}); points can't be made from two columns",
+                self.table()
+            )));
+        }
+        if x.eq_ignore_ascii_case(y) {
+            return Err(DataError::Format(format!("{}: X and Y must be two different fields, not both {x}", self.table())));
+        }
+        let fields = &self.src.info.fields;
+        let find = |name: &str| fields.iter().find(|f| f.name.eq_ignore_ascii_case(name));
+        let (Some(fx), Some(fy)) = (find(x), find(y)) else {
+            return Err(DataError::Format(format!("{}: it has no fields {x} and {y} to make points from", self.table())));
+        };
+        if !fx.ty.is_numeric() || !fy.ty.is_numeric() {
+            let (not, ty) = if !fx.ty.is_numeric() { (x, fx.ty) } else { (y, fy.ty) };
+            return Err(DataError::Format(format!(
+                "{}: the field {not} holds {}, not numbers, so points can't be made from it",
+                self.table(),
+                ty.label()
+            )));
+        }
+        let crs = match crs.map(str::trim).filter(|c| !c.is_empty()) {
+            Some(text) => Crs::parse(text).map_err(DataError::Format)?,
+            None => Crs::LonLat,
+        };
+        let transformer = crs.transformer().map_err(DataError::Format)?;
+        let column = |name: &str| self.columns.iter().position(|c| c.eq_ignore_ascii_case(name)).ok_or_else(|| self.shape_error());
+        let (x, y) = (column(&fx.name)?, column(&fy.name)?);
+        self.synthetic = Some(Points { x, y, x_name: fx.name.clone(), y_name: fy.name.clone(), crs, transformer });
+        Ok(())
+    }
+
+    /// The columns points are made from, when they were set.
+    pub fn points(&self) -> Option<(&str, &str)> {
+        self.synthetic.as_ref().map(|p| (p.x_name.as_str(), p.y_name.as_str()))
+    }
+
+    /// The coordinate system those columns are in.
+    pub fn point_crs(&self) -> Option<Crs> {
+        self.synthetic.as_ref().map(|p| p.crs)
     }
 
     /// Its geometry storage (`gpkg`, `spatialite` or `wkb`), or `wkb` for a table without geometry.
@@ -210,15 +300,22 @@ impl SqliteEditTable {
             let mut rows = st.query([limit.clamp(1, MAX_EDITABLE) as i64]).map_err(err)?;
             while let Some(row) = rows.next().map_err(err)? {
                 let id = row.get::<_, i64>(0).map_err(err)?.cast_unsigned();
-                let geometry = match geom {
-                    Some(i) => match self.geometry(row.get_ref(i + 1).map_err(err)?) {
+                let geometry = match (&self.synthetic, geom) {
+                    (Some(p), _) => match p.point(row.get_ref(p.x + 1).map_err(err)?, row.get_ref(p.y + 1).map_err(err)?) {
+                        Some(g) => Some(g),
+                        None => {
+                            out.skipped += 1;
+                            continue;
+                        }
+                    },
+                    (None, Some(i)) => match self.geometry(row.get_ref(i + 1).map_err(err)?) {
                         Some(g) => g,
                         None => {
                             out.skipped += 1;
                             continue;
                         }
                     },
-                    None => None,
+                    (None, None) => None,
                 };
                 let mut hash = FNV_OFFSET;
                 for i in 0..=self.columns.len() {
@@ -289,6 +386,15 @@ impl SqliteEditTable {
             (None, None) => {}
             _ => return Err(self.shape_error()),
         }
+        if let Some(p) = &self.synthetic {
+            // The two coordinate columns must still be there, and still hold numbers.
+            for (pos, name) in [(p.x, &p.x_name), (p.y, &p.y_name)] {
+                let c = current_columns.get(pos).ok_or_else(|| self.shape_error())?;
+                if !c.name.eq_ignore_ascii_case(name) || !crate::source::gpkg_blob::field_type(&c.decl).is_some_and(FieldType::is_numeric) {
+                    return Err(self.shape_error());
+                }
+            }
+        }
 
         let residents: HashMap<i64, bool> = reserved
             .map(u64::cast_signed)
@@ -342,8 +448,25 @@ impl SqliteEditTable {
             let row = current.get(&f.id.cast_signed()).ok_or_else(|| self.shape_error())?;
             let mut sets = Vec::new();
             let mut args = Vec::new();
+            let geometry_changed = match (&self.synthetic, geom_pos) {
+                (Some(p), _) => {
+                    let x = row.get(p.x + 1).ok_or_else(|| self.shape_error())?;
+                    let y = row.get(p.y + 1).ok_or_else(|| self.shape_error())?;
+                    p.point(ValueRef::from(x), ValueRef::from(y)) != f.geometry
+                }
+                (None, Some(geom)) => {
+                    let old = row.get(geom + 1).ok_or_else(|| self.shape_error())?;
+                    self.geometry(ValueRef::from(old)).ok_or_else(|| self.shape_error())? != f.geometry
+                }
+                (None, None) => false,
+            };
             for &(i, c) in &targets {
                 let field = fields.get(i).ok_or_else(|| self.shape_error())?;
+                // A point made from two columns moves by writing those columns below, which wins
+                // over the attribute values submitted with it.
+                if geometry_changed && self.synthetic.as_ref().is_some_and(|p| c == p.x || c == p.y) {
+                    continue;
+                }
                 let old = row.get(c + 1).ok_or_else(|| self.shape_error())?;
                 let attr = f.attrs.get(i).unwrap_or(&Value::Null);
                 if value(ValueRef::from(old), field.ty) != *attr {
@@ -351,14 +474,24 @@ impl SqliteEditTable {
                     args.push(sql_value(attr, field.ty));
                 }
             }
-            if let Some(geom) = geom_pos {
-                let old = row.get(geom + 1).ok_or_else(|| self.shape_error())?;
-                let geometry_changed = self.geometry(ValueRef::from(old)).ok_or_else(|| self.shape_error())? != f.geometry;
-                if geometry_changed {
-                    let blob = self.geometry_blob(f.geometry.as_ref(), Some((f.id, ValueRef::from(old))))?;
-                    sets.push(format!("{} = ?", quote(geom_name.as_deref().ok_or_else(|| self.shape_error())?)));
-                    args.push(blob);
+            match (&self.synthetic, geom_pos) {
+                (Some(p), _) => {
+                    if geometry_changed {
+                        for (name, v) in self.synthetic_values(p, f.geometry.as_ref(), fields)? {
+                            sets.push(format!("{} = ?", quote(&name)));
+                            args.push(v);
+                        }
+                    }
                 }
+                (None, Some(geom)) => {
+                    if geometry_changed {
+                        let old = row.get(geom + 1).ok_or_else(|| self.shape_error())?;
+                        let blob = self.geometry_blob(f.geometry.as_ref(), Some((f.id, ValueRef::from(old))))?;
+                        sets.push(format!("{} = ?", quote(geom_name.as_deref().ok_or_else(|| self.shape_error())?)));
+                        args.push(blob);
+                    }
+                }
+                (None, None) => {}
             }
             if sets.is_empty() {
                 saved.unchanged += 1;
@@ -392,17 +525,31 @@ impl SqliteEditTable {
             high_water = new_key;
             let mut names_sql = vec![pk.clone()];
             let mut args = vec![Sql::Integer(new_key)];
-            if let Some(g) = &f.geometry {
+            if let Some(g) = &f.geometry
+                && self.synthetic.is_none()
+            {
                 let blob = self.geometry_blob(Some(g), None)?;
                 names_sql.push(quote(geom_name.as_deref().ok_or_else(|| self.shape_error())?));
                 args.push(blob);
             }
             for &(i, c) in &targets {
+                // A submitted point is written to the two coordinate columns below.
+                if f.geometry.is_some() && self.synthetic.as_ref().is_some_and(|p| c == p.x || c == p.y) {
+                    continue;
+                }
                 let attr = f.attrs.get(i).unwrap_or(&Value::Null);
                 if *attr != Value::Null {
                     let field = fields.get(i).ok_or_else(|| self.shape_error())?;
                     names_sql.push(quote(names.get(c).ok_or_else(|| self.shape_error())?));
                     args.push(sql_value(attr, field.ty));
+                }
+            }
+            if let Some(p) = &self.synthetic
+                && f.geometry.is_some()
+            {
+                for (name, v) in self.synthetic_values(p, f.geometry.as_ref(), fields)? {
+                    names_sql.push(quote(&name));
+                    args.push(v);
                 }
             }
             let sql = format!("INSERT INTO {table} ({}) VALUES ({})", names_sql.join(", "), vec!["?"; names_sql.len()].join(", "));
@@ -443,11 +590,15 @@ impl SqliteEditTable {
             .chain(additional.iter().filter(|k| rows.contains_key(*k)).map(|k| (None, *k)));
         for (original, k) in originals {
             let row = rows.get(&k).ok_or_else(|| DataError::Format(format!("row {k}: it was removed while saving")))?;
-            let geometry = match geom_pos {
-                Some(i) => self
+            let geometry = match (&self.synthetic, geom_pos) {
+                (Some(p), _) => p.point(
+                    ValueRef::from(row.get(p.x + 1).ok_or_else(|| self.shape_error())?),
+                    ValueRef::from(row.get(p.y + 1).ok_or_else(|| self.shape_error())?),
+                ),
+                (None, Some(i)) => self
                     .geometry(ValueRef::from(row.get(i + 1).ok_or_else(|| self.shape_error())?))
                     .ok_or_else(|| DataError::Format(format!("row {k}: its stored geometry can't be read, so nothing was saved")))?,
-                None => None,
+                (None, None) => None,
             };
             let mut feature = Feature { id: k.cast_unsigned(), geometry, attrs: vec![Value::Null; fields.len()] };
             if let Some(original) = original {
@@ -472,6 +623,32 @@ impl SqliteEditTable {
 
     fn shape_error(&self) -> DataError {
         DataError::Format(format!("{} changed shape since it was loaded; Discard Edits loads it again", self.table()))
+    }
+
+    /// The two coordinate columns a submitted point is written as, in the columns' own
+    /// coordinate system; a feature without a point writes NULL to both.
+    fn synthetic_values(&self, p: &Points, g: Option<&Geometry>, fields: &[Field]) -> Result<Vec<(String, Sql)>> {
+        let (x, y) = match g {
+            None => (None, None),
+            Some(g) => {
+                let (x, y) = p.values(g).ok_or_else(|| {
+                    DataError::Format(format!(
+                        "{}: its geometry can't be written to the coordinate fields {} and {} ({})",
+                        self.table(),
+                        p.x_name,
+                        p.y_name,
+                        p.crs.label()
+                    ))
+                })?;
+                (Some(x), Some(y))
+            }
+        };
+        let mut out = Vec::with_capacity(2);
+        for (name, v) in [(&p.x_name, x), (&p.y_name, y)] {
+            let ty = fields.iter().find(|f| f.name.eq_ignore_ascii_case(name)).ok_or_else(|| self.shape_error())?.ty;
+            out.push((name.clone(), sql_value(&v.map_or(Value::Null, Value::Float), ty)));
+        }
+        Ok(out)
     }
 
     // Outer None is unreadable; inner None is a valid NULL or empty geometry.
@@ -932,6 +1109,91 @@ mod tests {
             table.save(&Edits { inserts: vec![insert], ..Default::default() }, &fields, std::iter::empty(), &read.revision).unwrap_err();
         assert!(error.to_string().contains("refusing stale inserts"), "{error}");
         assert_eq!(Connection::open(&path).unwrap().query_row("SELECT count(*) FROM places", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn points_from_two_numeric_columns_move_and_insert() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photos.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE photos (id INTEGER PRIMARY KEY, name TEXT, Longitude REAL, Latitude REAL, photo BLOB);").unwrap();
+        conn.execute("INSERT INTO photos VALUES (1, 'a', 117.63361, 33.70124, ?1)", [picture()]).unwrap();
+        conn.execute("INSERT INTO photos VALUES (2, 'b', NULL, NULL, NULL)", []).unwrap();
+        let mut table = SqliteEditTable::open(&path, "photos").unwrap();
+        assert_eq!(table.geometry_column(), None);
+        table.set_points("Longitude", "Latitude", None).unwrap();
+        assert_eq!(table.points(), Some(("Longitude", "Latitude")));
+        let fields = table.info().fields.clone();
+        let read = table.read_editable(MAX_EDITABLE).unwrap();
+        // The row without both coordinates isn't a point, and is reported.
+        assert_eq!((read.features.len(), read.matched, read.skipped), (1, 2, 1));
+        match &read.features[0].geometry {
+            Some(Geometry::Point(c)) => {
+                assert!((c.x - 117.63361).abs() < 1e-9 && (c.y - 33.70124).abs() < 1e-9, "{c:?}");
+            }
+            other => panic!("row 1 isn't a point: {other:?}"),
+        }
+
+        let mut moved = read.features[0].clone();
+        moved.geometry = Some(Geometry::Point(Coord::new(117.64, 33.71)));
+        let edits = Edits { updates: vec![(moved, read.versions[0].1)], ..Default::default() };
+        let saved = table.save(&edits, &fields, read.versions.iter().map(|(k, _)| *k), &read.revision).unwrap().unwrap();
+        assert_eq!(saved.changes.updated, 1);
+        let (x, y): (f64, f64) =
+            conn.query_row("SELECT Longitude, Latitude FROM photos WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert!((x - 117.64).abs() < 1e-9 && (y - 33.71).abs() < 1e-9, "{x}, {y}");
+        match &saved.features[0].geometry {
+            Some(Geometry::Point(c)) => assert!((c.x - 117.64).abs() < 1e-9 && (c.y - 33.71).abs() < 1e-9),
+            other => panic!("the saved point: {other:?}"),
+        }
+
+        let insert = Feature { id: 9, geometry: Some(Geometry::Point(Coord::new(117.62, 33.69))), attrs: vec![Value::Null; fields.len()] };
+        let saved = table
+            .save(&Edits { inserts: vec![insert], ..Default::default() }, &fields, read.versions.iter().map(|(k, _)| *k), &saved.revision)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.changes.inserted, vec![(9, 3)]);
+        let (x, y): (f64, f64) =
+            conn.query_row("SELECT Longitude, Latitude FROM photos WHERE id = 3", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert!((x - 117.62).abs() < 1e-9 && (y - 33.69).abs() < 1e-9, "{x}, {y}");
+        assert_eq!(saved.read_only, vec!["photo".to_string()]);
+
+        // A coordinate in another system is read as longitude/latitude and written back in it.
+        let path2 = dir.path().join("metric.sqlite");
+        let conn2 = Connection::open(&path2).unwrap();
+        conn2
+            .execute_batch("CREATE TABLE places (id INTEGER PRIMARY KEY, x REAL, y REAL); INSERT INTO places VALUES (1, 30.0, 40.0);")
+            .unwrap();
+        let mut projected = SqliteEditTable::open(&path2, "places").unwrap();
+        projected.set_points("x", "y", Some("EPSG:32650")).unwrap();
+        let read = projected.read_editable(MAX_EDITABLE).unwrap();
+        let crs = Crs::parse("EPSG:32650").unwrap();
+        let expected = crs.transformer().unwrap().to_lonlat(Coord::new(30.0, 40.0)).unwrap();
+        match &read.features[0].geometry {
+            Some(Geometry::Point(c)) => assert!((c.x - expected.x).abs() < 1e-9 && (c.y - expected.y).abs() < 1e-9, "{c:?}"),
+            other => panic!("the projected point: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn points_need_two_numeric_fields_and_a_table_without_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("attrs.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE attrs (id INTEGER PRIMARY KEY, label TEXT, n INTEGER, n2 INTEGER);").unwrap();
+        let mut table = SqliteEditTable::open(&path, "attrs").unwrap();
+        let error = table.set_points("label", "n", None).unwrap_err().to_string();
+        assert!(error.contains("not numbers"), "{error}");
+        let error = table.set_points("n", "n", None).unwrap_err().to_string();
+        assert!(error.contains("two different fields"), "{error}");
+        let error = table.set_points("n", "missing", None).unwrap_err().to_string();
+        assert!(error.contains("no fields"), "{error}");
+        let error = table.set_points("n", "n2", Some("nowhere")).unwrap_err().to_string();
+        assert!(error.contains("coordinate system"), "{error}");
+        let (_dir, geo) = fixture();
+        let mut stored = SqliteEditTable::open(&geo, "places").unwrap();
+        let error = stored.set_points("lanes", "lanes", None).unwrap_err().to_string();
+        assert!(error.contains("geometry column"), "{error}");
     }
 
     #[test]

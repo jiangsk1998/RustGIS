@@ -14,8 +14,11 @@ use serde_json::json;
 pub fn commands() -> Vec<C> {
     vec![
         C::new("sqlite.addLayer", "Edit SQLite Table", "Home › Add › Add Data", add_layer).params(
-            r#"{"path": "an SQLite database file on this computer", "table"?: "its table (needed when it has several)", "limit"?: "the most rows (default and most: 100000)", "name"?: string}"#,
+            r#"{"path": "an SQLite database file on this computer", "table"?: "its table (needed when it has several)", "x"?: "a numeric field holding X, for a table with no geometry column", "y"?: "a numeric field holding Y, with x", "crs"?: "the X and Y coordinate system (EPSG:4326 when left out)", "limit"?: "the most rows (default and most: 100000)", "name"?: string}"#,
         ),
+        C::new("sqlite.tableInfo", "SQLite Table Fields", "Home › Add › Add Data", table_info)
+            .view()
+            .params(r#"{"path": "an SQLite database file on this computer", "table"?: "its table (needed when it has several)"}"#),
         C::new("sqlite.pendingEdits", "SQLite Edits", "Edit › Manage Edits", pending_edits).view()
             .params(r#"{"layer"?: "a layer added with sqlite.addLayer (default: the active one)"}"#),
         C::new("sqlite.saveEdits", "Save to SQLite", "Edit › Manage Edits", save_edits)
@@ -23,6 +26,55 @@ pub fn commands() -> Vec<C> {
         C::new("sqlite.discardEdits", "Discard SQLite Edits", "Edit › Manage Edits", discard_edits)
             .params(r#"{"layer"?: "a layer added with sqlite.addLayer (default: the active one)"}"#),
     ]
+}
+
+/// The database file, its name for messages, and the table it names (the only one when it has
+/// just one).
+#[cfg(not(target_arch = "wasm32"))]
+fn path_and_table(p: &Value) -> Result<(std::path::PathBuf, String, String), String> {
+    use std::path::Path;
+    let path = ps(p, "path").map(str::trim).filter(|v| !v.is_empty()).ok_or("path is required")?;
+    let path = Path::new(path);
+    if !path.is_file() {
+        return Err(format!("{}: no such file", path.display()));
+    }
+    let path = std::path::absolute(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let table = match ps(p, "table").map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => t.to_string(),
+        None => {
+            let tables = rustgis_data::source::sqlite::tables(&path).map_err(|e| format!("{file}: {e}"))?;
+            if tables.len() != 1 {
+                return Err(format!("{file}: {} tables ({}); choose one with table", tables.len(), tables.join(", ")));
+            }
+            tables.first().cloned().ok_or_else(|| format!("{file}: no tables"))?
+        }
+    };
+    Ok((path, file, table))
+}
+
+/// A table's fields and stored geometry, so a dialog can offer its numeric fields as X and Y.
+fn table_info(s: &mut Session, p: &Value) -> CmdResult {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (s, p);
+        Err("SQLite tables are read in the desktop app".into())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use rustgis_data::source::FeatureSource;
+        let _ = s;
+        let (path, file, table) = path_and_table(p)?;
+        let src = rustgis_data::source::sqlite::SqliteSource::open(&path, Some(&table)).map_err(|e| format!("{file}: {e}"))?;
+        let columns: Vec<Value> =
+            src.info().fields.iter().map(|f| json!({"name": f.name, "type": f.ty.label(), "numeric": f.ty.is_numeric()})).collect();
+        Ok(json!({
+            "table": src.info().name,
+            "key": src.key_column().unwrap_or("rowid"),
+            "geometry": src.geometry_column(),
+            "columns": columns,
+        }))
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -60,31 +112,26 @@ fn add_layer(s: &mut Session, p: &Value) -> CmdResult {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        use std::path::Path;
-        let path = ps(p, "path").map(str::trim).filter(|v| !v.is_empty()).ok_or("path is required")?;
-        let path = Path::new(path);
-        if !path.is_file() {
-            return Err(format!("{}: no such file", path.display()));
-        }
-        let path = std::path::absolute(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let file = path.file_name().unwrap_or_default().to_string_lossy();
+        let (path, file, table) = path_and_table(p)?;
         let err = |e: rustgis_data::DataError| format!("{file}: {e}");
-        let table = match ps(p, "table").map(str::trim).filter(|t| !t.is_empty()) {
-            Some(t) => t.to_string(),
-            None => {
-                let tables = rustgis_data::source::sqlite::tables(&path).map_err(err)?;
-                if tables.len() != 1 {
-                    return Err(format!("{file}: {} tables ({}); choose one with table", tables.len(), tables.join(", ")));
-                }
-                tables.first().cloned().ok_or_else(|| format!("{file}: no tables"))?
+        let mut src = SqliteEditTable::open(&path, &table).map_err(err)?;
+        let x = ps(p, "x").map(str::trim).filter(|v| !v.is_empty());
+        let y = ps(p, "y").map(str::trim).filter(|v| !v.is_empty());
+        let crs = ps(p, "crs").map(str::trim).filter(|v| !v.is_empty());
+        match (x, y) {
+            (Some(x), Some(y)) => src.set_points(x, y, crs).map_err(err)?,
+            _ if x.is_some() || y.is_some() => {
+                return Err(format!("{file}: give both x and y, two numeric fields to make points from"));
             }
-        };
-        let src = SqliteEditTable::open(&path, &table).map_err(err)?;
+            _ => {}
+        }
+        let points = src.points().map(|(x, y)| (x.to_string(), y.to_string()));
         let limit = f(p, "limit").map_or(MAX_EDITABLE, |n| n.clamp(1.0, MAX_EDITABLE as f64) as usize);
         let editable = src.read_editable(limit).map_err(err)?;
         let name = ps(p, "name").map(str::trim).filter(|v| !v.is_empty()).unwrap_or(src.table()).to_string();
         let info = src.info();
-        let mut ds = rustgis_data::Dataset::new(name.clone(), info.geometry_type, info.fields.clone());
+        let geometry_type = if points.is_some() { rustgis_data::GeometryType::Point } else { info.geometry_type };
+        let mut ds = rustgis_data::Dataset::new(name.clone(), geometry_type, info.fields.clone());
         ds.crs = src.crs();
         ds.zm_dropped = info.zm_dropped;
         let path = path.to_string_lossy().into_owned();
@@ -103,30 +150,44 @@ fn add_layer(s: &mut Session, p: &Value) -> CmdResult {
             );
         }
         if editable.skipped > 0 {
-            s.notify(
-                format!(
+            let message = match &points {
+                Some(_) => format!(
+                    "{name}: {} rows without a usable pair of X and Y values weren't loaded; saving leaves them as they are",
+                    editable.skipped
+                ),
+                None => format!(
                     "{name}: {} rows with a geometry RustGIS can't read weren't loaded; saving leaves them as they are",
                     editable.skipped
                 ),
-                false,
-            );
+            };
+            s.notify(message, false);
         }
         if !editable.writable {
             s.notify(format!("{name}: the file is read-only, so edits can't be saved to it"), false);
         }
-        if src.geometry_column().is_none() {
+        if let Some((x, y)) = &points {
+            let crs = src.point_crs().map_or_else(|| "EPSG:4326".into(), |c| c.label());
+            s.notify(format!("{name}: points are made from {x} and {y}, read as coordinates in {crs}"), false);
+        } else if src.geometry_column().is_none() {
             s.notify(format!("{name}: it has no geometry column; its attributes are read as a table"), false);
         } else if src.zm() {
             s.notify(format!("{name}: its geometry carries Z or M values, which edits can't write; attributes still save"), false);
         }
         let empty_before = s.map().layers.is_empty();
         let id = super::layer::add_dataset(s, ds);
+        let (x, y) = match &points {
+            Some((x, y)) => (Some(x.clone()), Some(y.clone())),
+            None => (None, None),
+        };
         if let Some(l) = s.map_mut().layer_mut(id) {
             l.sqlite = Some(rustgis_map::source::SqliteEdit {
                 path,
                 table: src.table().to_string(),
                 key: src.key().to_string(),
                 geometry: src.geometry_column().map(str::to_string),
+                x,
+                y,
+                crs: crs.map(str::to_string),
                 format: src.format_name().to_string(),
                 shape: src.shape_name().to_string(),
                 srid: src.srid(),
@@ -176,7 +237,10 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
             return Err(format!("{name}: {} is read-only, so nothing was saved", edit.path));
         }
         let err = |e: rustgis_data::DataError| format!("{name}: nothing was saved to {table}: {e}");
-        let src = SqliteEditTable::open(path, table).map_err(err)?;
+        let mut src = SqliteEditTable::open(path, table).map_err(err)?;
+        if let (Some(x), Some(y)) = (&edit.x, &edit.y) {
+            src.set_points(x, y, edit.crs.as_deref()).map_err(err)?;
+        }
         // The table is opened just now, so its shape is compared with the one loaded.
         let geometry_same = match (src.geometry_column(), edit.geometry.as_deref()) {
             (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
@@ -307,12 +371,15 @@ fn discard_edits(s: &mut Session, p: &Value) -> CmdResult {
     {
         let (id, name, edit) = sqlite_layer(s, p)?;
         let err = |e: rustgis_data::DataError| format!("{name}: {e}");
-        let src = SqliteEditTable::open(std::path::Path::new(&edit.path), &edit.table).map_err(err)?;
+        let mut src = SqliteEditTable::open(std::path::Path::new(&edit.path), &edit.table).map_err(err)?;
+        if let (Some(x), Some(y)) = (&edit.x, &edit.y) {
+            src.set_points(x, y, edit.crs.as_deref()).map_err(err)?;
+        }
         let editable = src.read_editable(if edit.limit == 0 { MAX_EDITABLE } else { edit.limit }).map_err(err)?;
         let read = editable.versions.iter().copied().collect();
         let n = editable.features.len();
         let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
-        let geometry_type = src.info().geometry_type;
+        let geometry_type = if src.points().is_some() { rustgis_data::GeometryType::Point } else { src.info().geometry_type };
         if l.dataset.geometry_type != geometry_type {
             l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol::default_for(geometry_type, id));
         }

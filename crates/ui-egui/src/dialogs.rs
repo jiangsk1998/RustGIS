@@ -56,8 +56,31 @@ pub struct Dialogs {
     pub listed: Option<String>,
     /// Add Delimited Text's file, picked before the dialog opens.
     pub csv: Option<CsvFile>,
+    /// Add SQLite Table's chosen table: the geometry column it stores, or the numeric fields
+    /// points can be made from.
+    pub sqlite_table: Option<SqliteTable>,
+    /// The file and table whose fields were last read, successful or not, so a failing table
+    /// isn't opened again every frame.
+    pub sqlite_read: Option<(String, String)>,
+    /// Make points from these two fields, for a table with no geometry column.
+    pub sqlite_x: String,
+    pub sqlite_y: String,
+    /// The coordinate system the X and Y fields hold (`EPSG:4326` when left out).
+    pub sqlite_crs: String,
+    /// Load a table without a geometry column as attributes only, instead of points from X and Y.
+    pub sqlite_flat: bool,
     /// Reset collapsed then closed dialogs when reopening
     pub reset_collapse: bool,
+}
+
+/// An SQLite table's fields, read for Add SQLite Table's geometry choice.
+pub struct SqliteTable {
+    /// The file path and table the fields belong to.
+    pub key: (String, String),
+    /// Its geometry column, when it has one.
+    pub geometry: Option<String>,
+    /// The fields that hold numbers, which points can be made from.
+    pub numeric: Vec<String>,
 }
 
 /// A file picked for Add Delimited Text.
@@ -178,6 +201,7 @@ impl Dialogs {
             // A file name can't hold a folder separator, which a project name may.
             "saveProject" => self.text = format!("{}.rgis", s.project.name.replace(['/', '\\'], "-")),
             "exportLayer" => self.mode = "geojson",
+            "sqliteAddLayer" => self.sqlite_crs = "EPSG:4326".into(),
             // The active layer when it is from PostGIS, else the first that is.
             "pgSave" | "pgDiscard" => {
                 let pg = |l: &&rustgis_engine::map::Layer| l.postgis.is_some();
@@ -1727,7 +1751,7 @@ fn gpkg_discard(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
 
 /// Add an ordinary SQLite table, loaded whole for editing and saved back to it.
 fn sqlite_add_layer(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
-    ui.label(egui::RichText::new(tl!("Loads one table of an SQLite database on this computer (up to 100,000 rows) so its edits can be saved back to that table with Edit › Save to SQLite. Its geometry keeps the table's own storage; image fields are read from the file and never written. It needs an INTEGER PRIMARY KEY, or uses its rowid.")).weak());
+    ui.label(egui::RichText::new(tl!("Loads one table of an SQLite database on this computer (up to 100,000 rows) so its edits can be saved back to that table with Edit › Save to SQLite. A table without a geometry column can show points made from two numeric fields (X and Y), or its attributes alone. Image fields are read from the file and never written. It needs an INTEGER PRIMARY KEY, or uses its rowid.")).weak());
     let mut list = false;
     egui::Grid::new("sqlite_add_layer").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
         let input_label = ui.label(tl!("File"));
@@ -1765,23 +1789,115 @@ fn sqlite_add_layer(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         app.dialogs.list.clear();
         app.dialogs.c.clear();
         app.dialogs.info = None;
+        app.dialogs.sqlite_table = None;
+        app.dialogs.sqlite_read = None;
+        app.dialogs.sqlite_x.clear();
+        app.dialogs.sqlite_y.clear();
     }
     if list {
         match app.run("info.fileLayers", json!({"path": app.dialogs.a})) {
             Ok(v) => {
                 app.dialogs.list = v["layers"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(str::to_string)).collect();
                 app.dialogs.listed = Some(app.dialogs.a.clone());
+                app.dialogs.sqlite_table = None;
+                app.dialogs.sqlite_read = None;
                 app.dialogs.error = None;
                 app.dialogs.info = Some(crate::i18n::fmt("{n} tables", &[("n", &app.dialogs.list.len().to_string())]));
+                if app.dialogs.list.len() == 1 {
+                    app.dialogs.c.clone_from(&app.dialogs.list[0]);
+                }
             }
             Err(e) => {
                 app.dialogs.listed = None;
                 app.dialogs.list.clear();
                 app.dialogs.c.clear();
                 app.dialogs.info = None;
+                app.dialogs.sqlite_table = None;
+                app.dialogs.sqlite_read = None;
                 app.dialogs.error = Some(e);
             }
         }
+    }
+    // The chosen table's fields say whether it stores geometry, and which fields hold numbers.
+    let path = app.dialogs.a.trim().to_string();
+    let table = app.dialogs.c.trim().to_string();
+    let listed = app.dialogs.listed.as_deref().is_some_and(|p| p.trim() == path);
+    if listed && !table.is_empty() && app.dialogs.sqlite_read.as_ref().is_none_or(|(p, t)| (p, t) != (&path, &table)) {
+        app.dialogs.sqlite_read = Some((path.clone(), table.clone()));
+        match app.run("sqlite.tableInfo", json!({"path": path.clone(), "table": table.clone()})) {
+            Ok(v) => {
+                let geometry = v["geometry"].as_str().map(str::to_string);
+                let numeric: Vec<String> = v["columns"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|c| c["numeric"].as_bool().unwrap_or(false))
+                    .filter_map(|c| c["name"].as_str().map(str::to_string))
+                    .collect();
+                let (x, y) = default_xy(&numeric);
+                app.dialogs.sqlite_flat = geometry.is_none() && numeric.len() < 2;
+                app.dialogs.sqlite_x = x;
+                app.dialogs.sqlite_y = y;
+                app.dialogs.sqlite_table = Some(SqliteTable { key: (path.clone(), table.clone()), geometry, numeric });
+                app.dialogs.error = None;
+            }
+            Err(e) => {
+                app.dialogs.sqlite_table = None;
+                app.dialogs.error = Some(e);
+            }
+        }
+    }
+    let info = app.dialogs.sqlite_table.as_ref().filter(|t| t.key == (path.clone(), table.clone()));
+    if let Some(info) = info {
+        egui::Grid::new("sqlite_add_geometry").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+            ui.label(tl!("Geometry"));
+            match &info.geometry {
+                Some(column) => {
+                    ui.label(crate::i18n::fmt("stored in {field}", &[("field", column)]));
+                }
+                None if info.numeric.len() >= 2 => {
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut app.dialogs.sqlite_flat, false, tl!("Points from X and Y fields"));
+                        ui.radio_value(&mut app.dialogs.sqlite_flat, true, tl!("No geometry (attributes only)"));
+                    });
+                }
+                None => {
+                    app.dialogs.sqlite_flat = true;
+                    ui.label(tl!("No geometry: it has fewer than two numeric fields"));
+                }
+            }
+            ui.end_row();
+            if info.geometry.is_none() && !app.dialogs.sqlite_flat {
+                let input_label = ui.label(tl!("X field"));
+                egui::ComboBox::from_id_salt("sqlite_x")
+                    .selected_text(app.dialogs.sqlite_x.clone())
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        for name in &info.numeric {
+                            ui.selectable_value(&mut app.dialogs.sqlite_x, name.clone(), name);
+                        }
+                    })
+                    .response
+                    .labelled_by(input_label.id);
+                ui.end_row();
+                let input_label = ui.label(tl!("Y field"));
+                egui::ComboBox::from_id_salt("sqlite_y")
+                    .selected_text(app.dialogs.sqlite_y.clone())
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        for name in &info.numeric {
+                            ui.selectable_value(&mut app.dialogs.sqlite_y, name.clone(), name);
+                        }
+                    })
+                    .response
+                    .labelled_by(input_label.id);
+                ui.end_row();
+                let input_label = ui.label(tl!("Coordinate system"));
+                ui.add(egui::TextEdit::singleline(&mut app.dialogs.sqlite_crs).hint_text("EPSG:4326").desired_width(280.0))
+                    .labelled_by(input_label.id);
+                ui.end_row();
+            }
+        });
     }
     buttons(app, ui, "Load", |app| {
         let mut p = json!({"path": app.dialogs.a.trim()});
@@ -1805,8 +1921,41 @@ fn sqlite_add_layer(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                 .map_err(|_| tl!("Most rows: a whole number").to_string())?;
             p["limit"] = json!(n);
         }
+        let key = (path.clone(), table.clone());
+        if app.dialogs.sqlite_table.as_ref().is_some_and(|t| t.key == key)
+            && app.dialogs.sqlite_table.as_ref().is_some_and(|t| t.geometry.is_none())
+            && !app.dialogs.sqlite_flat
+        {
+            let (x, y) = (app.dialogs.sqlite_x.trim(), app.dialogs.sqlite_y.trim());
+            if x.is_empty() || y.is_empty() {
+                return Err(tl!("Choose the fields that hold X and Y").to_string());
+            }
+            if x.eq_ignore_ascii_case(y) {
+                return Err(tl!("X and Y must be two different fields").to_string());
+            }
+            p["x"] = json!(x);
+            p["y"] = json!(y);
+            let crs = app.dialogs.sqlite_crs.trim();
+            if !crs.is_empty() {
+                p["crs"] = json!(crs);
+            }
+        }
         app.run("sqlite.addLayer", p).map(|_| ())
     })
+}
+
+/// The X and Y fields to offer first: the two whose names say they hold coordinates, else the
+/// first two numeric fields.
+fn default_xy(numeric: &[String]) -> (String, String) {
+    const X: [&str; 6] = ["lon", "lng", "long", "longitude", "x", "经度"];
+    const Y: [&str; 6] = ["lat", "latitude", "y", "纬度", "北纬", "南纬"];
+    let plain = |name: &str| name.trim().to_ascii_lowercase().replace([' ', '_', '-'], "");
+    let x = numeric.iter().position(|n| X.contains(&plain(n).as_str())).unwrap_or(0);
+    let y = (0..numeric.len())
+        .find(|&i| i != x && Y.contains(&plain(&numeric[i]).as_str()))
+        .or_else(|| (0..numeric.len()).find(|&i| i != x))
+        .unwrap_or(x);
+    (numeric.get(x).cloned().unwrap_or_default(), numeric.get(y).cloned().unwrap_or_default())
 }
 
 /// Save a SQLite layer's edits to its table in one transaction.

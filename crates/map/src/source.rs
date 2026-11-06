@@ -195,6 +195,14 @@ pub struct SqliteEdit {
     /// The geometry column, when the table has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry: Option<String>,
+    /// The two numeric columns points are made from, for a table with no geometry column, and
+    /// their coordinate system as given when the table was loaded (`EPSG:4326` when left out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crs: Option<String>,
     /// The storage the geometry had when these rows were loaded: `gpkg`, `spatialite` or `wkb`.
     #[serde(default)]
     pub format: String,

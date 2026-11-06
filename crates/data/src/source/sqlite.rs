@@ -61,6 +61,18 @@ fn err(e: rusqlite::Error) -> DataError {
     DataError::Format(format!("SQLite: {e}"))
 }
 
+impl SqliteSource {
+    /// The geometry column, when the table has one.
+    pub fn geometry_column(&self) -> Option<&str> {
+        self.geometry.as_deref()
+    }
+
+    /// The `INTEGER PRIMARY KEY` column, or `None` when its rows are keyed by rowid.
+    pub fn key_column(&self) -> Option<&str> {
+        self.key.as_deref()
+    }
+}
+
 fn open_db(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(err)?;
     // A cap on SQLite's page cache, so a huge database can't take all the memory; and the file is
