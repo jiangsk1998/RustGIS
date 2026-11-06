@@ -2910,7 +2910,21 @@ fn skills_load_on_demand() {
     use crate::skills;
     let built = skills::built_in();
     let names: Vec<&str> = built.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, ["thematic-map", "explore-data", "print-layout", "geoprocessing", "add-data", "share-web-map", "tb-segmentation"]);
+    assert_eq!(
+        names,
+        [
+            "thematic-map",
+            "explore-data",
+            "print-layout",
+            "geoprocessing",
+            "add-data",
+            "share-web-map",
+            "tb-segmentation",
+            "tb-segmentation-v3",
+            "photo-interpretation",
+            "result-projection"
+        ]
+    );
     assert!(built.iter().all(|s| !s.description.is_empty() && s.body.starts_with('#')));
     // Front matter: name and description, then the body.
     let s = skills::parse("---\nname: flood-map\ndescription: \"Map a flood: depth, extent.\"\n---\n\n# Flood map\nDo this.").unwrap();

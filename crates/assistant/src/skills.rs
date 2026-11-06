@@ -59,6 +59,9 @@ pub fn built_in() -> Vec<Skill> {
         include_str!("../skills/add-data/SKILL.md"),
         include_str!("../skills/share-web-map/SKILL.md"),
         include_str!("../skills/tb-segmentation/SKILL.md"),
+        include_str!("../skills/tb-segmentation-v3/SKILL.md"),
+        include_str!("../skills/photo-interpretation/SKILL.md"),
+        include_str!("../skills/result-projection/SKILL.md"),
     ]
     .iter()
     .filter_map(|text| parse(text).ok())
