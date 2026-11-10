@@ -282,6 +282,25 @@ fn file_access_needs_approval() {
     assert!(tool_msg["content"].as_str().is_some_and(|t| t.contains("declined")));
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn writing_a_skill_asks_first_and_the_tool_is_offered() {
+    let mut s = sample();
+    let mut a = Agent::new(cfg("openai"), &s);
+    let Step::Send(req) = a.ask("write a skill for flood maps", &s) else { panic!("expected a request") };
+    let b = body(&req);
+    assert!(b["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "save_skill"));
+    let written = ToolCall {
+        id: "s1".into(),
+        name: "save_skill".into(),
+        args: json!({"name":"flood-map","description":"Map a flood.","body":"# Flood"}),
+    };
+    assert!(tools::gate(&s, &written).is_some_and(|why| why.contains("skill file")));
+    assert!(tools::approval_key(&s, &written).is_none(), "a skill write is asked about every time");
+    let answered = call("s1", "save_skill", json!({"name":"flood-map","description":"Map a flood.","body":"# Flood"}));
+    assert_eq!(a.receive(a.generation(), ok(answered), &mut s), Step::Confirm, "never written without the user");
+}
+
 #[test]
 fn connection_management_requires_fresh_approval_but_can_run_in_app() {
     let mut s = Session::new(Project::default());
@@ -2949,8 +2968,10 @@ fn skills_load_on_demand() {
             "share-web-map",
             "tb-segmentation",
             "tb-segmentation-v3",
+            "tb-segmentation-v4",
             "photo-interpretation",
-            "result-projection"
+            "result-projection",
+            "tb-passthrough"
         ]
     );
     assert!(built.iter().all(|s| !s.description.is_empty() && s.body.starts_with('#')));

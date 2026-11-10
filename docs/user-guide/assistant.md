@@ -159,7 +159,8 @@ with a switch to turn each one on or off:
 - **Yours**: on the desktop, **Add skill…** adds a `SKILL.md`, a skill's folder, a folder of
   skills or a `.zip` of them. They are kept in the `skills` folder of the app's settings folder
   (**Open folder**), and **Remove** deletes one's `SKILL.md` (files you keep beside it stay). A skill of yours replaces a built-in one of the
-  same name.
+  same name. In a chat, the assistant can write one with `save_skill`, which asks before it
+  writes the file.
 - **Shared**: skills in `~/.agents/skills`, where other AI agents keep theirs. They are listed
   but off until you turn them on, since they were written for other tools.
 

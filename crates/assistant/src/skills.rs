@@ -60,8 +60,10 @@ pub fn built_in() -> Vec<Skill> {
         include_str!("../skills/share-web-map/SKILL.md"),
         include_str!("../skills/tb-segmentation/SKILL.md"),
         include_str!("../skills/tb-segmentation-v3/SKILL.md"),
+        include_str!("../skills/tb-segmentation-v4/SKILL.md"),
         include_str!("../skills/photo-interpretation/SKILL.md"),
         include_str!("../skills/result-projection/SKILL.md"),
+        include_str!("../skills/tb-passthrough/SKILL.md"),
     ]
     .iter()
     .filter_map(|text| parse(text).ok())
@@ -157,6 +159,8 @@ pub fn catalog(skills: &[Skill]) -> String {
     }
     let mut out =
         String::from("\n\nSkills (instructions for kinds of task): when a request matches one, read it with load_skill before acting.");
+    #[cfg(not(target_arch = "wasm32"))]
+    out.push_str(" A missing one is written with save_skill.");
     // Where each listed skill's line starts, so the note replaces whole lines.
     let mut starts = Vec::new();
     for s in skills {
@@ -186,6 +190,24 @@ pub fn tool() -> ToolDef {
             "type": "object",
             "properties": {"name": {"type": "string", "description": "The skill's name"}},
             "required": ["name"]
+        }),
+    }
+}
+
+/// The `save_skill` tool (the desktop and the command line, where skills are files).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_tool() -> ToolDef {
+    ToolDef {
+        name: "save_skill",
+        description: "Create or replace one of the user's skills: a `SKILL.md` in the settings folder, listed to you and every later chat. Give a name (lower case letters, digits and hyphens), a description (what it does and when to use it) and the instructions in Markdown. The user approves writing the file.",
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The skill's name: lower case letters, digits and hyphens"},
+                "description": {"type": "string", "description": "What it does and when to use it (the model sees this before loading the skill)"},
+                "body": {"type": "string", "description": "The instructions, in Markdown"}
+            },
+            "required": ["name", "description", "body"]
         }),
     }
 }
@@ -478,6 +500,53 @@ mod local {
         Ok(skills.into_iter().map(|(name, _)| name).collect())
     }
 
+    /// Writes a skill to the user's: `<skills>/<name>/SKILL.md`, replacing a user's skill of that
+    /// name (in its own folder) and switching it on. Returns what was written.
+    pub fn save(places: &Places, name: &str, description: &str, body: &str) -> Result<Skill, String> {
+        let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+        if description.is_empty() {
+            return Err("a skill needs a description: what it does and when to use it".into());
+        }
+        let text = format!("---\nname: {}\ndescription: {description}\n---\n\n{}\n", name.trim(), body.trim());
+        if text.len() > MAX_SKILL {
+            return Err(format!("a skill is at most {} KB", MAX_SKILL / 1024));
+        }
+        let skill = parse(&text)?;
+        let dir = places.user.as_ref().ok_or("there is no settings folder")?;
+        let mine = load_dir(dir).0;
+        // Its own folder when it has one (its folder may be named otherwise), else one named after
+        // it; a folder holding another of the user's skills is refused, as `add` does.
+        let folder = mine
+            .iter()
+            .find_map(|s| match &s.source {
+                Source::User(d) if s.name == skill.name => Some(d.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| dir.join(&skill.name));
+        if let Some(other) = mine.iter().find(|s| s.source == Source::User(folder.clone()) && s.name != skill.name) {
+            return Err(format!("'{}': its folder {} holds your skill '{}'", skill.name, folder.display(), other.name));
+        }
+        std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+        let file = folder.join("SKILL.md");
+        rustgis_engine::data::io::write_atomic(&file, text.as_bytes()).map_err(|e| format!("{}: {e}", file.display()))?;
+        // A user's skill is off only when `skills.json` lists it: a replaced one comes back on.
+        if let Some(state) = &places.state {
+            let mut value = read_state(places);
+            let before = value["disabled"].clone();
+            let mut disabled: Vec<Value> = value["disabled"].as_array().cloned().unwrap_or_default();
+            disabled.retain(|n| n.as_str() != Some(skill.name.as_str()));
+            value["disabled"] = Value::Array(disabled);
+            if value["disabled"] != before {
+                if let Some(d) = state.parent() {
+                    std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+                }
+                let state_text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+                rustgis_engine::data::io::write_atomic(state, state_text.as_bytes()).map_err(|e| format!("{}: {e}", state.display()))?;
+            }
+        }
+        Ok(Skill { source: Source::User(folder), ..skill })
+    }
+
     fn windows_device_name(name: &str) -> bool {
         matches!(name, "con" | "prn" | "aux" | "nul")
             || name
@@ -715,6 +784,31 @@ mod local {
             assert!(rows.iter().any(|l| l.skill.name == "thematic-map" && l.on && matches!(l.skill.source, Source::Shared(_))));
             set_source_enabled(&places, "thematic-map", &shared.skill.source, false).unwrap();
             assert!(list(&places).0.iter().any(|l| l.skill.name == "thematic-map" && l.on && l.skill.source == Source::BuiltIn));
+        }
+
+        #[test]
+        fn save_writes_a_skill_and_replaces_one_of_the_same_name() {
+            let root = tempfile::tempdir().unwrap();
+            let places = Places { user: Some(root.path().join("skills")), shared: None, state: Some(root.path().join("skills.json")) };
+            let first = save(&places, "flood-map", "Map a flood, step by step.", "# Flood\n\n1. ...").unwrap();
+            assert_eq!(first.name, "flood-map");
+            let file = root.path().join("skills/flood-map/SKILL.md");
+            assert!(std::fs::read_to_string(&file).unwrap().contains("description: Map a flood, step by step."));
+            assert!(list(&places).0.iter().any(|l| l.skill.name == "flood-map" && l.on && matches!(l.skill.source, Source::User(_))));
+            // Replacing keeps the folder, folds the description to a line, and switches it back on.
+            set_source_enabled(&places, "flood-map", &first.source, false).unwrap();
+            assert!(!list(&places).0.iter().find(|l| l.skill.name == "flood-map").is_some_and(|l| l.on));
+            save(&places, "flood-map", "Map a flood.\nSecond line.", "New body.").unwrap();
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(text.contains("Map a flood. Second line.") && text.contains("New body.") && !text.contains("step by step"));
+            assert!(list(&places).0.iter().find(|l| l.skill.name == "flood-map").is_some_and(|l| l.on));
+            // A folder named for the skill that holds another of the user's is refused.
+            let taken = root.path().join("skills/taken");
+            std::fs::create_dir_all(&taken).unwrap();
+            std::fs::write(taken.join("SKILL.md"), "---\nname: other\ndescription: test\n---\nBody.").unwrap();
+            assert!(save(&places, "taken", "x", "y").unwrap_err().contains("holds your skill 'other'"));
+            assert!(save(&places, "Other Skill", "x", "y").is_err());
+            assert!(save(&places, "flood-map", "  ", "y").unwrap_err().contains("description"));
         }
 
         #[test]

@@ -552,6 +552,9 @@ impl Agent {
         if self.depth == 0 {
             defs.push(Self::delegate_tool(&self.harnesses));
         }
+        // Skills are files on the desktop and the command line, and their folders may be written.
+        #[cfg(not(target_arch = "wasm32"))]
+        defs.push(skills::save_tool());
         if !self.allowed.is_empty() {
             defs.retain(|d| self.allowed.iter().any(|a| a == d.name));
         }
@@ -571,6 +574,14 @@ impl Agent {
                 let name = call.args.get("name").and_then(serde_json::Value::as_str).unwrap_or("").trim();
                 let markdown = skills::load(&self.skills, name)?;
                 Ok(tools::bounded_json(&serde_json::json!({"name":name,"markdown":markdown}), tokens))
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            "save_skill" => {
+                let arg = |key: &str| call.args.get(key).and_then(serde_json::Value::as_str).unwrap_or("").trim().to_string();
+                let skill = skills::save(&skills::Places::here(), &arg("name"), &arg("description"), &arg("body"))?;
+                // The new instructions are this chat's from its next turn.
+                self.set_skills(skills::with(self.skills.clone(), vec![skill.clone()]));
+                Ok(tools::bounded_json(&serde_json::json!({"name": skill.name, "description": skill.description, "saved": true}), tokens))
             }
             "read_image" => self.read_image(s, call, tokens),
             _ => tools::run_with_budget(s, call, tokens),

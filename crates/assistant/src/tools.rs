@@ -185,6 +185,10 @@ pub fn gate(s: &Session, call: &ToolCall) -> Option<String> {
             .filter(|p| !p.trim().is_empty())
             .map(|_| "it writes a file on this computer".into());
     }
+    // A skill is a file in the settings folder.
+    if call.name == "save_skill" {
+        return Some("it writes a skill file on this computer".into());
+    }
     // A script asks once, for every line that needs it, each named.
     if call.name == "run" {
         let script = call.args.get("script").and_then(Value::as_str).unwrap_or("");
