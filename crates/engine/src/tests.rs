@@ -9124,9 +9124,12 @@ fn plugin_mosaics_of_project_layers_need_no_files() {
         let e = forward(&mut s, "eng-mosaic", "raster.mosaic", params.clone()).unwrap_err();
         assert!(e.contains(why) && !e.contains("permission"), "{params}: {e}");
     }
-    // So does a raster layer whose cells aren't in memory yet (a tile still downloading).
+    // So does a raster layer whose cells aren't in memory yet (a tile still downloading, which
+    // has no pixels to read here).
     let east = s.map().layer_by_name("east").unwrap().id;
-    s.map_mut().layer_mut(east).unwrap().raster.as_mut().unwrap().data = None;
+    let rl = s.map_mut().layer_mut(east).unwrap().raster.as_mut().unwrap();
+    rl.data = None;
+    rl.error = Some("the tile is still downloading".into());
     let e = forward(&mut s, "eng-mosaic", "raster.mosaic", json!({"inputs": ["west", "east"]})).unwrap_err();
     assert!(e.contains("no raster layer 'east'") && !e.contains("permission"), "{e}");
     rustgis_plugins::unload("eng-mosaic");
@@ -22162,6 +22165,39 @@ fn raster_stretch_like_copies_each_band() {
     s.run("raster.stretch", &json!({"layer": to, "like": from})).unwrap();
     let st = s.map().layer_by_name(to).and_then(|l| l.raster.as_ref()).unwrap().style.stretch;
     assert_eq!(st, Stretch::custom_bands([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]]));
+}
+
+/// An undo step keeps no pixels of its own: the project holds the one copy, and undo takes them
+/// back from there rather than reading the raster again.
+#[test]
+fn undo_steps_keep_no_second_copy_of_raster_pixels() {
+    let mut s = with_raster();
+    let pixels = s.map().layers[0].raster.as_ref().unwrap().data.clone().unwrap();
+    let held = std::sync::Arc::strong_count(&pixels);
+    s.run("raster.stretch", &json!({"type": "minMax"})).unwrap();
+    assert_eq!(std::sync::Arc::strong_count(&pixels), held, "the undo step holds no second copy");
+    assert!(s.undo());
+    let back = s.map().layers[0].raster.as_ref().unwrap().data.clone().unwrap();
+    assert!(std::sync::Arc::ptr_eq(&back, &pixels), "undo shares the pixels, reading nothing");
+}
+
+/// A raster deleted and brought back by undo has no pixels to share: it reads them when drawn.
+#[test]
+fn undo_restores_a_deleted_rasters_pixels_when_drawn() {
+    fn pixels(s: &Session) -> Option<std::sync::Arc<rustgis_data::raster::Raster>> {
+        s.map().layer_by_name("scene").and_then(|l| l.raster.as_ref()).and_then(|r| r.data.clone())
+    }
+    let mut s = with_raster();
+    let before = pixels(&s).unwrap();
+    s.run("layer.remove", &json!({"layer": "scene"})).unwrap();
+    assert!(s.undo());
+    assert!(pixels(&s).is_none(), "the undo step kept no pixels");
+    let lonlat = rustgis_geom::Extent::new(-180.0, -90.0, 180.0, 90.0);
+    let scale = s.map().scale();
+    assert!(!s.map_mut().sync_sources(&lonlat, scale, true), "an export reads them in place");
+    let after = pixels(&s).expect("drawn: the pixels are back");
+    assert_eq!((after.width, after.height, after.bands.len()), (before.width, before.height, before.bands.len()));
+    assert_eq!(after.bands[0].data, before.bands[0].data);
 }
 
 #[test]

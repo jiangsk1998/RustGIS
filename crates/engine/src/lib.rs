@@ -1438,6 +1438,9 @@ impl Session {
                     files.identity != self.file_identity || files.path != self.path || files.opened_package != self.opened_package
                 });
                 if key.is_none() || key != self.merged || self.undo.is_empty() {
+                    // A step doesn't keep a second copy of every raster's pixels: the current
+                    // project holds them, and the step reads any it alone needs when restored.
+                    snap.thin_raster_pixels();
                     self.undo.push((snap, open_layout, label, self.actor.clone(), state, files));
                     if self.undo.len() > UNDO_LIMIT {
                         self.undo.remove(0);
@@ -1799,6 +1802,9 @@ impl Session {
         let Some((p, saved, label, actor, state, mut files)) = self.undo.pop() else { return false };
         let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
+        // The step dropped its rasters' pixels; the project it replaces still holds those of
+        // every layer whose source it shares, so nothing is read again here.
+        self.share_raster_pixels(&cur);
         if let Some(files) = &mut files {
             std::mem::swap(&mut self.file_identity, &mut files.identity);
             std::mem::swap(&mut self.path, &mut files.path);
@@ -1808,6 +1814,8 @@ impl Session {
         self.reopen_layout(open, saved);
         self.keep_time_position(&cur);
         self.keep_tile_pick(&cur);
+        let mut cur = cur;
+        cur.thin_raster_pixels();
         self.redo.push((cur, was, label, actor, std::mem::replace(&mut self.state, state), files));
         self.touch_all_geometry();
         true
@@ -1818,6 +1826,7 @@ impl Session {
         let Some((p, saved, label, actor, state, mut files)) = self.redo.pop() else { return false };
         let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
+        self.share_raster_pixels(&cur);
         if let Some(files) = &mut files {
             std::mem::swap(&mut self.file_identity, &mut files.identity);
             std::mem::swap(&mut self.path, &mut files.path);
@@ -1827,9 +1836,27 @@ impl Session {
         self.reopen_layout(open, saved);
         self.keep_time_position(&cur);
         self.keep_tile_pick(&cur);
+        let mut cur = cur;
+        cur.thin_raster_pixels();
         self.undo.push((cur, was, label, actor, std::mem::replace(&mut self.state, state), files));
         self.touch_all_geometry();
         true
+    }
+
+    /// Gives a project restored by undo or redo the pixels its step dropped, taking them from the
+    /// project it replaces when that holds a layer of the same source. A layer the step brings
+    /// back after a delete has none there: it reads them when it is drawn.
+    fn share_raster_pixels(&mut self, from: &Project) {
+        for m in &mut self.project.maps {
+            let Some(old) = from.maps.iter().find(|o| o.name == m.name) else { continue };
+            for l in &mut m.layers {
+                let Some(rl) = l.raster.as_mut().filter(|rl| rl.data.is_none()) else { continue };
+                let Some(old_rl) = old.layers.iter().find(|o| o.id == l.id).and_then(|o| o.raster.as_ref()) else { continue };
+                if let Some(d) = old_rl.data.as_ref().filter(|_| rl.same_source(old_rl)) {
+                    rl.data = Some(d.clone());
+                }
+            }
+        }
     }
 
     /// After undo or redo swaps the project: each map's time slider stays on the step it was

@@ -6,7 +6,8 @@
 //! elevation). Stretch types, dynamic range adjustment (statistics from the current view),
 //! resampling and brightness/contrast/gamma apply on top.
 
-use std::sync::{Arc, Mutex, Weak};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use rustgis_data::raster::{BandStats, ColorHint, Raster};
 use serde::{Deserialize, Serialize};
@@ -64,6 +65,66 @@ struct MaskedStats(Arc<Mutex<Option<(RasterMask, Vec<usize>, Weak<Raster>, Arc<V
 
 type RasterRead = Arc<Mutex<Option<Result<Arc<Raster>, String>>>>;
 
+/// What a layer's pixels are read from, with every setting that shapes them: two layers naming
+/// the same file this way draw the same pixels.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ReadKey {
+    path: String,
+    subdataset: Option<String>,
+    crs: Option<String>,
+    /// `f64` has no `Hash`; the bits of a placement identify it.
+    placement: Option<[u64; 4]>,
+}
+
+/// Reads already finished: the pixels are kept weakly, so the cache never keeps a raster alive
+/// after the layers drawing it are gone.
+fn pixel_cache() -> &'static Mutex<HashMap<ReadKey, Weak<Raster>>> {
+    static CACHE: OnceLock<Mutex<HashMap<ReadKey, Weak<Raster>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Reads under way: a layer asking for a file another is already reading waits for that read
+/// rather than decoding the same pixels again.
+fn pixel_reads() -> &'static Mutex<HashMap<ReadKey, RasterRead>> {
+    static READS: OnceLock<Mutex<HashMap<ReadKey, RasterRead>>> = OnceLock::new();
+    READS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Reads the pixels several layers share once (see [`ReadKey`]).
+fn read_shared(path: &str, subdataset: Option<&str>, crs: Option<&str>, placement: Option<[f64; 4]>) -> Result<Arc<Raster>, String> {
+    let key = ReadKey {
+        path: path.into(),
+        subdataset: subdataset.map(String::from),
+        crs: crs.map(String::from),
+        placement: placement.map(|b| b.map(f64::to_bits)),
+    };
+    if let Some(raster) = pixel_cache().lock().ok().and_then(|c| c.get(&key).and_then(Weak::upgrade)) {
+        return Ok(raster);
+    }
+    read_fresh(path, subdataset, crs, placement)
+}
+
+/// Reads a file as it is now (a repair must see its current contents), and lets later reads of it
+/// share the pixels.
+fn read_fresh(path: &str, subdataset: Option<&str>, crs: Option<&str>, placement: Option<[f64; 4]>) -> Result<Arc<Raster>, String> {
+    let raster = Arc::new(
+        rustgis_data::raster::read_path_with(std::path::Path::new(path), subdataset, crs)
+            .and_then(|r| placed(r, placement))
+            .map_err(|e| e.to_string())?,
+    );
+    if let Ok(mut cache) = pixel_cache().lock() {
+        cache.retain(|_, weak| weak.strong_count() > 0);
+        let key = ReadKey {
+            path: path.into(),
+            subdataset: subdataset.map(String::from),
+            crs: crs.map(String::from),
+            placement: placement.map(|b| b.map(f64::to_bits)),
+        };
+        cache.insert(key, Arc::downgrade(&raster));
+    }
+    Ok(raster)
+}
+
 impl std::fmt::Debug for RasterLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RasterLayer")
@@ -81,9 +142,7 @@ impl RasterLayer {
             return Err("the raster's data is kept in the project: there's no file to repair".into());
         }
         let sub = subdataset.or(self.subdataset.as_deref());
-        let r = rustgis_data::raster::read_path_with(std::path::Path::new(path), sub, self.crs.as_deref())
-            .and_then(|r| placed(r, self.placement))
-            .map_err(|e| format!("{path}: {e}"))?;
+        let r = read_fresh(path, sub, self.crs.as_deref(), self.placement).map_err(|e| format!("{path}: {e}"))?;
         let need = self.style.renderer.bands().into_iter().max().map_or(1, |b| b.saturating_add(1));
         if r.band_count() < need {
             return Err(format!(
@@ -107,7 +166,7 @@ impl RasterLayer {
             time_zarr: None,
             placement: self.placement,
             style,
-            data: Some(Arc::new(r)),
+            data: Some(r),
             error: None,
             masked: MaskedStats::default(),
             opening: None,
@@ -162,11 +221,7 @@ impl RasterLayer {
         self.opening = None;
         self.error = None;
         if self.embedded.is_none()
-            && let Some(path) = self.path.as_deref().filter(|p| {
-                rustgis_data::login_address::is_wrapper(p)
-                    || rustgis_data::s3_address::is_wrapper(p)
-                    || p.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("s3://"))
-            })
+            && let Some(path) = self.path.as_deref().filter(|p| Self::downloads_whole(Some(p)))
         {
             let name = rustgis_data::login_address::inner(rustgis_data::s3_address::inner(path))
                 .split(['?', '#'])
@@ -198,27 +253,145 @@ impl RasterLayer {
             );
             return Ok(());
         }
-        let r = if let Some(bytes) = &self.embedded {
-            rustgis_data::raster::read_bytes(self.file_name.as_deref().unwrap_or("raster.tif"), bytes)
-        } else if let Some(p) = &self.path {
-            rustgis_data::raster::read_path_with(std::path::Path::new(p), self.subdataset.as_deref(), self.crs.as_deref())
-        } else {
-            return Err("the raster has no source".into());
-        };
-        // A scan goes back where it was laid (a GeoTIFF opened `as` a scan is one again).
-        let r = r.and_then(|r| placed(r, self.placement));
-        match r {
+        match self.read_pixels() {
             Ok(r) => {
                 self.style.repair(&r);
-                self.data = Some(Arc::new(r));
+                self.data = Some(r);
                 Ok(())
             }
             Err(e) => {
-                self.error = Some(e.to_string());
+                self.error = Some(e.clone());
                 self.data = None;
-                Err(e.to_string())
+                Err(e)
             }
         }
+    }
+
+    /// Whether this layer reads the same pixels as `another`: the same file (or the same embedded
+    /// bytes) with the same settings shaping them. Layers from an undo step and the project it was
+    /// undone from share their pixels this way instead of decoding them twice.
+    pub fn same_source(&self, another: &RasterLayer) -> bool {
+        if self.time_zarr.is_some() || another.time_zarr.is_some() {
+            return false;
+        }
+        match (&self.embedded, &another.embedded) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b) && self.file_name == another.file_name,
+            (None, None) => {
+                self.path.is_some()
+                    && self.path == another.path
+                    && self.subdataset == another.subdataset
+                    && self.crs == another.crs
+                    && self.placement.map(|b| b.map(f64::to_bits)) == another.placement.map(|b| b.map(f64::to_bits))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the layer's pixels were dropped (an undo step's) and it can read them again.
+    pub fn needs_pixels(&self) -> bool {
+        self.data.is_none()
+            && self.opening.is_none()
+            && self.error.is_none()
+            && self.time_zarr.is_none()
+            && (self.path.is_some() || self.embedded.is_some())
+    }
+
+    /// Reads a dropped layer's pixels again: in place when `block` (an export that must draw them)
+    /// or in the browser, on a background thread otherwise (landing for [`Self::poll_reload`]).
+    /// Layers naming one file share the read. Returns whether a read is still on its way.
+    pub fn start_reload(&mut self, block: bool) -> bool {
+        if !self.needs_pixels() {
+            return self.opening.is_some();
+        }
+        // A remote address is downloaded whole by [`Self::reload`], which shares its own slot
+        // with the render copies.
+        if Self::downloads_whole(self.embedded.is_none().then_some(self.path.as_deref()).flatten()) {
+            let _ = self.reload();
+            return self.opening.is_some();
+        }
+        let key = self.path.as_ref().filter(|_| self.embedded.is_none()).map(|path| ReadKey {
+            path: path.clone(),
+            subdataset: self.subdataset.clone(),
+            crs: self.crs.clone(),
+            placement: self.placement.map(|b| b.map(f64::to_bits)),
+        });
+        if let Some(key) = &key
+            && let Ok(reads) = pixel_reads().lock()
+            && let Some(reading) = reads.get(key)
+        {
+            self.opening = Some(reading.clone());
+            return true;
+        }
+        if block || cfg!(target_arch = "wasm32") {
+            let _ = self.reload();
+            return false;
+        }
+        let slot = Arc::new(Mutex::new(None));
+        self.opening = Some(slot.clone());
+        if let Some(key) = &key
+            && let Ok(mut reads) = pixel_reads().lock()
+        {
+            reads.insert(key.clone(), slot.clone());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let layer = self.clone();
+            let land = slot.clone();
+            let reading = key.clone();
+            let read = move || {
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| layer.read_pixels()))
+                    .unwrap_or_else(|_| Err("the raster couldn't be read".into()));
+                *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                if let Some(key) = &reading
+                    && let Ok(mut reads) = pixel_reads().lock()
+                    && reads.get(key).is_some_and(|s| Arc::ptr_eq(s, &land))
+                {
+                    reads.remove(key);
+                }
+                crate::source::landed();
+            };
+            let capture = rustgis_data::diagnostics::Capture::current();
+            match std::thread::Builder::new().name("rustgis-raster".into()).spawn(move || {
+                let _diagnostics = capture.enter();
+                read();
+            }) {
+                Ok(_) => {}
+                // No thread to read on: read here, so the layer still draws.
+                Err(_) => {
+                    if let Some(key) = &key
+                        && let Ok(mut reads) = pixel_reads().lock()
+                        && reads.get(key).is_some_and(|s| Arc::ptr_eq(s, &slot))
+                    {
+                        reads.remove(key);
+                    }
+                    let _ = self.reload();
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Reads this layer's pixels from its file or embedded bytes (not a remote address, which
+    /// [`Self::reload`] downloads whole).
+    fn read_pixels(&self) -> Result<Arc<Raster>, String> {
+        if let Some(bytes) = &self.embedded {
+            let r = rustgis_data::raster::read_bytes(self.file_name.as_deref().unwrap_or("raster.tif"), bytes)
+                .and_then(|r| placed(r, self.placement))
+                .map_err(|e| e.to_string())?;
+            return Ok(Arc::new(r));
+        }
+        let Some(path) = self.path.as_deref() else { return Err("the raster has no source".into()) };
+        read_shared(path, self.subdataset.as_deref(), self.crs.as_deref(), self.placement)
+    }
+
+    /// Whether an address is downloaded whole before it is read (an S3 or login-wrapped one).
+    fn downloads_whole(path: Option<&str>) -> bool {
+        path.is_some_and(|p| {
+            rustgis_data::login_address::is_wrapper(p)
+                || rustgis_data::s3_address::is_wrapper(p)
+                || p.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("s3://"))
+        })
     }
 
     /// Installs a completed remote read; each render copy can observe the same shared result.
@@ -1345,5 +1518,60 @@ mod tests {
         plain.data = None;
         assert!(plain.reload().is_err());
         assert!(plain.opening.is_none(), "an anonymous web raster is not fetched whole");
+    }
+
+    /// A GeoTIFF in the temporary directory, for the tests reading one file twice.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn temp_tiff(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("rustgis-map-raster-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dem.tif");
+        std::fs::write(&path, rustgis_data::raster::geotiff::write(&dem(), 0).unwrap()).unwrap();
+        (dir, path)
+    }
+
+    /// Two layers of one file decode it once: the second reads the pixels the first holds.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn reload_shares_one_files_pixels() {
+        let (dir, path) = temp_tiff("share");
+        let path = path.display().to_string();
+        let mut a = RasterLayer::from_path(dem(), &path);
+        let mut b = RasterLayer::from_path(dem(), &path);
+        a.data = None;
+        b.data = None;
+        a.reload().unwrap();
+        b.reload().unwrap();
+        assert!(Arc::ptr_eq(a.data.as_ref().unwrap(), b.data.as_ref().unwrap()), "one read for one file");
+        assert!(a.same_source(&b) && !a.same_source(&RasterLayer { crs: Some("EPSG:4326".into()), ..b.clone() }));
+        // The cache holds the pixels weakly: when the last layer drawing them goes, they go.
+        let weak = Arc::downgrade(a.data.as_ref().unwrap());
+        drop(a);
+        assert!(weak.upgrade().is_some(), "b still draws them");
+        drop(b);
+        assert!(weak.upgrade().is_none(), "the cache keeps no pixels alive");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A layer whose pixels an undo step dropped reads them again: in place for an export, on a
+    /// thread for the screen.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn start_reload_reads_dropped_pixels_again() {
+        let (dir, path) = temp_tiff("again");
+        let mut layer = RasterLayer::from_path(dem(), path.display().to_string());
+        layer.data = None;
+        assert!(layer.needs_pixels());
+        assert!(!layer.start_reload(true), "read in place: nothing is left pending");
+        assert_eq!(layer.data.as_ref().map(|d| (d.width, d.height)), Some((4, 4)));
+        layer.data = None;
+        assert!(layer.start_reload(false), "read on a thread");
+        let start = std::time::Instant::now();
+        while layer.poll_reload() && start.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(layer.data.is_some(), "{:?}", layer.error);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

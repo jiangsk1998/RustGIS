@@ -2517,6 +2517,14 @@ impl Map {
         for l in self.layers.iter_mut().filter(|l| l.is_streamed() && l.visible && l.in_scale_range(scale) && !held.contains(&l.id)) {
             pending |= l.sync_source(view, block);
         }
+        // A raster whose pixels an undo step dropped reads them again when it is drawn: on a
+        // background thread, or in place for a full-resolution export. Hidden layers wait until
+        // they are shown, so an undo doesn't decode every raster of a large project at once.
+        for l in self.layers.iter_mut().filter(|l| l.visible && l.in_scale_range(scale) && !held.contains(&l.id)) {
+            if let Some(raster) = &mut l.raster {
+                pending |= raster.start_reload(block);
+            }
+        }
         pending
     }
 

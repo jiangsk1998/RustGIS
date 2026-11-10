@@ -107,7 +107,20 @@ pub fn commands() -> Vec<C> {
 }
 
 fn raster_named(s: &Session, n: &str) -> Result<Arc<Raster>, String> {
-    s.map().layer_by_name(n).and_then(|l| l.raster.as_ref()).and_then(|r| r.data.clone()).ok_or_else(|| format!("no raster layer '{n}'"))
+    let missing = || format!("no raster layer '{n}'");
+    let layer = s.map().layer_by_name(n).and_then(|l| l.raster.as_ref()).ok_or_else(missing)?;
+    if let Some(data) = &layer.data {
+        return Ok(data.clone());
+    }
+    // An undo step keeps no pixels: read them again for this command (a file's read is shared
+    // with the layer when it is drawn). A layer still downloading, or one that failed to read,
+    // isn't read here.
+    if !layer.needs_pixels() {
+        return Err(missing());
+    }
+    let mut read = layer.clone();
+    read.reload().map_err(|e| format!("{n}: {e}"))?;
+    read.data.ok_or_else(missing)
 }
 
 pub(crate) fn raster(s: &Session, p: &Value) -> Result<Arc<Raster>, String> {

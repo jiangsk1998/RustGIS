@@ -956,6 +956,23 @@ impl Project {
         &mut self.maps[i]
     }
 
+    /// Drops the decoded pixels an undo or redo step would keep, for every layer that can read
+    /// them again from its file or embedded bytes. The step still restores the layer's style and
+    /// source; the pixels come back from the project it is undone from, or are read when drawn
+    /// (and, for a layer the step brings back after a delete, then). Layers following the time
+    /// slider keep theirs, since the engine reads their step.
+    pub(crate) fn thin_raster_pixels(&mut self) {
+        for l in self.maps.iter_mut().flat_map(|m| m.layers.iter_mut()) {
+            if let Some(rl) = &mut l.raster
+                && rl.data.is_some()
+                && rl.time_zarr.is_none()
+                && (rl.path.is_some() || rl.embedded.is_some())
+            {
+                rl.data = None;
+            }
+        }
+    }
+
     /// A consumed download cannot run again when an older undo snapshot is restored.
     pub(crate) fn discard_import_reservation(&mut self, token: &str) {
         for map in &mut self.maps {
