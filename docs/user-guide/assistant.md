@@ -105,16 +105,15 @@ no documented usage endpoint, and the tested live responses supplied no rate-lim
 ## Tool output limits
 
 The assistant can `search_docs` and `read_doc` to look up RustGIS features and commands.
-Each tool result defaults to an estimated **10,000 tokens**, following
-[Codex's default output budget](https://github.com/openai/codex/blob/main/codex-rs/core/src/tools/handlers/shell_spec.rs).
-A result is capped at an absolute **24,000 tokens**. Like
+Each tool result defaults to an estimated **24,000 tokens**, the absolute ceiling, so a whole
+skill file (up to the 64 KB limit) arrives in one `load_skill` result. Like
 [Codex's truncation utilities](https://github.com/openai/codex/blob/main/codex-rs/utils/output-truncation/src/lib.rs),
 the budget uses a byte-based estimate (four UTF-8 bytes per token), rather than an exact tokenizer.
 It includes JSON escaping and truncation metadata. This bounds individual results, not the
 entire conversation or all results from a batch.
 
-`RUSTGIS_ASSISTANT_TOOL_OUTPUT_TOKEN_LIMIT` changes the requested per-tool budget; it cannot
-bypass the 24,000-token ceiling. Embedding callers can set `Config::tool_output_token_limit`.
+`RUSTGIS_ASSISTANT_TOOL_OUTPUT_TOKEN_LIMIT` lowers the requested per-tool budget; it cannot
+raise it past the 24,000-token ceiling. Embedding callers can set `Config::tool_output_token_limit`.
 MCP uses the 10,000-token default.
 
 Oversized successful results return an explicit, bounded text preview inside valid JSON, preserving the

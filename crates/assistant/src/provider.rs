@@ -168,7 +168,7 @@ pub struct Config {
     /// Whether the catalog offers reasoning for the selected model (`Some(false)` also turns it off
     /// for a Chat Completions model that refused it alongside tools: see [`refuses_reasoning_with_tools`]).
     pub reasoning: Option<bool>,
-    /// Requested tool output token estimate (default 10,000); the 24,000-token hard limit still applies.
+    /// Requested tool output token estimate (default 24,000, the hard limit; the environment lowers it).
     pub tool_output_token_limit: usize,
 }
 
@@ -203,7 +203,7 @@ impl Config {
             tool_output_token_limit: env("RUSTGIS_ASSISTANT_TOOL_OUTPUT_TOKEN_LIMIT")
                 .and_then(|s| s.parse().ok())
                 .filter(|n| *n > 0)
-                .unwrap_or(crate::tools::DEFAULT_OUTPUT_TOKENS),
+                .unwrap_or(crate::tools::MAX_OUTPUT_TOKENS),
         }
     }
 
