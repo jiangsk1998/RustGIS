@@ -57,7 +57,6 @@ pub(crate) fn marker_displace(template: [f32; 2], radius_px: f32, viewport_px: [
 use std::sync::Arc;
 
 use egui_wgpu::{CallbackResources, CallbackTrait, RenderState, wgpu};
-use wgpu::util::DeviceExt;
 
 use rustgis_engine::render::gpu_scene::{self, CmdClip, DrawCmd, GpuScene, MeshTile, SceneTilt, TileMeshVertex, TileQuad};
 use rustgis_engine::render::rustgis_tiles::cache::Payload;
@@ -330,11 +329,14 @@ impl GpuMapRenderer {
             label: Some("mapgpu_blit_uv"),
             entries: &[uniform_buf(wgpu::ShaderStages::VERTEX, 0, 16)],
         });
-        let templates = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mapgpu_templates"),
-            contents: bytemuck::cast_slice(&marker_templates()),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let templates = buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("mapgpu_templates"),
+                contents: bytemuck::cast_slice(&marker_templates()),
+                usage: wgpu::BufferUsages::UNIFORM,
+            },
+        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("mapgpu_image"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -614,7 +616,30 @@ impl<T: Destroy> std::ops::Deref for Owned<T> {
 }
 
 fn owned_buffer(device: &wgpu::Device, desc: &wgpu::util::BufferInitDescriptor<'_>) -> Owned<wgpu::Buffer> {
-    Owned(device.create_buffer_init(desc))
+    Owned(buffer_init(device, desc))
+}
+
+/// A buffer holding `desc`'s contents, as wgpu's `create_buffer_init` makes it, but without its
+/// panic when the graphics card has no room for it (#1777): wgpu then gives an invalid buffer
+/// and reports running out of memory to the device's error handler, which moves the map to the
+/// CPU (`mapview::handle_gpu_errors`); `create_buffer_init` would first panic mapping it.
+pub(crate) fn buffer_init(device: &wgpu::Device, desc: &wgpu::util::BufferInitDescriptor<'_>) -> wgpu::Buffer {
+    if desc.contents.is_empty() {
+        return device.create_buffer(&wgpu::BufferDescriptor { label: desc.label, size: 0, usage: desc.usage, mapped_at_creation: false });
+    }
+    let len = desc.contents.len() as wgpu::BufferAddress;
+    // A multiple of COPY_BUFFER_ALIGNMENT, and at least that, as wgpu pads it.
+    let align = wgpu::COPY_BUFFER_ALIGNMENT - 1;
+    let size = ((len + align) & !align).max(wgpu::COPY_BUFFER_ALIGNMENT);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: desc.label, size, usage: desc.usage, mapped_at_creation: true });
+    // (No mapping: the buffer couldn't be made, and the handler was told.)
+    if let Ok(mut range) = buffer.get_mapped_range_mut(..) {
+        // (Within the mapping: `size` is at least the contents' length.)
+        range.slice(..desc.contents.len()).copy_from_slice(desc.contents);
+        drop(range);
+        buffer.unmap();
+    }
+    buffer
 }
 
 fn owned_texture(device: &wgpu::Device, desc: &wgpu::TextureDescriptor<'_>) -> Owned<wgpu::Texture> {
@@ -1011,7 +1036,9 @@ pub(crate) struct SceneBuffers {
     /// A turned or tilted scene: the camera it was drawn for, its sky and fog.
     pub tilt: Option<SceneTilt>,
     /// Its live raster tile layers, in order, placed for each frame shown ([`LiveFrame`]).
-    pub live: Vec<(rustgis_engine::render::rustgis_tiles::Spec, f32)>,
+    pub live: Vec<(String, rustgis_engine::render::rustgis_tiles::Spec, f32)>,
+    /// The archive revision of the scene that owns the live layers' attribution.
+    live_archive_revision: u64,
     /// Every tile layer of the scene is live: a tile arriving needs no new scene.
     pub tiles_live: bool,
     /// The farthest a vertex lies from its origin (map units, [`gpu_scene::reach`]): zoomed in
@@ -1024,6 +1051,8 @@ pub(crate) struct LiveFrame {
     pub camera: Camera,
     /// Per live layer, its tiles from the camera's centre, bottom first.
     pub layers: Vec<Vec<TileQuad>>,
+    /// Placement diagnostics, prefixed with their layer's name as in a full scene.
+    pub tile_errors: Vec<String>,
 }
 
 impl SceneBuffers {
@@ -1034,6 +1063,15 @@ impl SceneBuffers {
         if self.live.is_empty() {
             return None;
         }
+        let revision = || {
+            use rustgis_engine::render::rustgis_tiles::{Kind, cache};
+            cache::archive_revision(
+                self.live.iter().filter_map(|(_, spec, _)| matches!(spec.kind, Kind::PmTiles | Kind::MbTiles).then_some(spec.url.as_str())),
+            )
+        };
+        if revision() != self.live_archive_revision {
+            return Some((LiveFrame { camera, layers: Vec::new(), tile_errors: Vec::new() }, false, true));
+        }
         let view = rustgis_engine::render::View {
             width: self.size[0],
             height: self.size[1],
@@ -1042,12 +1080,16 @@ impl SceneBuffers {
             sky: false,
         };
         let (mut pending, mut declined) = (false, false);
+        let mut tile_errors = Vec::new();
         let layers = self
             .live
             .iter()
-            .map(|(spec, opacity)| match rustgis_engine::render::live_tiles(spec, *opacity, &view) {
+            .map(|(name, spec, opacity)| match rustgis_engine::render::live_tiles(spec, *opacity, &view) {
                 Some(l) => {
                     pending |= l.pending;
+                    if let Some(error) = l.error {
+                        tile_errors.push(format!("{name}: {error}"));
+                    }
                     l.quads
                 }
                 None => {
@@ -1056,7 +1098,10 @@ impl SceneBuffers {
                 }
             })
             .collect();
-        Some((LiveFrame { camera, layers }, pending, declined))
+        if revision() != self.live_archive_revision {
+            return Some((LiveFrame { camera, layers: Vec::new(), tile_errors: Vec::new() }, false, true));
+        }
+        Some((LiveFrame { camera, layers, tile_errors }, pending, declined))
     }
 }
 
@@ -1145,6 +1190,7 @@ impl SceneBuffers {
         let mut has_images = false;
         let mut has_tiles = false;
         let mut live = Vec::new();
+        let mut live_archive_revision = 0;
         let tilt = scene.tilt.as_ref();
         let mut tile_textures = r.tile_textures.lock().unwrap_or_else(|e| e.into_inner());
         let mut tile_meshes = r.tile_meshes.lock().unwrap_or_else(|e| e.into_inner());
@@ -1338,9 +1384,10 @@ impl SceneBuffers {
                     draws.push(SceneDraw::Image { bind, _texture: texture });
                     has_images = true;
                 }
-                DrawCmd::LiveTiles { spec, opacity } => {
+                DrawCmd::LiveTiles { name, spec, opacity, archive_revision } => {
                     draws.push(SceneDraw::LiveTiles { n: live.len() });
-                    live.push((spec.clone(), *opacity));
+                    live.push((name.clone(), spec.clone(), *opacity));
+                    live_archive_revision = live_archive_revision.max(*archive_revision);
                 }
                 DrawCmd::Tiles { origin, tiles } => {
                     let mut vertices = Vec::with_capacity(tiles.len() * 6);
@@ -1422,7 +1469,19 @@ impl SceneBuffers {
         let tiles_live =
             !live.is_empty() && !has_images && !has_tiles && !scene.cmds.iter().any(|c| matches!(c, DrawCmd::TileMeshes { .. }));
         let reach = gpu_scene::reach(&scene.cmds);
-        Some(SceneBuffers { draws, clear: scene.clear, size, ppp, has_images, has_tiles, tilt: scene.tilt, live, tiles_live, reach })
+        Some(SceneBuffers {
+            draws,
+            clear: scene.clear,
+            size,
+            ppp,
+            has_images,
+            has_tiles,
+            tilt: scene.tilt,
+            live,
+            tiles_live,
+            reach,
+            live_archive_revision,
+        })
     }
 
     /// Rewrites every command's camera uniforms for a moved camera — pan/zoom without
@@ -1686,6 +1745,32 @@ mod tests {
     }
 
     #[test]
+    fn live_archive_pixels_cannot_outlive_their_scenes_credits() {
+        use rustgis_engine::{
+            map::{TileKind, TileLayer},
+            render,
+        };
+        let layer = TileLayer::new("Archive", TileKind::PmTiles, "/live-scene-revision.pmtiles");
+        let revision = render::rustgis_tiles::cache::archive_revision([layer.url.as_str()]);
+        let scene = SceneBuffers {
+            draws: Vec::new(),
+            clear: [0.0; 4],
+            size: [128.0, 128.0],
+            ppp: 1.0,
+            has_images: false,
+            has_tiles: false,
+            tilt: None,
+            live: vec![(layer.name.clone(), render::tile_spec(&layer), 1.0)],
+            tiles_live: true,
+            reach: 0.0,
+            live_archive_revision: revision,
+        };
+        render::rustgis_tiles::cache::reload_archive(&layer.url);
+        let (frame, pending, declined) = scene.live_frame(Camera::world()).unwrap();
+        assert!(declined && !pending && frame.layers.is_empty(), "redraw the scene instead of placing new pixels under its old credits");
+    }
+
+    #[test]
     fn commands_over_device_limits_are_declined() {
         let limits = wgpu::Limits { max_buffer_size: 1024, max_texture_dimension_2d: 2048, ..Default::default() };
         let mesh = |nv: usize, ni: usize| DrawCmd::Mesh {
@@ -1706,6 +1791,42 @@ mod tests {
             cmd_fits(&limits, &DrawCmd::Image { pixmap: rustgis_engine::render::Pixmap::new(2, 2).expect("pixmap") }),
             "a valid 2x2 image fits"
         );
+    }
+
+    /// A buffer made with its contents holds them, padded as wgpu pads it, empty ones included
+    /// (#1777: made without `create_buffer_init`, which panics when the card has no room).
+    #[test]
+    fn buffers_are_made_with_their_contents() {
+        let _serial = one_at_a_time();
+        let Some(rs) = headless_render_state() else { return };
+        let usage = wgpu::BufferUsages::COPY_SRC;
+        let made = buffer_init(&rs.device, &wgpu::util::BufferInitDescriptor { label: None, contents: &[1, 2, 3, 4, 5], usage });
+        assert_eq!(made.size(), 8);
+        assert_eq!(buffer_init(&rs.device, &wgpu::util::BufferInitDescriptor { label: None, contents: &[], usage }).size(), 0);
+        let back = rs.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 8,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = rs.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_buffer_to_buffer(&made, 0, &back, 0, 8);
+        rs.queue.submit(Some(enc.finish()));
+        let slice = back.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |res| {
+            let _ = tx.send(res);
+        });
+        rs.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        rx.recv().unwrap().unwrap();
+        assert_eq!(&slice.get_mapped_range().unwrap()[..], &[1, 2, 3, 4, 5, 0, 0, 0]);
+        // A buffer that can't be made (here a usage wgpu refuses, as it refuses one the card has
+        // no room for) comes back invalid, without the panic; its error is captured here, as the
+        // device's handler would otherwise be given it.
+        let scope = rs.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let refused = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::VERTEX;
+        let _ = buffer_init(&rs.device, &wgpu::util::BufferInitDescriptor { label: None, contents: &[1, 2, 3, 4], usage: refused });
+        assert!(pollster::block_on(scope.pop()).is_some(), "the error is reported");
     }
 
     #[test]
@@ -1732,6 +1853,8 @@ mod tests {
             tiles_pending: false,
             data_pending: false,
             tile_errors: vec![],
+            partial: vec![],
+            pending_in_place: vec![],
             tilt: None,
             clips: vec![],
         };
@@ -2160,6 +2283,7 @@ mod tests {
         use rustgis_engine::map::{TileKind, TileLayer};
         use rustgis_engine::render::rustgis_tiles::mvt::{Feature, GeomKind, Layer, Tile, Value, encode};
         use rustgis_engine::render::rustgis_tiles::pmtiles::{NewArchive, TileType, write};
+        let _turn = crate::fetching::turn();
         // Zoom 1: each tile's park, see-through, reaching past the tile into its buffer (as real
         // tiles do; drawn twice where tiles overlap unless each is clipped to its square), a road
         // and a dashed path in it.
@@ -2346,6 +2470,8 @@ mod tests {
             tiles_pending: false,
             data_pending: false,
             tile_errors: vec![],
+            partial: vec![],
+            pending_in_place: vec![],
             tilt: None,
             clips: vec![],
         };

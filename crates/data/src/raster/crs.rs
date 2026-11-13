@@ -206,7 +206,9 @@ pub(crate) fn proj_key_refused(key: &str, val: &str) -> bool {
 
 impl Crs {
     /// A file's own coordinate system: checked (its PROJ definition must parse, or be a
-    /// sinusoidal one RustGIS computes) and added to the run's table, once per definition.
+    /// projection RustGIS computes: a sinusoidal one, an equidistant cylindrical one on an
+    /// ellipsoid, or Natural Earth, Winkel Tripel or Eckert IV) and added to the run's table, once
+    /// per definition.
     pub fn custom(def: CustomCrs) -> Result<Crs, String> {
         Crs::register(def, false)
     }
@@ -214,13 +216,11 @@ impl Crs {
     /// Adds a system to the run's table; one `typed` as a PROJ string counts against
     /// `MAX_TYPED` too, checked under the same lock as the insertion.
     fn register(def: CustomCrs, typed: bool) -> Result<Crs, String> {
-        let checked = match rustgis_geom::Sinusoidal::from_proj4(&def.proj4) {
-            Some(sinu) => sinu.map(|_| ()),
-            // As for an EPSG code ([`unusable_epsg`]): say where it can be used.
-            None if def.proj4.contains("+proj=aeqd") && !aeqd_supported() => {
-                Err("azimuthal equidistant can't be used in the web app: open the file in the desktop app".to_string())
-            }
-            None => proj4rs::Proj::from_proj_string(&def.proj4).map(|_| ()).map_err(|e| e.to_string()),
+        // As for an EPSG code ([`unusable_epsg`]): say where it can be used.
+        let checked = if def.proj4.contains("+proj=aeqd") && !aeqd_supported() {
+            Err("azimuthal equidistant can't be used in the web app: open the file in the desktop app".to_string())
+        } else {
+            transformer_of(&def.proj4).map(|_| ())
         };
         checked.map_err(|e| format!("{}: {e}", def.proj4))?;
         let mut t = custom_table().lock().unwrap_or_else(|e| e.into_inner());
@@ -313,6 +313,14 @@ impl Crs {
         }
     }
 
+    /// Text [`Crs::parse`] reads back as this system: `EPSG:32645`, or a custom one's definition.
+    pub fn code(self) -> String {
+        match self.custom_def() {
+            Some(d) => d.proj4.clone(),
+            None => format!("EPSG:{}", self.epsg()),
+        }
+    }
+
     /// `EPSG:32645`, or a custom system's name.
     pub fn label(self) -> String {
         match self.custom_def() {
@@ -326,13 +334,13 @@ impl Crs {
         match self {
             Crs::LonLat => true,
             Crs::WebMercator => false,
-            Crs::Epsg(c) => epsg_proj4(c).is_some_and(|d| d.contains("+proj=longlat")),
-            Crs::Custom(_) => self.custom_def().is_some_and(|d| d.proj4.contains("+proj=longlat")),
+            Crs::Epsg(c) => epsg_proj4(c).is_some_and(geographic_def),
+            Crs::Custom(_) => self.custom_def().is_some_and(|d| geographic_def(&d.proj4)),
         }
     }
 
     /// Whether its coordinates are geocentric (X, Y and Z from the Earth's centre), not a map's.
-    pub(crate) fn is_geocentric(self) -> bool {
+    pub fn is_geocentric(self) -> bool {
         match self {
             Crs::LonLat | Crs::WebMercator => false,
             Crs::Epsg(c) => epsg_proj4(c).is_some_and(|d| d.contains("+proj=geocent")),
@@ -359,7 +367,7 @@ impl Crs {
             let named = member(units).map(|u| (u != "m").then(|| u.to_string()));
             named.or_else(|| member(factor).map(|f| (f.parse::<f64>().ok() != Some(1.0)).then(|| format!("{f} m"))))
         };
-        let geographic = definition.contains("+proj=longlat") || definition.contains("+proj=latlong");
+        let geographic = geographic_def(definition);
         stated("+vunits=", "+vto_meter=").or_else(|| if geographic { None } else { stated("+units=", "+to_meter=") }).flatten()
     }
 
@@ -369,9 +377,10 @@ impl Crs {
     /// no known shift writes, as `+a`/`+rf` even on WGS 84's axes (SVY21's), and the reading says
     /// so. `+ellps=WGS84` and `+ellps=GRS80` alone need no shift (GRS 80 datums the reader knows
     /// get a null one), nor does a Mercator on Web Mercator's sphere of radius 6378137 m. Written
-    /// back in the same system, positions come back exact.
+    /// back in the same system, positions come back exact. False for another body's system
+    /// ([`Crs::is_planetary`]): it has no shift to WGS 84 at all, and its own notice says so.
     pub fn lacks_datum_shift(self) -> bool {
-        let Some(def) = self.custom_def() else { return false };
+        let Some(def) = self.custom_def().filter(|_| !self.is_planetary()) else { return false };
         let keys: Vec<&str> = def.proj4.split_whitespace().collect();
         let has = |prefix: &str| keys.iter().any(|k| k.starts_with(prefix));
         let shifted = has("+towgs84=") || has("+datum=") || has("+nadgrids=");
@@ -384,30 +393,316 @@ impl Crs {
         ellipsoid && !wgs84 && !shifted
     }
 
+    /// Whether the system is another body's than the Earth's: a custom one whose ellipsoid's
+    /// semi-major axis isn't the Earth's ([`super::planetary`]). Its longitude/latitude are read as
+    /// they are, on the Earth.
+    pub fn is_planetary(self) -> bool {
+        self.custom_def().and_then(|d| super::planetary::proj4_axes(&d.proj4)).is_some_and(|(a, _)| super::planetary::off_earth(a))
+    }
+
     /// A transformer between this system and WGS 84 longitude/latitude.
     pub fn transformer(self) -> Result<Transformer, String> {
-        Ok(Transformer {
-            kind: match self {
-                Crs::LonLat => Kind::LonLat,
-                Crs::WebMercator => Kind::Merc,
-                Crs::Epsg(c) => {
-                    let def = epsg_proj4(c).ok_or_else(|| format!("unknown coordinate system EPSG:{c}"))?;
-                    let native = proj4rs::Proj::from_proj_string(def).map_err(|e| format!("EPSG:{c}: {e}"))?;
-                    let wgs84 = proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())?;
-                    Kind::Proj { native: Box::new(native), wgs84: Box::new(wgs84), geographic: self.is_geographic() }
-                }
-                Crs::Custom(_) => {
-                    let def = self.custom_def().ok_or("an unknown custom coordinate system")?;
-                    // Sinusoidal (MODIS), which proj4rs lacks, is computed here.
-                    if let Some(sinu) = rustgis_geom::Sinusoidal::from_proj4(&def.proj4) {
-                        return Ok(Transformer { kind: Kind::Sinusoidal(sinu.map_err(|e| format!("{}: {e}", def.label))?) });
-                    }
-                    let native = proj4rs::Proj::from_proj_string(&def.proj4).map_err(|e| format!("{}: {e}", def.label))?;
-                    let wgs84 = proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())?;
-                    Kind::Proj { native: Box::new(native), wgs84: Box::new(wgs84), geographic: self.is_geographic() }
-                }
-            },
-        })
+        match self {
+            Crs::LonLat => Ok(Transformer { kind: Kind::LonLat }),
+            Crs::WebMercator => Ok(Transformer { kind: Kind::Merc }),
+            Crs::Epsg(c) => {
+                let def = epsg_proj4(c).ok_or_else(|| format!("unknown coordinate system EPSG:{c}"))?;
+                transformer_of(def).map_err(|e| format!("EPSG:{c}: {e}"))
+            }
+            Crs::Custom(_) => {
+                let def = self.custom_def().ok_or("an unknown custom coordinate system")?;
+                transformer_of(&def.proj4).map_err(|e| format!("{}: {e}", def.label))
+            }
+        }
+    }
+}
+
+/// A transformer between the system a PROJ definition describes and WGS 84 longitude/latitude.
+/// Sinusoidal (MODIS's grid) is computed here. Equidistant cylindrical uses PROJ 9.7.1's spherical
+/// projection formula while retaining its datum's ellipsoid for datum transformations.
+pub(crate) fn transformer_of(def: &str) -> Result<Transformer, String> {
+    if let Some(sinu) = rustgis_geom::Sinusoidal::from_proj4(def) {
+        return Ok(Transformer { kind: Kind::Sinusoidal(sinu?) });
+    }
+    if let Some(eqc) = ellipsoidal_eqc(def) {
+        return eqc;
+    }
+    if let Some(world) = WorldProjection::from_proj4(def) {
+        return world.and_then(|w| Ok(Transformer { kind: Kind::World { world: Box::new(w), wgs84: Box::new(wgs84()?) } }));
+    }
+    let native = proj4rs::Proj::from_proj_string(def).map_err(|e| e.to_string())?;
+    let geographic = geographic_def(def);
+    Ok(Transformer { kind: Kind::Proj { native: Box::new(native), wgs84: Box::new(wgs84()?), geographic } })
+}
+
+/// Whether a PROJ definition is in degrees: `longlat`, or one of the names PROJ takes for it.
+fn geographic_def(definition: &str) -> bool {
+    definition.split_whitespace().any(|t| matches!(t, "+proj=longlat" | "+proj=latlong" | "+proj=lonlat" | "+proj=latlon"))
+}
+
+#[cfg(test)]
+mod datum_tests {
+    use super::*;
+
+    /// Every name PROJ takes for longitude/latitude is in degrees; a projection is not.
+    #[test]
+    fn longlat_and_its_aliases_are_geographic() {
+        for proj in ["longlat", "latlong", "lonlat", "latlon"] {
+            assert!(geographic_def(&format!("+proj={proj} +datum=WGS84 +no_defs")), "{proj}");
+        }
+        assert!(!geographic_def("+proj=utm +zone=16 +datum=WGS84"));
+        assert!(!geographic_def("+proj=longlatx"));
+        // Read as degrees too: a corner comes back where it was, not off by the radian factor.
+        let to = transformer_of("+proj=latlong +datum=WGS84 +no_defs").unwrap();
+        let c = to.from_lonlat(Coord::new(-90.0, 35.0)).unwrap();
+        assert!((c.x + 90.0).abs() < 1e-9 && (c.y - 35.0).abs() < 1e-9, "{c:?}");
+    }
+
+    /// A corner on a datum shifted from WGS 84 (SAD69) moves by the shift, tens of metres; on one
+    /// with none (SIRGAS 2000) it stays (#1191).
+    #[test]
+    fn a_point_moves_onto_a_shifted_datum_and_not_onto_an_unshifted_one() {
+        let c = Coord::new(-45.0, -20.0);
+        let sirgas = lonlat_on_datum_of(epsg_proj4(31983).unwrap(), c).unwrap();
+        assert!((sirgas.x - c.x).abs() < 1e-9 && (sirgas.y - c.y).abs() < 1e-9, "{sirgas:?}");
+        let sad69 = epsg_proj4(29193).unwrap();
+        assert!(sad69.contains("+towgs84="), "{sad69}");
+        let on = lonlat_on_datum_of(sad69, c).unwrap();
+        // About 40 m east and 40 m north at 20° S: well past a centimetre, short of a kilometre.
+        let (dx, dy) = ((on.x - c.x) * 111_320.0 * 20f64.to_radians().cos(), (on.y - c.y) * 110_574.0);
+        let moved = dx.hypot(dy);
+        assert!(moved > 10.0 && moved < 200.0, "{moved} m ({dx} m, {dy} m)");
+    }
+}
+
+fn wgs84() -> Result<proj4rs::Proj, String> {
+    proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())
+}
+
+/// A WGS 84 longitude/latitude on the datum of the PROJ definition `def`: where a reader that
+/// takes `def`'s own geographic system puts the point (a GeoPDF's corners, #1191). The same
+/// point where `def`'s datum has no shift from WGS 84.
+pub fn lonlat_on_datum_of(def: &str, c: Coord) -> Option<Coord> {
+    const DATUM: [&str; 9] = ["datum", "ellps", "towgs84", "a", "b", "rf", "f", "R", "pm"];
+    let mut geographic = String::from("+proj=longlat");
+    for t in def.split_whitespace() {
+        let key = t.trim_start_matches('+').split('=').next().unwrap_or("");
+        if DATUM.contains(&key) {
+            geographic.push(' ');
+            geographic.push_str(t);
+        }
+    }
+    geographic.push_str(" +no_defs");
+    let to = proj4rs::Proj::from_proj_string(&geographic).ok()?;
+    let mut p = (c.x.to_radians(), c.y.to_radians(), 0.0);
+    proj4rs::transform::transform(&wgs84().ok()?, &to, &mut p).ok()?;
+    let out = Coord::new(p.0.to_degrees(), p.1.to_degrees());
+    out.is_finite().then_some(out)
+}
+
+/// The transformer for a PROJ definition of an equidistant cylindrical projection on an
+/// ellipsoid (EPSG:4087's), using PROJ 9.7.1's sphere of its semi-major axis for the projection and
+/// keeping the ellipsoid for datum transformations: `None` for any other definition, `eqc` on a sphere
+/// included. A map drawn in such a system uses it too (rustgis-map's `Projector`), so the map,
+/// the data read in the system and a raster drawn in its own coordinates all agree.
+pub fn ellipsoidal_eqc(def: &str) -> Option<Result<Transformer, String>> {
+    let eqc = EllipsoidalEqc::from_proj4(def)?;
+    Some(eqc.and_then(|eqc| Ok(Transformer { kind: Kind::Eqc { eqc: Box::new(eqc), wgs84: Box::new(wgs84()?) } })))
+}
+
+/// Longitude/latitude on the datum (its ellipsoid, shift to WGS 84 and prime meridian) of a PROJ
+/// definition of an equidistant cylindrical projection: every parameter but the projection's own.
+/// proj4rs replaces the ellipsoid of the projection itself with a sphere of its semi-major axis.
+pub(crate) fn eqc_geographic(def: &str) -> Result<proj4rs::Proj, String> {
+    const PROJECTION: [&str; 13] =
+        ["proj", "lat_ts", "lat_0", "lon_0", "x_0", "y_0", "units", "to_meter", "k", "k_0", "axis", "type", "wktext"];
+    let datum: Vec<String> = def
+        .split_whitespace()
+        .map(|t| t.trim_start_matches('+'))
+        .map(|t| t.split_once('=').unwrap_or((t, "")))
+        .filter(|(k, _)| !PROJECTION.contains(k))
+        .map(|(k, v)| if v.is_empty() { format!("+{k}") } else { format!("+{k}={v}") })
+        .collect();
+    proj4rs::Proj::from_proj_string(&format!("+proj=longlat {}", datum.join(" "))).map_err(|e| e.to_string())
+}
+
+/// PROJ 9.7.1-compatible equidistant cylindrical coordinates on an ellipsoidal datum. The projection
+/// uses a sphere of the semi-major axis, as legacy PROJ/GDAL do for `eqc`; the datum keeps its ellipsoid,
+/// shift to WGS 84 and prime meridian. proj4rs replaces the projection's ellipsoid with a sphere,
+/// so datum transformations must run separately on longitude/latitude.
+#[derive(Clone)]
+struct EllipsoidalEqc {
+    eqc: rustgis_geom::EquidistantCylindrical,
+    /// Longitude/latitude on the projection's own datum and prime meridian.
+    geo: proj4rs::Proj,
+    /// Metres per unit of its coordinates.
+    to_meter: f64,
+}
+
+impl EllipsoidalEqc {
+    /// The projection a PROJ definition describes when it is `+proj=eqc` on an ellipsoid: `None`
+    /// for any other projection, and for `eqc` on a sphere, which proj4rs computes exactly (with
+    /// its axes and `+over`, as before); an error for one it can't compute (axes other than east
+    /// and north, `+over`, a latitude of true scale that isn't a number of degrees).
+    fn from_proj4(def: &str) -> Option<Result<EllipsoidalEqc, String>> {
+        // Every parameter, however many: a datum shift or `+lat_ts` late in a long definition is
+        // still the definition's.
+        let tokens: Vec<(&str, &str)> =
+            def.split_whitespace().map(|t| t.trim_start_matches('+')).map(|t| t.split_once('=').unwrap_or((t, ""))).collect();
+        if !tokens.iter().any(|(k, v)| *k == "proj" && *v == "eqc") {
+            return None;
+        }
+        let built = (|| {
+            let native = proj4rs::Proj::from_proj_string(def).map_err(|e| e.to_string())?;
+            let geo = eqc_geographic(def)?;
+            let (a, b) = geo.ellipse_parameters();
+            if !(a.is_finite() && b.is_finite() && a > 0.0 && b > 0.0) {
+                return Err("the ellipsoid's axes aren't usable".into());
+            }
+            if ((a - b) / a).abs() < 1e-12 {
+                return Ok(None);
+            }
+            if !native.is_normalized_axis() || tokens.iter().any(|(k, _)| *k == "over") {
+                return Err(
+                    "an equidistant cylindrical projection on an ellipsoid takes axes east and north only, with no +over".to_string()
+                );
+            }
+            let lat_ts = match tokens.iter().find(|(k, _)| *k == "lat_ts") {
+                Some((_, v)) => v.parse::<f64>().ok().filter(|v| v.is_finite()).ok_or_else(|| format!("+lat_ts={v} isn't a number"))?,
+                None => 0.0,
+            };
+            let to_meter = native.to_meter();
+            if !(to_meter.is_finite() && to_meter > 0.0) {
+                return Err("its unit isn't usable".into());
+            }
+            let eqc = rustgis_geom::EquidistantCylindrical::new(
+                a,
+                0.0,
+                lat_ts,
+                native.latitude_of_origin().to_degrees(),
+                native.longitude_of_origin().to_degrees(),
+                native.false_easting(),
+                native.false_northing(),
+            )
+            .ok_or("not a possible equidistant cylindrical projection")?;
+            Ok(Some(EllipsoidalEqc { eqc, geo, to_meter }))
+        })();
+        built.transpose()
+    }
+
+    /// Its coordinates to longitude/latitude on its datum, then to WGS 84.
+    fn unproject(&self, wgs84: &proj4rs::Proj, c: Coord) -> Option<Coord> {
+        let own = self.eqc.inverse(Coord::new(c.x * self.to_meter, c.y * self.to_meter))?;
+        let mut p = (own.x.to_radians(), own.y.to_radians(), 0.0);
+        proj4rs::transform::transform(&self.geo, wgs84, &mut p).ok()?;
+        Some(Coord::new(p.0.to_degrees(), p.1.to_degrees()))
+    }
+
+    /// WGS 84 longitude/latitude to its datum's, then to its coordinates.
+    fn project(&self, wgs84: &proj4rs::Proj, c: Coord) -> Option<Coord> {
+        let mut p = (c.x.to_radians(), c.y.to_radians(), 0.0);
+        proj4rs::transform::transform(wgs84, &self.geo, &mut p).ok()?;
+        let m = self.eqc.forward(Coord::new(p.0.to_degrees(), p.1.to_degrees()))?;
+        Some(Coord::new(m.x / self.to_meter, m.y / self.to_meter))
+    }
+}
+
+/// A world projection proj4rs lacks (Natural Earth, Winkel Tripel, Eckert IV), computed by
+/// `rustgis_geom::world` on a sphere of its datum's semi-major axis (or `+R`), as PROJ does for
+/// these spherical projections. Its datum (ellipsoid, shift to WGS 84, prime meridian) is kept for
+/// the datum transformation on longitude/latitude, as for [`EllipsoidalEqc`] (#1701).
+#[derive(Clone)]
+struct WorldProjection {
+    world: rustgis_geom::world::World,
+    /// Longitude/latitude on the projection's own datum and prime meridian.
+    geo: proj4rs::Proj,
+    /// Metres per unit of its coordinates.
+    to_meter: f64,
+}
+
+impl WorldProjection {
+    /// The projection a PROJ definition describes when it is `+proj=natearth`, `wintri` or
+    /// `eck4`: `None` for any other; an error for one it can't compute (axes other than east and
+    /// north, `+over`, a scale other than 1, an offset that isn't a number, a Winkel Tripel
+    /// standard parallel that isn't a latitude short of a pole). Winkel Tripel's parallel is
+    /// `+lat_1`, else 0, as PROJ takes a definition used as a coordinate system (`cs2cs`, GDAL,
+    /// and WKT without the parameter; verified with PROJ 9.8.1 and 9.9.0). The `proj` program,
+    /// which runs the bare projection, takes Winkel's own, acos(2/π), for one without `+lat_1`;
+    /// the map's preset gives that one ([`rustgis_geom::world::winkel_parallel`]). Natural Earth
+    /// and Eckert IV have no standard parallel: a `+lat_1` is ignored, as in PROJ.
+    fn from_proj4(def: &str) -> Option<Result<WorldProjection, String>> {
+        use rustgis_geom::world::Kind as W;
+        let tokens: Vec<(&str, &str)> =
+            def.split_whitespace().map(|t| t.trim_start_matches('+')).map(|t| t.split_once('=').unwrap_or((t, ""))).collect();
+        let name = tokens.iter().find(|(k, _)| *k == "proj").map(|(_, v)| *v)?;
+        let kind = match name {
+            "natearth" => W::NaturalEarth,
+            "wintri" => W::WinkelTripel,
+            "eck4" => W::EckertIV,
+            _ => return None,
+        };
+        Some((|| {
+            if tokens.iter().any(|(k, v)| (*k == "k" || *k == "k_0") && v.parse::<f64>().ok() != Some(1.0)) {
+                return Err("a world projection with a scale other than 1 isn't supported".to_string());
+            }
+            let lat1 = match tokens.iter().find(|(k, _)| *k == "lat_1").filter(|_| kind == W::WinkelTripel) {
+                Some((_, v)) => v
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && v.abs() < 90.0)
+                    .ok_or_else(|| format!("+lat_1={v} isn't a latitude short of a pole"))?,
+                None => 0.0,
+            };
+            // proj4rs reads what every projection shares (centre, offsets, unit, axes, datum) from
+            // the same definition with a projection it has, the equidistant cylindrical, in place.
+            // `+geoc` (latitudes counted from the earth's centre) changes nothing on the sphere
+            // these are computed on, in PROJ too, so it is kept from the datum's longitude/latitude.
+            let stand_in: Vec<String> = def
+                .split_whitespace()
+                .filter(|t| !t.trim_start_matches('+').starts_with("lat_1=") && t.trim_start_matches('+') != "geoc")
+                .map(|t| if t.trim_start_matches('+') == format!("proj={name}") { "+proj=eqc".to_string() } else { t.to_string() })
+                .collect();
+            let stand_in = stand_in.join(" ");
+            let native = proj4rs::Proj::from_proj_string(&stand_in).map_err(|e| e.to_string())?;
+            if !native.is_normalized_axis() || tokens.iter().any(|(k, _)| *k == "over") {
+                return Err("a world projection takes axes east and north only, with no +over".to_string());
+            }
+            let geo = eqc_geographic(&stand_in)?;
+            let (a, _) = geo.ellipse_parameters();
+            let to_meter = native.to_meter();
+            if !(a.is_finite() && a > 0.0 && to_meter.is_finite() && to_meter > 0.0) {
+                return Err("its earth or unit isn't usable".to_string());
+            }
+            let world = rustgis_geom::world::World {
+                kind,
+                lon0: native.longitude_of_origin().to_degrees(),
+                radius: a,
+                x0: native.false_easting(),
+                y0: native.false_northing(),
+                lat1,
+            };
+            // `+x_0=inf` parses: every point of such a system would be nowhere.
+            if !(world.lon0.is_finite() && world.x0.is_finite() && world.y0.is_finite()) {
+                return Err("its centre or offset isn't a number".to_string());
+            }
+            Ok(WorldProjection { world, geo, to_meter })
+        })())
+    }
+
+    /// Its coordinates to longitude/latitude on its datum, then to WGS 84.
+    fn unproject(&self, wgs84: &proj4rs::Proj, c: Coord) -> Option<Coord> {
+        let own = self.world.inverse(Coord::new(c.x * self.to_meter, c.y * self.to_meter))?;
+        let mut p = (own.x.to_radians(), own.y.to_radians(), 0.0);
+        proj4rs::transform::transform(&self.geo, wgs84, &mut p).ok()?;
+        Some(Coord::new(p.0.to_degrees(), p.1.to_degrees()))
+    }
+
+    /// WGS 84 longitude/latitude to its datum's, then to its coordinates.
+    fn project(&self, wgs84: &proj4rs::Proj, c: Coord) -> Option<Coord> {
+        let mut p = (c.x.to_radians(), c.y.to_radians(), 0.0);
+        proj4rs::transform::transform(wgs84, &self.geo, &mut p).ok()?;
+        let m = self.world.forward(Coord::new(p.0.to_degrees(), p.1.to_degrees()))?;
+        Some(Coord::new(m.x / self.to_meter, m.y / self.to_meter))
     }
 }
 
@@ -417,6 +712,8 @@ enum Kind {
     Merc,
     Proj { native: Box<proj4rs::Proj>, wgs84: Box<proj4rs::Proj>, geographic: bool },
     Sinusoidal(rustgis_geom::Sinusoidal),
+    Eqc { eqc: Box<EllipsoidalEqc>, wgs84: Box<proj4rs::Proj> },
+    World { world: Box<WorldProjection>, wgs84: Box<proj4rs::Proj> },
 }
 
 /// Converts between a raster's coordinates and WGS 84 longitude/latitude.
@@ -432,6 +729,8 @@ impl std::fmt::Debug for Transformer {
             Kind::Merc => "mercator",
             Kind::Proj { .. } => "proj",
             Kind::Sinusoidal(_) => "sinusoidal",
+            Kind::Eqc { .. } => "eqc",
+            Kind::World { .. } => "world",
         };
         write!(f, "Transformer({k})")
     }
@@ -449,6 +748,8 @@ impl Transformer {
                 Coord::new(p.0.to_degrees(), p.1.to_degrees())
             }
             Kind::Sinusoidal(s) => s.inverse(c)?,
+            Kind::Eqc { eqc, wgs84 } => eqc.unproject(wgs84, c)?,
+            Kind::World { world, wgs84 } => world.unproject(wgs84, c)?,
         };
         out.is_finite().then_some(out)
     }
@@ -475,6 +776,8 @@ impl Transformer {
                 if *geographic { Coord::new(p.0.to_degrees(), p.1.to_degrees()) } else { Coord::new(p.0, p.1) }
             }
             Kind::Sinusoidal(s) => s.forward(c)?,
+            Kind::Eqc { eqc, wgs84 } => eqc.project(wgs84, c)?,
+            Kind::World { world, wgs84 } => world.project(wgs84, c)?,
         };
         out.is_finite().then_some(out)
     }
@@ -482,6 +785,15 @@ impl Transformer {
     /// Whether the raster's own coordinates are longitude/latitude degrees.
     pub fn is_geographic(&self) -> bool {
         matches!(self.kind, Kind::LonLat | Kind::Proj { geographic: true, .. })
+    }
+
+    /// The WGS 84 longitude of its central meridian, when its projection is a world projection
+    /// RustGIS computes (Natural Earth, Winkel Tripel, Eckert IV): its outline's east and west
+    /// edges are the meridian opposite (#1701).
+    pub(super) fn world_central_meridian(&self) -> Option<f64> {
+        let Kind::World { world, wgs84 } = &self.kind else { return None };
+        let centre = Coord::new(world.world.x0 / world.to_meter, world.world.y0 / world.to_meter);
+        world.unproject(wgs84, centre).map(|c| c.x).filter(|lon| lon.is_finite())
     }
 
     /// Web Mercator to native coordinates (the renderer's direction).
@@ -536,6 +848,136 @@ mod tests {
         let p = m.from_lonlat(Coord::new(10.0, 20.0)).unwrap();
         let q = m.to_lonlat(p).unwrap();
         assert!((q.x - 10.0).abs() < 1e-9 && (q.y - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn eqc_reads_proj_gdal_coordinates_without_moving_latitude() {
+        // PROJ 9.7.1 / GDAL use a sphere of the semi-major axis for +proj=eqc,
+        // including EPSG:4087 and IAU planetographic definitions on an ellipsoid.
+        for (def, lon, lat, x, y) in [
+            ("EPSG:4087", 0.0, 45.0, 0.0, 5_009_377.085_697_311),
+            ("+proj=eqc +a=3396190 +rf=169.894447223612", -133.8, 18.65, -7_930_954.53, 1_105_473.11),
+        ] {
+            let t = Crs::parse(def).unwrap().transformer().unwrap();
+            let m = t.from_lonlat(Coord::new(lon, lat)).unwrap();
+            assert!((m.x - x).abs() < 0.01 && (m.y - y).abs() < 0.01, "{def}: {m:?}");
+            let back = t.to_lonlat(Coord::new(x, y)).unwrap();
+            assert!((back.x - lon).abs() < 1e-6 && (back.y - lat).abs() < 1e-6, "{def}: {back:?}");
+        }
+    }
+
+    /// EPSG:4087 and equidistant cylindrical systems on ellipsoidal datums match PROJ 9.7.1/GDAL.
+    #[test]
+    fn equidistant_cylindrical_on_an_ellipsoid() {
+        check(4087, (10.0, 55.0), (1_113_194.907_932_735_7, 6_122_571.993_630_046), 1e-6);
+        check(4087, (0.0, 45.0), (0.0, 5_009_377.085_697_311), 1e-6);
+        let t = Crs::from_epsg(4087).unwrap().transformer().unwrap();
+        assert_eq!(format!("{t:?}"), "Transformer(eqc)");
+        let spherical = std::f64::consts::FRAC_PI_4 * 6_378_137.0;
+        let at = t.to_lonlat(Coord::new(0.0, spherical)).unwrap();
+        assert!((at.y - 45.0).abs() < 1e-12, "{at:?}");
+        // PROJ's ESRI World Equidistant Cylindrical uses a*cos(60°) per radian of longitude.
+        let world = Crs::parse("+proj=eqc +lat_ts=60 +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs").unwrap();
+        let m = world.transformer().unwrap().from_lonlat(Coord::new(1.0, 45.0)).unwrap();
+        assert!((m.x - 55_659.745_396_636_8).abs() < 1e-6 && (m.y - 5_009_377.085_697_311).abs() < 1e-6, "{m:?}");
+        // On a sphere it stays proj4rs's, unchanged (IAU_2015:49910, Mars).
+        for sphere in ["+proj=eqc +lat_ts=0 +lon_0=0 +R=3396190 +units=m +no_defs", "+proj=eqc +lon_0=0 +a=3396190 +b=3396190 +no_defs"] {
+            let t = Crs::parse(sphere).unwrap().transformer().unwrap();
+            assert_eq!(format!("{t:?}"), "Transformer(proj)", "{sphere}");
+            let m = t.from_lonlat(Coord::new(77.45, 18.44)).unwrap();
+            assert!((m.x - 3_396_190.0 * 77.45f64.to_radians()).abs() < 1e-6 && (m.y - 3_396_190.0 * 18.44f64.to_radians()).abs() < 1e-6);
+        }
+    }
+
+    /// The datum of an ellipsoidal equidistant cylindrical system is kept: its prime meridian, its
+    /// shift to WGS 84, its unit and its origin, each as proj4rs would apply it.
+    #[test]
+    fn equidistant_cylindrical_keeps_its_datum() {
+        let base = "+proj=eqc +lat_ts=30 +lat_0=10 +lon_0=10 +x_0=1000 +y_0=2000 +ellps=GRS80";
+        let t = |extra: &str| Crs::parse(&format!("{base} {extra} +no_defs")).unwrap().transformer().unwrap();
+        let m = Coord::new(800_000.0, 3_000_000.0);
+        let plain = t("+units=m").to_lonlat(m).unwrap();
+        // Round trips.
+        let back = t("+units=m").from_lonlat(plain).unwrap();
+        assert!((back.x - m.x).abs() < 1e-6 && (back.y - m.y).abs() < 1e-6, "{back:?}");
+        // The origin: lat_0 10°N, lon_0 10°E at the false origin.
+        let o = t("+units=m").to_lonlat(Coord::new(1000.0, 2000.0)).unwrap();
+        assert!((o.x - 10.0).abs() < 1e-12 && (o.y - 10.0).abs() < 1e-12, "{o:?}");
+        // Paris's meridian moves longitudes 2.337 229 167° east, and nothing else.
+        let paris = t("+units=m +pm=paris").to_lonlat(m).unwrap();
+        assert!((paris.x - plain.x - 2.337_229_166_666_667).abs() < 1e-9 && (paris.y - plain.y).abs() < 1e-12, "{paris:?}");
+        // Coordinates in feet are the same place as their metres (the false origin stays metres).
+        let feet = t("+units=ft").to_lonlat(Coord::new(m.x / 0.3048, m.y / 0.3048)).unwrap();
+        assert!((feet.x - plain.x).abs() < 1e-9 && (feet.y - plain.y).abs() < 1e-9, "{feet:?}");
+        let back = t("+units=ft").from_lonlat(feet).unwrap();
+        assert!((back.x - m.x / 0.3048).abs() < 1e-5 && (back.y - m.y / 0.3048).abs() < 1e-5, "{back:?}");
+        // A shift to WGS 84 is applied as proj4rs applies it to longitude/latitude on that datum.
+        let shifted = t("+units=m +towgs84=100,-50,30").to_lonlat(m).unwrap();
+        let geo = proj4rs::Proj::from_proj_string("+proj=longlat +ellps=GRS80 +towgs84=100,-50,30 +no_defs").unwrap();
+        let wgs84 = proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").unwrap();
+        let mut p = (plain.x.to_radians(), plain.y.to_radians(), 0.0);
+        proj4rs::transform::transform(&geo, &wgs84, &mut p).unwrap();
+        assert!((shifted.x - p.0.to_degrees()).abs() < 1e-12 && (shifted.y - p.1.to_degrees()).abs() < 1e-12, "{shifted:?} {p:?}");
+        assert!((shifted.x - plain.x).abs() + (shifted.y - plain.y).abs() > 1e-4, "no shift: {shifted:?}");
+    }
+
+    /// Every parameter of a long definition is read: a latitude of true scale and a datum shift
+    /// after 64 others place points as they do at its start.
+    #[test]
+    fn equidistant_cylindrical_reads_a_long_definition_whole() {
+        let padding = "+no_defs ".repeat(70);
+        let tail = "+lat_ts=60 +towgs84=100,-50,30";
+        let (short, long) = (format!("+proj=eqc +ellps=GRS80 {tail}"), format!("+proj=eqc +ellps=GRS80 {padding}{tail}"));
+        let lonlat = Coord::new(10.0, 45.0);
+        let at = |def: &str| Crs::parse(def).and_then(Crs::transformer).unwrap_or_else(|e| panic!("{e}")).from_lonlat(lonlat).unwrap();
+        let (a, b) = (at(&short), at(&long));
+        assert!((a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9, "{a:?} {b:?}");
+        // And that is with the scale at 60°: half the equator's easting.
+        let at_equator = at("+proj=eqc +ellps=GRS80 +towgs84=100,-50,30");
+        assert!((a.x / at_equator.x - 0.5).abs() < 0.01, "{a:?} {at_equator:?}");
+    }
+
+    /// Definitions it can't compute are refused, saying why, and hostile ones never panic.
+    #[test]
+    fn equidistant_cylindrical_hostile_definitions() {
+        for refused in [
+            "+proj=eqc +ellps=WGS84 +lat_ts=abc",
+            // Degrees and minutes, which proj4rs reads: not taken as 0.
+            "+proj=eqc +ellps=WGS84 +lat_ts=30d30",
+            "+proj=eqc +ellps=WGS84 +lat_ts=0.5r",
+            "+proj=eqc +ellps=WGS84 +lat_ts=NaN",
+            "+proj=eqc +ellps=WGS84 +lat_ts=90",
+            "+proj=eqc +ellps=WGS84 +axis=wsu",
+            "+proj=eqc +ellps=WGS84 +over",
+            "+proj=eqc +ellps=WGS84 +to_meter=0",
+        ] {
+            assert!(Crs::parse(refused).is_err(), "{refused}");
+        }
+        // On a sphere, axes and +over stay proj4rs's, as before the ellipsoidal form.
+        for sphere in ["+proj=eqc +R=3396190 +over +no_defs", "+proj=eqc +R=3396190 +axis=wsu +no_defs"] {
+            let t = Crs::parse(sphere).and_then(Crs::transformer).unwrap_or_else(|e| panic!("{sphere}: {e}"));
+            assert_eq!(format!("{t:?}"), "Transformer(proj)", "{sphere}");
+        }
+        // PROJ's spherical projection also works on a datum as flat as Jupiter's.
+        let t = Crs::parse("+proj=eqc +a=71492000 +b=66854000 +no_defs").unwrap().transformer().unwrap();
+        let at = t.from_lonlat(Coord::new(10.0, 45.0)).unwrap();
+        assert!((at.y - 71_492_000.0 * std::f64::consts::FRAC_PI_4).abs() < 1e-6, "{at:?}");
+        assert!(Crs::parse("+proj=eqc +a=3396190 +b=3376200 +no_defs").is_ok(), "Mars");
+        for odd in [
+            "+proj=eqc +a=1e308 +rf=1.0000001",
+            "+proj=eqc +a=-1 +b=5",
+            "+proj=eqc +a=6378137 +b=1",
+            "+proj=eqc +ellps=WGS84 +x_0=1e308 +y_0=-1e308",
+            "+proj=eqc +ellps=WGS84 +lat_0=89.999999 +lat_ts=-89.9999999",
+            "+proj=eqc +ellps=WGS84 +lon_0=1e300",
+        ] {
+            if let Ok(t) = Crs::parse(odd).and_then(Crs::transformer) {
+                for c in [Coord::new(0.0, 0.0), Coord::new(f64::NAN, 1.0), Coord::new(1e308, -1e308), Coord::new(f64::INFINITY, 0.0)] {
+                    let _ = t.to_lonlat(c);
+                    let _ = t.from_lonlat(c);
+                }
+            }
+        }
     }
 
     /// Projects `lonlat` with EPSG `code` and checks it against `want` (metres, or degrees for

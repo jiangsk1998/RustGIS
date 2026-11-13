@@ -40,9 +40,12 @@ from qgis.core import (
     QgsPointClusterRenderer, QgsPointDisplacementRenderer, QgsNullSymbolRenderer,
     QgsEmbeddedSymbolRenderer, QgsEffectStack, QgsVectorLayerTemporalProperties,
     QgsDateTimeRange, QgsStyle, QgsGradientColorRamp, QgsLayerTreeLayer,
+    QgsDiagramSettings, QgsDiagramLayerSettings, QgsSingleCategoryDiagramRenderer,
+    QgsLinearlyInterpolatedDiagramRenderer, QgsPieDiagram, QgsHistogramDiagram,
+    QgsStackedBarDiagram, QgsTextDiagram, QgsGroupLayer, QgsPolymorphicRelation,
 )
-from qgis.PyQt.QtCore import QVariant, QMetaType, QDateTime, QDate, QTime
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import QVariant, QMetaType, QDateTime, QDate, QTime, QSizeF
+from qgis.PyQt.QtGui import QColor, QPainter
 
 OUT = os.path.abspath(sys.argv[1])
 LOG = []
@@ -279,6 +282,60 @@ def data_defined():
 
 
 attempt("data-defined", data_defined)
+
+
+# ---------------------------------------------------------------------------------------------
+# Diagrams: pie by fields and by expressions, a histogram, a stacked bar and a text diagram; a pie
+# and a histogram sized between two values (by an expression, and by a field).
+
+def diagrams():
+    def settings(attrs):
+        s = QgsDiagramSettings()
+        s.enabled = True
+        s.categoryAttributes = attrs
+        s.categoryColors = [QColor(c) for c in ("#e41a1c", "#377eb8", "#4daf4a", "#984ea3")[:len(attrs)]]
+        s.categoryLabels = [a.strip('"') for a in attrs]
+        s.size = QSizeF(12, 12)
+        s.sizeType = Qgis.RenderUnit.Millimeters
+        s.backgroundColor = QColor(255, 255, 255, 255)
+        s.penColor = QColor("#333333")
+        s.penWidth = 0.3
+        s.barWidth = 3
+        return s
+
+    for name, kind, attrs, scaled in [
+        ("pie", QgsPieDiagram, ['"value"', '"angle"'], False),
+        ("pie-expression", QgsPieDiagram, ['"value"', '"angle" / 2', '"id"'], False),
+        ("pie-scaled", QgsPieDiagram, ['"value"', '"angle"'], True),
+        ("histogram-scaled", QgsHistogramDiagram, ['"value"', '"angle"'], True),
+        ("histogram", QgsHistogramDiagram, ['"value"', '"angle"', '"id"'], False),
+        ("stackedbar", QgsStackedBarDiagram, ['"value"', '"angle"'], False),
+        ("text", QgsTextDiagram, ['"value"', '"angle"'], False),
+    ]:
+        vl = layer("polygons")
+        s = settings(attrs)
+        if scaled:
+            r = QgsLinearlyInterpolatedDiagramRenderer()
+            r.setLowerValue(0)
+            r.setUpperValue(400)
+            r.setLowerSize(QSizeF(0, 0))
+            r.setUpperSize(QSizeF(20, 20))
+            if name == "pie-scaled":
+                r.setClassificationAttributeIsExpression(True)
+                r.setClassificationAttributeExpression('"value" + "angle"')
+            else:
+                r.setClassificationField("value")
+            s.scaleByArea = True
+        else:
+            r = QgsSingleCategoryDiagramRenderer()
+        r.setDiagram(kind())
+        r.setDiagramSettings(s)
+        vl.setDiagramRenderer(r)
+        vl.setDiagramLayerSettings(QgsDiagramLayerSettings())
+        save_qml(vl, f"diagram-{name}")
+
+
+attempt("diagrams", diagrams)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -729,6 +786,206 @@ def annotations():
 
 
 attempt("annotations", annotations)
+
+
+# Annotations with their settings: styled marks, lines and polygons (one with a hole), text
+# aligned, turned, in millimetres, as HTML, with a buffer; rectangle text with a background and a
+# frame, of a fixed size; a picture file and an SVG; text along a line; one switched off, one sized
+# at a reference scale; drawn in an order of their own (z index). The layer has its own
+# coordinate system (the project's is the same).
+def annotations_styled():
+    from qgis.core import QgsTextBufferSettings, QgsMarkerSymbol, QgsLineSymbol, QgsFillSymbol
+    from qgis.PyQt.QtCore import Qt, QSizeF
+    from qgis.PyQt.QtGui import QImage, QFont
+    png = os.path.join(OUT, "data", "picture.png")
+    img = QImage(40, 20, QImage.Format.Format_RGB32)
+    img.fill(QColor(200, 30, 30))
+    img.save(png)
+    p = new_project()
+    al = QgsAnnotationLayer("styled annotations", QgsAnnotationLayer.LayerOptions(p.transformContext()))
+    al.setCrs(CRS)
+
+    def fmt(size=12, unit=Qgis.RenderUnit.Points, color=QColor(0, 0, 0), bold=False, italic=False, buffer=False):
+        f = QgsTextFormat()
+        font = QFont("DejaVu Sans")
+        font.setBold(bold)
+        font.setItalic(italic)
+        f.setFont(font)
+        f.setSize(size)
+        f.setSizeUnit(unit)
+        f.setColor(color)
+        if buffer:
+            b = QgsTextBufferSettings()
+            b.setEnabled(True)
+            b.setSize(1)
+            b.setColor(QColor(255, 255, 0))
+            f.setBuffer(b)
+        return f
+
+    def add(item, z=0):
+        item.setZIndex(z)
+        al.addItem(item)
+        return item
+
+    t = add(QgsAnnotationPointTextItem("right, bold, red", QgsPointXY(2697000, 1261800)), 5)
+    t.setFormat(fmt(14, color=QColor(200, 0, 0), bold=True, buffer=True))
+    t.setAlignment(Qt.AlignmentFlag.AlignRight)
+    t = add(QgsAnnotationPointTextItem("turned, italic", QgsPointXY(2697000, 1261750)))
+    t.setFormat(fmt(4, Qgis.RenderUnit.Millimeters, italic=True))
+    t.setAngle(30)
+    t = add(QgsAnnotationPointTextItem("<b>html</b> text", QgsPointXY(2697000, 1261700)))
+    f = fmt()
+    f.setAllowHtmlFormatting(True)
+    t.setFormat(f)
+    t = add(QgsAnnotationPointTextItem("switched off", QgsPointXY(2697000, 1261650)))
+    t.setEnabled(False)
+    t = add(QgsAnnotationPointTextItem("at a reference scale", QgsPointXY(2697000, 1261600)))
+    t.setUseSymbologyReferenceScale(True)
+    t.setSymbologyReferenceScale(5000)
+    m = add(QgsAnnotationMarkerItem(QgsPoint(2697100, 1261800)), 2)
+    m.setSymbol(QgsMarkerSymbol.createSimple({"name": "square", "color": "255,0,0,255", "outline_color": "0,0,128,255", "outline_width": "0.5", "size": "4"}))
+    m = add(QgsAnnotationMarkerItem(QgsPoint(2697150, 1261800)))
+    m.setSymbol(QgsMarkerSymbol.createSimple({"name": "circle", "color": "0,160,0,128", "size": "3"}))
+    ln = add(QgsAnnotationLineItem(QgsLineString([QgsPoint(2697000, 1261550), QgsPoint(2697200, 1261580), QgsPoint(2697300, 1261520)])), 1)
+    ln.setSymbol(QgsLineSymbol.createSimple({"line_color": "0,0,255,255", "line_width": "1"}))
+    ln = add(QgsAnnotationLineItem(QgsLineString([QgsPoint(2697000, 1261500), QgsPoint(2697200, 1261500)])))
+    ln.setSymbol(QgsLineSymbol.createSimple({"line_color": "0,0,0,255", "line_width": "0.5", "line_style": "dash"}))
+    outer = QgsLineString([QgsPoint(2697400, 1261500), QgsPoint(2697600, 1261500), QgsPoint(2697600, 1261700), QgsPoint(2697400, 1261700), QgsPoint(2697400, 1261500)])
+    hole = QgsLineString([QgsPoint(2697450, 1261550), QgsPoint(2697550, 1261550), QgsPoint(2697550, 1261650), QgsPoint(2697450, 1261550)])
+    poly = QgsPolygon(outer)
+    poly.addInteriorRing(hole)
+    pg = add(QgsAnnotationPolygonItem(poly), -1)
+    pg.setSymbol(QgsFillSymbol.createSimple({"color": "0,200,0,100", "outline_color": "0,100,0,255", "outline_width": "0.8"}))
+    r = add(QgsAnnotationRectangleTextItem("centred in a box", QgsRectangle(2697300, 1261750, 2697500, 1261850)), 3)
+    r.setFormat(fmt(10))
+    r.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+    r.setBackgroundSymbol(QgsFillSymbol.createSimple({"color": "255,255,180,255", "outline_style": "no"}))
+    r.setFrameSymbol(QgsFillSymbol.createSimple({"color": "0,0,0,0", "outline_color": "200,0,0,255", "outline_width": "0.6"}))
+    r = add(QgsAnnotationRectangleTextItem("plain, top left", QgsRectangle(2697300, 1261600, 2697500, 1261700)))
+    r.setFormat(fmt(10))
+    r.setBackgroundEnabled(False)
+    r.setFrameEnabled(False)
+    r = add(QgsAnnotationRectangleTextItem("fixed size", QgsRectangle(2697300, 1261400, 2697500, 1261500)))
+    r.setFormat(fmt(10))
+    r.setPlacementMode(Qgis.AnnotationPlacementMode.FixedSize)
+    r.setFixedSize(QSizeF(30, 10))
+    r.setFixedSizeUnit(Qgis.RenderUnit.Millimeters)
+    pic = add(QgsAnnotationPictureItem(Qgis.PictureFormat.Raster, png, QgsRectangle(2697700, 1261700, 2697800, 1261800)), 4)
+    pic.setFrameEnabled(True)
+    pic = add(QgsAnnotationPictureItem(Qgis.PictureFormat.SVG, "/usr/share/qgis/svg/arrows/Arrow_01.svg", QgsRectangle(2697700, 1261550, 2697800, 1261650)))
+    lt = add(QgsAnnotationLineTextItem("along a line", QgsLineString([QgsPoint(2697000, 1261400), QgsPoint(2697300, 1261450)])))
+    lt.setFormat(fmt(10))
+    p.addMapLayer(al)
+    t = QgsAnnotationPointTextItem("on the main layer", QgsPointXY(2697050, 1261850))
+    t.setFormat(fmt(10, color=QColor(0, 0, 160)))
+    p.mainAnnotationLayer().addItem(t)
+    save_project(p, "annotations-styled")
+
+
+attempt("annotations styled", annotations_styled)
+
+
+# Groups: nested, hidden, collapsed, a layer unchecked in a shown group, and a group drawn as one
+# (a group layer) with its opacity and blending.
+def groups():
+    p = new_project()
+    pts, lines, polys, dem = layer("points"), layer("lines"), layer("polygons"), raster()
+    for lyr in (pts, lines, polys, dem):
+        p.addMapLayer(lyr, False)
+    root = p.layerTreeRoot()
+    outer = root.addGroup("Outer")
+    inner = outer.addGroup("Inner")
+    inner.addLayer(pts)
+    outer.addLayer(lines).setItemVisibilityChecked(False)
+    hidden = root.addGroup("Hidden")
+    hidden.setItemVisibilityChecked(False)
+    hidden.addLayer(dem)
+    collapsed = root.addGroup("Drawn as one")
+    collapsed.setExpanded(False)
+    collapsed.addLayer(polys)
+    gl = collapsed.convertToGroupLayer(QgsGroupLayer.LayerOptions(p.transformContext()))
+    p.addMapLayer(gl, False)
+    gl.setOpacity(0.6)
+    gl.setBlendMode(QPainter.CompositionMode.CompositionMode_Multiply)
+    root.addGroup("Empty")
+    save_project(p, "groups-nested-hidden-collapsed-drawn-as-one")
+
+
+attempt("groups", groups)
+
+
+# Bookmarks (in two coordinate systems, one turned, one in a group), relations (on one pair of
+# fields, a composition, on two pairs, polymorphic) and time settings (a span with steps, each
+# way a layer takes its time).
+def bookmarks_relations_time():
+    p = new_project()
+    # In UTC, so the file is the same wherever it is written.
+    UTC = __import__("qgis.PyQt.QtCore", fromlist=["Qt"]).Qt.TimeSpec.UTC
+    pts, lines, polys = layer("points"), layer("lines"), layer("polygons")
+    for lyr in (pts, lines, polys):
+        p.addMapLayer(lyr)
+    bm = p.bookmarkManager()
+    old = QgsBookmark()
+    old.setId("old-town")
+    old.setName("Old town")
+    old.setGroup("Places")
+    old.setExtent(QgsReferencedRectangle(QgsRectangle(2696400, 1261250, 2698200, 1262350), CRS))
+    old.setRotation(30)
+    bm.addBookmark(old)
+    wide = QgsBookmark()
+    wide.setId("region")
+    wide.setName("Region")
+    wide.setExtent(QgsReferencedRectangle(QgsRectangle(8.6, 47.4, 8.9, 47.6), QgsCoordinateReferenceSystem("EPSG:4326")))
+    bm.addBookmark(wide)
+    rm = p.relationManager()
+    for rid, name, strength, pairs in [
+        ("lines_points", "lines to points", Qgis.RelationshipStrength.Association, [("id", "id")]),
+        ("polygons_points", "polygons of points", Qgis.RelationshipStrength.Composition, [("id", "id")]),
+        ("lines_points_kind", "lines to points by kind", Qgis.RelationshipStrength.Association, [("id", "id"), ("kind", "kind")]),
+    ]:
+        rel = QgsRelation()
+        rel.setId(rid)
+        rel.setName(name)
+        rel.setReferencingLayer(lines.id() if rid.startswith("lines") else polys.id())
+        rel.setReferencedLayer(pts.id())
+        for referencing, referenced in pairs:
+            rel.addFieldPair(referencing, referenced)
+        rel.setStrength(strength)
+        rm.addRelation(rel)
+    poly = QgsPolymorphicRelation()
+    poly.setId("by_layer")
+    poly.setName("by layer")
+    poly.setReferencingLayer(polys.id())
+    poly.addFieldPair("id", "id")
+    poly.setReferencedLayerField("name")
+    poly.setReferencedLayerExpression("@layer_name")
+    poly.setReferencedLayerIds([pts.id(), lines.id()])
+    rm.addPolymorphicRelation(poly)
+    ts = p.timeSettings()
+    ts.setTemporalRange(QgsDateTimeRange(QDateTime(QDate(2024, 1, 1), QTime(0, 0), UTC), QDateTime(QDate(2024, 12, 31), QTime(0, 0), UTC)))
+    ts.setTimeStep(1)
+    ts.setTimeStepUnit(Qgis.TemporalUnit.Months)
+    ts.setIsTemporalRangeCumulative(True)
+    ts.setFramesPerSecond(2)
+    tp = pts.temporalProperties()
+    tp.setIsActive(True)
+    tp.setMode(Qgis.VectorTemporalMode.FeatureDateTimeInstantFromField)
+    tp.setStartField("day")
+    tp.setAccumulateFeatures(True)
+    tl = lines.temporalProperties()
+    tl.setIsActive(True)
+    tl.setMode(Qgis.VectorTemporalMode.FeatureDateTimeStartAndDurationFromFields)
+    tl.setStartField("day")
+    tl.setDurationField("value")
+    tl.setDurationUnits(Qgis.TemporalUnit.Days)
+    tg = polys.temporalProperties()
+    tg.setIsActive(True)
+    tg.setMode(Qgis.VectorTemporalMode.FixedTemporalRange)
+    tg.setFixedTemporalRange(QgsDateTimeRange(QDateTime(QDate(2024, 3, 1), QTime(0, 0), UTC), QDateTime(QDate(2024, 6, 1), QTime(0, 0), UTC)))
+    save_project(p, "bookmarks-relations-time")
+
+
+attempt("bookmarks relations time", bookmarks_relations_time)
 
 
 # Every style above as one project, each on its own layer: a single file covering them all.

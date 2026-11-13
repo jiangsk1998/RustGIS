@@ -12,8 +12,11 @@ existing numeric field with each feature's area, perimeter, length or X/Y coordi
 you choose, for all features or the selected ones. Length and perimeter include feet and miles;
 area includes square feet (`ft2`), acres (`ac`) and square miles (`mi2`). Every edit is one undo
 step. Areas, perimeters and lengths measure on the WGS 84 ellipsoid, the same measure as the network tools and the Measure panel (Spatial Join still
-measures on the sphere), with two exceptions: a ring with a full-turn edge (a globe-wide band)
-is measured on the sphere instead, and a ring winding around a pole is measured as the region it
+measures on the sphere). A ring with a full-turn edge, -180° to 180° along a parallel that the
+ring reaches down one meridian and leaves back up the other (a globe-wide band, or a cap closed
+along the pole), counts that whole parallel, as long as the ring's turns leave it closed around
+the globe; an edge from 180° to -180° anywhere else is a seam along the antimeridian (a polygon
+split there), so a 1° cell written that way is the cell. A ring winding around a pole is measured as the region it
 traces, where [Geoprocessing](analysis.md#geoprocessing-tools) gives the smaller polar cap.
 
 Undo (++ctrl+z++) and Redo (++ctrl+y++ or ++ctrl+shift+z++) restore project changes, not just
@@ -41,6 +44,37 @@ you edit the value or choose units; click **Apply elevation** to apply the new i
   and flip line direction. A single point turns and scales on itself, so Rotate and Scale leave
   points (text graphics included) as they are: with only points selected they change nothing,
   say so, and add no undo step. Edit › Tools lists every editing tool.
+  Beyond 85.05°, where Web Mercator stops, Move, Rotate and Scale work on the ground: a feature
+  that reaches beyond it, or that the edit would take beyond it, moves rigidly, together with the
+  selected features sharing a vertex with it (their center goes the distance and direction asked,
+  along the ground and across a pole if that's the way, and the rest turn with the world around
+  it), and turns or scales about its own center. Within ±85.05° an edit is made in Web Mercator, as
+  before (where a long move north covers less ground than asked, and Rotate and Scale turn about
+  the middle of the feature's extent), so an edit that just stays within 85.05° and one that just
+  passes it can land far apart. Only the vertices move rigidly: edges stay straight in longitude
+  and latitude between them, so long edges bend, the more so the nearer the pole one end is than
+  the other, and far less for moves north–south than east–west: an edge from 87° to 89° bends
+  333 m for each kilometer moved east; one from 89.5° to 89.99° bends much more. Add vertices along them first to keep their shape. A moved
+  feature's longitudes run on from where they were written, past ±180° if it crosses there (to
+  188°, say, rather than −172°), as within ±85.05°; one carried more than halfway around a pole
+  is written within half a turn of where it was.
+  Rotate and Scale use each feature's own center, so selected neighbors sharing a corner can
+  separate at that corner.
+  Right by a pole a move's directions turn quickly with its center's place: a center at
+  the pole takes "east" from the prime meridian (toward 90°E), one a meter away from its own
+  longitude. The whole edit is refused, and nothing changes, when a selected line or polygon
+  edited on the ground reaches a pole (so moving every feature of a world layer fails while
+  Antarctica is selected), spans 180° of longitude or more in one edge, or would be carried onto
+  or around a pole, or when the edit would move a feature more than 10,000 km on the ground or
+  carry a vertex more than 10,000 km from the center it's edited about. A move of no distance
+  leaves features beyond 85.05° as they are. Moving neighbors one at a time, one within ±85.05°
+  and one beyond, can leave their shared corners apart, by about the distance moved times
+  2·sin(Δλ/2), Δλ being the corner's longitude from the center of the one moved on the ground (a
+  tenth of it 6° away, half of it 30° away): select them together. Split cuts beyond 85.05° where
+  it's asked: where the point or the line reaches beyond it, at the line's point nearest on the
+  ground (once a split has worked out a million distances along segments near the point, a
+  segment counts as near as the nearest point found on it so far, its nearer end at first, and the
+  split says how many lines it cut that way, or left whole when that point was an end).
 - **Cut Polygon** (Edit › Tools, or the Editing pane): select polygons, then click a line across
   them and double-click to finish. Each polygon the line crosses from edge to edge is cut into
   pieces; a zigzag line can make several. The pieces keep the original's attributes. The
@@ -95,6 +129,17 @@ you edit the value or choose units; click **Apply elevation** to apply the new i
   (Move, and `edit.traverse`, which draws a line or polygon from distances and bearings).
 - **Topology**: rules (must not overlap, must not have gaps, must not self-intersect, must not
   have dangles, must be covered by); Validate lists the errors, and clicking one zooms to it.
+  On the desktop the check runs in the background, so the map stays in use: the status bar
+  shows **Error Inspector** with its progress and **Cancel**, and a check that can be cancelled
+  takes any amount of work (a gaps rule first joins all its polygons in one step, which
+  **Cancel** stops only once it is done). A layer edited while it is checked makes the check say
+  so: run Validate again. Checked from a script, the assistant or the command line, it holds
+  the window and stops after a fixed amount of work, saying which rules weren't checked
+  completely (a gaps rule's join of its polygons has no such limit). A line or ring too complex
+  to check for self-intersections within the limit is listed at its first point, to be looked
+  at, and its rule is said to be incomplete.
+  Beyond 85.05° they follow the geometry tools (see
+  [Geoprocessing tools](analysis.md#geoprocessing-tools), **Near the poles**).
 - **Status**: features added, changed and deleted per layer since the last save.
 
 ### Moving shared polygon vertices
@@ -173,6 +218,34 @@ nothing. The pop-up lists every feature under the click in those layers, overlap
 (up to 100): step through them with ‹ ›. The feature shown is the one selected. The magnifier in
 the pop-up's header zooms to it. Long feature titles and layer names are shortened with an
 ellipsis to leave room for the header controls; hover over either name to read it in full.
+
+A value that is a web address is a link: click it to open the page in your browser (a new tab in the
+web app), or right-click it for **Copy Link**. It must be the whole value: `http://` or `https://`
+(in any case), a host name or IP address with no user name before it
+(`https://bank.example@other.example/` stays text), at most 2048 bytes, and no spaces, control
+characters, quotes or backticks, angle brackets, braces, backslashes or `^`. A picture kept with a
+feature (a geotagged photo's thumbnail, a `data:image/jpeg`, `png` or `webp` value) shows at the top
+of the pop-up. Without one, the pop-up can show a picture from the web: the `https://` address in a
+field named `image`, `image_url`, `photo`, `photo_url`, `picture`, `picture_url`, `thumbnail` or
+`thumbnail_url` (in any case, with or without `_`, `-` or spaces), or else the first address whose
+path ends in `.jpg`, `.jpeg`, `.png` or `.webp`, with fields taken in the order of their names. An
+address that can be fetched comes before a plain `http://` one or one on the local network. Fields
+such as `image_page_url` or `image_credit` stay links or text in the list.
+
+A picture from RustGIS's own asset server (`https://assets.rustgis.app/…`) is fetched as the pop-up
+opens. A picture from any other server isn't: the pop-up shows **Show Picture** and the server's
+name, and fetches nothing until you click it, because the request tells that server that someone
+opened the data (see [Privacy](../privacy.md)). A spinner shows while a picture is fetched. PNG, JPEG,
+WebP and GIF pictures of up to 4 MB and 2048 × 2048 pixels are shown (on every platform; any other
+format, such as BMP or TIFF, is "not supported"); the last 16 addresses' pictures are kept for the
+session, so opening the pop-up again shows the picture without asking again; they are forgotten with
+the web layers' cached tiles (signing out of ArcGIS, a login that ends, **Reload Web Layers**). When
+one can't be shown, the pop-up says why ("Picture unavailable: …": the server's answer, a network
+error, a server that stops sending it, not a picture, a picture format that isn't supported, too
+large) and doesn't ask again; its address stays a link. A plain `http://` picture, or one on this
+computer or the local network, is never fetched. In the web app the picture's server must allow it
+to be read from another site (CORS); many photo sites do, some don't. It must also give the picture
+at that address: the web app refuses a redirect, as it does for every download.
 
 The topmost and visible modes also identify the features of vector tile layers under the click:
 PMTiles and MBTiles archives and vector tiles added as data (not catalog basemaps or MapLibre

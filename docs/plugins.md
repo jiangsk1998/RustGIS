@@ -4,6 +4,8 @@ Plugins add commands, geoprocessing tools and assistant skills to RustGIS. A plu
 `plugin.json` manifest and is packaged as a `.rgplugin` file. WebAssembly plugins run sandboxed
 in the desktop app, on the command line and in the web app. [Process plugins](#process-plugins)
 run a local program instead and need the desktop app or command line.
+Parts of RustGIS itself that you can turn on or off without installing anything are
+[extensions](user-guide/index.md#extensions).
 
 Browse the [plugin catalog](https://plugins.rustgis.app/catalog/).
 [opengeos/rustgis-plugins](https://github.com/opengeos/rustgis-plugins) holds the registry,
@@ -81,10 +83,16 @@ described below, and RustGIS checks each one:
   a map file) has it taken out again without `network`.
 - No plugin may run the user's scripts, tasks or models, create or save models, install or
   locate other software, manage plugins or connections and logins, replace the project, or
-  step through undo history. It cannot call another plugin's command directly.
+  step through undo history. It cannot call another plugin's command or tool. It may run its
+  own tools through `gp.run`, with the usual `edit` and file requirements.
 
 A [process plugin](#process-plugins) is the exception: it is a program on your computer, not
 sandboxed, and the install prompt says so.
+
+Commands, tool schemas and deferred results stay bound to the exact enabled plugin load that
+started them. Disabling, removing or reloading it prevents further stages and result application.
+Development process programs remain unsandboxed; this load binding does not attest their
+executable bytes or prevent a program from changing on disk.
 
 The install prompt lists these permissions. Each call has a fuel budget, so a plugin stuck in a
 loop is stopped. Memory is capped at 512 MB, and requests and replies are size-limited. A plugin
@@ -180,11 +188,43 @@ cargo build --release --target wasm32-unknown-unknown
   not a JSON object or a form definition; it defaults to `"{}"`.
 - `commands[].icon`: the name of one of RustGIS's own icons (`stats`, `zoom_full`, `bookmark`,
   `buffer`…), or a puzzle piece when it isn't one.
+- `commands[].form` (optional) gives the command a dialog of its own: its ribbon button (tab
+  entry, panel button, Command Search entry, shortcut) opens a window with these fields instead of
+  running it, and **Run** runs the command with their values as its parameters, by their `name`s.
+  Fields are declared like tool parameters (below), with `rasterLayer` added and `file` left out
+  (a command that reads a file asks for it with host calls, behind the `files` permission); a
+  `field` or `numericField` lists the fields of the nearest layer field above it, which must be a
+  vector one (`vectorLayer`, `polygonLayer` or `pointLayer`), and required when the field is. A
+  required layer starts at the active layer when it is of the kind, an optional one offers `—` to
+  leave it out (a `choice` with a `default` counts as required and offers no `—`), and **Run**
+  waits until the required fields are filled in. An optional number left empty, or an optional
+  checkbox without a `default` never ticked, is left out of the parameters; a required checkbox is
+  sent unticked as `false`. A text box sends what it holds once typed in, empty text too. A
+  field's `default` must be of its kind (a number, or a number written as text, for `number`;
+  `true` or `false` for `bool`; one of its choices for `choice`; text for the others), or the
+  plugin is refused. The dialog shows what the command answers: its `report` text when it answers
+  `{"report": "…"}`, or else the answer itself without its `panel` state (which the plugin's panel
+  takes in), up to its first 64 KB, saying how much more there is. Its values are kept, for each
+  dialog, until RustGIS closes. Scripts and agents run the command as before, with the parameters
+  they give, so describe the form's parameters in `commands[].params` too. RustGIS versions before
+  dialogs ignore `form` and run the command when its button is clicked, without these parameters:
+  set `minRustgisVersion` to the first version with them, or have the command answer what it needs
+  then.
+- `commands[].timeout`: seconds the command may run, from 1 to 86400; unset is 120. It holds on
+  the command line, in Python and in scripts. The desktop app runs commands on its window's own
+  thread, which can't draw or cancel until a command answers, so there a command still stops
+  after 120 seconds and its error says so. Long work such as downloading a dataset belongs in a
+  tool, which the desktop app runs in the background with progress and Cancel.
 - Tool parameter `kind`s: `layer`, `vectorLayer`, `polygonLayer`, `pointLayer`, `field`,
   `numericField`, `number`, `text`, `choice` (with 1 to 64 `choices`), `bool` and `file` (see
   [File parameters](#file-parameters)). Each has `name`, `label`, optional `help`, `required`
   (default `false`) and an optional JSON `default`. Parameter names start with a lower-case
-  letter and may also contain upper-case letters and underscores after it.
+  letter and may also contain upper-case letters and underscores after it. In the tool's form, a
+  required layer parameter starts at the active layer, or, when that isn't of the kind it takes (a
+  `vectorLayer`, `polygonLayer` or `pointLayer`), at the first layer that is (empty when none
+  is); an optional one stays empty until it's picked (its picker offers `—` to leave it out
+  again), or shows the layer its `default` names, which a run without one uses; its picker then
+  offers no `—`, which would leave the parameter out and run with that layer too.
 - `panel` (optional) gives the plugin a pane of its own, with widgets bound to its commands. See
   [A panel](#a-panel).
 - `i18n` translates the plugin's own text into the interface language, by language code (`de`,
@@ -192,7 +232,7 @@ cargo build --release --target wasm32-unknown-unknown
 - `skills` (optional) lists skills for the AI Assistant that the package carries. See
   [Skills](#skills).
 
-A manifest can declare at most 256 commands, 64 tools and 32 parameters per tool.
+A manifest can declare at most 256 commands, 64 tools and 32 parameters per tool or command dialog.
 
 A package is a zip archive, conventionally named `<id>-<version>.rgplugin`. It holds
 `plugin.json` at its root or inside one top-level folder; `entry` is relative to that manifest.
@@ -216,6 +256,18 @@ The plugin needs the `files` permission:
 - The tool gets the file in the request's `files`, by parameter name, as
   `{"name": "run.nc", "data": base64}`. The parameter itself holds just the file name.
 - Files are at most 64 MB. The Geoprocessing history keeps the file's name, not its contents.
+- A process plugin, which can open files itself, can take the file's path instead with
+  `"mode": "path"`. RustGIS then checks the file is there but doesn't read it, so the 64 MB
+  limit doesn't apply. The parameter holds the file's full path (a relative one is made full, as
+  the program runs in its own folder), and there is no `files` entry:
+
+  ```json
+  { "name": "input", "label": "Input LAS file", "kind": "file", "mode": "path", "required": true, "extensions": ["las", "laz"] }
+  ```
+
+  `mode` is `"contents"` (the default) or `"path"`; a WebAssembly plugin can't use `path`.
+  RustGIS versions before `mode` read the file anyway, so set `minRustgisVersion` to the first
+  version with it.
 - RustGIS versions before file parameters refuse a plugin that has one, so set
   `minRustgisVersion` to the first version with them.
 
@@ -312,7 +364,8 @@ an example.
 ### A panel
 
 A plugin can have a panel: a pane on the right of the map with texts, checkboxes, sliders,
-buttons and trees bound to its commands. Declare it in `plugin.json`:
+buttons, trees, forms, dropdowns, date pickers, range sliders and picks on the map bound to its
+commands. Declare it in `plugin.json`:
 
 ```json
 "panel": {
@@ -344,14 +397,38 @@ buttons and trees bound to its commands. Declare it in `plugin.json`:
       to `0`; `default` is `min` unless given), with a caption, the value's label, and its two
       ends' labels. `steps: true` adds ‹ and › buttons that move it by one.
     - `button`: runs its `command`; its `label` is the command's unless given.
+    - `choice`: a dropdown. Its `options` (`[{"id": "dswx-hls", "label": "DSWx-HLS"}]`, at most
+      1,000, each `id` unique) come from `plugin.json` or the plugin; `default` is one of their
+      ids. Its value is the chosen option's id, or `null`. An option whose id and label are
+      those of one declared in `plugin.json` shows its label translated with its `i18n` (whether
+      the declaration or the plugin's answer gave it); any other label is shown as the plugin
+      words it. Only the first 1,000 options given are looked at.
+    - `date`: a box for a date written `YYYY-MM-DD`, with a calendar button beside it. `default`
+      is a date. Its value is the date, or `null`. A date typed runs the command when it is
+      confirmed (Enter, or leaving the box); one that isn't a real date is put back.
+    - `range`: a slider with two handles, low and high, over whole numbers from `min` to `max`,
+      as a slider's (with its `labels` and `steps`, which move both handles). Each handle also
+      takes the focus and moves with the arrow keys. `default` is `[low, high]` (both ends unless
+      given). Its value is `[low, high]`, low first.
     - `tree`: nodes the plugin gives (themes, their datasets, say), each branch opened or closed
       with its triangle or a double click. `search: true` adds a box above it that keeps the
       nodes whose label holds every word typed (case and accents aside), with the branches
       above them open; a branch found with nothing found below it opens to all its children.
-- A checkbox runs its `command` when it changes, a slider when it is let go, or stepped
-  (never while it is dragged, while the pane shows the label of the value it would take), and a
-  tree when a node is chosen. Without a `command`, a widget's value just goes with the plugin's
-  next request.
+    - `form`: a grid of fields the plugin gives, one per parameter, with a label and its widget.
+      A field's `kind` is `text`, `number` (a whole number when `integer` is true), `checkbox`,
+      `select` (one of `choices`) or `multi` (several of them). A field has an `id` (unique in
+      the form), a `label`, and optionally `help`, `choices`, `default`, `required` (shown with
+      `*`) and `integer`. A form holds at most 64 fields, a field id 64 characters and 256
+      choices. A label wraps in a narrow column so the value box stays reachable: keep a long
+      description in `help`, which shows on hover.
+    - `pick`: a button that asks for a place on the map ([below](#picking-a-place-on-the-map)):
+      a point, or with `"shape": "box"` a box. Its `label` is its command's unless given.
+- A checkbox runs its `command` when it changes, a slider or a range when it is let go, or
+  stepped (never while it is dragged, while the pane shows the label of the value it would take),
+  a tree or a dropdown when a node or an option is chosen, a form's text and number fields when
+  they lose focus (so the plugin is not run on every keystroke), its other fields at once, a date
+  when one is picked, and a pick when the place is picked. Without a `command`, a widget's value
+  just goes with the plugin's next request.
 - `state` (optional) is a command RustGIS runs each time the panel is opened, to answer its
   state.
 - Every `command` reference, including `state`, must name one of the plugin's own commands.
@@ -366,11 +443,12 @@ button, a script or the command line):
 "panel": { "values": { "local": false, "release": 196 }, "changed": ["release"] }
 ```
 
-`values` has each checkbox (`true` or `false`), slider (a whole number) and tree (the chosen
-node's id, or `null`), and `changed` the ones this call set: the widget the user just moved. A
-widget's command is run with `{"panel": {"release": 196}}` as its parameters, which sets the
-values before the call and is taken out of the request's `params`, so a script or `rustgis-cli`
-can do the same:
+`values` has each checkbox (`true` or `false`), slider (a whole number), range (`[low, high]`),
+tree and dropdown (the chosen node's or option's id, or `null`), date (`"YYYY-MM-DD"`, or `null`),
+form (an object of its fields' values, by field id) and pick (the place picked last, or `null`),
+and `changed` the ones this call set: the widget the user just moved. A widget's command is run
+with `{"panel": {"release": 196}}` as its parameters, which sets the values before the call and is
+taken out of the request's `params`, so a script or `rustgis-cli` can do the same:
 
 ```sh
 rustgis-cli run --sample --cmd 'plugin:historical-imagery/go-to-release={"panel": {"release": 40}}'
@@ -393,18 +471,46 @@ Any command can answer the panel's new state, beside the rest of its answer:
 ```
 
 - An item can set `label` (`null` brings back the declared one), `enabled` and `visible`; a text
-  its `text`; a slider its `min`, `max` and `labels`, one per value from `min` (the numbers when
-  there are none); a tree its `nodes`. What an answer leaves out stays as it was.
+  its `text`; a slider or a range its `min`, `max` and `labels`, one per value from `min` (the
+  numbers when there are none); a tree its `nodes`; a dropdown its `options`; a form its `fields`.
+  What an answer leaves out stays as it was. Fields belonging to another widget kind are ignored
+  and reported: `text` outside a text widget, `min`/`max`/`labels` outside a slider or range,
+  `nodes` outside a tree, `options` outside a dropdown, and `fields` outside a form. Unknown item
+  ids and field names are also ignored and reported. Unknown panel-answer keys are reported too;
+  echoed `changed` request metadata is accepted.
 - A tree's `nodes` are `[{"id": "env", "label": "Environment", "count": 67, "children": [...]}]`:
   `id` is the value the node gives when chosen, unique in the tree; `label` defaults to the id;
   `count` (a whole number) shows at the right of the row. The nodes come before the values in an
   answer, so one can give a tree and choose a node of it; a chosen node no longer among them
   leaves nothing chosen.
+- A form's `fields` are `[{"id": "method", "kind": "select", "label": "Method", "choices":
+  ["fast", "careful"], "default": "fast", "required": true}]`. A value is kept by field id: a
+  field the new form does not have is dropped and a new one takes its default, so switching a
+  module cannot carry a stale value into a run.
 - RustGIS checks the answer like any other: unknown ids and fields and values of the wrong type
-  are ignored, a slider's value stays within its ends and a tree's among its nodes, texts are
-  clipped to 4,000 characters, labels to 200, and a slider has at most 2,000 labels of 80
-  characters. A tree holds at most 5,000 nodes, 8 levels deep; a node without an id, or with one
-  longer than 200 characters or taken already, is left out with its children.
+  are ignored with a warning, a slider's or a range's value stays within its ends, a tree's among
+  its nodes, a dropdown's among its options (a repeated or missing id is left out), a form's among
+  its fields and their choices, and a date is a real date. Texts are clipped to 4,000 characters,
+  labels to 200, and a slider has at most 2,000 labels of 80 characters. A tree holds at most
+  20,000 nodes (a country's municipalities with the levels above them), 8 levels deep; a node
+  without an id, or with one longer than 200 characters or taken already, is left out with its
+  children. A tree given more nodes keeps the first 20,000, in the order given, depth first: the
+  warning names the tree and how many nodes it was given, and the panel says so under the tree,
+  where a search can't find what was left out. Keep larger lists (France's 34,900 communes) in
+  parts the user chooses, a level at a time.
+- Malformed panel, `items` or `values` objects, invalid numeric bounds and non-string node or
+  option labels produce counted warnings. So do values clamped or reordered to fit a widget,
+  choices cleared after options change, text cut to 4,000 characters, labels cut to 200,
+  slider labels cut to 80 characters or 2,000 entries, and wrong-type applicable item fields.
+  A malformed bound leaves that bound unchanged while a valid companion bound is applied.
+  Warnings name the plugin and affected widgets or fields; clean input stays quiet. Diagnostic
+  field and rejected-value names retain only ten samples of at most 200 characters, while counts
+  include every field and value. Null entries in `items` mean no update; null values for
+  selectable widgets still clear their selection. Control characters, line separators and bidi
+  formatting controls in diagnostic names become spaces. A manifest's dropdown labels must already
+  be strings of at most 200 characters without control characters. Option objects allow only `id`
+  and an optional `label`; declarations requiring fields to be discarded or labels to be changed
+  are refused with the affected fields in the error.
 - A plugin words what it sets in the request's `lang`; RustGIS translates only what the
   manifest declares.
 - A command that fails leaves the values as they were. The panel's state command is no undo
@@ -415,11 +521,72 @@ Any command can answer the panel's new state, beside the rest of its answer:
   plugin, a project opened. A state command that reads what it shows from the map (which
   release is on it) puts the panel right when it is opened again.
 - The values are kept while RustGIS runs, not saved with the project.
-- `plugin.panel {"id": "<plugin>"}` answers a panel's state (`values` and `items`), and sets
+- `plugin.panel {"id": "<plugin>"}` answers a panel's state (`values` and `items`; a tree cut at
+  20,000 nodes has `"cut"`, how many it was given), and sets
   `values` or, with `"refresh": true`, runs the state command first. On the command line, which
   has no panes, the commands still run with the values given.
 - RustGIS versions before panels ignore `panel` (and refuse a tab that names it): keep the
-  commands usable from the ribbon too, or set `minRustgisVersion`.
+  commands usable from the ribbon too, or set `minRustgisVersion`. Versions before dropdowns,
+  dates and ranges refuse a panel that has one, so set `minRustgisVersion` to the first version
+  with them.
+
+#### Picking a place on the map
+
+A `pick` lets the user show the plugin a place: where to grow a training sample from, a
+site to report on, an area to download.
+
+```json
+{ "kind": "pick", "id": "seed", "label": "Grow a Sample", "command": "grow" },
+{ "kind": "pick", "id": "area", "label": "Download Inside a Box", "shape": "box", "command": "download" }
+```
+
+- Clicked, the pick waits for the map, and the map's hint and the status bar say what for. The
+  next click on the map is the point (dragging still pans the map); for a box, the next box
+  dragged on it. Esc, choosing another tool, clicking the pick again or closing the panel stops
+  it waiting, with nothing run. A pick turns the Explore tool on.
+- The place is the pick's value, and its `command` runs with it, as any widget's:
+
+  ```json
+  "panel": {
+    "values": {
+      "seed": { "lon": -42.8, "lat": -5.09, "x": -4764474.2, "y": -567363.0, "crs": "EPSG:3857" },
+      "area": null
+    },
+    "changed": ["seed"]
+  }
+  ```
+
+  A point has `lon` and `lat` in degrees (WGS 84; on another body's map, that body's) and `x` and
+  `y` in the map's coordinate system, `crs`: its EPSG or ESRI code (`EPSG:3857` for Web Mercator
+  and the globe), or the PROJ definition of another projection (`+proj=robin …`). A box has `bbox`,
+  `[west, south, east, north]` in degrees (a `bbox` whose west longitude is greater than its east
+  crosses the antimeridian), and `extent`, `[xmin, ymin, xmax, ymax]`, the surrounding box in the
+  map's coordinates, with `crs`. A box across the antimeridian is measured through it on Web
+  Mercator and the globe, unwrapped: its `xmax` goes past the world's edge (20037508.34 m). On a
+  projection whose edge it crosses (Robinson's at 180°, for one) its two parts sit at the map's two
+  sides, and `extent` is the box around both, as wide as the map. A plugin that needs boxes inside
+  the world splits `bbox` at the antimeridian. A place on another body's map, or one the projection
+  can't show, has only its degrees, and on Web Mercator and the globe one past ±85.05° of latitude
+  has its map coordinates at that edge, each with a warning. A place keeps the map coordinates of
+  the map it was picked on, which its `crs` names, until it is picked again.
+- The pane shows the place picked last under the pick, and the map marks it (a box's outline)
+  while the panel is open.
+- A plugin can clear a pick, `"values": {"seed": null}`, but not pick a place itself: another
+  place in its answer is refused with a warning, and the place the pick holds, given back (an
+  answer with the whole panel), is kept quietly. A script gives the degrees, and RustGIS works
+  out the rest from the active map: `x`, `y`, `extent` or `crs` given other than the map's are
+  replaced, with a warning. A place it can't read (degrees out of range, a `bbox` that isn't
+  four numbers, south above north) is not taken, and a field it doesn't know is left out, each
+  with a warning:
+
+  ```sh
+  rustgis-cli run --sample --cmd 'plugin:my-plugin/grow={"panel": {"seed": {"lon": -42.8, "lat": -5.09}}}'
+  ```
+
+- It works the same in the desktop app and the web app. On the command line, which has no map
+  to click, the command still runs with the place given.
+- RustGIS versions before picks refuse a manifest with one (its kind is unknown to them), so
+  set `minRustgisVersion` to the first version with picks.
 
 ### What a plugin can ask for
 
@@ -428,9 +595,9 @@ Inside a request, `host::call(op, params)` sends one of these to RustGIS:
 | Request | Answer |
 |---|---|
 | `host.info` | `{rustgis, abi, plugin, permissions}`: version, ABI, plugin id and permissions |
-| `host.layers` | `[{id, name, raster, visible, geometry, features, selected, active, fields: [{name, type}]}]` |
+| `host.layers` | `[{id, name, raster, visible, geometry, features, selected, active, extent, transparency, group, fields: [{name, type}]}]`, top first: `extent` is `[west, south, east, north]` in longitude/latitude (`null` when empty or a raster not yet read), `transparency` the layer's own, 0 (opaque) to 100 (its groups' transparency applies on top), `group` the name of the group it is in or `null`. The web tile layers, groups, tables and layouts (with their page size) are in `info.project` |
 | `host.features` `{layer, selected?, limit?}` | the layer's features as GeoJSON; each feature has its `row` |
-| `host.view` | `{center: [lon, lat], scale, projection}` |
+| `host.view` | `{center: [lon, lat], scale, projection, bearing, pitch}` (bearing and pitch in degrees, 0 for a flat north-up map) |
 | `host.notify` `{text, error?}` | shows a message in the status bar |
 | `host.addLayer` `{name, geojson}` | adds a layer (`edit`) |
 | `host.fetch` `{url}` | `{url, text, json?}`: the document at a web address (`network`; see [Fetching a document](#fetching-a-document)) |
@@ -443,15 +610,56 @@ download a file whole it answers `{"pending": true, "url": …}`: RustGIS downlo
 frame, saying so in the status bar, and adds the layer when it lands (its own undo step), as
 **Home › Add › Add Data › From URL** does. On the desktop that goes for reading a GeoTIFF's,
 FlatGeobuf's or GeoParquet's header too; in the web app a PMTiles archive, a cloud-optimised
-GeoTIFF or a FlatGeobuf or GeoParquet whose header was fetched already is added at once. Up to 16
+GeoTIFF or a FlatGeobuf or GeoParquet whose header was fetched already is added at once. A window
+of a cloud-optimised GeoTIFF (`"bbox"`, on the desktop) is read and added the same way. Up to 16
 downloads wait at a time: a request past 16 fails, and if the command then fails too, none of its
 downloads start. Run by
 `rustgis-cli`, a script or a task, the command waits and answers what was added.
 
-Other commands that wait for a server (`service.add`, say) still wait with the window held. A
-command the user starts from the ribbon, command search or a panel first shows "Running …" in the
-status bar with a busy cursor, and clicks made during a long run are dropped, so they don't run it
-again.
+The command then runs again, as for a [fetch](#fetching-a-document): RustGIS undoes what the call
+did to the project and, once every download it left has been added (or failed), runs it again with
+the same parameters. In that run the same `layer.addUrl` call answers what adding the download
+answered (`{"layer", …}`, or its error) and adds nothing, so the command goes on with the layer:
+clips it, renames it or styles it. Everything the command did before the call runs again as well,
+and only what it did to the project is undone: keep side effects outside the project (files
+written, services called) after the call, or make them safe to repeat. The added layer stays its
+own undo step, and what the command
+does with it is another. So a command can be written as if `layer.addUrl` waited:
+
+```rust
+let added = host::call("layer.addUrl", json!({"url": url, "name": "Rivers"}))?;
+if added.get("pending").is_some() {
+    return Ok(json!({}));           // runs again once the layer is in
+}
+host::call("gp.run", json!({"tool": "clip", "params": {"input": "Rivers", "clip": "Area"}}))?;
+```
+
+A call asked again while its download is under way (the button clicked twice) waits for that
+download, not another. A command runs again at most 64 times, and a download not added within 10
+minutes runs it again with an error.
+
+`service.add` does the same on the desktop: it reads the service's documents off the frame,
+answering `{"pending": true, "url": …}`, and leaves a feature layer or a coverage to download as
+`layer.addUrl` does, so the same call answers what adding it answered once the command runs again
+(a feature layer's with `"area"`, when asked for over one). The command may run several times on
+the way, once for each document at most, and a map layer is added by the run that has them. Up to
+16 documents are read at a time, and asking for more fails. In the web app
+`service.add` still refuses to download.
+
+While a command waits the window answers, so the user can work and the project can change. The
+status bar says the command is running, and asking for it again with the same parameters does
+nothing. A run again sees the view the command first ran with, and the window's size then, unless
+it moves the view itself; the layers, the selection and the rest are as they are by then. With
+another map shown by then, or another project open, it isn't run again: it stops with an error. A failed answer is given once a run, in
+the order it came, so a call made again after it is a new try. Because everything before the call
+runs again, a command replacing a layer removes the old one after the call: removed before it, the
+run again finds its new layer gone, and says so. With the old name still in use the new layer came
+in as `Name (2)`, so rename it once the old one is gone.
+
+Other commands that wait for a server (`service.layers`, `host.fetch`, say) still wait with the
+window held. A command the user starts from the ribbon, command search or a panel first shows
+"Running …" in the status bar with a busy cursor, and clicks made during a long run are dropped,
+so they don't run it again.
 
 `rustgis-cli commands` lists every command id and its parameters.
 
@@ -481,8 +689,8 @@ document parsed when it is a JSON object or array.
 - In the web app nothing may wait. A fetch that isn't kept yet answers
   `{"pending": true, "url"}` and starts in the background. The command should then return
   straight away, before doing anything outside the project (writing a file): RustGIS undoes
-  what the call did to the project (its notices stay, and so does anything done outside it),
-  and runs the command
+  what the call did to the project (its error notices stay, and the next run doesn't repeat them;
+  anything done outside the project stays too), and runs the command
   again with the same parameters once every pending answer has landed (up to 8 per call), when
   `host.fetch` answers from what was kept. A command that walks a chain of documents, each
   address taken from the one before, runs once per step, up to 64 times. The browser follows
@@ -610,9 +818,9 @@ requests and replies over its standard input and output, one JSON object per lin
    stopped.
 
 Output lines that aren't protocol messages are logged and skipped, since libraries print (even
-JSON), and so is the program's error output. A command is stopped after 2 minutes; a tool runs
-until it finishes or is cancelled (the desktop app runs it in the background: see
-[What a plugin can ask for](#what-a-plugin-can-ask-for)).
+JSON), and so is the program's error output. A command is stopped after 2 minutes unless its
+`timeout` says otherwise (in the desktop app, 2 minutes at most); a tool runs until it finishes or is cancelled (the desktop app runs
+it in the background: see [What a plugin can ask for](#what-a-plugin-can-ask-for)).
 
 The plugin above, in Python with no SDK:
 
@@ -646,6 +854,64 @@ except Exception as e:
     result = {"error": str(e)}
 print(json.dumps(result), flush=True)
 ```
+
+### Session plugins
+
+A process plugin with `"session": true` keeps one program running between its commands, so it
+can ask RustGIS for things whenever it likes and hear when the map changes: a view of the map in
+a window of its own (a 3D globe linked with it) is one. The program talks to RustGIS only over
+its standard input and output: no port, no token, nothing another program can join.
+
+```json
+"runtime": "process",
+"session": true,
+"run": ["bin/globe"]
+```
+
+- RustGIS starts the program the first time one of the plugin's commands runs and writes a first
+  line `{"session": {"abi": 1, "plugin": "<id>", "rustgis": "<version>", "lang": "<code>"}}`.
+- Each command comes as `{"command": request, "id": n}`, where `request` is what a per-call
+  program gets. The program answers `{"ok": value, "id": n}` or `{"error": "text", "id": n}`,
+  within 2 minutes, or the command's `timeout`.
+- At any time, during a command or between commands, the program can send a host request
+  `{"call": {"op": "...", "params": {...}}, "id": "any"}`. RustGIS answers
+  `{"ok": value, "id": "any"}` or `{"error": "text", "id": "any"}`; the `id` is optional and comes
+  back as given. Requests go through the same checks as a command's, within the plugin's
+  permissions. Between commands, each request that can change the project is an undo step of its
+  own, named after the plugin, and an entry in the session log; `host.fetch` is refused: it would make the app wait, and the
+  program can fetch for itself. Whether a request is part of a command depends on when RustGIS handles
+  it, not when the program sent it: one handled before the command starts (by a poll, or as the
+  command is about to run) is answered as between commands; one handled while the command runs,
+  until the program answers, is part of that command (its undo step), even if it was sent just
+  before. Sending a request meant to stand alone after answering the command, and
+  waiting for its reply, makes that likely but not certain: if another of its commands starts
+  before RustGIS handles the request, the request is part of that command. The desktop app answers requests as they come; `rustgis-cli` and
+  the Python package only while one of the plugin's commands runs (or as the next one starts);
+  `rustgis-cli` ends the program after its last command, and what it asks after that isn't
+  answered.
+- When the map changes, the desktop app sends `{"event": "view", "view": {center, scale,
+  projection, bearing, pitch}}` (the view, as `host.view` answers it), `{"event": "layers"}` (layers added,
+  removed, reordered, made active, renamed, shown or hidden, restyled, made more or less transparent, their
+  fields or features changed, and web tile layers changed), `{"event": "selection"}` or `{"event": "project"}` (another project
+  opened). Ask for what changed with host requests. Changes the program made itself are told too: a view it set comes back as
+  a `view` event, so compare before following it. An event can arrive while the program waits
+  for an answer: match answers by their `id`. While the program is behind in reading its input,
+  events wait, and only the latest of each kind is sent.
+- `log` and `progress` lines work as for a per-call program.
+- The program RustGIS started is the session: keep it running, rather than starting another
+  program and exiting. RustGIS stops it, with what it started, when the plugin is turned off,
+  removed or updated and when the desktop app closes. Its input closing means it is being
+  stopped (RustGIS closing or gone, however it ended; the plugin turned off, removed or updated;
+  the program failed or stopped answering): the program should then exit, and stop what it
+  started. A program may also
+  exit by itself (its window closed); the plugin's next command starts it again. One that fails
+  or stops answering a command is stopped, and the error says so.
+- On Linux and macOS, while RustGIS runs, what a program left running when it exited is stopped
+  with it. Windows can't find what an exited program started, so there the program must stop it
+  itself, as every program must once RustGIS has gone.
+- The plugin's tools still start the program once per run, with the request as its first line.
+- RustGIS versions before sessions run the program once per command instead, so set
+  `minRustgisVersion` to the first version with them.
 
 ### Python environments
 
@@ -751,3 +1017,24 @@ skills packages with `"runtime": "skills"`. The Plugin Manager checks the packag
 and id before installing; `rustgis-cli plugins get` also checks its runtime.
 `rustgis-cli plugins browse` prints `runtime` for every entry (`wasm` when the registry leaves
 it out).
+
+A plugin that ships a program for each platform can be published as one package per platform,
+so that nobody downloads the other platforms' programs. Its registry entry then has `packages`:
+
+```json
+"packages": {
+  "windows": {"package": "…/globe-1.0.0-windows.rgplugin", "sha256": "…", "size": 16000000},
+  "macos":   {"package": "…/globe-1.0.0-macos.rgplugin",   "sha256": "…", "size": 30000000},
+  "linux":   {"package": "…/globe-1.0.0-linux.rgplugin",   "sha256": "…", "size": 17000000}
+}
+```
+
+The keys are those of a manifest's `run` (`windows`, `macos`, `linux`); other keys are ignored.
+Each package holds the same `plugin.json` (id, version, permissions) with the `run` of its
+platform, and is checked like any other: its hash, its id and its runtime. RustGIS downloads the
+one for the platform it runs on. The entry's own `package` and `sha256` are then optional: when
+given, they are the package for the platforms `packages` doesn't name (and the only one the web
+app installs). A plugin with no package for your platform stays in the list, marked
+*Not available for* your platform with the platforms it has; `rustgis-cli plugins browse` prints
+`"available": false` for it, and `rustgis-cli plugins get` refuses it with the same reason. A
+RustGIS older than this feature skips an entry that has `packages` only.

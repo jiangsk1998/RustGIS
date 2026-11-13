@@ -15,6 +15,15 @@
 //! passes over the pixels as there are levels, where building each level from the one before
 //! would take about 1⅓ but hold a second copy.
 //!
+//! Tiles are compressed with Deflate at its fastest level, after a predictor that makes neighbouring
+//! samples alike: the floating-point one for floats, differences along the row for whole numbers.
+//! Most of the time spent writing is compressing. Against Deflate's default level without a
+//! predictor, this compresses an elevation model's tiles about four times as fast and a fifth
+//! smaller, and an aerial photograph's three times as fast and a seventh smaller. Classes (a
+//! palette's indexes, a few whole numbers) keep the default level and no predictor: their codes
+//! don't change smoothly, so differences make them no smaller, and their long runs compress quickly
+//! at any level, to half the size of the fastest.
+//!
 //! Classic TIFF is used when the file can't pass 4 GiB even with every tile left uncompressed,
 //! BigTIFF otherwise.
 
@@ -29,8 +38,11 @@ use crate::{DataError, Result};
 pub const TILE: u32 = 512;
 /// The most images (full and overviews) written; 2³¹ pixels across needs far fewer.
 const MAX_LEVELS: usize = 32;
-/// Deflate effort (GDAL's default).
-const DEFLATE_LEVEL: u8 = 6;
+/// Deflate effort for values that change smoothly: the fastest, which the predictor makes up for in
+/// size (see the module's notes).
+const DEFLATE_FAST: u8 = 1;
+/// Deflate effort for classes, which take no predictor: the default.
+const DEFLATE_CLASSES: u8 = 6;
 
 fn err(e: impl std::fmt::Display) -> DataError {
     DataError::Format(format!("COG: {e}"))
@@ -116,18 +128,20 @@ fn plan(r: &Raster, band: usize) -> Result<Plan> {
     if matches!(r.color, ColorHint::Rgb { .. }) && r.bands.len() >= 3 {
         // A fourth band is alpha only when the raster says so (RGB and near-infrared isn't).
         let has_alpha = r.bands.len() >= 4 && matches!(r.color, ColorHint::Rgb { alpha: true });
-        if let Some(sample) = sample_of(&[0, 1, 2]) {
+        let rgbi = r.bands.len() == 4 && !has_alpha;
+        let color_bands: Vec<usize> = (0..if rgbi { 4 } else { 3 }).collect();
+        if let Some(sample) = sample_of(&color_bands) {
             let alpha = has_alpha && sample_of(&[0, 1, 2, 3]) == Some(sample);
             let max = if sample == Sample::Byte { 255.0 } else { 65_535.0 };
             // Pixels with no value need a way to say so: alpha (see-through, in tile_samples), or a
             // no-data value the samples hold. Otherwise they are written as floats, with NaN.
             let n = r.width as usize * r.height as usize;
-            let holes = (0..3).any(|b| r.bands.get(b).is_some_and(|band| band.stats.count < n));
+            let holes = color_bands.iter().copied().any(|b| r.bands.get(b).is_some_and(|band| band.stats.count < n));
             // An alpha band that can't share the colour bands' type keeps its place through the
             // float plan below rather than being dropped.
             if alpha == has_alpha && (alpha || !holes || int_nodata(max).is_some()) {
                 return Ok(Plan {
-                    bands: (0..if alpha { 4 } else { 3 }).collect(),
+                    bands: (0..if alpha || rgbi { 4 } else { 3 }).collect(),
                     sample,
                     rgb: true,
                     alpha: alpha.then_some(3),
@@ -138,7 +152,7 @@ fn plan(r: &Raster, band: usize) -> Result<Plan> {
             }
         }
         let alpha = has_alpha;
-        let n = if alpha { 4 } else { 3 };
+        let n = if alpha || rgbi { 4 } else { 3 };
         return Ok(Plan {
             bands: (0..n).collect(),
             sample: Sample::Float,
@@ -188,7 +202,7 @@ fn plan(r: &Raster, band: usize) -> Result<Plan> {
     };
     let max = if sample == Sample::Byte { 255.0 } else { 65_535.0 };
     // A few distinct whole numbers are classes; photographs and rasters with a range are not.
-    let categorical = sample != Sample::Float && b.stats.categories.as_ref().is_some_and(|c| c.len() <= 64);
+    let categorical = !b.classes.is_empty() || (sample != Sample::Float && b.stats.categories.as_ref().is_some_and(|c| c.len() <= 64));
     Ok(Plan {
         bands: vec![band],
         sample,
@@ -313,6 +327,68 @@ fn tile_samples(r: &Raster, plan: &Plan, lv: &Level, tx: u32, ty: u32) -> Vec<u8
     raw
 }
 
+/// The TIFF predictor `plan`'s tiles are written with: none (1) for classes, differences along the
+/// row (2) for whole numbers, the floating-point one (3) for floats.
+fn predictor(plan: &Plan) -> u16 {
+    match plan.sample {
+        _ if plan.categorical => 1,
+        Sample::Byte | Sample::Short => 2,
+        Sample::Float => 3,
+    }
+}
+
+/// Applies `plan`'s predictor to a tile's samples (as [`tile_samples`] makes them), one tile row at
+/// a time; `row` is scratch space for the floating-point predictor's reordering.
+fn predict(raw: &mut [u8], plan: &Plan, row: &mut Vec<u8>) {
+    let spp = plan.bands.len();
+    let size = plan.sample.bytes();
+    for line in raw.chunks_exact_mut(TILE as usize * spp * size) {
+        match (predictor(plan), plan.sample) {
+            (2, Sample::Byte) => differ(line, spp),
+            (2, Sample::Short) => {
+                // Each 16-bit sample less the one a pixel before it, wrapping; last first, so each
+                // takes away a value not yet changed.
+                for i in (spp..line.len() / 2).rev() {
+                    let word =
+                        |l: &[u8], j: usize| l.get(2 * j..2 * j + 2).map_or(0, |b| u16::from_le_bytes(b.try_into().unwrap_or([0; 2])));
+                    let v = word(line, i).wrapping_sub(word(line, i - spp));
+                    if let Some(b) = line.get_mut(2 * i..2 * i + 2) {
+                        b.copy_from_slice(&v.to_le_bytes());
+                    }
+                }
+            }
+            (3, _) => {
+                // The row's bytes regrouped by significance, the most significant byte of every
+                // sample first, then differenced (TIFF Technical Note 3).
+                let n = line.len() / size;
+                row.clear();
+                row.resize(line.len(), 0);
+                for (i, sample) in line.chunks_exact(size).enumerate() {
+                    // Samples are little-endian: the last byte is the most significant.
+                    for (k, b) in sample.iter().rev().enumerate() {
+                        if let Some(o) = row.get_mut(k * n + i) {
+                            *o = *b;
+                        }
+                    }
+                }
+                line.copy_from_slice(row);
+                differ(line, spp);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Each byte of `line` less the one `stride` bytes before it, wrapping.
+fn differ(line: &mut [u8], stride: usize) {
+    for i in (stride..line.len()).rev() {
+        let prev = line.get(i - stride).copied().unwrap_or(0);
+        if let Some(b) = line.get_mut(i) {
+            *b = b.wrapping_sub(prev);
+        }
+    }
+}
+
 // TIFF field types.
 const ASCII: u16 = 2;
 const SHORT: u16 = 3;
@@ -382,6 +458,7 @@ fn entries(r: &Raster, plan: &Plan, lv: &Level, first: bool, geo: &GeoKeys, big:
     ));
     e.push(shorts(277, &[spp as u16]));
     e.push(shorts(284, &[1]));
+    e.push(shorts(317, &[predictor(plan)]));
     if let Some(colors) = &plan.palette {
         // Reds, then greens, then blues, 256 of each, as 16-bit intensities.
         let map: Vec<u16> = (0..3).flat_map(|c| (0..256).map(move |i| colors.get(i).map_or(0, |rgba| u16::from(rgba[c]) * 257))).collect();
@@ -393,9 +470,14 @@ fn entries(r: &Raster, plan: &Plan, lv: &Level, first: bool, geo: &GeoKeys, big:
     e.push(table(325, lv.tiles(), big, true));
     if plan.alpha.is_some() {
         e.push(shorts(338, &[2]));
+    } else if plan.rgb && spp == 4 {
+        e.push(shorts(338, &[0]));
     }
     e.push(shorts(339, &vec![format; spp]));
     if first {
+        if let Some(c) = r.copyright.as_deref().map(super::tag_text).filter(|c| !c.is_empty()) {
+            e.push(ascii(33432, &c));
+        }
         let gt = r.transform;
         e.push(doubles(33550, &[gt.pixel_width.abs(), gt.pixel_height.abs(), 0.0]));
         e.push(doubles(33922, &[0.0, 0.0, 0.0, gt.origin_x, gt.origin_y, 0.0]));
@@ -559,11 +641,15 @@ pub fn write_to<W: Write + Seek>(r: &Raster, band: usize, flavour: Flavour, out:
     // Smallest overview first, the full image last; each in row order.
     let mut places: Vec<Vec<(u64, u64)>> = vec![Vec::new(); levels.len()];
     crate::progress::begin(tiles);
+    let mut row = Vec::new();
+    let effort = if plan.categorical { DEFLATE_CLASSES } else { DEFLATE_FAST };
     for (i, lv) in levels.iter().enumerate().rev() {
         for ty in 0..lv.down {
             for tx in 0..lv.across {
                 crate::progress::step(1)?;
-                let zipped = miniz_oxide::deflate::compress_to_vec_zlib(&tile_samples(r, &plan, lv, tx, ty), DEFLATE_LEVEL);
+                let mut raw = tile_samples(r, &plan, lv, tx, ty);
+                predict(&mut raw, &plan, &mut row);
+                let zipped = miniz_oxide::deflate::compress_to_vec_zlib(&raw, effort);
                 if !big && pos + zipped.len() as u64 > u64::from(u32::MAX) {
                     return Err(err("the file is too large for classic TIFF"));
                 }
@@ -744,6 +830,24 @@ mod tests {
     }
 
     #[test]
+    fn raster_export_review_named_classes_keep_codes_in_float_overviews() {
+        let (w, h) = (700u32, 4u32);
+        let data = (0..w * h).map(|i| if i % w < 2 { f32::NAN } else { (i % 2) as f32 }).collect();
+        let mut r = utm(w, h, vec![data], ColorHint::Gray, "UInt8", None);
+        r.bands[0].classes = vec!["Water".into(), "Land".into()];
+        let bytes = write(&r, 0).unwrap();
+        let ov = geotiff::read_limited(geotiff::reader(Cursor::new(bytes.as_slice())).unwrap(), "o", 1500, None).unwrap();
+        assert_eq!((ov.width, ov.height), (350, 2));
+        assert_eq!(ov.value(0, 0, 0), None);
+        assert!(ov.bands[0].data.iter().all(|v| v.is_nan() || *v == 0.0 || *v == 1.0), "no averaged class codes");
+        assert_eq!(ov.bands[0].classes, r.bands[0].classes);
+        r.bands[0].classes.clear();
+        let bytes = write(&r, 0).unwrap();
+        let ov = geotiff::read_limited(geotiff::reader(Cursor::new(bytes.as_slice())).unwrap(), "o", 1500, None).unwrap();
+        assert_eq!(ov.value(0, 2, 0), Some(0.5), "continuous float overviews still average");
+    }
+
+    #[test]
     fn edges_of_odd_sizes_average_what_is_there() {
         // 1025 × 3 floats: the second overview's last column averages one pixel column, and the
         // one row of the overview below is 1 pixel tall.
@@ -898,6 +1002,33 @@ mod tests {
     }
 
     #[test]
+    fn each_kind_of_sample_reads_back_exactly_through_its_predictor() {
+        // Wider than a tile, so rows run on into a second one and end in its padding.
+        let (w, h) = (700u32, 3u32);
+        let n = (w * h) as usize;
+        let floats =
+            (0..n).map(|i| if i % 97 == 0 { f32::NAN } else { (i as f32 - 1000.0) * 3.7e-4 * if i % 5 == 0 { 1e30 } else { 1.0 } });
+        let cases = [
+            (utm(w, h, vec![floats.collect()], ColorHint::Gray, "Float32", None), 3),
+            (utm(w, h, vec![(0..n).map(|i| (i * 37 % 65_536) as f32).collect()], ColorHint::Gray, "UInt16", None), 2),
+            (utm(w, h, vec![(0..n).map(|i| (i * 7 % 256) as f32).collect()], ColorHint::Gray, "UInt8", None), 2),
+            // A few classes take no predictor.
+            (utm(w, h, vec![(0..n).map(|i| (i % 3) as f32).collect()], ColorHint::Gray, "UInt8", None), 1),
+        ];
+        for (r, predictor) in cases {
+            let bytes = write(&r, 0).unwrap();
+            let mut dec = Decoder::new(Cursor::new(bytes.as_slice())).unwrap();
+            assert_eq!(dec.find_tag_unsigned::<u16>(Tag::Predictor).unwrap(), Some(predictor), "{}", r.data_type);
+            let back = geotiff::read(Cursor::new(bytes), "back").unwrap();
+            for (i, v) in r.bands[0].data.iter().enumerate() {
+                let (x, y) = ((i % w as usize) as i64, (i / w as usize) as i64);
+                let want = if v.is_nan() { None } else { Some(*v) };
+                assert_eq!(back.value(0, x, y), want, "{} at ({x}, {y})", r.data_type);
+            }
+        }
+    }
+
+    #[test]
     fn sixteen_bit_and_grey_alpha_keep_their_type() {
         let (w, h) = (600u32, 10u32);
         let n = (w * h) as usize;
@@ -966,7 +1097,8 @@ mod tests {
         assert_eq!((back.data_type.as_str(), back.value(3, 0, 0), back.value(3, 1, 0)), ("UInt8", Some(255.0), Some(0.0)));
         // A fourth band the raster doesn't call alpha isn't written as one.
         let rgbi = utm(1, 1, vec![vec![10.0], vec![20.0], vec![30.0], vec![0.0]], ColorHint::Rgb { alpha: false }, "UInt8", None);
-        assert_eq!(geotiff::read(Cursor::new(write(&rgbi, 0).unwrap()), "b").unwrap().band_count(), 3);
+        let back = geotiff::read(Cursor::new(write(&rgbi, 0).unwrap()), "b").unwrap();
+        assert_eq!((back.band_count(), back.color), (4, ColorHint::Rgb { alpha: false }));
         // Every palette index used and a cell with none: no index is left to mark it, so refused.
         let colors: Vec<[u8; 4]> = (0..=255u8).map(|i| [i, 0, 0, 255]).collect();
         let mut idx: Vec<f32> = (0..=255u8).map(f32::from).collect();
@@ -983,6 +1115,27 @@ mod tests {
         let scan = utm(2, 1, vec![vec![1.0, 2.0]], ColorHint::Gray, "UInt8", None).into_scan().unwrap();
         let e = write(&scan, 0).unwrap_err().to_string();
         assert!(e.contains("no coordinates"), "{e}");
+    }
+
+    #[test]
+    fn rgbi_writers_keep_nir_without_marking_it_as_alpha() {
+        for (dt, factor) in [("UInt8", 1.0), ("UInt16", 100.0), ("Float32", 0.01)] {
+            let mut bands: Vec<Vec<f32>> = [200.0, 100.0, 50.0, 0.0].iter().map(|v| vec![v * factor; 16]).collect();
+            // Measured NIR next to zeros: a writer that zeroes the band fails.
+            if let Some(v) = bands[3].first_mut() {
+                *v = 75.0 * factor;
+            }
+            let r = utm(4, 4, bands, ColorHint::Rgb { alpha: false }, dt, None);
+            for bytes in [geotiff::write(&r, 0).unwrap(), write(&r, 0).unwrap()] {
+                let back = geotiff::read(Cursor::new(bytes), "rgbi").unwrap();
+                assert_eq!(back.band_count(), 4);
+                assert_eq!(back.color, ColorHint::Rgb { alpha: false });
+                for (b, original) in r.bands.iter().enumerate() {
+                    assert_eq!(back.bands[b].data, original.data, "{dt}, band {b}");
+                }
+            }
+            assert_eq!(written_bands(&r, 0).unwrap(), vec![0, 1, 2, 3]);
+        }
     }
 
     #[test]

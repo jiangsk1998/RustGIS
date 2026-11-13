@@ -76,7 +76,7 @@ RustGIS is also published to these package managers, which keep it up to date:
 | Platform | Command |
 | --- | --- |
 | Windows x64 ([winget](https://learn.microsoft.com/windows/package-manager/)) | `winget install OpenGeos.RustGIS` (x64 only for now: on ARM64, use the ARM64 setup.exe or .msi above) |
-| macOS ([Homebrew](https://brew.sh)) | `brew install --cask opengeos/rustgis/rustgis` |
+| macOS and Linux ([Homebrew](https://github.com/Homebrew/homebrew-cask/blob/main/Casks/r/rustgis.rb)) | `brew install --cask rustgis` (the DMG on macOS, the AppImage on Linux) |
 | macOS and Linux, command-line tool only (Homebrew) | `brew install opengeos/rustgis/rustgis-cli` |
 | Arch Linux ([AUR](https://aur.archlinux.org/packages/rustgis-bin)) | `yay -S rustgis-bin` (or any AUR helper) |
 | Fedora ([COPR](https://copr.fedorainfracloud.org/coprs/giswqs/rustgis/)) | `sudo dnf copr enable giswqs/rustgis && sudo dnf install rustgis` |
@@ -86,7 +86,11 @@ RustGIS and `rustgis-cli` before `winget upgrade`: the setup.exe, run silently, 
 for each to close and otherwise stops without installing (exit code 2), rather than replace only
 part of it. The same goes for Help › Check for Updates › Install and Restart: close any other
 RustGIS window first, or the update waits for it and then isn't installed (RustGIS says so).
-On Homebrew 5.1 and later, run `brew trust opengeos/rustgis` once before installing from the tap.
+The `rustgis` cask is in Homebrew's own repository, so it needs no tap. The `rustgis-cli`
+formula comes from the opengeos/rustgis tap; installing it by that full name trusts just that
+formula, with no separate `brew trust` step. If you installed the app from that tap
+before (`opengeos/rustgis/rustgis`), it keeps updating from there; to move to Homebrew's cask,
+run `brew uninstall --cask opengeos/rustgis/rustgis && brew install --cask rustgis`.
 Each package is the same build as the release page, and a new release reaches the package
 managers shortly after it is published (winget after Microsoft's review).
 
@@ -105,8 +109,7 @@ cargo build --release -p rustgis-cli      # the command-line tool
 
 The build downloads the Natural Earth sample data from
 [rustgis-assets](https://github.com/opengeos/rustgis-assets). To build offline, download
-`countries.geojson`, `countries_chn.geojson`, `cities.geojson`, `rivers.geojson` and
-`lakes.geojson` from `https://assets.rustgis.app/data/` once and point the build at them:
+`countries.geojson`, `cities.geojson`, `rivers.geojson` and `lakes.geojson` from `https://assets.rustgis.app/data/` once and point the build at them:
 
 ```sh
 RUSTGIS_DATA_DIR=/path/to/data cargo build --release
@@ -133,7 +136,10 @@ RustGIS also runs in the browser, compiled to WebAssembly: open
 - **Save** and **Export** download the file. **Save As**, and the first **Save** of a project,
   ask for the file name first; the browser decides which folder downloads go to (Firefox, for
   one, saves to its Downloads folder unless told to ask). A project opened from a file is named
-  after it, and **Save** downloads it under that name again.
+  after it, and **Save** downloads it under that name again. The browser doesn't tell RustGIS
+  whether it saved a download (its save prompt can be cancelled), so **Save** keeps any unsaved
+  changes, and **Save As** to a different name makes the project unsaved. Closing or leaving
+  the tab asks first while there are unsaved changes; an unchanged project stays clean.
 - The interface uses the built-in font, because a web page can't read installed fonts. Choosing
   Chinese, Japanese, Korean or Persian downloads a font for that script.
 - Process plugins (including Python plugins), and the formats read through GDAL or DuckDB,

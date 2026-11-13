@@ -13,17 +13,26 @@ use serde_json::json;
 
 pub fn commands() -> Vec<C> {
     vec![
-        C::new("sqlite.addLayer", "Edit SQLite Table", "Home › Add › Add Data", add_layer).params(
+        C::new("sqlite.addLayer", "Edit SQLite Table", "Home › Add › Add Data", add_layer).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"path": "an SQLite database file on this computer", "table"?: "its table (needed when it has several)", "x"?: "a numeric field holding X, for a table with no geometry column", "y"?: "a numeric field holding Y, with x", "crs"?: "the X and Y coordinate system (EPSG:4326 when left out)", "limit"?: "the most rows (default and most: 100000)", "name"?: string}"#,
         ),
         C::new("sqlite.tableInfo", "SQLite Table Fields", "Home › Add › Add Data", table_info)
+            .roles(&[])
+            .effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
             .params(r#"{"path": "an SQLite database file on this computer", "table"?: "its table (needed when it has several)"}"#),
-        C::new("sqlite.pendingEdits", "SQLite Edits", "Edit › Manage Edits", pending_edits).view()
+        C::new("sqlite.pendingEdits", "SQLite Edits", "Edit › Manage Edits", pending_edits)
+            .roles(&[])
+            .effects(crate::policy::Effects::NONE)
+            .view()
             .params(r#"{"layer"?: "a layer added with sqlite.addLayer (default: the active one)"}"#),
         C::new("sqlite.saveEdits", "Save to SQLite", "Edit › Manage Edits", save_edits)
+            .roles(&[])
+            .effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .params(r#"{"layer"?: "a layer added with sqlite.addLayer (default: the active one)"}"#),
         C::new("sqlite.discardEdits", "Discard SQLite Edits", "Edit › Manage Edits", discard_edits)
+            .roles(&[])
+            .effects(crate::policy::Effects::NONE)
             .params(r#"{"layer"?: "a layer added with sqlite.addLayer (default: the active one)"}"#),
     ]
 }

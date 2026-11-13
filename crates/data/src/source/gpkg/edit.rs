@@ -29,6 +29,9 @@ pub struct Editable {
     pub revision: String,
     pub matched: u64,
     pub skipped: u64,
+    /// Values in date fields that weren't dates and are read as null, by field
+    /// ([`crate::source::Batch::unread_dates`]).
+    pub unread_dates: Vec<usize>,
     pub writable: bool,
 }
 
@@ -44,6 +47,9 @@ pub struct SavedRows {
     /// Supplied field positions that have no stored column.
     pub unstored_fields: Vec<usize>,
     pub revision: String,
+    /// Per supplied field, date-times written in UTC that had another offset
+    /// ([`crate::io::offset_dates`]): only values the save wrote.
+    pub utc_dates: Vec<usize>,
 }
 
 /// An existing feature table; its read connection is never reused for writes.
@@ -110,6 +116,8 @@ impl EditTable {
         (&self.geometry_type, self.z, self.m)
     }
 
+    /// Reads up to `limit` rows for editing, with their versions, in one snapshot; rows with a
+    /// geometry that can't be read are counted, and dates that aren't ones read as null and counted.
     pub fn read_editable(&self, limit: usize) -> Result<Editable> {
         let guard = self.src.conn.lock().map_err(|_| DataError::Format("GeoPackage connection poisoned".into()))?;
         let conn = guard.as_ref().ok_or_else(|| DataError::Format("GeoPackage connection closed".into()))?;
@@ -130,6 +138,7 @@ impl EditTable {
             revision: self.revision(&tx)?,
             matched,
             skipped: 0,
+            unread_dates: Vec::new(),
             writable: std::fs::metadata(&self.path).is_ok_and(|m| !m.permissions().readonly()),
         };
         {
@@ -152,14 +161,14 @@ impl EditTable {
                 for i in 0..self.columns.len() {
                     hash_value(&mut hash, row.get_ref(i).map_err(err)?);
                 }
-                let attrs = self
-                    .info()
-                    .fields
-                    .iter()
-                    .zip(&attrs)
-                    .map(|(f, &i)| row.get_ref(i).map(|v| value(v, f.ty)))
-                    .collect::<rusqlite::Result<_>>()
-                    .map_err(err)?;
+                let mut values = Vec::with_capacity(attrs.len());
+                for (k, (f, &i)) in self.info().fields.iter().zip(&attrs).enumerate() {
+                    values.push(value(row.get_ref(i).map_err(err)?, f.ty).unwrap_or_else(|| {
+                        crate::source::unread_date(&mut out.unread_dates, k);
+                        Value::Null
+                    }));
+                }
+                let attrs = values;
                 out.versions.push((id, hash.cast_signed()));
                 out.features.push(Feature { id, geometry, attrs });
             }
@@ -259,6 +268,7 @@ impl EditTable {
         let table = quote(self.table());
         let pk = quote(self.key());
         let mut spatial_changed = !edits.inserts.is_empty() || !edits.deletes.is_empty();
+        let mut utc_dates = vec![0usize; fields.len()];
         for (f, _) in &edits.updates {
             let row = current.get(&f.id.cast_signed()).ok_or_else(|| self.shape_error())?;
             let mut sets = Vec::new();
@@ -267,9 +277,13 @@ impl EditTable {
                 let field = fields.get(i).ok_or_else(|| self.shape_error())?;
                 let old = row.get(c).ok_or_else(|| self.shape_error())?;
                 let attr = f.attrs.get(i).unwrap_or(&Value::Null);
-                if value(ValueRef::from(old), field.ty) != *attr {
+                // A stored date that isn't one reads as null and is kept unless edited.
+                let previous = value(ValueRef::from(old), field.ty).unwrap_or(Value::Null);
+                let same_nan = matches!((&previous, attr), (Value::Float(a), Value::Float(b)) if a.is_nan() && b.is_nan());
+                if previous != *attr && !same_nan {
                     sets.push(format!("{} = ?", quote(columns.get(c).ok_or_else(|| self.shape_error())?)));
                     args.push(sql_value(attr, field.ty));
+                    count_utc(&mut utc_dates, i, attr, field.ty);
                 }
             }
             let old = ValueRef::from(row.get(geom).ok_or_else(|| self.shape_error())?);
@@ -325,6 +339,7 @@ impl EditTable {
                     let field = fields.get(i).ok_or_else(|| self.shape_error())?;
                     names.push(quote(columns.get(c).ok_or_else(|| self.shape_error())?));
                     args.push(sql_value(attr, field.ty));
+                    count_utc(&mut utc_dates, i, attr, field.ty);
                 }
             }
             let sql = format!("INSERT INTO {table} ({}) VALUES ({})", names.join(", "), vec!["?"; names.len()].join(", "));
@@ -383,7 +398,7 @@ impl EditTable {
             for &(i, c) in &snapshot_columns {
                 let field = fields.get(i).ok_or_else(|| self.shape_error())?;
                 let attr = feature.attrs.get_mut(i).ok_or_else(|| self.shape_error())?;
-                *attr = value(ValueRef::from(row.get(c).ok_or_else(|| self.shape_error())?), field.ty);
+                *attr = value(ValueRef::from(row.get(c).ok_or_else(|| self.shape_error())?), field.ty).unwrap_or(Value::Null);
             }
             saved.versions.push((k.cast_unsigned(), fingerprint(row.iter().map(ValueRef::from))));
             features.push(feature);
@@ -432,7 +447,7 @@ impl EditTable {
         .map_err(err)?;
         let revision = self.revision(&tx)?;
         tx.commit().map_err(err)?;
-        Ok(Ok(SavedRows { changes: saved, features, removed, unstored_fields, revision }))
+        Ok(Ok(SavedRows { changes: saved, features, removed, unstored_fields, revision, utc_dates }))
     }
 
     fn revision(&self, conn: &Connection) -> Result<String> {
@@ -581,6 +596,19 @@ impl FeatureWrites {
     fn unmarked(&self) -> Result<Vec<i64>> {
         let residents = self.residents.lock().map_err(|_| DataError::Format("GeoPackage write observer poisoned".into()))?;
         Ok(residents.iter().filter_map(|(&k, &changed)| (!changed).then_some(k)).collect())
+    }
+}
+
+/// Counts `attr` in field `i` when it is a date-time at an offset other than UTC's, which the
+/// save writes in UTC.
+fn count_utc(counts: &mut [usize], i: usize, attr: &Value, ty: crate::FieldType) {
+    let offset = |v: &Value| matches!(v, Value::DateTime(t) if t.offset().is_some_and(|o| o != 0));
+    // Text in a date field that reads as a date is written as that date.
+    let text = matches!(attr, Value::Text(t) if ty.is_temporal() && offset(&Value::parse_stored(t, ty)));
+    if (offset(attr) || text)
+        && let Some(n) = counts.get_mut(i)
+    {
+        *n += 1;
     }
 }
 
@@ -793,6 +821,32 @@ mod tests {
     use rustgis_geom::Coord;
 
     const REVISION: &str = "2026-01-01T00:00:00.000Z";
+
+    #[test]
+    fn gpkg_editing_another_field_preserves_an_unchanged_nan() {
+        let (_dir, path) = fixture();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE roads SET lanes = 'NaN'", []).unwrap();
+        let table = EditTable::open(&path, "roads").unwrap();
+        let read = table.read_editable(MAX_EDITABLE).unwrap();
+        let lane = table.info().fields.iter().position(|f| f.name == "lanes").unwrap();
+        let name = table.info().fields.iter().position(|f| f.name == "name").unwrap();
+        assert!(matches!(read.features[0].attrs[lane], Value::Float(v) if v.is_nan()));
+        let mut changed = read.features[0].clone();
+        changed.attrs[name] = Value::Text("edited".into());
+        let edits = Edits { updates: vec![(changed, read.versions[0].1)], ..Default::default() };
+        let saved = table.save(&edits, &table.info().fields, std::iter::empty(), &read.revision).unwrap().unwrap();
+        assert_eq!(saved.changes.updated, 1);
+        let stored: (String, String) = conn.query_row("SELECT name, lanes FROM roads", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(stored, ("edited".into(), "NaN".into()));
+        // An explicit clear still writes SQL NULL.
+        let read = table.read_editable(MAX_EDITABLE).unwrap();
+        let mut cleared = read.features[0].clone();
+        cleared.attrs[lane] = Value::Null;
+        let edits = Edits { updates: vec![(cleared, read.versions[0].1)], ..Default::default() };
+        table.save(&edits, &table.info().fields, std::iter::empty(), &saved.revision).unwrap().unwrap();
+        assert!(conn.query_row("SELECT lanes IS NULL FROM roads", [], |r| r.get::<_, bool>(0)).unwrap());
+    }
 
     #[test]
     fn gpkg_insert_revision_is_durable_and_strictly_advances() {

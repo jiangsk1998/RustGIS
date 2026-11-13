@@ -15,6 +15,9 @@ impl Host for Recorder {
         self.ops.push(op.to_string());
         match op {
             "host.echo" => Ok(params.clone()),
+            // A host request that fails unexpectedly.
+            #[allow(clippy::panic)]
+            "host.panic" => panic!("a host request failed unexpectedly"),
             _ => Err(format!("no '{op}'")),
         }
     }
@@ -213,6 +216,126 @@ fn plugin_tool_and_parameter_limits_stay_bounded() {
     assert!(e.contains("more than 32 parameters"), "{e}");
 }
 
+/// A command's dialog fields are checked like a tool's parameters, take raster layers, and
+/// refuse files; a command without one still parses.
+#[test]
+fn command_dialog_fields_are_checked() {
+    let mut m = json!({"id": "dialogs", "name": "Dialogs", "version": "1.0.0", "permissions": ["files"],
+        "commands": [{"id": "classify", "label": "Classify", "form": [
+            {"name": "image", "label": "Image", "kind": "rasterLayer", "required": true},
+            {"name": "samples", "label": "Samples", "kind": "polygonLayer"},
+            {"name": "field", "label": "Class field", "kind": "field", "default": "class"},
+            {"name": "method", "label": "Method", "kind": "choice", "choices": ["Random Forest", "Minimum distance"]},
+            {"name": "trees", "label": "Trees", "kind": "number", "default": 50}
+        ]}, {"id": "plain", "label": "Plain"}]});
+    let parsed = Manifest::parse(&m.to_string()).unwrap();
+    assert_eq!(parsed.commands[0].form.len(), 5);
+    assert!(parsed.commands[1].form.is_empty());
+    m["commands"][0]["form"][1]["kind"] = json!("file");
+    let e = Manifest::parse(&m.to_string()).unwrap_err();
+    assert!(e.contains("unknown parameter kind 'file'"), "{e}");
+    m["commands"][0]["form"][1] = json!({"name": "image", "label": "Again", "kind": "text"});
+    let e = Manifest::parse(&m.to_string()).unwrap_err();
+    assert!(e.contains("parameter 'image' is invalid or repeated"), "{e}");
+    // Tools still refuse raster layers: they get features, not rasters.
+    let tool = json!({"id": "t", "name": "Tool", "version": "1.0.0",
+        "tools": [{"id": "t", "name": "Tool", "params": [{"name": "image", "label": "Image", "kind": "rasterLayer"}]}]});
+    let e = Manifest::parse(&tool.to_string()).unwrap_err();
+    assert!(e.contains("unknown parameter kind 'rasterLayer'"), "{e}");
+    // A dialog field's default must be one it can show, or the plugin is refused, naming it;
+    // a number written as text is a number.
+    m["commands"][0]["form"][1] = json!({"name": "samples", "label": "Samples", "kind": "polygonLayer"});
+    m["commands"][0]["form"][4]["default"] = json!("50");
+    assert!(Manifest::parse(&m.to_string()).is_ok());
+    // An integer past i64, as text or as a number, would be rounded or dropped: refused like
+    // other wrong defaults.
+    for (i, wrong) in [
+        (4, json!("many")),
+        (2, json!(5)),
+        (4, json!(true)),
+        (4, json!("99999999999999999999")),
+        (4, json!(u64::MAX)),
+        (4, json!("9007199254740993.0")),
+    ] {
+        let mut m = m.clone();
+        m["commands"][0]["form"][i]["default"] = wrong;
+        let e = Manifest::parse(&m.to_string()).unwrap_err();
+        assert!(e.contains("default") && e.contains("Classify"), "{e}");
+    }
+    let mut s = m.clone();
+    s["commands"][0]["form"].as_array_mut().unwrap().push(json!({"name": "save", "label": "Save", "kind": "bool", "default": "yes"}));
+    let e = Manifest::parse(&s.to_string()).unwrap_err();
+    assert!(e.contains("'save' has a default of another kind"), "{e}");
+    // A choice's default is one of its choices.
+    let mut c = m.clone();
+    c["commands"][0]["form"][3]["default"] = json!("Maximum likelihood");
+    let e = Manifest::parse(&c.to_string()).unwrap_err();
+    assert!(e.contains("'method' has a default of another kind"), "{e}");
+    // A field lists the fields of a vector layer picked above it: none, or a field that may pick
+    // a raster, is refused.
+    for form in [
+        json!([{"name": "col", "label": "Column", "kind": "field", "required": true}]),
+        json!([{"name": "image", "label": "Image", "kind": "rasterLayer"}, {"name": "col", "label": "Column", "kind": "numericField"}]),
+        // `layer` takes rasters too.
+        json!([{"name": "any", "label": "Any", "kind": "layer"}, {"name": "col", "label": "Column", "kind": "field", "required": true}]),
+    ] {
+        let mut c = m.clone();
+        c["commands"][0]["form"] = form;
+        let e = Manifest::parse(&c.to_string()).unwrap_err();
+        assert!(e.contains("'col' lists the fields of a layer"), "{e}");
+    }
+    // A required field lists those of a layer that must be picked too.
+    let mut c = m.clone();
+    c["commands"][0]["form"] = json!([
+        {"name": "samples", "label": "Samples", "kind": "polygonLayer"},
+        {"name": "col", "label": "Column", "kind": "field", "required": true}
+    ]);
+    let e = Manifest::parse(&c.to_string()).unwrap_err();
+    assert!(e.contains("'col' is required, so the layer field above it must be too"), "{e}");
+    c["commands"][0]["form"][0]["required"] = json!(true);
+    assert!(Manifest::parse(&c.to_string()).is_ok());
+}
+
+/// A command may ask for more time than the two minutes a command normally gets.
+#[test]
+fn command_timeouts_are_bounded() {
+    let manifest = |timeout: Value| {
+        json!({"id": "timed", "name": "Timed", "version": "1.0.0",
+            "commands": [{"id": "c", "label": "C", "timeout": timeout}]})
+    };
+    let m = Manifest::parse(&manifest(json!(600)).to_string()).unwrap();
+    assert_eq!(m.commands[0].timeout, Some(600));
+    assert_eq!(Manifest::parse(&manifest(Value::Null).to_string()).unwrap().commands[0].timeout, None);
+    let e = Manifest::parse(&manifest(json!(0)).to_string()).unwrap_err();
+    assert!(e.contains("timeout of 0 seconds"), "{e}");
+    let e = Manifest::parse(&manifest(json!(86_401)).to_string()).unwrap_err();
+    assert!(e.contains("timeout of 86401 seconds"), "{e}");
+}
+
+/// A WebAssembly command's host requests are refused once its time limit has passed.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn wasm_host_requests_stop_at_the_time_limit() {
+    struct Slow(u32);
+    impl Host for Slow {
+        fn call(&mut self, _: &str, _: &Value) -> Result<Value, String> {
+            self.0 += 1;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(json!(1))
+        }
+    }
+    let mut host = Slow(0);
+    // The limit is far off for the first request, so no scheduling delay can end it early; the
+    // deadline then passes before the second.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut timed = crate::Timed { host: &mut host, deadline };
+    assert!(timed.call("a", &json!({})).is_ok());
+    timed.deadline = std::time::Instant::now();
+    let e = timed.call("b", &json!({})).unwrap_err();
+    assert!(e.contains("too long"), "{e}");
+    assert_eq!(host.0, 1, "the request after the limit never reached the host");
+}
+
 /// Enabled plugin tools register with geoprocessing and return layers or selections.
 #[test]
 fn tools_join_the_geoprocessing_tools() {
@@ -248,6 +371,92 @@ fn tools_join_the_geoprocessing_tools() {
     crate::set_enabled("unit-tools", false).unwrap();
     assert!(rustgis_analysis::tool("plugin:unit-tools/m").is_none());
     crate::unload("unit-tools");
+}
+
+/// Old prepared tool jobs cannot run after their plugin is toggled, replaced or removed.
+#[test]
+fn prepared_tools_keep_their_load_and_refuse_revoked_handles() {
+    struct Empty;
+    impl rustgis_analysis::Inputs for Empty {
+        /// The fixed-output plugin needs no project dataset.
+        fn dataset(&self, _: &str) -> Option<&rustgis_data::Dataset> {
+            None
+        }
+        /// The fixture gives the plugin no selected rows.
+        fn selection(&self, _: &str) -> &[usize] {
+            &[]
+        }
+    }
+
+    let plugin = load("unit-pinned-tool", &[]);
+    let job = crate::tools::prepare_pinned(&plugin, "m", &Empty, &json!({})).unwrap();
+    assert!(crate::is_current(&plugin));
+    assert_eq!(job.run(&crate::tools::Control::default()).unwrap().messages, ["made"]);
+
+    crate::set_enabled("unit-pinned-tool", false).unwrap();
+    assert!(!crate::is_current(&plugin));
+    assert!(job.run(&crate::tools::Control::default()).unwrap_err().contains("changed or was disabled"));
+    crate::set_enabled("unit-pinned-tool", true).unwrap();
+    let enabled = crate::get("unit-pinned-tool").unwrap();
+    assert!(crate::is_current(&enabled));
+    assert!(!crate::is_current(&plugin), "enabling cannot revive an old load");
+    let job = crate::tools::prepare_pinned(&enabled, "m", &Empty, &json!({})).unwrap();
+
+    let replacement = load("unit-pinned-tool", &[]);
+    assert!(crate::is_current(&replacement));
+    assert!(!crate::is_current(&enabled), "identical package bytes still make a new load");
+    assert!(job.run(&crate::tools::Control::default()).is_err());
+    let err = crate::tools::prepare_pinned(&enabled, "m", &Empty, &json!({"input": "Missing"})).err().unwrap();
+    assert!(err.contains("updated or removed"), "refuse before reading inputs: {err}");
+    let job = crate::tools::prepare_pinned(&replacement, "m", &Empty, &json!({})).unwrap();
+    crate::unload("unit-pinned-tool");
+    assert!(!crate::is_current(&replacement));
+    assert!(job.run(&crate::tools::Control::default()).is_err());
+
+    let withdrawn = load("unit-pinned-withdrawn", &[]);
+    let job = crate::tools::prepare_pinned(&withdrawn, "m", &Empty, &json!({})).unwrap();
+    crate::apply_blocklist(
+        "https://pinned-test.invalid/registry.json",
+        vec![registry::Blocked { id: "unit-pinned-withdrawn".into(), sha256: None, reason: "test withdrawal".into() }],
+    );
+    assert!(!crate::is_current(&withdrawn));
+    assert!(job.run(&crate::tools::Control::default()).is_err());
+}
+
+/// A schema captured from one registry snapshot cannot be paired with another plugin load.
+#[test]
+fn pinned_tool_schema_refuses_changed_defaults_display_and_stale_load() {
+    // This schema-comparison scenario holds its own publication; other fixtures reload the
+    // process-wide provider, which may legitimately make a concurrent lookup unavailable.
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::var_os("RUSTGIS_SCHEMA_PIN_TEST_CHILD").is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::pinned_tool_schema_refuses_changed_defaults_display_and_stale_load", "--nocapture"])
+            .env("RUSTGIS_SCHEMA_PIN_TEST_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("test result: ok. 1 passed; 0 failed;"));
+        return;
+    }
+    crate::tools::register();
+    let first = load("unit-schema-pin", &[]);
+    let spec = rustgis_analysis::resolve("plugin:unit-schema-pin/m").unwrap();
+    crate::tools::matches_pinned(&first, spec.spec()).unwrap();
+    let mut manifest: Value = serde_json::from_str(&testing::manifest("unit-schema-pin", &[])).unwrap();
+    manifest["tools"][0]["name"] = json!("Different operation");
+    manifest["tools"][0]["params"][1]["default"] = json!(42);
+    let text = manifest.to_string();
+    let bytes = testing::zip_of(&[("plugin.json", text.as_bytes()), ("plugin.wasm", &testing::wasm())]);
+    let second = crate::load(Package::from_zip(&bytes).unwrap(), "test").unwrap();
+    assert!(crate::tools::matches_pinned(&first, spec.spec()).unwrap_err().contains("updated or removed"));
+    assert!(crate::tools::matches_pinned(&second, spec.spec()).unwrap_err().contains("schema or display"));
+    let current = rustgis_analysis::resolve("plugin:unit-schema-pin/m").unwrap();
+    crate::tools::matches_pinned(&second, current.spec()).unwrap();
+    assert_eq!(current.resolve_params(&json!({"input":"Cities"})).unwrap()["size"], 42);
+    crate::set_enabled("unit-schema-pin", false).unwrap();
+    assert!(crate::tools::matches_pinned(&second, current.spec()).is_err());
+    crate::unload("unit-schema-pin");
 }
 
 /// Registry and blocklist parsing validates entries and resolves package addresses safely.
@@ -306,6 +515,18 @@ fn registries_and_blocklists_are_read_defensively() {
     assert!(registry::blocked(&list, "x", "anything").is_some());
     assert!(registry::blocked(&list, "y", &sha).is_some());
     assert!(registry::blocked(&list, "y", &"b".repeat(64)).is_none());
+    // A list too long to read whole is refused, not cut short.
+    let entry = json!({"id": "x"});
+    let full = Value::Array(vec![entry.clone(); registry::MAX_ENTRIES]);
+    assert_eq!(registry::parse_blocklist(&full.to_string()).unwrap().len(), registry::MAX_ENTRIES);
+    let over = Value::Array(vec![entry; registry::MAX_ENTRIES + 1]);
+    assert!(registry::parse_blocklist(&over.to_string()).unwrap_err().contains("at most"));
+    // A refused entry isn't quoted at length.
+    let long = json!([{"id": "x".repeat(100_000)}, "y".repeat(100_000)]);
+    for list in [json!([long[0].clone()]), json!([long[1].clone()])] {
+        let e = registry::parse_blocklist(&list.to_string()).unwrap_err();
+        assert!(e.starts_with("blocklist entry 1") && e.len() < 400, "{}", e.len());
+    }
 }
 
 /// Blocklisting unloads affected plugins and prevents them from being loaded again.
@@ -317,6 +538,25 @@ fn blocked_plugins_are_unloaded_and_refused() {
     assert!(crate::get("unit-blocked").is_none());
     let pkg = Package::from_zip(&testing::package("unit-blocked", &[])).unwrap();
     assert!(crate::load(pkg, "t").unwrap_err().contains("malware"));
+    // A refresh of the wrong shape is refused and leaves the withdrawal in place.
+    for text in [
+        "{}",
+        r#"{"blocked": {}}"#,
+        r#"{"blocked": null}"#,
+        "1",
+        r#"[{"reason": "no id"}]"#,
+        "[1]",
+        r#"[{"id": "ok"}, {"reason": "no id"}]"#,
+        r#"[{"id": "unit-blocked", "sha256": "sha256:abc"}]"#,
+        r#"[{"id": "Unit Blocked"}]"#,
+        r#"[{"id": "unit blocked"}]"#,
+    ] {
+        assert!(crate::store::save_blocklist(registry::DEFAULT_URL, text).is_err(), "{text}");
+        assert!(crate::blocked("unit-blocked", "any").is_some(), "{text} cleared the blocklist");
+    }
+    // Only an explicitly empty list clears it.
+    assert_eq!(registry::parse_blocklist(r#"{"blocked": []}"#).unwrap(), Vec::new());
+    assert_eq!(registry::parse_blocklist("[]").unwrap(), Vec::new());
     crate::set_blocklist(Vec::new());
     // Another registry's blocklist only adds: it can't bring back what the hosted one withdrew.
     load("unit-blocked", &[]);
@@ -526,7 +766,7 @@ fn plugin_tab_total_item_limit_counts_menus_and_entries_across_groups() {
 fn plugin_panels_are_checked() {
     let ok = Manifest::parse(&testing::panel_manifest("paneled")).unwrap();
     let panel = ok.panel.as_ref().unwrap();
-    assert_eq!(panel.items.len(), 7);
+    assert_eq!(panel.items.len(), 8);
     // A button's id is its command's unless it has one; a tab's `panel` opens the panel.
     assert!(panel.item("q-newer").is_none() && panel.item("newer").is_some_and(|i| i.command == "q-newer"));
     assert!(matches!(ok.entry("panel"), Some(crate::Entry::Panel(_))));
@@ -556,7 +796,13 @@ fn plugin_panels_are_checked() {
             "1 to 32 items",
         ),
         (json!({"title": "P", "state": "nope", "items": [{"kind": "button", "command": "h"}]}), "state command"),
-        (item(json!({"kind": "dial", "id": "d"})), "isn't text, checkbox"),
+        (item(json!({"kind": "dial", "id": "d"})), "isn't text, checkbox, slider, button, tree, form, choice, date, range or pick"),
+        (item(json!({"kind": "pick", "id": "p"})), "needs a label or a command"),
+        (item(json!({"kind": "pick", "label": "P"})), "invalid or repeated"),
+        (item(json!({"kind": "pick", "id": "p", "command": "zz"})), "isn't one of the plugin's commands"),
+        (item(json!({"kind": "pick", "id": "p", "command": "h", "shape": "polygon"})), "isn't point or box"),
+        (item(json!({"kind": "pick", "id": "p", "command": "h", "default": {"lon": 1, "lat": 2}})), "only checkboxes, sliders"),
+        (item(json!({"kind": "button", "command": "h", "shape": "box"})), "shape is for picks"),
         (item(json!({"kind": "text"})), "invalid or repeated"),
         (item(json!({"kind": "text", "id": "Bad Id"})), "invalid or repeated"),
         (json!({"title": "P", "items": [{"kind": "text", "id": "t"}, {"kind": "text", "id": "t"}]}), "invalid or repeated"),
@@ -575,7 +821,18 @@ fn plugin_panels_are_checked() {
         (item(json!({"kind": "slider", "id": "s", "max": 1.5})), "plugin.json"),
         (item(json!({"kind": "button", "command": "h", "max": 3})), "for sliders"),
         (item(json!({"kind": "checkbox", "id": "c", "label": "C", "steps": true})), "for sliders"),
-        (item(json!({"kind": "button", "command": "h", "default": true})), "only checkboxes and sliders"),
+        (item(json!({"kind": "button", "command": "h", "default": true})), "only checkboxes, sliders"),
+        (item(json!({"kind": "choice", "id": "c", "options": [{"id": "a"}, {"id": "a"}]})), "unique id"),
+        (item(json!({"kind": "choice", "id": "c", "options": ["a"]})), "unique id"),
+        (item(json!({"kind": "choice", "id": "c", "options": [{"id": "a"}], "default": "b"})), "one of its options"),
+        (item(json!({"kind": "slider", "id": "s", "max": 3, "options": [{"id": "a"}]})), "for dropdowns"),
+        (item(json!({"kind": "date", "id": "d", "default": "2023-02-29"})), "YYYY-MM-DD"),
+        (item(json!({"kind": "date", "id": "d", "default": "2023-2-1"})), "YYYY-MM-DD"),
+        (item(json!({"kind": "date", "id": "d", "min": 1})), "for sliders and ranges"),
+        (item(json!({"kind": "range", "id": "r", "max": 9, "default": [5, 2]})), "low first"),
+        (item(json!({"kind": "range", "id": "r", "max": 9, "default": [0, 10]})), "from min to max"),
+        (item(json!({"kind": "range", "id": "r", "max": 9, "default": 3})), "[low, high]"),
+        (item(json!({"kind": "range", "id": "r", "min": 4, "max": 1})), "min must not be above"),
         (item(json!({"kind": "button", "command": "h", "text": "t"})), "for texts"),
         (item(json!({"kind": "text", "id": "t", "text": long})), "too long"),
         (item(json!({"kind": "text", "id": "t", "label": 7})), "plugin.json"),
@@ -602,7 +859,8 @@ fn plugin_panel_state_round_trips() {
     let p = crate::load(pkg, "test").unwrap();
     let decl = p.manifest.panel.clone().unwrap();
     let mut st = PanelState::new(&decl);
-    assert_eq!(st.values, [("local".to_string(), json!(false)), ("release".to_string(), json!(0))].into_iter().collect());
+    let defaults = [("local", json!(false)), ("release", json!(0)), ("span", json!([2, 8]))];
+    assert_eq!(st.values, defaults.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
     assert_eq!(st.items["selected"].text, "None yet");
     // The state command answers the panel's state; the host takes it in.
     let cmd = crate::command("plugin:unit-panel/p").unwrap();
@@ -620,7 +878,7 @@ fn plugin_panel_state_round_trips() {
     assert_eq!(changed, ["local", "release"]);
     let echo = crate::command("plugin:unit-panel/q").unwrap();
     let got = crate::run_command_with_panel(&echo, &mut Recorder::default(), &json!({"a": 1}), Some(st.request(&changed))).unwrap();
-    assert_eq!(got["panel"], json!({"values": {"local": true, "release": 3}, "changed": ["local", "release"]}));
+    assert_eq!(got["panel"], json!({"values": {"local": true, "release": 3, "span": [2, 8]}, "changed": ["local", "release"]}));
     assert_eq!(got["params"], json!({"a": 1}));
     assert_eq!(got["kind"], "command");
     // Without a panel, no `panel` in the request.
@@ -727,6 +985,91 @@ fn hostile_panel_states_are_tamed() {
     assert_eq!(st.items["local"].label, None);
 }
 
+/// A pick's value is a place: a point's degrees, a box's, with the map's coordinates the host
+/// worked out; anything else is ignored, and a plugin can only clear it, never pick one.
+#[test]
+fn panel_picks_take_a_place_on_the_map() {
+    use crate::PanelState;
+    let m = Manifest::parse(&testing::pick_manifest("pick-panel")).unwrap();
+    let decl = m.panel.unwrap();
+    let (seed, area, spot) = (decl.item("seed").unwrap(), decl.item("area").unwrap(), decl.item("spot").unwrap());
+    assert!(!seed.picks_box() && area.picks_box() && !spot.picks_box(), "a point unless it says box");
+    assert!(seed.has_value() && spot.command.is_empty(), "a pick needs no command");
+    let mut st = PanelState::new(&decl);
+    assert_eq!((&st.values["seed"], &st.values["area"], &st.values["spot"]), (&Value::Null, &Value::Null, &Value::Null));
+    // A point: its degrees, and what the host adds; nothing else.
+    let point = json!({"lon": -42.8, "lat": -5.09, "x": -4764474.2, "y": -567363.0, "crs": "EPSG:3857", "junk": 1});
+    let given = json!({"seed": point});
+    let set = st.set_values(&decl, &given);
+    assert_eq!(set, ["seed"]);
+    assert_eq!(st.values["seed"], json!({"lon": -42.8, "lat": -5.09, "x": -4764474.2, "y": -567363.0, "crs": "EPSG:3857"}));
+    assert_eq!(st.value_report(&decl, &given, &set).adjusted, ["seed"], "the field left out is said");
+    let clean = json!({"seed": st.values["seed"].clone()});
+    let set = st.clone().set_values(&decl, &clean);
+    assert_eq!(st.value_report(&decl, &clean, &set).notice(), None, "a clean place stays quiet");
+    assert_eq!(st.request(&["seed".into()])["values"]["seed"]["lon"], -42.8, "it goes with the request");
+    // Degrees alone are a place (a script's); half a pair of map coordinates is left out.
+    st.set_values(&decl, &json!({"spot": {"lon": 10, "lat": 20, "x": 5}}));
+    assert_eq!(st.values["spot"], json!({"lon": 10.0, "lat": 20.0}));
+    // A box: west, south, east and north; one whose west is greater than its east crosses the
+    // antimeridian.
+    assert_eq!(
+        st.set_values(&decl, &json!({"area": {"bbox": [170, -10, -170, 10], "extent": [1, 2, 3, 4], "crs": "EPSG:3857"}})),
+        ["area"]
+    );
+    assert_eq!(st.values["area"], json!({"bbox": [170.0, -10.0, -170.0, 10.0], "extent": [1.0, 2.0, 3.0, 4.0], "crs": "EPSG:3857"}));
+    // Junk is ignored: the places stay.
+    let long = "x".repeat(crate::panel::MAX_PICK_CRS + 1);
+    for junk in [
+        json!({"seed": {"lon": 200, "lat": 0}}),
+        json!({"seed": {"lon": 0, "lat": -91}}),
+        json!({"seed": {"lon": "1", "lat": 2}}),
+        json!({"seed": {"lon": 1}}),
+        json!({"seed": [1, 2]}),
+        json!({"seed": "here"}),
+        json!({"seed": {"bbox": [0, 0, 1, 1]}}),
+        json!({"area": {"lon": 1, "lat": 2}}),
+        json!({"area": {"bbox": [0, 0, 1]}}),
+        json!({"area": {"bbox": [0, 10, 1, -10]}}),
+        json!({"area": {"bbox": [0, 0, 1e300, 1]}}),
+        json!({"area": {"bbox": [0, 0, "1", 1]}}),
+    ] {
+        let mut kept = st.clone();
+        let set = kept.set_values(&decl, &junk);
+        assert!(set.is_empty(), "{junk}");
+        assert_eq!(kept.values, st.values, "{junk}");
+        assert!(kept.value_report(&decl, &junk, &set).notice().is_some_and(|n| n.contains("not taken")), "said: {junk}");
+    }
+    // Map coordinates that aren't right are left out, as is a coordinate system too long.
+    let given = json!({"area": {"bbox": [0, 0, 1, 1], "extent": [3, 0, 1, 1], "crs": long}});
+    let set = st.set_values(&decl, &given);
+    assert_eq!(st.values["area"], json!({"bbox": [0.0, 0.0, 1.0, 1.0]}));
+    let notice = st.value_report(&decl, &given, &set).notice().unwrap_or_default();
+    assert!(notice.contains("adjusted") && notice.contains("area"), "{notice}");
+    // A plugin's answer can't pick a place, only clear one; the place it gave is said.
+    let dropped = st.apply(&decl, &json!({"values": {"seed": {"lon": 1, "lat": 2}, "area": null}}));
+    assert_eq!(dropped.values, ["seed"]);
+    assert_eq!(st.picked("seed").and_then(|p| p["lon"].as_f64()), Some(-42.8));
+    // An answer that gives back the place held is no refusal: the place stays, quietly.
+    let held = st.values["seed"].clone();
+    let dropped = st.apply(&decl, &json!({"values": {"seed": held.clone()}}));
+    assert_eq!(dropped.notice(), None, "{dropped:?}");
+    assert_eq!(st.values["seed"], held);
+    // Given back with its numbers written otherwise (whole degrees as integers), it is the same
+    // place, and as quiet.
+    assert_eq!(st.set_values(&decl, &json!({"seed": {"lon": 10, "lat": 0}, "area": {"bbox": [-180, -10, 180, 10]}})), ["seed", "area"]);
+    let held = (st.values["seed"].clone(), st.values["area"].clone());
+    let dropped = st.apply(&decl, &json!({"values": {"seed": {"lon": 10, "lat": 0}, "area": {"bbox": [-180, -10, 180, 10]}}}));
+    assert_eq!(dropped.notice(), None, "{dropped:?}");
+    assert_eq!((st.values["seed"].clone(), st.values["area"].clone()), held);
+    st.apply(&decl, &json!({"values": {"area": null}}));
+    assert_eq!(st.values["area"], Value::Null);
+    assert_eq!(st.picked("area"), None);
+    // The user's own values clear it too.
+    assert_eq!(st.set_values(&decl, &json!({"seed": null})), ["seed"]);
+    assert_eq!(st.values["seed"], Value::Null);
+}
+
 /// The test panel with a catalogue tree added.
 fn tree_panel() -> crate::PanelDecl {
     let mut m: Value = serde_json::from_str(&testing::panel_manifest("tree-panel")).unwrap();
@@ -748,7 +1091,7 @@ fn a_panel_tree_takes_nodes_and_a_chosen_one() {
         {"id": "env", "label": "Ambiente", "count": 2, "children": [{"id": "501", "label": "Árboles"}, {"id": "502"}]},
         {"id": "farm", "label": "Agricultura", "count": 1, "children": [{"id": "601", "label": "Productividad Rural"}]},
     ]);
-    st.apply(&decl, &json!({"items": {"catalogue": {"nodes": nodes}}, "values": {"catalogue": "601"}}));
+    assert_eq!(st.apply(&decl, &json!({"items": {"catalogue": {"nodes": nodes}}, "values": {"catalogue": "601"}})).notice(), None);
     let tree = &st.items["catalogue"].nodes;
     assert_eq!(tree.len(), 2);
     assert_eq!((tree[0].count, tree[0].children[1].label.as_str()), (Some(2), "502"), "a label defaults to the id");
@@ -766,6 +1109,10 @@ fn a_panel_tree_takes_nodes_and_a_chosen_one() {
         kept.apply(&decl, &json!({"items": {"catalogue": {"nodes": junk}}}));
         assert_eq!((kept.items["catalogue"].nodes.len(), kept.chosen("catalogue")), (2, Some("501")), "{junk}");
     }
+    // A node repeated, or without an id, at any depth is left out and counted.
+    let mut lossy = st.clone();
+    let junk = json!([{"id": "env", "children": [{"id": "env"}, {"label": "x", "children": [{"id": "y"}]}]}]);
+    assert_eq!(lossy.apply(&decl, &json!({"items": {"catalogue": {"nodes": junk}}})).nodes, 3);
     // New nodes without the chosen one: none chosen.
     st.apply(&decl, &json!({"items": {"catalogue": {"nodes": [{"id": "env"}]}}}));
     assert_eq!(st.chosen("catalogue"), None);
@@ -825,7 +1172,118 @@ fn hostile_panel_trees_are_tamed() {
     assert!(Manifest::parse(&m.to_string()).unwrap_err().contains("search is for trees"));
     let mut m: Value = serde_json::from_str(&testing::panel_manifest("bad-tree")).unwrap();
     m["panel"]["items"].as_array_mut().unwrap().push(json!({"kind": "tree", "id": "t", "default": "a"}));
-    assert!(Manifest::parse(&m.to_string()).unwrap_err().contains("only checkboxes and sliders have a default"));
+    assert!(Manifest::parse(&m.to_string()).unwrap_err().contains("dates have a default"));
+}
+
+/// A tree holds [`MAX_TREE_NODES`](crate::panel::MAX_TREE_NODES) nodes, a country's
+/// municipalities with the levels above them (#1546). Past them, at any depth, it is cut, and the
+/// cut is said once, naming the tree and how many nodes it was given, apart from the nodes left
+/// out for other reasons; the panel's state keeps it for a note under the tree.
+#[test]
+fn a_tree_cut_at_its_limit_says_so() {
+    use crate::PanelState;
+    use crate::panel::{MAX_TREE_NODES, TreeNode};
+    fn count(n: &[TreeNode]) -> usize {
+        n.iter().map(|n| 1 + count(&n.children)).sum()
+    }
+    let flat = |n: usize| -> Vec<Value> { (0..n).map(|i| json!({"id": i.to_string()})).collect() };
+    let decl = tree_panel();
+    let mut st = PanelState::new(&decl);
+    let full = st.apply(&decl, &json!({"items": {"catalogue": {"nodes": flat(MAX_TREE_NODES)}}}));
+    assert_eq!(count(&st.items["catalogue"].nodes), MAX_TREE_NODES, "all of them kept");
+    assert_eq!(full.notice(), None, "and nothing said");
+    assert_eq!(st.items["catalogue"].cut, None);
+
+    let over = st.apply(&decl, &json!({"items": {"catalogue": {"nodes": flat(MAX_TREE_NODES + 1)}}}));
+    assert_eq!(count(&st.items["catalogue"].nodes), MAX_TREE_NODES, "the first ones kept");
+    assert_eq!(over.cut, [("catalogue".to_string(), MAX_TREE_NODES + 1)]);
+    assert_eq!(over.nodes, 0, "not counted again among the nodes left out");
+    let notice = over.notice().unwrap();
+    assert_eq!(notice.matches("catalogue").count(), 1, "{notice}");
+    assert!(notice.contains(&format!("{} nodes", MAX_TREE_NODES + 1)) && notice.contains(&format!("first {MAX_TREE_NODES}")), "{notice}");
+    assert_eq!(st.items["catalogue"].cut, Some(MAX_TREE_NODES + 1));
+    assert_eq!(serde_json::to_value(&st.items["catalogue"]).unwrap()["cut"], MAX_TREE_NODES + 1);
+
+    // Nested, as regions and their municipalities: the last ones of a branch are cut, and the
+    // branches after it with what they hold. A node without an id is left out for that.
+    let tail: Vec<Value> = (0..MAX_TREE_NODES - 1).map(|i| json!({"id": format!("m{i}")})).collect();
+    let nested = json!([
+        {"label": "no id", "children": [{"id": "z"}]},
+        {"id": "north", "children": tail.into_iter().chain([json!({"id": "past"})]).collect::<Vec<_>>()},
+        {"id": "south", "children": [{"id": "s1"}, {"id": "s2"}]},
+        {"id": "west", "children": [{"id": "w1", "children": [{"id": "w2"}]}]},
+    ]);
+    let given = 2 + MAX_TREE_NODES + 1 + 3 + 3;
+    let over = st.apply(&decl, &json!({"items": {"catalogue": {"nodes": nested}}}));
+    assert_eq!(count(&st.items["catalogue"].nodes), MAX_TREE_NODES);
+    assert_eq!(over.cut, [("catalogue".to_string(), given)]);
+    assert_eq!(over.nodes, 2, "the node without an id and its child");
+    assert_eq!(st.items["catalogue"].cut, Some(given));
+
+    // Two trees cut in one answer: one part, with the count and each tree.
+    let mut m: Value = serde_json::from_str(&testing::panel_manifest("tree-panel")).unwrap();
+    for id in ["catalogue", "places"] {
+        m["panel"]["items"].as_array_mut().unwrap().push(json!({"kind": "tree", "id": id, "label": id, "command": "q"}));
+    }
+    let two = Manifest::parse(&m.to_string()).unwrap().panel.unwrap();
+    let mut both = PanelState::new(&two);
+    let over = both
+        .apply(&two, &json!({"items": {"catalogue": {"nodes": flat(MAX_TREE_NODES + 1)}, "places": {"nodes": flat(MAX_TREE_NODES + 2)}}}));
+    let notice = over.notice().unwrap();
+    assert_eq!(notice.matches("tree(s) cut").count(), 1, "{notice}");
+    assert!(notice.contains(&format!("2 tree(s) cut: only the first {MAX_TREE_NODES} nodes")), "{notice}");
+    assert!(
+        notice.contains(&format!("catalogue ({} nodes given)", MAX_TREE_NODES + 1))
+            && notice.contains(&format!("places ({} nodes given)", MAX_TREE_NODES + 2)),
+        "{notice}"
+    );
+
+    // Fewer again: no cut left to say.
+    assert_eq!(st.apply(&decl, &json!({"items": {"catalogue": {"nodes": flat(3)}}})).notice(), None);
+    assert_eq!(st.items["catalogue"].cut, None);
+    assert!(serde_json::to_value(&st.items["catalogue"]).unwrap().get("cut").is_none());
+
+    // A dropdown's options past its limit are still in the generic count: only a tree's cut is
+    // said apart.
+    let decl = choice_date_range_panel();
+    let mut st = PanelState::new(&decl);
+    let options: Vec<Value> = (0..=crate::panel::MAX_CHOICES).map(|i| json!({"id": i.to_string()})).collect();
+    let over = st.apply(&decl, &json!({"items": {"product": {"options": options}}}));
+    assert_eq!(st.items["product"].nodes.len(), crate::panel::MAX_CHOICES);
+    assert!(over.cut.is_empty() && st.items["product"].cut.is_none());
+    let notice = over.notice().unwrap();
+    assert!(notice.contains("1 option(s) or tree node(s) left out") && notice.contains("past a dropdown's limit"), "{notice}");
+}
+
+/// A node's label is folded (lower case, accents aside) once, when the node comes: a search,
+/// which runs every frame it is typed, compares against that and folds no label (#1546).
+#[test]
+fn a_tree_search_reads_the_label_folded_once() {
+    use crate::PanelState;
+    use crate::panel::TreeNode;
+    let words = |q: &str| TreeNode::fold(q).split_whitespace().map(String::from).collect::<Vec<_>>();
+    let mut node = TreeNode::new("3547809".into(), "Santo André – São Paulo".into(), None, Vec::new());
+    assert_eq!(node.folded, "santo andre – sao paulo");
+    assert!(node.holds_words(&words("SÃO andre")));
+    assert!(node.holds_words(&[]), "no words: every node");
+    assert!(!node.holds_words(&words("são josé")));
+    // What it compares is what was stored, not the label folded again.
+    node.folded = "outro".into();
+    assert!(node.holds_words(&words("outro")) && !node.holds_words(&words("santo")));
+    // From a plugin's answer, the label, or the id standing for it, is folded as it is kept.
+    let decl = tree_panel();
+    let mut st = PanelState::new(&decl);
+    st.apply(
+        &decl,
+        &json!({"items": {"catalogue": {"nodes": [
+            {"id": "a", "label": "A\u{301}rvore"},
+            {"id": "Içá"},
+            {"id": "two", "label": "Água\nRíos"},
+        ]}}}),
+    );
+    let folded: Vec<&str> = st.items["catalogue"].nodes.iter().map(|n| n.folded.as_str()).collect();
+    assert_eq!(folded, ["arvore", "ica", "agua rios"]);
+    assert_eq!(TreeNode::fold("Ñandú Çà Åland İzmir"), "nandu ca aland izmir");
 }
 
 #[test]
@@ -939,6 +1397,48 @@ fn file_parameters_need_files_and_hand_tools_the_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn path_mode_file_parameters_hand_process_tools_the_path_unread() {
+    let wasm: Value = serde_json::from_str(&testing::manifest("path-param", &["files"])).unwrap();
+    let mut m: Value = serde_json::from_str(&testing::process_manifest("path-param", &["files"], &["prog".into()])).unwrap();
+    // Only a process plugin's file parameter takes `path`, and the mode must be one RustGIS knows.
+    let mut bad = wasm.clone();
+    bad["tools"][2]["params"][1]["mode"] = json!("path");
+    assert!(Manifest::parse(&bad.to_string()).unwrap_err().contains("mode 'path'"));
+    let mut bad = m.clone();
+    bad["tools"][2]["params"][0]["mode"] = json!("path");
+    assert!(Manifest::parse(&bad.to_string()).unwrap_err().contains("mode 'path'"));
+    let mut bad = m.clone();
+    bad["tools"][2]["params"][1]["mode"] = json!("folder");
+    assert!(Manifest::parse(&bad.to_string()).is_err());
+    m["tools"][2]["params"][1]["mode"] = json!("path");
+    let parsed = Manifest::parse(&m.to_string()).unwrap();
+    let decl = parsed.tools.iter().find(|t| t.id == "r").unwrap();
+
+    // A file over the contents limit goes as its full path, unread, with no `files`.
+    let dir = std::env::temp_dir().join(format!("rustgis-test-path-param-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tile.las");
+    std::fs::File::create(&path).unwrap().set_len(crate::tools::MAX_FILE as u64 + 1).unwrap();
+    let r = crate::tools::request(decl, &json!({"model": path.display().to_string()}), Default::default()).unwrap();
+    assert_eq!(r["params"]["model"], path.display().to_string());
+    assert!(r.get("files").is_none());
+    // A relative path is made full: the plugin's program runs in its own folder. (Tests run in
+    // the crate's folder.)
+    let r = crate::tools::request(decl, &json!({"model": "Cargo.toml"}), Default::default()).unwrap();
+    assert_eq!(r["params"]["model"], std::env::current_dir().unwrap().join("Cargo.toml").display().to_string());
+    // A missing file, a folder, file contents or a non-text value is an error.
+    for bad in [
+        json!(dir.join("missing.las").display().to_string()),
+        json!(dir.display().to_string()),
+        json!({"name": "a.las", "data": ""}),
+        json!(7),
+    ] {
+        assert!(crate::tools::request(decl, &json!({"model": bad}), Default::default()).is_err(), "{bad}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------------------------------
 // process plugins
 
@@ -1026,9 +1526,9 @@ fn process_plugins_that_hang_are_stopped() {
 #[test]
 fn process_tools_show_progress_and_can_be_cancelled() {
     let dir = process_folder("proc-cancel", &[]);
-    let p = crate::prepare(Package::from_dir(&dir).unwrap(), "test").unwrap();
+    let p = crate::load(Package::from_dir(&dir).unwrap(), "test").unwrap();
     let job = crate::tools::Job {
-        plugin: std::sync::Arc::new(p),
+        plugin: p.clone(),
         name: "Work Forever".into(),
         request: json!({"abi": 1, "kind": "tool", "id": "w", "params": {}, "layers": {}, "lang": "en"}),
     };
@@ -1051,13 +1551,211 @@ fn process_tools_show_progress_and_can_be_cancelled() {
     assert!(e == "Work Forever: cancelled" && t0.elapsed() < std::time::Duration::from_secs(10), "{e}");
     // Progress shows while a tool runs, but isn't kept in its messages as log lines are.
     let job = crate::tools::Job {
-        plugin: std::sync::Arc::new(crate::prepare(Package::from_dir(&dir).unwrap(), "test").unwrap()),
+        plugin: p,
         name: "Make Points".into(),
         request: json!({"abi": 1, "kind": "tool", "id": "m", "params": {}, "layers": {}, "lang": "en"}),
     };
     let control = crate::tools::Control::default();
     assert_eq!(job.run(&control).unwrap().messages, vec!["made"]);
     assert_eq!(control.last_log().as_deref(), Some("making"));
+    crate::unload("proc-cancel");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Whether a process is gone: not there, or (on Linux) a zombie nothing has reaped yet, as in a
+/// container with no init to reap orphans.
+#[cfg(unix)]
+fn gone(pid: rustix::process::Pid) -> bool {
+    rustix::process::test_kill_process(pid).is_err()
+        || std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero()))
+            .ok()
+            .and_then(|s| s.rsplit_once(") ").map(|(_, rest)| rest.starts_with('Z')))
+            .unwrap_or(false)
+}
+
+/// A session test plugin played by this binary, prepared (not loaded).
+fn session_plugin(id: &str) -> (crate::Plugin, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("rustgis-test-session-{id}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = testing::child_run("tests::process_child");
+    std::fs::write(dir.join("plugin.json"), testing::session_manifest(id, &[], &run)).unwrap();
+    (crate::prepare(Package::from_dir(&dir).unwrap(), "test").unwrap(), dir)
+}
+
+/// The request for the test plugin's command `id`, without parameters.
+fn command(id: &str) -> Value {
+    json!({"abi": 1, "kind": "command", "id": id, "params": {}, "lang": "en"})
+}
+
+/// Polls `plugin`'s program until `done` says so, for a few seconds at most.
+fn poll_until(plugin: &str, host: &mut Recorder, done: impl Fn(&crate::session::Polled, &Recorder) -> bool) -> crate::session::Polled {
+    let t0 = std::time::Instant::now();
+    loop {
+        let polled = crate::session::poll(plugin, host);
+        if done(&polled, host) || t0.elapsed() > std::time::Duration::from_secs(20) {
+            return polled;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// A program's error output past what is kept is counted, so the log can say so.
+#[test]
+fn error_output_past_what_is_kept_is_counted() {
+    let text: String = (0..25).map(|i| format!("line {i}\n")).collect();
+    let kept = crate::process::errors(std::io::Cursor::new(text.into_bytes()), None);
+    let t0 = std::time::Instant::now();
+    while kept.lock().unwrap().dropped < 5 && t0.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let k = kept.lock().unwrap();
+    assert_eq!((k.dropped, k.lines.len(), k.lines.front().map(String::as_str)), (5, 20, Some("line 5")));
+}
+
+#[test]
+fn session_plugins_keep_one_program_running() {
+    let (p, dir) = session_plugin("sess-keep");
+    assert_eq!(p.info()["session"], true);
+    let mut host = Recorder::default();
+    let pid = crate::call(&p, &mut host, &command("i"), false).unwrap();
+    assert!(crate::session::is_running("sess-keep"));
+    assert_eq!(crate::call(&p, &mut host, &command("h"), false).unwrap(), json!({"hello": "world"}));
+    assert_eq!(crate::call(&p, &mut host, &command("i"), false).unwrap(), pid, "the same program answers");
+    // A host request inside a command is answered as a per-call plugin's is.
+    let forward = json!({"abi": 1, "kind": "command", "id": "f", "params": {"op": "host.echo", "params": {"a": 1}}, "lang": "en"});
+    assert_eq!(crate::call(&p, &mut host, &forward, false).unwrap(), json!({"a": 1}));
+    assert_eq!(crate::call(&p, &mut host, &command("e"), false).unwrap_err(), "nope");
+
+    // Between commands it asks when it likes; the answer carries its id. It hears events.
+    let later = json!({"abi": 1, "kind": "command", "id": "k", "params": {"op": "host.echo", "params": {"a": 1}}, "lang": "en"});
+    assert_eq!(crate::call(&p, &mut host, &later, false).unwrap(), "asked");
+    let polled = poll_until("sess-keep", &mut host, |_, h| h.ops.len() >= 2);
+    assert_eq!(host.ops, ["host.echo", "host.echo"]);
+    assert!(polled.ended.is_none());
+    crate::session::event("sess-keep", &json!({"event": "selection"}));
+    let heard = crate::call(&p, &mut host, &command("v"), false).unwrap();
+    assert_eq!(heard["answers"], json!([{"ok": {"a": 1}, "id": "a2"}]));
+    assert_eq!(heard["events"], json!(["selection"]));
+
+    // A program that stops reading while the map moves gets the latest view when it reads again,
+    // not every one that came meanwhile.
+    assert_eq!(crate::call(&p, &mut host, &command("p"), false).unwrap(), "paused");
+    for i in 0..5_000 {
+        crate::session::event("sess-keep", &json!({"event": "view", "view": {"scale": i, "pad": "x".repeat(100)}}));
+    }
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    poll_until("sess-keep", &mut host, |_, _| true);
+    let heard = crate::call(&p, &mut host, &command("v"), false).unwrap();
+    let views = heard["events"].as_array().unwrap().len();
+    assert!(views < 5_000, "{views} views queued");
+    assert_eq!(heard["last_view"]["scale"], 4_999, "the latest view is the one kept");
+
+    // A host request that fails unexpectedly is an error answer; the program stays running.
+    let panics = json!({"abi": 1, "kind": "command", "id": "f", "params": {"op": "host.panic", "params": {}}, "lang": "en"});
+    let e = crate::call(&p, &mut host, &panics, false).unwrap_err();
+    assert!(e.contains("'host.panic' failed unexpectedly"), "{e}");
+    assert_eq!(crate::call(&p, &mut host, &command("i"), false).unwrap(), pid, "the same program still answers");
+
+    // Stopped, it's gone; the next command starts it again.
+    crate::session::stop("sess-keep");
+    assert!(!crate::session::is_running("sess-keep"));
+    #[cfg(unix)]
+    {
+        let old = rustix::process::Pid::from_raw(pid.as_i64().unwrap() as i32).unwrap();
+        assert!(rustix::process::test_kill_process(old).is_err(), "{old:?} still runs");
+    }
+    assert_ne!(crate::call(&p, &mut host, &command("i"), false).unwrap(), pid);
+    // A tool still runs a program of its own, once.
+    let tool = json!({"abi": 1, "kind": "tool", "id": "m", "params": {}, "layers": {}, "lang": "en"});
+    assert_eq!(crate::call(&p, &mut host, &tool, true).unwrap()["messages"], json!(["made"]));
+    crate::session::stop("sess-keep");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn session_plugins_that_end_or_fail_are_started_again() {
+    let (p, dir) = session_plugin("sess-end");
+    let mut host = Recorder::default();
+    // Exiting by itself (its window closed) is no failure, and it is no longer running.
+    assert_eq!(crate::call(&p, &mut host, &command("z"), false).unwrap(), "bye");
+    let polled = poll_until("sess-end", &mut host, |p, _| p.ended.is_some());
+    assert_eq!(polled.ended, Some(crate::session::Ended { failed: false, last_error: None, unread: false, reason: None }));
+    assert!(!crate::session::is_running("sess-end"));
+    // What a program left running when it exited is stopped with it (on Unix).
+    #[cfg(unix)]
+    {
+        let left = crate::call(&p, &mut host, &command("l"), false).unwrap();
+        assert!(poll_until("sess-end", &mut host, |p, _| p.ended.is_some()).ended.is_some(), "the session didn't end");
+        let pid = rustix::process::Pid::from_raw(left.as_i64().unwrap() as i32).unwrap();
+        let t0 = std::time::Instant::now();
+        while !gone(pid) && t0.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(gone(pid), "{pid:?} still runs");
+    }
+    // What it sent as it exited is still handled: a last request, a last log line.
+    let last = json!({"abi": 1, "kind": "command", "id": "w", "params": {"op": "host.echo", "params": {"last": true}}, "lang": "en"});
+    assert_eq!(crate::call(&p, &mut host, &last, false).unwrap(), "bye");
+    let polled = poll_until("sess-end", &mut host, |p, _| p.ended.is_some());
+    assert_eq!(polled.ended.map(|e| e.failed), Some(false));
+    assert!(host.ops.contains(&"host.echo".to_string()) && host.logs.contains(&"last words".to_string()), "{:?} {:?}", host.ops, host.logs);
+    // A crash is an error naming what it wrote last; the next command starts it again.
+    let e = crate::call(&p, &mut host, &command("c"), false).unwrap_err();
+    assert!(e.contains("exited without answering") && e.contains("boom"), "{e}");
+    assert!(!crate::session::is_running("sess-end"));
+    assert_eq!(crate::call(&p, &mut host, &command("h"), false).unwrap(), json!({"hello": "world"}));
+    // One that stops answering is stopped.
+    let spec =
+        crate::process::Spec { session: true, ..crate::process::Spec::new(&testing::child_run("tests::process_child"), &dir).unwrap() };
+    let t0 = std::time::Instant::now();
+    let e = crate::session::command("sess-spin", &spec, &mut host, &command("s"), std::time::Duration::from_secs(2)).unwrap_err();
+    assert!(e.contains("too long") && t0.elapsed() < std::time::Duration::from_secs(20), "{e}");
+    assert!(!crate::session::is_running("sess-spin"));
+    // Updated, the running program is the old version's: stopped. Turned off, it stops too.
+    let p = crate::register(p);
+    assert!(!crate::session::is_running("sess-end"));
+    crate::call(&p, &mut host, &command("h"), false).unwrap();
+    assert!(crate::session::is_running("sess-end"));
+    crate::set_enabled("sess-end", false).unwrap();
+    assert!(!crate::session::is_running("sess-end"));
+    // Removed, it stops as well.
+    crate::set_enabled("sess-end", true).unwrap();
+    let p = crate::get("sess-end").unwrap();
+    crate::call(&p, &mut host, &command("h"), false).unwrap();
+    assert!(crate::session::is_running("sess-end"));
+    assert!(crate::unload("sess-end"));
+    assert!(!crate::session::is_running("sess-end") && crate::get("sess-end").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A program that exits while something it left running keeps writing into its output, faster
+/// than it's read, is still ended poll after poll, with what it left running.
+#[cfg(unix)]
+#[test]
+fn an_exited_session_whose_output_keeps_flowing_is_ended() {
+    let (p, dir) = session_plugin("sess-flow");
+    let mut host = Recorder::default();
+    let left = crate::call(&p, &mut host, &command("r"), false).unwrap();
+    let pid = rustix::process::Pid::from_raw(left.as_i64().unwrap() as i32).unwrap();
+    // Polled as frames would be, for a while at most: until it has exited there's nothing to
+    // count, and a poll with nothing new returns at once.
+    let mut ended = None;
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < std::time::Duration::from_secs(30) {
+        if let Some(e) = crate::session::poll("sess-flow", &mut host).ended {
+            ended = Some(e);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let ended = ended.expect("the session didn't end");
+    assert!(ended.unread, "{ended:?}");
+    assert!(!crate::session::is_running("sess-flow"));
+    let t0 = std::time::Instant::now();
+    while !gone(pid) && t0.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(gone(pid), "{pid:?} still runs");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1077,6 +1775,9 @@ fn process_manifests_are_checked() {
     assert!(base(json!({"runtime": "process", "run": {"windos": ["x"]}})).unwrap_err().contains("names no program"));
     assert!(base(json!({"runtime": "process", "run": vec!["a"; 65]})).is_err());
     assert!(base(json!({"run": ["python3"]})).unwrap_err().contains("process plugins"));
+    // Only a process plugin keeps a program running.
+    assert!(base(json!({"runtime": "process", "run": ["x"], "session": true})).unwrap().session);
+    assert!(base(json!({"session": true})).unwrap_err().contains("process plugins"));
     assert!(base(json!({"runtime": "native"})).is_err());
     // A program by a relative path stays in the plugin's folder.
     assert!(base(json!({"runtime": "process", "run": ["bin/tool"]})).is_ok());
@@ -1101,6 +1802,32 @@ fn process_manifests_are_checked() {
     let m = base(json!({"runtime": "process", "run": {other: ["x"]}})).unwrap();
     let pkg = Package { manifest: m, wasm: Vec::new(), sha256: String::new(), dir: Some(std::env::temp_dir()), skills: Vec::new() };
     assert!(crate::prepare(pkg, "test").unwrap_err().contains("doesn't run on this platform"));
+}
+
+/// A refused refresh leaves the cached hosted blocklist byte for byte, and a cache that can't be
+/// read at start is reported rather than ignored.
+#[test]
+fn cached_blocklist_survives_refused_refreshes() {
+    let plugins = std::env::temp_dir().join(format!("rustgis-test-blocklist-cache-{}", std::process::id()));
+    let _store = store_lock();
+    crate::store::set_dir(Some(plugins.clone()));
+    std::fs::create_dir_all(&plugins).unwrap();
+    let cache = plugins.join("blocklist.json");
+    let good = r#"{"blocked": [{"id": "cached-withdrawal"}]}"#;
+    std::fs::write(&cache, good).unwrap();
+    for text in ["{}", r#"{"blocked": {}}"#, r#"[{"id": "ok"}, {"reason": "no id"}]"#] {
+        assert!(crate::store::save_blocklist(registry::DEFAULT_URL, text).is_err(), "{text}");
+        assert_eq!(std::fs::read_to_string(&cache).unwrap(), good, "{text} overwrote the cache");
+    }
+    std::fs::write(&cache, r#"[{"id": "a"}, {"reason": "no id"}]"#).unwrap();
+    let errors = crate::store::load_installed();
+    assert!(errors.iter().any(|e| e.contains("blocklist.json") && e.contains("entry 2")), "{errors:?}");
+    // So is one that isn't text; none at all is fine.
+    std::fs::write(&cache, [0xff, 0xfe]).unwrap();
+    assert!(crate::store::load_installed().iter().any(|e| e.contains("blocklist.json")));
+    std::fs::remove_file(&cache).unwrap();
+    assert!(crate::store::load_installed().is_empty());
+    let _ = std::fs::remove_dir_all(&plugins);
 }
 
 #[test]
@@ -1354,4 +2081,483 @@ fn python_environments_are_prepared_one_at_a_time() {
     assert_eq!(crate::pyenv::status("pyenv-lock"), Some(true));
     crate::unload("pyenv-lock");
     let _ = std::fs::remove_dir_all(&plugins);
+}
+
+/// The test panel with a dropdown, a date and a range added (#1622).
+fn choice_date_range_panel() -> crate::PanelDecl {
+    let mut m: Value = serde_json::from_str(&testing::panel_manifest("cdr-panel")).unwrap();
+    let items = m["panel"]["items"].as_array_mut().unwrap();
+    items.push(json!({"kind": "choice", "id": "product", "label": "Product", "command": "q",
+        "options": [{"id": "hls", "label": "DSWx-HLS"}, {"id": "s1"}], "default": "s1"}));
+    items.push(json!({"kind": "date", "id": "start", "label": "Start", "default": "2023-04-01"}));
+    items.push(json!({"kind": "date", "id": "end", "label": "End"}));
+    items.push(json!({"kind": "range", "id": "months", "label": "Months", "min": 0, "max": 11, "default": [2, 5], "steps": true}));
+    items.push(json!({"kind": "range", "id": "all", "label": "All", "min": 1, "max": 4}));
+    Manifest::parse(&m.to_string()).unwrap().panel.unwrap()
+}
+
+#[test]
+fn panel_review_node_metadata_and_unknown_fields_are_reported() {
+    let mut decl = choice_date_range_panel();
+    let tree = decl.items.iter_mut().find(|d| d.id == "selected").unwrap();
+    tree.kind = "tree".into();
+    tree.text.clear();
+    for update in [
+        json!({"items":{"selected":{"nodes":[{"id":"node","count":"67"}]}}}),
+        json!({"items":{"selected":{"nodes":[{"id":"node","children":5}]}}}),
+        json!({"items":{"unknown":{"label":"X"}}}),
+        json!({"items":{"months":{"options":[]}}}),
+        json!({"items":{"months":{"typo":5}}}),
+    ] {
+        let mut state = crate::PanelState::new(&decl);
+        assert!(state.apply(&decl, &update).notice().is_some(), "{update}");
+    }
+}
+
+#[test]
+fn panel_review_text_and_slider_label_losses_are_reported() {
+    let decl = choice_date_range_panel();
+    let mut state = crate::PanelState::new(&decl);
+    for update in [
+        json!({"items":{"selected":{"text":"界".repeat(4001)}}}),
+        json!({"items":{"months":{"labels":["界".repeat(81)]}}}),
+        json!({"items":{"months":{"labels":vec!["ok";2001]}}}),
+    ] {
+        assert!(state.apply(&decl, &update).notice().is_some(), "truncation must be reported");
+    }
+    assert!(state.apply(&decl, &json!({"items":{"months":{"labels":[5]}}})).notice().is_some());
+    assert!(state.apply(&decl, &json!({"items":{"selected":{"text":"Clean"},"months":{"labels":["One"]}}})).notice().is_none());
+}
+
+#[test]
+fn panel_review_partial_bounds_and_wrong_types_are_reported() {
+    let decl = choice_date_range_panel();
+    let mut state = crate::PanelState::new(&decl);
+    let report = state.apply(&decl, &json!({"items":{"months":{"min":null,"max":5}}}));
+    assert_eq!(state.items["months"].max, 5);
+    assert_eq!(report.fields, ["months.min"]);
+    for (id, field, value) in [
+        ("months", "label", json!(5)),
+        ("months", "enabled", json!(5)),
+        ("months", "visible", json!(5)),
+        ("months", "labels", json!(5)),
+        ("product", "options", json!(5)),
+    ] {
+        let report = state.apply(&decl, &json!({"items":{id:{field:value}}}));
+        assert!(report.fields.contains(&format!("{id}.{field}")), "{id}.{field}: {report:?}");
+    }
+}
+
+#[test]
+fn panel_reports_clamped_malformed_and_clipped_input() {
+    let mut decl = choice_date_range_panel();
+    let tree = decl.items.iter_mut().find(|item| item.id == "selected").unwrap();
+    tree.kind = "tree".into();
+    tree.text.clear();
+    for (update, expected) in [
+        (json!({"values":{"months":[-5,40]}}), "clamped or reordered"),
+        (json!({"values":{"months":[9,3]}}), "clamped or reordered"),
+        (json!({"values":{"release":999999}}), "clamped or reordered"),
+        (json!({"values":5}), "expected an object"),
+        (json!(false), "expected an object"),
+        (json!({"items":{"months":{"min":9,"max":3}}}), "field(s) not taken"),
+        (json!({"items":{"months":{"min":-1000000001_i64}}}), "field(s) not taken"),
+        (json!({"items":{"product":{"options":[{"id":"x","label":5}]}}}), "field(s) not taken"),
+        (json!({"items":{"product":{"options":[{"id":"x","label":"界".repeat(201)}]}}}), "200 characters"),
+        (json!({"items":{"selected":{"nodes":[{"id":"x","label":"界".repeat(201)}]}}}), "200 characters"),
+    ] {
+        let mut state = crate::PanelState::new(&decl);
+        let note = state.apply(&decl, &update).notice().unwrap_or_default();
+        assert!(note.contains(expected), "{update}: {note}");
+    }
+    let mut state = crate::PanelState::new(&decl);
+    assert!(state.apply(&decl, &json!({"values":{"months":[1.0,3.0],"end":"2024-02-29"}})).notice().is_none());
+    assert!(state.apply(&decl, &json!({"items":{"product":{"options":[{"id":"s1","label":"Sentinel"}]}}})).notice().is_none());
+    let choice = decl.items.iter_mut().find(|item| item.id == "product").unwrap();
+    choice.options = vec![json!({"id":"s1","label":"界".repeat(201)})];
+    assert!(decl.validate(&|_| true).is_err_and(|error| error.contains("200 characters")));
+}
+
+#[test]
+fn panel_review_out_of_range_bound_keeps_valid_sibling() {
+    let decl = choice_date_range_panel();
+    for (update, expected, refused) in
+        [(json!({"min":-2000000000_i64,"max":5}), (0, 5), "months.min"), (json!({"min":2,"max":2000000000_i64}), (2, 11), "months.max")]
+    {
+        let mut state = crate::PanelState::new(&decl);
+        let report = state.apply(&decl, &json!({"items":{"months":update}}));
+        assert_eq!((state.items["months"].min, state.items["months"].max), expected);
+        assert_eq!(report.fields, [refused]);
+    }
+}
+
+#[test]
+fn panel_review_clipped_labels_name_their_fields() {
+    let mut decl = choice_date_range_panel();
+    decl.items.iter_mut().find(|item| item.id == "selected").unwrap().kind = "tree".into();
+    let mut state = crate::PanelState::new(&decl);
+    for (update, field) in [
+        (json!({"items":{"months":{"label":"界".repeat(201)}}}), "months.label"),
+        (json!({"items":{"selected":{"nodes":[{"id":"branch","label":"界".repeat(201)}]}}}), "branch.label"),
+    ] {
+        let note = state.apply(&decl, &update).notice().unwrap();
+        assert!(note.contains(field) && note.contains("200 characters"), "{note}");
+    }
+}
+
+#[test]
+fn panel_review_node_counts_keep_whole_floats_and_large_integers() {
+    let mut decl = choice_date_range_panel();
+    decl.items.iter_mut().find(|item| item.id == "selected").unwrap().kind = "tree".into();
+    let mut state = crate::PanelState::new(&decl);
+    for (count, expected) in [(json!(67.0), Some(67)), (json!(u64::MAX), Some(u64::MAX)), (json!(1.5), None), (json!(-1.0), None)] {
+        let report = state.apply(&decl, &json!({"items":{"selected":{"nodes":[{"id":"branch","label":"Branch","count":count}]}}}));
+        assert_eq!(state.items["selected"].nodes[0].count, expected, "{count}: {report:?}");
+        assert_eq!(report.notice().is_none(), expected.is_some(), "{count}: {report:?}");
+    }
+}
+
+/// A dropdown takes its options from `plugin.json` or the plugin and the chosen option's id as its
+/// value; a date takes `YYYY-MM-DD`; a range takes `[low, high]` within its ends (#1622).
+#[test]
+fn panel_dropdowns_dates_and_ranges_keep_their_values() {
+    use crate::PanelState;
+    let decl = choice_date_range_panel();
+    let mut st = PanelState::new(&decl);
+    assert_eq!(st.chosen("product"), Some("s1"), "the declared default");
+    assert_eq!(st.items["product"].nodes.iter().map(|n| n.label.as_str()).collect::<Vec<_>>(), ["DSWx-HLS", "s1"]);
+    assert_eq!((st.chosen("start"), st.chosen("end")), (Some("2023-04-01"), None));
+    assert_eq!(st.range("months"), (2, 5));
+    assert_eq!(st.range("all"), (1, 4), "a range without a default spans its ends");
+    let req = st.request(&[]);
+    assert_eq!(req["values"]["months"], json!([2, 5]));
+    assert_eq!(req["values"]["end"], Value::Null);
+
+    // Values set by the pane or a script: kept only when they fit.
+    assert_eq!(st.set_values(&decl, &json!({"product": "hls", "end": "2024-02-29", "months": [9, 3]})), ["product", "end", "months"]);
+    assert_eq!((st.chosen("product"), st.chosen("end"), st.range("months")), (Some("hls"), Some("2024-02-29"), (3, 9)), "low first");
+    assert!(st.set_values(&decl, &json!({"product": "nope", "end": "2023-02-29", "start": "today", "months": 4})).is_empty());
+    assert_eq!(st.set_values(&decl, &json!({"months": [-5, 40]})), ["months"]);
+    assert_eq!(st.range("months"), (0, 11), "kept within its ends");
+    assert_eq!(st.set_values(&decl, &json!({"end": null, "product": null})), ["product", "end"]);
+    assert_eq!((st.chosen("product"), st.chosen("end")), (None, None));
+
+    // The plugin replaces the options and the ends: the values follow.
+    st.set_values(&decl, &json!({"product": "s1", "months": [8, 11]}));
+    let clean = st.apply(&decl, &json!({"items": {"product": {"options": [{"id": "a", "label": "A"}, {"id": "b"}]}, "months": {"min": 0, "max": 9, "labels": ["Jan"]}}}));
+    assert_eq!(clean.adjusted, ["product", "months"], "a cleared choice and a clamped range are reported");
+    assert!(clean.notice().unwrap().contains("2 value(s) adjusted"));
+    assert_eq!(st.chosen("product"), None, "the chosen option is gone");
+    assert_eq!(st.range("months"), (8, 9), "within the new ends");
+    assert_eq!(st.slider_label("months", 0), "Jan");
+    let lossy = st.apply(
+        &decl,
+        &json!({"items": {"product": {"options": [{"id": "a"}, {"id": "a"}, "junk", {"label": "no id"}]}}, "values": {"product": "a", "end": "2023-02-30", "nope": 1}}),
+    );
+    assert_eq!((st.items["product"].nodes.len(), st.chosen("product")), (1, Some("a")), "repeated and id-less options are left out");
+    // ... and said, with the values not taken.
+    assert_eq!(lossy, crate::Dropped { values: vec!["end".into(), "nope".into()], nodes: 3, ..Default::default() });
+    let said = lossy.notice().unwrap();
+    assert!(
+        said.starts_with("3 option(s) or tree node(s) left out")
+            && said.ends_with("2 value(s) not taken (no such widget, or not a value it holds): end, nope"),
+        "{said}"
+    );
+    assert_eq!(crate::panel::not_taken(&json!({"product": "a", "x": 1}), &["product".into()]), ["x"]);
+    // Options are flat: children are dropped.
+    st.apply(&decl, &json!({"items": {"product": {"options": [{"id": "p", "children": [{"id": "c"}]}]}}}));
+    assert!(st.items["product"].nodes[0].children.is_empty());
+    // A date's options or a range's nodes aren't theirs: ignored.
+    st.apply(&decl, &json!({"items": {"start": {"options": [{"id": "x"}]}, "months": {"nodes": [{"id": "x"}]}}}));
+    assert!(st.items["start"].nodes.is_empty() && st.items["months"].nodes.is_empty());
+}
+
+#[test]
+fn panel_dates_are_real_dates() {
+    use crate::panel::date;
+    assert_eq!(date("2024-02-29"), Some((2024, 2, 29)));
+    assert_eq!(date("2000-02-29"), Some((2000, 2, 29)));
+    for bad in
+        ["1900-02-29", "2023-13-01", "2023-00-10", "2023-04-31", "0000-01-01", "2023-4-01", "2023-04-1 ", "+023-04-01", "2023/04/01", ""]
+    {
+        assert_eq!(date(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn panel_option_fields_and_label_sanitization_are_reported() {
+    let decl = choice_date_range_panel();
+    let mut state = crate::PanelState::new(&decl);
+    let report =
+        state.apply(&decl, &json!({"items":{"product":{"options":[{"id":"a","label":"A\nB","count":4,"children":[],"lable":"typo"}]}}}));
+    assert_eq!(state.items["product"].nodes[0].label, "A B");
+    for field in ["a.count", "a.children", "a.lable"] {
+        assert!(report.fields.iter().any(|f| f == field), "{report:?}");
+    }
+    assert_eq!(report.clipped, ["a.label (control characters replaced)"]);
+    let report = state.apply(&decl, &json!({"items":{"product":{"options":[{"id":"a","label":"A B"}]}}}));
+    assert!(report.notice().is_none(), "{report:?}");
+}
+
+#[test]
+fn panel_null_optional_objects_are_quiet() {
+    let decl = choice_date_range_panel();
+    let mut state = crate::PanelState::new(&decl);
+    for update in [Value::Null, json!({"items":null}), json!({"values":null})] {
+        assert!(state.apply(&decl, &update).notice().is_none(), "{update}");
+    }
+    assert!(state.value_report(&decl, &Value::Null, &[]).notice().is_none());
+}
+
+#[test]
+fn panel_diagnostic_field_samples_are_bounded_and_counts_are_complete() {
+    let decl = choice_date_range_panel();
+    let mut state = crate::PanelState::new(&decl);
+    let fields: serde_json::Map<String, Value> = (0..1000).map(|index| (format!("{index}{}", "界".repeat(256)), json!(false))).collect();
+    let report = state.apply(&decl, &json!({"items":fields}));
+    assert!(report.fields.len() <= 10);
+    assert!(report.fields.iter().all(|name| name.chars().count() <= 200));
+    let notice = report.notice().unwrap();
+    assert!(notice.contains("1000 item field(s)"), "{notice}");
+    assert!(notice.len() < 7000);
+}
+
+#[test]
+fn panel_unknown_answer_fields_are_reported_but_echoed_changes_are_quiet() {
+    let decl = choice_date_range_panel();
+    let mut state = crate::PanelState::new(&decl);
+    let report = state.apply(&decl, &json!({"itmes":{"selected":{"text":"lost"}}}));
+    assert_eq!(report.fields, ["panel.itmes"]);
+    assert!(state.apply(&decl, &json!({"changed":["product"]})).notice().is_none());
+}
+
+#[test]
+fn panel_diagnostic_names_cannot_inject_controls() {
+    let decl = choice_date_range_panel();
+    let mut state = crate::PanelState::new(&decl);
+    let key = "bad\n\u{1b}[31m\u{2028}\u{2029}\u{202e}\u{2069}";
+    let report = state.apply(&decl, &json!({"items":{key:false},"values":{key:true}}));
+    assert_eq!(report.fields.len(), 1);
+    assert!(report.fields.iter().all(|name| !name.chars().any(char::is_control)));
+    assert!(report.fields.iter().all(|name| !name.contains(['\u{2028}', '\u{2029}', '\u{202e}', '\u{2069}'])));
+    let notice = report.notice().unwrap();
+    assert!(!notice.chars().any(char::is_control), "{notice:?}");
+    let report = crate::Dropped { clipped: vec![key.into()], adjusted: vec![key.into()], ..Default::default() };
+    assert!(!report.notice().unwrap().chars().any(char::is_control));
+}
+
+#[test]
+fn panel_null_item_updates_leave_widgets_unchanged() {
+    let decl = choice_date_range_panel();
+    let mut state = crate::PanelState::new(&decl);
+    assert!(state.apply(&decl, &json!({"items":{"product":null,"unknown":null}})).notice().is_none());
+    assert_eq!(state.chosen("product"), Some("s1"));
+    assert!(state.apply(&decl, &json!({"values":{"product":null}})).notice().is_none());
+    assert_eq!(state.chosen("product"), None);
+}
+
+#[test]
+fn panel_rejected_value_names_are_sampled_without_losing_the_count() {
+    let decl = choice_date_range_panel();
+    let mut state = crate::PanelState::new(&decl);
+    let values: serde_json::Map<String, Value> = (0..1000).map(|index| (format!("unknown-{index}"), json!(false))).collect();
+    let report = state.apply(&decl, &json!({"values":values}));
+    assert!(report.values.len() <= 10);
+    assert!(report.notice().unwrap().contains("1000 value(s) not taken"));
+}
+
+/// A registry entry can name a package per platform (#1821): each platform reads its own, the
+/// entry's own package serves the platforms not named, and a plugin with packages for other
+/// platforms only is listed with nothing to download.
+#[test]
+fn registry_entries_name_a_package_per_platform() {
+    let (win, mac, lin, any) = ("1".repeat(64), "2".repeat(64), "3".repeat(64), "4".repeat(64));
+    let url = "https://plugins.rustgis.app/registry.json";
+    let text = json!([
+        {"id": "globe", "name": "Globe", "version": "1.0.0", "runtime": "process", "packages": {
+            "windows": {"package": "globe-windows.rgplugin", "sha256": win, "size": 16},
+            "macos": {"package": "https://example.com/globe-macos.rgplugin", "sha256": mac, "size": 30},
+            "linux": {"package": "globe-linux.rgplugin", "sha256": lin, "size": 17}}},
+        // Windows only, with no package for the rest.
+        {"id": "win-only", "name": "Win", "version": "1.0.0", "runtime": "process", "packages": {
+            "windows": {"package": "win.rgplugin", "sha256": win, "size": 5}}},
+        // One platform's own package, and the entry's for the others.
+        {"id": "mixed", "name": "Mixed", "version": "1.0.0", "package": "mixed.rgplugin", "sha256": any, "size": 9, "packages": {
+            "linux": {"package": "mixed-linux.rgplugin", "sha256": lin, "size": 7}}},
+        // Packages that don't check out are dropped: a bad hash, plain HTTP, an unknown platform.
+        {"id": "broken", "name": "Broken", "version": "1.0.0", "packages": {
+            "windows": {"package": "b.rgplugin", "sha256": "abc"},
+            "linux": {"package": "http://insecure.example.com/b.rgplugin", "sha256": lin},
+            "plan9": {"package": "b.rgplugin", "sha256": lin}}},
+        {"id": "plain", "name": "Plain", "version": "1.0.0", "package": "plain.rgplugin", "sha256": any, "size": 3},
+    ])
+    .to_string();
+    let read = |platform: Option<&str>| registry::parse_for(&text, url, platform).unwrap();
+    let got = |platform: Option<&str>| -> Vec<(String, String, String, u64)> {
+        read(platform).into_iter().map(|e| (e.id, e.package, e.sha256, e.size)).collect()
+    };
+    let row = |id: &str, package: &str, sha: &str, size: u64| {
+        let package = if package.is_empty() || package.contains("://") {
+            package.to_string()
+        } else {
+            format!("https://plugins.rustgis.app/{package}")
+        };
+        (id.to_string(), package, sha.to_string(), size)
+    };
+    assert_eq!(
+        got(Some("linux")),
+        [
+            row("globe", "globe-linux.rgplugin", &lin, 17),
+            row("mixed", "mixed-linux.rgplugin", &lin, 7),
+            row("plain", "plain.rgplugin", &any, 3),
+            row("win-only", "", "", 0),
+        ]
+    );
+    assert_eq!(
+        got(Some("macos")),
+        [
+            row("globe", "https://example.com/globe-macos.rgplugin", &mac, 30),
+            row("mixed", "mixed.rgplugin", &any, 9),
+            row("plain", "plain.rgplugin", &any, 3),
+            row("win-only", "", "", 0),
+        ]
+    );
+    assert_eq!(
+        got(Some("windows")),
+        [
+            row("globe", "globe-windows.rgplugin", &win, 16),
+            row("mixed", "mixed.rgplugin", &any, 9),
+            row("plain", "plain.rgplugin", &any, 3),
+            row("win-only", "win.rgplugin", &win, 5),
+        ]
+    );
+    // The browser has no platform: only an entry's own package installs there.
+    assert_eq!(
+        got(None),
+        [
+            row("globe", "", "", 0),
+            row("mixed", "mixed.rgplugin", &any, 9),
+            row("plain", "plain.rgplugin", &any, 3),
+            row("win-only", "", "", 0)
+        ]
+    );
+    // A plugin with nothing for this platform says where it does install.
+    let v = read(Some("linux"));
+    let (globe, win_only) = (&v[0], &v[3]);
+    assert!(globe.available() && !win_only.available());
+    assert_eq!(globe.platforms(), ["Windows", "macOS", "Linux"]);
+    assert_eq!(win_only.platforms(), ["Windows"]);
+    assert!(win_only.unavailable().starts_with("Win has no package for "), "{}", win_only.unavailable());
+    assert!(win_only.unavailable().ends_with(" (it is available for Windows)"), "{}", win_only.unavailable());
+    // What `parse` reads is this platform's.
+    let own = registry::parse(&text, url).unwrap();
+    assert_eq!(own, registry::parse_for(&text, url, registry::this_platform()).unwrap());
+    // Round trips, the packages by platform included; an entry without them is written without.
+    for e in &v {
+        let back: registry::Entry = serde_json::from_value(serde_json::to_value(e).unwrap()).unwrap();
+        assert_eq!(&back, e);
+    }
+    assert!(serde_json::to_value(&v[2]).unwrap().get("packages").is_none());
+}
+
+/// A platform's package that doesn't check out costs that platform its package, not the plugin
+/// its place in the list, and is never replaced by the package for the platforms not named.
+#[test]
+fn a_bad_platform_package_is_dropped_alone() {
+    let (win, lin, any) = ("1".repeat(64), "3".repeat(64), "4".repeat(64));
+    let url = "https://plugins.rustgis.app/registry.json";
+    let good = json!({"package": "w.rgplugin", "sha256": win, "size": 5});
+    let entry = |id: &str, linux: Value, own: bool| {
+        let mut e = json!({"id": id, "name": id, "version": "1.0.0", "packages": {"windows": good, "linux": linux}});
+        if own {
+            e["package"] = json!("any.rgplugin");
+            e["sha256"] = json!(any);
+        }
+        e
+    };
+    let text = json!([
+        // No address, no hash, not an object, a size that isn't a number, a bad hash.
+        entry("a-no-address", json!({"sha256": lin}), false),
+        entry("b-no-hash", json!({"package": "l.rgplugin"}), false),
+        entry("c-not-an-object", json!(7), false),
+        entry("d-bad-size", json!({"package": "l.rgplugin", "sha256": lin, "size": "big"}), false),
+        // Linux was given its own package: the entry's isn't Linux's, though Linux's is bad.
+        entry("e-own-too", json!({"package": "l.rgplugin", "sha256": "abc"}), true),
+        // The same with nothing else left for other platforms: on Linux there is nothing to list.
+        {"id": "f-only-bad", "name": "f", "version": "1.0.0", "package": "any.rgplugin", "sha256": any,
+         "packages": {"linux": {"package": "l.rgplugin", "sha256": "abc"}}},
+        // An entry of its own with no address isn't the registry's folder.
+        {"id": "g-no-address", "name": "g", "version": "1.0.0", "sha256": any},
+        {"id": "h-no-address", "name": "h", "version": "1.0.0", "sha256": any, "packages": {"windows": good}},
+    ])
+    .to_string();
+    let got = |platform: &str| -> Vec<(String, String)> {
+        registry::parse_for(&text, url, Some(platform)).unwrap().into_iter().map(|e| (e.id, e.package)).collect()
+    };
+    let row = |id: &str, package: &str| {
+        (id.to_string(), if package.is_empty() { String::new() } else { format!("https://plugins.rustgis.app/{package}") })
+    };
+    assert_eq!(
+        got("linux"),
+        [
+            row("a-no-address", ""),
+            row("b-no-hash", ""),
+            row("c-not-an-object", ""),
+            row("d-bad-size", ""),
+            row("e-own-too", ""),
+            row("h-no-address", ""),
+        ]
+    );
+    assert_eq!(
+        got("windows"),
+        [
+            row("a-no-address", "w.rgplugin"),
+            row("b-no-hash", "w.rgplugin"),
+            row("c-not-an-object", "w.rgplugin"),
+            row("d-bad-size", "w.rgplugin"),
+            row("e-own-too", "w.rgplugin"),
+            row("f-only-bad", "any.rgplugin"),
+            row("h-no-address", "w.rgplugin"),
+        ]
+    );
+    // macOS isn't named anywhere: the entry's own package, where it has one.
+    assert_eq!(
+        got("macos"),
+        [
+            row("a-no-address", ""),
+            row("b-no-hash", ""),
+            row("c-not-an-object", ""),
+            row("d-bad-size", ""),
+            row("e-own-too", "any.rgplugin"),
+            row("f-only-bad", "any.rgplugin"),
+            row("h-no-address", "")
+        ]
+    );
+    // Skipped packages are said, with how many and which (the first five); the platforms this
+    // version doesn't know and a registry read whole say nothing.
+    let (_, notice) = registry::parse_noting(&text, url, Some("windows")).unwrap();
+    let notice = notice.unwrap();
+    assert!(notice.starts_with("6 package(s) for a platform in the plugin registry were skipped"), "{notice}");
+    assert!(
+        notice.ends_with(": a-no-address (Linux), b-no-hash (Linux), c-not-an-object (Linux), d-bad-size (Linux), e-own-too (Linux), …"),
+        "{notice}"
+    );
+    let clean = json!([
+        {"id": "ok", "name": "ok", "version": "1.0.0", "packages": {"windows": good, "plan9": {"package": "p.rgplugin", "sha256": lin}}},
+        // `null` is no packages: the entry's own package, as without the field.
+        {"id": "null-packages", "name": "n", "version": "1.0.0", "package": "any.rgplugin", "sha256": any, "packages": null},
+    ])
+    .to_string();
+    let (entries, notice) = registry::parse_noting(&clean, url, Some("linux")).unwrap();
+    assert_eq!(notice, None);
+    assert_eq!(
+        entries.iter().map(|e| (e.id.as_str(), e.package.as_str())).collect::<Vec<_>>(),
+        [("null-packages", "https://plugins.rustgis.app/any.rgplugin"), ("ok", "")]
+    );
+    // What is listed without a package always names a platform that has one.
+    for platform in ["linux", "macos", "windows"] {
+        for e in registry::parse_for(&text, url, Some(platform)).unwrap() {
+            assert!(e.available() || !e.platforms().is_empty(), "{platform}: {}", e.id);
+        }
+    }
 }

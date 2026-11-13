@@ -59,13 +59,66 @@ at a time; other assets download whole (see [Files on the web](data-formats.md#f
 The commands do the same: `stac.collections` (`"url"`), `stac.search` (`"collections"`,
 `"bbox"` as `[west, south, east, north]` or `"view"`, `"datetime"` such as
 `2024-06-01/2024-06-30`, `"limit"` from 1 to 200, default 10, `"maxCloud"`, `"footprints"`, and
-`"properties": true` for the scalar item properties rather than just date and cloud cover),
+`"properties": true` for the scalar item properties rather than just date and cloud cover; see
+[Searching by shape](#searching-by-shape) for `"intersects"` and `"buffer"`),
 and `stac.addAsset` with an item returned by `stac.search` (`"item"`) or an item's address
 (`"url"`) and `"asset"`. API searches return one page and a `"next"` address when there is another:
 
 ```sh
 rustgis-cli run --cmd 'stac.search={"collections":"sentinel-2-c1-l2a","bbox":[7.4,46.9,7.5,47],"datetime":"2024-07-01/2024-07-31","maxCloud":20}' --cmd 'stac.addAsset={"url":"https://earth-search.aws.element84.com/v1/collections/sentinel-2-c1-l2a/items/S2B_T32TLS_20240727T103439_L2A","asset":"scl"}'
 ```
+
+### Searching by shape
+
+A bounding box isn't always the area you mean. In STAC Search (desktop) build a **Search area**
+from any of these, and the search looks there rather than where the map is:
+
+- **Draw point**, **Draw line**, **Draw polygon** and **Draw extent** (a box dragged on the map)
+  draw on the map with the usual click-to-add, double-click-to-finish tools; Esc stops.
+- **Selected features** adds the selected features of the active layer.
+- **Load file…** adds the features of a file in any format RustGIS reads. A file that holds
+  several layers (KML, GPX, a zip) is read by its first layer, and a notice names the others: add
+  the file with Add Data, pick the layer you mean, and use **Selected features**.
+- **Current extent** adds the map's extent as a polygon.
+- **Clear** empties the area.
+
+Each choice adds a part, so the area can hold several; the pane says how many of each kind, and
+the area is drawn on the map while the pane is open. Reading a file or merging a large selection
+runs in the background, with Cancel. The command is `"intersects"`: GeoJSON (a geometry, a feature
+or a collection of features), or `"selection"` for the selected features of `"layer"` (default the
+active layer). It is sent as the STAC `intersects` parameter and replaces `"bbox"` (Item Search
+takes one or the other); a static catalog, which has no search, keeps the items whose footprint
+meets the shape, and also the items that have no usable footprint, which are not known to match:
+check those yourself. A box dragged across the 180° meridian is searched as two boxes, one each
+side of it.
+
+Several features are merged into one shape. Only the highest dimension present is kept
+(polygons, then lines, then points); polygons are dissolved, and positions are rounded to eight
+decimals. RustGIS says how many parts of a lower dimension it left out, and how many lines or
+polygons had too few positions to search with. A shape of more than 20,000 positions, or one
+off the globe, is refused.
+
+`"buffer"` (up to 1,000,000 metres, given in `"unit"`: `Meters`, `Feet`, `Kilometers` or `Miles`,
+default `Meters`; **Widen points and lines by** in the dialog, in your Distance units setting) widens a point
+or line into a polygon along the Earth's surface before searching, so scenes near it are found and
+not only those that cover it. A polygon is not widened, and RustGIS says so.
+
+`stac.area` makes the shape without searching: from `"path"` (a file in any format RustGIS reads)
+or from a layer's selected features, with the same rules and `"buffer"`. It returns the GeoJSON
+to give `stac.search` as `"intersects"`. Run it first, then copy the `intersects` geometry it
+returns into the search (already widened, so the search needs no `"buffer"`):
+
+```sh
+rustgis-cli run --cmd 'stac.area={"path":"parcel.shp","buffer":500}'
+rustgis-cli run --cmd 'stac.search={"collections":"sentinel-2-c1-l2a","intersects":<the geometry returned above>,"datetime":"2024-07-01/2024-07-31"}'
+```
+
+A shape is sent in the body of a `POST /search`; if the server refuses that, the search is asked
+again in the query when the shape is short enough for one (the pane and `stac.search` both do).
+A POST search returns no usable
+`"next"` address: raise `"limit"` or narrow the search to see more. RustGIS says when the answer
+shows that more items match than were loaded, but a server that gives neither a count nor a next
+link can't be told from one with no more.
 
 Assets can use HTTP(S) or `s3://` addresses. S3 assets use the saved connection serving their
 bucket, or anonymous AWS access when none matches; see [S3 buckets](data.md#s3-buckets).
@@ -89,7 +142,12 @@ and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentin
   path and row, the Brazil Data Cube's `bdc:tiles`, else their bounding box), and by day.
 - **Layers:** each tile becomes a tile layer read in place, a file per date. The time slider shows
   the last date in its window, and a tile with no date in it draws nothing. The slider turns on
-  over the dates when it is off.
+  over the dates when it is off. When it is on with regular steps, its span widens to the cube's,
+  and the cube is refused in two cases. If the widened span would be more steps than the slider
+  lists (20,000), a longer step (`time.set`) or a shorter period takes the cube. If its step is
+  longer than the cube's dates are apart, so some of them would never show (a yearly slider over a
+  monthly cube), the refusal names those dates, and a shorter step or the slider turned off takes
+  the cube.
 - **Range:** a fixed `"range"` (`[0, 0.9]` for NDVI) is the same for every date and tile, so a grey
   means one value throughout. It is in the band's own units: its `raster:bands` (or `eo:bands`)
   scale and offset turn it into the files' stored values. Without one, each file is stretched on
@@ -103,6 +161,25 @@ and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentin
   read at its own region's, found by reading one byte of its first file. Without a matching
   connection, a bucket that refuses anonymous reads (a private one, or one that charges the
   reader, as Landsat's does) is refused, naming it.
+- **A static collection laid out by date:** JAXA Earth's collections have no search, so `"url"` is
+  a `collection.json`, and only the period's date folders are read: one date's folders to find the
+  items over the area, then those items at each date, about one document per date and tile (a
+  tile that date doesn't have is missed in the others too). Documents that can't be read, or are
+  refused, are told in a notice. Collections with no year in their dates (climatologies) and hourly
+  ones are refused. A month or year folder is taken whole when the period reaches into it, so a
+  period from 15 January still has January's file. The codes a collection gives for a failed
+  retrieval (`dn.error`) draw on the map as values, inside its range or stretch, and a notice says
+  how many files have them; Trend Analysis and cube summaries skip them.
+- **One range for the whole cube, from its files:** `"range": "auto"` takes the 2nd and 98th
+  percentiles of a sample of the files found: the newest file of up to four of the cube's tiles,
+  each read at its finest overview no larger than 512 pixels a side, its values scaled as its
+  metadata says and its codes for no value left out. The range is the same for every date and
+  tile, and the answer gives it (`"range"`, with `"rangeFrom": "sample"`). A sample with no values,
+  files whose scale changes partway, files whose metadata gives a scale of 0 (or none finite), or a
+  sample that can't be read leave each file stretched on its own, and a notice says so. Files of
+  classes in their own colours take no range and keep their colours, and a notice says so.
+- **Credit:** `"attribution"` puts a credit on each tile layer the cube adds (as `tiles.add`
+  takes it, at most 500 characters); a cube opened from the catalog passes its entry's.
 - **Web app:** creating a cube with **Add as Time Series** is desktop-only. Saved cube tile
   layers can draw in the web app when their servers allow browser requests (CORS).
 - **Its trend:** the same search, given to Trend Analysis (`cube.trend` with `collection`,
@@ -142,7 +219,8 @@ scripts and the assistant use the same list.
   provider's page.
 - **Opening one** (desktop; `cube.open` with the entry's `"id"`): a STAC entry is added as
   `stac.addCube` adds a cube, over the map's extent (or `"bbox"`), with the entry's collection,
-  band, range and cloud cover cap (`"range"` and `"maxCloud"` override the last two). A Zarr entry
+  band, range and cloud cover cap (`"range"` and `"maxCloud"` override the last two); an entry that
+  gives no range takes one from its files (`"range": "auto"`, above). A Zarr entry
   is added as `layer.addZarr` adds a variable that follows the time slider; its variable is read
   whole, but an area given must meet the entry's. The period is `"start"` and `"end"`, given together; with neither, it
   is the entry's last full calendar year (the year before this one while the cube is kept up to
@@ -169,6 +247,43 @@ Only cubes RustGIS reads today are listed. Collections whose files sit behind si
 (Landsat Collection 2 on Earth Search) are left out. Digital Earth Australia's catalog sits behind
 a firewall that may ask a program making many requests in a row for a browser check for a while;
 its searches then fail until it lets them through again.
+
+#### JAXA Earth's datasets, read live
+
+The [JAXA Earth API](https://data.earth.jaxa.jp/en/)'s datasets join the list from JAXA's own
+catalog ([`catalog.v2.md`](https://data.earth.jaxa.jp/app/mcp/catalog.v2.md)), which the app
+reads once a run, in the background, the first time the Data Cubes pane opens: precipitation
+(GSMaP), land and sea surface temperature, vegetation, soil moisture, evapotranspiration,
+aerosols, chlorophyll-a, elevation (AW3D30) and land cover, among others. They add to the list in
+use (the hosted one, or the built-in one); they don't replace it. Until the catalog is read the
+pane says so, and when it can't be (offline) it says why, with **Try again**.
+
+- **A cube a band:** each dataset in JAXA's EPSG:4326 grid is listed once for each of its bands,
+  with the id `<dataset id>/<band>` (`cube.open` takes it), its title, provider, area, period,
+  step and resolution as JAXA's catalog gives them, its themes from its title and keywords, and
+  its keywords and bands to search by. Its collection is read where the catalog says, only in
+  JAXA's buckets.
+- **What can't be a cube is said:** the pane counts the datasets left out, and lists them with why
+  when the pointer is over that line (`cube.catalog` gives them under `"jaxa"`): the two polar
+  ones (EPSG:3031 and EPSG:3995, sea ice), the climatologies (averages of past years, whose dates
+  have no year) and the hourly series (a cube has one file a day).
+- **Range and cell size:** JAXA gives no range for its bands, so the cube is added with
+  `"range": "auto"` (above): one range from a sample of the files that cover the map's extent (whole JAXA grid tiles, so it can reach past the view). The cell size
+  Trend Analysis reads at is the catalog's resolution, in degrees.
+- **Licence and credit:** each collection names its own licence: JAXA's
+  [terms of use](https://earth.jaxa.jp/en/data/policy/) for most, NASA's or Copernicus's for some.
+  The pane reads it from the collection as its entry comes into view and links it as **Licence**;
+  `cube.open` reads it too and gives it in its answer. JAXA's terms ask for credit: a cube added
+  from the list credits "JAXA" and the dataset's name on its tile layers. The data is free to use
+  and share with that credit; commercial use is free too, but JAXA's terms (section 2.3) ask to be
+  told of it in advance.
+- **Limits:** `cube.catalog` lists JAXA's datasets once the pane has read the catalog; a command or
+  script that never opens the pane sees `"jaxa": {"state": "unread"}`. The catalog is read once a
+  run; after a failed read, **Try again** reads it again. Text too long for the list (a title
+  over 160 characters, a field over 2,000) is cut, its name ends in "…", and the pane and
+  `cube.catalog` (`"cut"`) say which; they also name the fields that aren't read (a resolution
+  that isn't kilometres, a field given twice, a field name that isn't letters and digits). A JAXA cube whose id the list already has is left out for
+  the list's own, and the pane and `cube.catalog` (`"hidden"`) name it.
 
 An entry, as the list holds it (built in from `crates/tiles/src/cubes.json`, and kept with the app's
 assets); a cube is proposed by adding one:
@@ -409,8 +524,9 @@ reads it back the next time it is needed: when the pane opens or a file is read 
 server. A token saved without the box ticked deletes the one remembered before. An expired token
 is forgotten, here and in the credential store, and the pane asks for a new one.
 `earthdata.status` reports whether a token is kept, its expiry, whether it is remembered and
-whether an expired one was forgotten; `earthdata.logout` (**Remove token**) forgets it and deletes
-the remembered one. The command line (`--use-saved-secrets`) and Python (`use_saved_secrets=True`)
+whether an expired one was forgotten; `earthdata.logout` (**Remove token**) forgets it, deletes
+the remembered one and empties the download cache, so files and documents read with the token
+are read again when next needed. The command line (`--use-saved-secrets`) and Python (`use_saved_secrets=True`)
 use the remembered token too; without them, and in the web app, a token lasts for the session.
 
 In the web app, searching and footprints work, but NASA's data servers don't let web pages read
@@ -495,6 +611,16 @@ rustgis-cli run --cmd 'portal.files={"dataset":"giswqs/geospatial"}'
 rustgis-cli run --sample --cmd 'portal.add={"url":"https://data.geopf.fr/telechargement/download/LiDARHD-NUALID/NUALHD_1-0__LAZ_LAMB93_KE_2025-06-06/LHD_FXX_0652_6864_PTS_LAMB93_IGN69.copc.laz","name":"LiDAR HD 0652-6864"}'
 ```
 
+When forwarding query options to addresses supplied by a service, RustGIS copies only
+`collections`, `datetime`, `subset`, `subset-crs`, `crs`, `bgcolor` and `transparent`.
+Other settings, including keys, are inherited only by sub-addresses RustGIS constructs within
+the original source path. Some discovery paths report withheld settings in a counted notice.
+An advertised WMS GetMap address can replace the discovery address without inheriting its query;
+this does not produce that notice.
+If it needs authentication, supply an explicitly authorized address for that source rather than
+relying on a token being copied from the discovery address. Destination addresses keep settings
+they already contain.
+
 ### Layers that change with time
 
 A WMS or WMTS layer with a time dimension, from any service, goes on the
@@ -533,7 +659,11 @@ animation, and a layer whose only time is `current`:
 rustgis-cli run --cmd 'service.add={"url":"https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/1.0.0/WMTSCapabilities.xml","layer":"MODIS_Terra_CorrectedReflectance_TrueColor","time":"2024-06-01"}' --cmd 'share.exportMap={"path":"gibs.png"}'
 rustgis-cli run --cmd 'service.add={"url":"https://wms.geo.admin.ch/?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.0","layer":"ch.swisstopo.pixelkarte-farbe-pk25.noscale"}' --cmd 'map.goToXY={"lon":7.4474,"lat":46.948,"scale":25000}' --cmd 'time.set={"interval":15}' --cmd 'time.export={"path":"bern.gif"}'
 rustgis-cli run --cmd 'service.add={"url":"https://wmts.geo.admin.ch/EPSG/3857/1.0.0/WMTSCapabilities.xml","layer":"ch.swisstopo.pixelkarte-farbe"}' --cmd 'share.exportMap={"path":"map.png"}'
+rustgis-cli run --cmd 'service.add={"url":"https://wmts.geo.admin.ch/EPSG/2056/1.0.0/WMTSCapabilities.xml","layer":"ch.swisstopo.pixelkarte-farbe"}' --cmd 'map.projection={"type":"EPSG:2056"}' --cmd 'map.goToXY={"lon":7.4474,"lat":46.948,"scale":20000}' --cmd 'share.exportMap={"path":"bern-lv95.tif"}'
 ```
+
+The last writes the view as a GeoTIFF in Swiss LV95 (EPSG:2056), placed on the ground, with the
+service's credits in its Copyright tag (see [Exporting](sharing.md#exporting)).
 
 ## United States
 
@@ -605,20 +735,24 @@ their footprints drawn as a layer.
 
 | Dataset | What RustGIS does with it |
 |---|---|
-| **AlphaEarth Foundations** (Google's Satellite Embedding; 64 values a 10 m pixel, 2017–2025) | Finds the year's UTM tiles where the map is in the dataset's GeoParquet index on [Source Cooperative](https://source.coop/tge-labs/aef), read in place (its bounding boxes, then the rows that meet the map). **Add** shows a tile as a cloud-optimised GeoTIFF read in place: three bands (**Bands**, from 1; A01, A16 and A09 by default) as red, green and blue, dequantised (`sign(v)·(v/127.5)²`) and stretched over ±**Stretch** (0.3). Only the three bands shown are read, a band at a time. **Apply to layers** shows other bands or another stretch on the tiles already added. |
+| **AlphaEarth Foundations** (Google's Satellite Embedding; 64 values a 10 m pixel, 2017–2025) | Finds the year's UTM tiles where the map is in the dataset's GeoParquet index on [Source Cooperative](https://source.coop/tge-labs/aef), read in place (its bounding boxes, then the rows that meet the map). **Add** shows a tile as a cloud-optimised GeoTIFF read in place: three bands (**Bands**, from 1; A01, A16 and A09 by default) as red, green and blue, dequantised (`sign(v)·(v/127.5)²`) and stretched over ±**Stretch** (0.3). Only the three bands shown are read, a band at a time. **Apply to layers** shows other bands or another stretch on the tiles already added. With **All years, on the time slider**, the search finds each tile's file of every year (2017–2025, matched by place, since each year's files have names of their own) and **Add years** shows them as one tile layer that follows the time slider, a year a step (turned on over the years when it is off); a year a tile has no file for shows nothing, and is said. |
 | **Earth Index** (Earth Genome; 384 values every ~320 m, 2024) | Names the Sentinel-2 (MGRS) tiles where the map is and keeps those with a file. **Add points** reads the file's points in the view in place (every point's position, then the vectors of those in view: zoom to a few kilometres) and colours them by their vectors' first three principal components (64 colours); **Keep value** keeps one of each vector's values as the points' `value` field. |
 | **Tessera** (Cambridge; 128 values a 10 m pixel, 2017–2025) | **Add view** reads three bands (1, 2 and 3 by default) of the view from Tessera's [Zarr store](https://data.source.coop/tessera/tessera/zarr/v1.1-dclimate) in place (the shard's index, then the chunks the view needs: at most about 6 km a side, its centre when the view is larger), as a 32-bit raster in UTM. |
 | **Clay**, **Major TOM**, **Copernicus-Embed** | Listed with links to their data and papers; RustGIS doesn't read them. |
 
-AlphaEarth's tiles keep their look in their layer's address (`#bands=2,17,10&range=-0.3,0.3&dequantize=aef`),
-which `map.setTiles` changes for any cloud-optimised GeoTIFF read in place (`"bands"`, `"range"`,
-`"dequantize"`); GeoTIFFs with their bands stored apart (planar), signed bytes and bottom-up images
-are read in place too. The commands: `embeddings.datasets`, `embeddings.search` (`"dataset"`,
+AlphaEarth's tiles are tile layers that keep their look in their address
+(`#bands=2,17,10&range=-0.3,0.3&dequantize=aef`), which `map.setTiles` changes (`"bands"`,
+`"range"`, `"dequantize"`); other cloud-optimised GeoTIFFs are raster layers read in place, styled
+in the Symbology pane. GeoTIFFs with their bands stored apart (planar), signed bytes and bottom-up
+images are read in place too. The commands: `embeddings.datasets`, `embeddings.search` (`"dataset"`,
 `"year"`, `"bbox"` or the view, `"footprints"`) and `embeddings.add` (`"dataset"`, `"url"`,
-`"bands"`, `"stretch"`, `"dimension"`, `"bbox"`, `"year"`):
+`"bands"`, `"stretch"`, `"dimension"`, `"bbox"`, `"year"`) and `embeddings.addCube` (AlphaEarth's tiles
+where the map is over the years `"start"` to `"end"`, with `"bbox"`, `"bands"`, `"stretch"`, `"name"`; at
+most 32 tile layers on a map):
 
 ```sh
 rustgis-cli run --cmd 'map.zoomToExtent={"extent":[-122.55,37.7,-122.3,37.85]}' --cmd 'embeddings.search={"dataset":"alphaearth","year":2024}' --cmd 'embeddings.add={"dataset":"alphaearth","url":"https://data.source.coop/tge-labs/aef/v1/annual/2024/10N/xcyo46pot2fg6a61t-0000008192-0000000000.tiff"}' --cmd 'share.exportMap={"path":"aef.png"}'
+rustgis-cli run --cmd 'map.zoomToExtent={"extent":[-42.91,-20.78,-42.85,-20.735]}' --cmd 'embeddings.addCube={"dataset":"alphaearth"}' --cmd 'time.goTo={"date":"2017"}' --cmd 'share.exportMap={"path":"aef_2017.png"}' --cmd 'time.goTo={"date":"2025"}' --cmd 'share.exportMap={"path":"aef_2025.png"}'
 rustgis-cli run --cmd 'map.zoomToExtent={"extent":[-83.96,35.94,-83.9,35.98]}' --cmd 'embeddings.add={"dataset":"tessera","year":2024}' --cmd 'share.exportMap={"path":"tessera.png"}'
 ```
 

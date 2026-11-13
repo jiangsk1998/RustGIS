@@ -29,8 +29,11 @@ rustgis-geolibre = { workspace = true, optional = true }
 
 [features]
 geolibre = ["dep:rustgis-geolibre"]
+# Existing in-tree Wasm fixtures for adapter tests; no guest or production interface change.
+testing = ["rustgis-plugins/testing"]
 
 [dev-dependencies]
+miniz_oxide = { workspace = true }
 # Writing sample GeoPackages.
 rusqlite = { workspace = true }
 rustgis-plugins = { workspace = true, features = ["testing"] }

@@ -18,7 +18,7 @@ pub const MAX_READS: usize = 400;
 /// How deep a walk goes below its start.
 pub const MAX_DEPTH: usize = 8;
 /// The most links read from one document.
-const MAX_LINKS: usize = 5000;
+pub(super) const MAX_LINKS: usize = 5000;
 /// The most documents waiting to be read.
 const MAX_QUEUE: usize = 20_000;
 /// The most documents read at once.
@@ -90,7 +90,7 @@ pub fn parse_item_links(bytes: &[u8], from: &str) -> Result<Vec<Child>, String> 
 
 /// The links of a relation, resolved against `from`: (address, title), the first
 /// [`MAX_LINKS`] of them (counted among that relation's alone).
-fn links(v: &Value, rel: &str, from: &str) -> Vec<(String, String)> {
+pub(super) fn links(v: &Value, rel: &str, from: &str) -> Vec<(String, String)> {
     of_rel(v, rel).take(MAX_LINKS).filter_map(|l| Some((resolve(from, l.get("href")?.as_str()?)?, text(l.get("title"))))).collect()
 }
 
@@ -100,7 +100,7 @@ fn of_rel<'a>(v: &'a Value, rel: &'a str) -> impl Iterator<Item = &'a Value> {
 }
 
 /// Whether a document has more links of a relation than a walk follows.
-fn too_many(v: &Value, rel: &str) -> bool {
+pub(super) fn too_many(v: &Value, rel: &str) -> bool {
     of_rel(v, rel).nth(MAX_LINKS).is_some()
 }
 
@@ -109,6 +109,9 @@ fn too_many(v: &Value, rel: &str) -> bool {
 pub struct Filter {
     /// West, south, east, north: items whose bbox meets it (items without one are kept).
     pub bbox: Option<[f64; 4]>,
+    /// A shape the item's footprint must meet (a static catalog has no search to do it); like the
+    /// bbox, an item with no footprint is kept.
+    pub shape: Option<super::area::Shape>,
     /// The first and last instants, in seconds since 1970 (either open): items whose date falls
     /// between (undated items, and dates that can't be read, are kept, as items without a bbox
     /// are).
@@ -151,11 +154,14 @@ impl Filter {
         {
             return Err(format!("{p}: phase is pre or post"));
         }
-        Ok(Filter { bbox: s.bbox, from, to, max_cloud: s.max_cloud.filter(|c| c.is_finite()), phase })
+        let shape = s.intersects.as_ref().map(super::area::Shape::new);
+        // The shape replaces the box, as it does in a search.
+        let bbox = if shape.is_some() { None } else { s.bbox };
+        Ok(Filter { bbox, shape, from, to, max_cloud: s.max_cloud.filter(|c| c.is_finite()), phase })
     }
 
     /// Whether an item is kept (`phase` is its `phase` property, if it has one).
-    fn keeps(&self, item: &Item, phase: Option<&str>) -> bool {
+    pub(super) fn keeps(&self, item: &Item, phase: Option<&str>) -> bool {
         if let (Some([w, s, e, n]), Some([iw, is, ie, inn])) = (self.bbox, item.bbox) {
             // A box over the antimeridian (west east of east), the filter's or the item's, is two:
             // up to 180° and from -180°.
@@ -164,6 +170,9 @@ impl Filter {
             if !meets || is > n || inn < s {
                 return false;
             }
+        }
+        if self.shape.as_ref().is_some_and(|shape| !shape.meets(item)) {
+            return false;
         }
         if let (Some(max), Some(c)) = (self.max_cloud, item.cloud)
             && c > max
@@ -695,5 +704,27 @@ mod tests {
         assert!(!w.finished());
         w.land(&a, Err("timeout".into()));
         assert!(w.finished() && w.items().len() == 1);
+    }
+
+    /// A shape replaces the box, and an item is kept only when its footprint meets the shape.
+    #[test]
+    fn a_shape_filters_a_walk_by_footprint_and_replaces_the_box() {
+        use rustgis_data::Geometry;
+        use rustgis_geom::Coord;
+        let at = |x: f64, y: f64| Search {
+            bbox: Some([50.0, 50.0, 51.0, 51.0]),
+            intersects: Some(Geometry::Point(Coord::new(x, y))),
+            ..Default::default()
+        };
+        let near = Filter::from_search(&at(0.5, 0.5), None).unwrap();
+        assert!(near.bbox.is_none() && near.shape.is_some(), "the shape replaces the box");
+        let item = |id: &str, bbox: [f64; 4]| super::super::item_from_json(&feature(id, bbox, "", ""), None).unwrap();
+        let a = item("a", [0.0, 0.0, 1.0, 1.0]);
+        assert!(near.keeps(&a, None));
+        assert!(!Filter::from_search(&at(5.0, 5.0), None).unwrap().keeps(&a, None));
+        // No shape: the box is the filter, as before.
+        let boxed = Filter::from_search(&Search { bbox: Some([5.0, 5.0, 6.0, 6.0]), ..Default::default() }, None).unwrap();
+        assert!(boxed.shape.is_none() && !boxed.keeps(&a, None));
+        assert!(Filter::from_search(&at(500.0, 0.0), None).is_ok(), "a shape off the globe is refused when it is sent, not here");
     }
 }

@@ -393,7 +393,7 @@ pub fn meshes(
     // Whether the style's sprite is still on its way, asked before the store is locked (a
     // lookup in the sprites the tile cache keeps).
     let (sprite_pending, sprites_read) = if rustgis_tiles::shapes::draws_patterns(style, level) {
-        match rustgis_tiles::sprite::load(&style.sprites, false) {
+        match style.load_sprites(false) {
             rustgis_tiles::sprite::Load::Pending => (true, Vec::new()),
             rustgis_tiles::sprite::Load::Ready(s) => (false, s.sheet_ids()),
             rustgis_tiles::sprite::Load::Failed => (false, Vec::new()),
@@ -458,7 +458,7 @@ pub fn meshes(
             };
             let mut order: Vec<usize> = (0..missing.len()).collect();
             order.sort_by(|a, b| far(&missing[*a]).total_cmp(&far(&missing[*b])));
-            let round = if cfg!(target_arch = "wasm32") { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).min(16) };
+            let round = rustgis_data::threads::max();
             let mut made: Vec<Option<Arc<TileMesh>>> = vec![None; missing.len()];
             for (n, some) in order.chunks(round).enumerate() {
                 if n > 0 && web_time::Instant::now() >= until {
@@ -508,24 +508,27 @@ pub fn meshes(
 fn parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<Option<R>> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(items.len()).min(16);
+        let threads = rustgis_data::threads::for_items(items.len());
         if threads > 1 {
             let next = std::sync::atomic::AtomicUsize::new(0);
             let out: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
-            std::thread::scope(|scope| {
-                for _ in 0..threads {
-                    scope.spawn(|| {
-                        loop {
-                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let Some(item) = items.get(i) else { break };
-                            // A tile that panics (hostile data) gives no mesh, rather than the frame.
-                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(item))).ok();
-                            if let Some(slot) = out.lock().unwrap_or_else(|e| e.into_inner()).get_mut(i) {
-                                *slot = r;
-                            }
-                        }
-                    });
+            let work = || {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(item) = items.get(i) else { break };
+                    // A tile that panics (hostile data) gives no mesh, rather than the frame.
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(item))).ok();
+                    if let Some(slot) = out.lock().unwrap_or_else(|e| e.into_inner()).get_mut(i) {
+                        *slot = r;
+                    }
                 }
+            };
+            std::thread::scope(|scope| {
+                // A thread the OS refuses costs speed, not the frame: this one takes items too.
+                for _ in 1..threads {
+                    let _ = std::thread::Builder::new().spawn_scoped(scope, work);
+                }
+                work();
             });
             return out.into_inner().unwrap_or_else(|e| e.into_inner());
         }
@@ -683,6 +686,7 @@ mod tests {
             let layer = serde_json::json!({"id": "p", "type": "fill", "source": "s", "source-layer": "l", "paint": paint});
             let sprites = vec![("default".to_owned(), address.clone())];
             Arc::new(Resolved {
+                from: None,
                 style: Style {
                     name: String::new(),
                     sources: vec![("s".into(), Source::parse(&serde_json::json!({"type": "vector", "tiles": ["x/{z}/{x}/{y}"]})))],
@@ -698,11 +702,28 @@ mod tests {
                 left_out: Vec::new(),
                 made: std::sync::Mutex::new(web_time::Instant::now()),
                 waiting: false,
+                retry: false,
             })
         };
         assert!(meshes(&resolved(serde_json::json!({"fill-pattern": "dots"})), "s", &[], 3, None).1);
         // Without pattern fills, a mesh doesn't wait for sprites.
         assert!(!meshes(&resolved(serde_json::json!({"fill-color": "#f00"})), "s", &[], 3, None).1);
+        // A public style's private sprite must be refused synchronously, not queued by
+        // this preliminary GPU lookup. `serve` answers without opening any sockets.
+        let mut private = resolved(serde_json::json!({"fill-pattern":"dots"}));
+        let style = Arc::get_mut(&mut private).unwrap();
+        style.from = Some(rustgis_tiles::address::Origin::named("https://mesh-style.example/style.json"));
+        style.sprites = vec![("default".into(), "http://127.0.0.1/mesh-private-only".into())];
+        let id = TileId { z: 3, x: 0, y: 0 };
+        let tiles = [DataTile { payload: Arc::new(Payload::Vector(tile())), at: id.extent(), z: id.z, clip: id.extent() }];
+        let (made, waiting) = meshes(&private, "s", &tiles, 3, None);
+        assert!(!waiting, "a refused sprite must never become a pending fetch");
+        assert!(made.first().and_then(Option::as_ref).is_some_and(|m| !m.waiting));
+        assert_eq!(
+            crate::tiles::tests::PRIVATE_SPRITE_REQUESTS.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "neither sprite JSON nor PNG may reach the fetcher"
+        );
     }
 
     #[test]
@@ -713,6 +734,7 @@ mod tests {
         use rustgis_tiles::style::{Source, Style, StyleLayer};
         let layer = serde_json::json!({"id": "p", "type": "fill", "source": "s", "source-layer": "parks", "paint": {"fill-color": "#f00"}});
         let style = Arc::new(Resolved {
+            from: None,
             style: Style {
                 name: String::new(),
                 sources: vec![("s".into(), Source::parse(&serde_json::json!({"type": "vector", "tiles": ["x/{z}/{x}/{y}"]})))],
@@ -728,6 +750,7 @@ mod tests {
             left_out: Vec::new(),
             made: std::sync::Mutex::new(web_time::Instant::now()),
             waiting: false,
+            retry: false,
         });
         let at = Extent::new(0.0, 0.0, 1.0, 1.0);
         let tiles =

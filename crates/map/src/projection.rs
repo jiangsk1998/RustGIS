@@ -18,7 +18,9 @@ pub const PRESETS: &[(&str, &str, &str)] = &[
     ("robinson", "Robinson", "+proj=robin +lon_0=0 +datum=WGS84 +units=m +no_defs"),
     ("equalEarth", "Equal Earth", "+proj=eqearth +lon_0=0 +datum=WGS84 +units=m +no_defs"),
     ("naturalEarth", "Natural Earth", "+proj=natearth +lon_0=0 +datum=WGS84 +units=m +no_defs"),
-    ("winkelTripel", "Winkel Tripel", "+proj=wintri +lon_0=0 +datum=WGS84 +units=m +no_defs"),
+    // At Winkel's own standard parallel, acos(2/π) (`rustgis_geom::world::winkel_parallel`):
+    // PROJ, and RustGIS's readers, take 0 for a definition without one.
+    ("winkelTripel", "Winkel Tripel", "+proj=wintri +lon_0=0 +lat_1=50.459776252189805 +datum=WGS84 +units=m +no_defs"),
     ("eckertIV", "Eckert IV (equal-area world)", "+proj=eck4 +lon_0=0 +datum=WGS84 +units=m +no_defs"),
     ("northPolar", "North Polar Stereographic", "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=0 +datum=WGS84 +units=m +no_defs"),
     ("southPolar", "South Polar Stereographic", "+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +datum=WGS84 +units=m +no_defs"),
@@ -495,6 +497,10 @@ enum Engine {
     World(crate::world::World),
     /// Sinusoidal (MODIS's grid, ESRI:54008), which proj4rs lacks.
     Sinusoidal(rustgis_geom::Sinusoidal),
+    /// Equidistant cylindrical on an ellipsoid (EPSG:4087), which proj4rs computes on a sphere:
+    /// as rustgis-data computes it, so a raster in the system, drawn in its own coordinates,
+    /// lands where the map puts the same longitude/latitude.
+    Eqc(Box<rustgis_data::raster::Transformer>),
 }
 
 /// Converts between longitude/latitude and the coordinates of a custom projection.
@@ -574,6 +580,7 @@ impl std::fmt::Debug for Projector {
             Engine::Proj { native, .. } => native.projname(),
             Engine::World(w) => w.kind.proj_name(),
             Engine::Sinusoidal(_) => "sinu",
+            Engine::Eqc(_) => "eqc",
         };
         write!(f, "Projector({name})")
     }
@@ -611,7 +618,19 @@ impl Projector {
                 .find_map(|t| t.strip_prefix("+R=")?.parse::<f64>().ok())
                 .filter(|r| r.is_finite() && *r > 0.0)
                 .unwrap_or(rustgis_geom::MERCATOR_R);
-            let engine = Engine::World(crate::world::World { kind, lon0, radius });
+            // Winkel Tripel's standard parallel as the definition gives it (the preset gives
+            // Winkel's own), else 0, as PROJ and RustGIS's readers take it, so the map draws a
+            // definition where its data is read. The other projections have no standard parallel
+            // and ignore one, as the reader and PROJ do.
+            let lat1 = match def.split_whitespace().find_map(|t| t.strip_prefix("+lat_1=")) {
+                Some(v) if kind == crate::world::Kind::WinkelTripel => v
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && v.abs() < 90.0)
+                    .ok_or_else(|| format!("{code}: +lat_1={v} isn't a latitude short of a pole"))?,
+                _ => 0.0,
+            };
+            let engine = Engine::World(crate::world::World { lat1, ..crate::world::World::new(kind, lon0, radius) });
             return Ok(Projector { engine, to_meter: 1.0, domain, lon0, edge: std::sync::OnceLock::new() });
         }
         let native = proj4rs::Proj::from_proj_string(&def).map_err(|e| match e {
@@ -628,7 +647,10 @@ impl Projector {
         let lon0 = finite(native.longitude_of_origin().to_degrees()) + pm;
         let lat0 = finite(native.latitude_of_origin().to_degrees());
         let domain = Domain::of(preset, &def, (lon0, lat0), pm);
-        let engine = Engine::Proj { native: Box::new(native), wgs84: Box::new(wgs84) };
+        let engine = match rustgis_data::raster::crs::ellipsoidal_eqc(&def) {
+            Some(eqc) => Engine::Eqc(Box::new(eqc.map_err(|e| format!("{code}: {e}"))?)),
+            None => Engine::Proj { native: Box::new(native), wgs84: Box::new(wgs84) },
+        };
         let to_meter = if to_meter > 0.0 { to_meter } else { 1.0 };
         Ok(Projector { engine, to_meter, domain, lon0, edge: std::sync::OnceLock::new() })
     }
@@ -655,7 +677,9 @@ impl Projector {
         }
         Some(self.edge.get_or_init(|| {
             let exact = Edge { lon: self.lon0 + 180.0, strays: [0.0; EDGE_SAMPLES] };
-            let Engine::Proj { .. } = self.engine else { return exact };
+            if let Engine::World(_) | Engine::Sinusoidal(_) = self.engine {
+                return exact;
+            }
             let shifted = [0.0, 60.0, -60.0].iter().any(|lat| self.edge_at(*lat, exact.lon).is_none_or(|x| (x - exact.lon).abs() > 1e-9));
             if shifted { self.find_edge(exact.lon).unwrap_or(exact) } else { exact }
         }))
@@ -702,6 +726,9 @@ impl Projector {
             Engine::Proj { native, wgs84 } => (native, wgs84),
             Engine::World(w) => return w.forward(c),
             Engine::Sinusoidal(s) => return s.forward(c).filter(|m| m.x.abs() < LIMIT && m.y.abs() < LIMIT),
+            Engine::Eqc(t) => {
+                return t.from_lonlat(Coord::new(c.x, c.y.clamp(-90.0, 90.0))).filter(|m| m.x.abs() < LIMIT && m.y.abs() < LIMIT);
+            }
         };
         let mut p = (c.x.to_radians(), c.y.clamp(-90.0, 90.0).to_radians(), 0.0);
         proj4rs::transform::transform(wgs84, native, &mut p).ok()?;
@@ -736,6 +763,7 @@ impl Projector {
             Engine::Proj { native, wgs84 } => (native, wgs84),
             Engine::World(w) => return w.inverse(m),
             Engine::Sinusoidal(s) => return s.inverse(m),
+            Engine::Eqc(t) => return t.to_lonlat(m).filter(|c| c.y.abs() <= 90.0 + 1e-9),
         };
         let mut p = (m.x, m.y, 0.0);
         proj4rs::transform::transform(native, wgs84, &mut p).ok()?;
@@ -1060,6 +1088,45 @@ mod tests {
         assert!(p.inverse(Coord::new(19_000_000.0, 9_000_000.0)).is_none());
     }
 
+    /// A map in EPSG:4087 (and the Equirectangular preset, its definition) uses the same
+    /// PROJ-compatible spherical formula as the data crate: a raster in
+    /// EPSG:4087 is drawn in its own coordinates on such a map, so both must put a place at the
+    /// same point. PROJ 9.7.1: 55°N 10°E in EPSG:4087 is E 1 113 194.91, N 6 122 571.99.
+    #[test]
+    fn ellipsoidal_equidistant_cylindrical_draws_as_its_data_reads() {
+        let data = rustgis_data::raster::Crs::from_epsg(4087).unwrap().transformer().unwrap();
+        for code in ["EPSG:4087", "equirectangular", "ESRI:54002"] {
+            let p = Projector::new(code).unwrap_or_else(|e| panic!("{code}: {e}"));
+            assert!(matches!(p.engine, Engine::Eqc(_)), "{code}");
+            assert_eq!(format!("{p:?}"), "Projector(eqc)", "{code}");
+            assert_eq!(p.domain(), Domain::World, "{code}");
+            assert!((p.central_meridian().unwrap() - 0.0).abs() < 1e-9, "{code}");
+            for (lon, lat) in [(10.0, 55.0), (-120.0, -35.0), (179.0, 89.0), (0.0, 90.0)] {
+                let c = Coord::new(lon, lat);
+                let m = p.forward(c).unwrap();
+                let back = p.inverse(m).unwrap();
+                assert!((back.x - lon).abs() < 1e-9 && (back.y - lat).abs() < 1e-9, "{code}: {back:?}");
+                if code != "ESRI:54002" {
+                    let d = data.from_lonlat(c).unwrap();
+                    assert!((m.x - d.x).abs() < 1e-6 && (m.y - d.y).abs() < 1e-6, "{code}: {m:?} {d:?}");
+                }
+            }
+        }
+        let m = Projector::new("EPSG:4087").unwrap().forward(Coord::new(10.0, 55.0)).unwrap();
+        assert!((m.x - 1_113_194.907_932_735_7).abs() < 1e-6 && (m.y - 6_122_571.993_630_046).abs() < 1e-6, "{m:?}");
+        // ESRI:54002 is true to scale at 60°: half the easting per degree, the same northing.
+        let (a, b) = (
+            Projector::new("ESRI:54002").unwrap().forward(Coord::new(1.0, 45.0)).unwrap(),
+            data.from_lonlat(Coord::new(1.0, 45.0)).unwrap(),
+        );
+        assert!((a.x / b.x - 0.5).abs() < 0.01 && (a.y - b.y).abs() < 1e-6, "{a:?} {b:?}");
+        // On a sphere (ESRI's Sphere_Plate_Carree) it stays proj4rs's.
+        let sphere = Projector::new("ESRI:53001").unwrap();
+        assert!(matches!(sphere.engine, Engine::Proj { .. }));
+        let sphere = sphere.forward(Coord::new(0.0, 45.0)).unwrap();
+        assert!((sphere.y - 6_371_000.0 * std::f64::consts::FRAC_PI_4).abs() < 1e-6, "{sphere:?}");
+    }
+
     #[test]
     fn local_codes_are_read_strictly() {
         assert!(lookup("local:12.5,41.9").is_ok());
@@ -1175,8 +1242,9 @@ mod tests {
         assert!(e.contains("labrd"), "{e}");
         // proj4rs 0.3 added Cassini, the polyconic, Equal Earth and the oblique Mercator: their
         // codes are accepted (EPSG:5880's polyconic, whose refusal was #208), and draw where PROJ
-        // does: 54°W 10°S lands at (5 000 000, 8 894 145.167) in pyproj 3.8.0's EPSG:5880, its
-        // false easting less a million-odd metres.
+        // does: 54°W 10°S lands at (5 000 000, 8 894 145.167) in pyproj 3.8.0's EPSG:5880. On the
+        // central meridian x is the false easting itself; y is the false northing (10 000 000)
+        // less a million-odd metres.
         for ok in ["EPSG:5880", "EPSG:2057", "EPSG:3068", "EPSG:8858"] {
             crate::Projection::from_code(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
         }
@@ -1292,7 +1360,7 @@ mod tests {
             assert!(west > centre && centre > east, "{n}: lon_0 {lon0}: {west} / {centre} / {east}");
             // With a datum shift the edge is found by search, which must not fall back to the
             // nominal edge (no margin) for any of them.
-            if let Engine::Proj { .. } = p.engine {
+            if let Engine::Proj { .. } | Engine::Eqc(_) = p.engine {
                 assert!(p.find_edge(p.lon0 + 180.0).is_some(), "{n}: the edge search fell back");
             }
             checked += 1;
@@ -1300,6 +1368,24 @@ mod tests {
         // 31 in crs-definitions 0.6 (Mercator, equirectangular, cylindrical equal-area, Equal Earth),
         // 6 of them Mercator from Jakarta (+pm).
         assert!(checked >= 31, "only {checked} world projections checked");
+    }
+
+    /// The world presets RustGIS computes draw where its readers place their definitions (a map
+    /// exported in one, say): Winkel Tripel at Winkel's own parallel, which its preset gives, as
+    /// PROJ 9.8.1 places it (#1701).
+    #[test]
+    fn world_presets_draw_where_their_definitions_are_read() {
+        for code in ["naturalEarth", "winkelTripel", "eckertIV", "winkelTripel +lon_0=150"] {
+            let (def, _) = lookup(code).unwrap();
+            let p = Projector::new(code).unwrap();
+            let t = rustgis_data::raster::Crs::parse(&def).unwrap().transformer().unwrap();
+            for (lon, lat) in [(10.0, 50.0), (-120.0, -35.0), (179.0, 80.0)] {
+                let (a, b) = (p.forward(Coord::new(lon, lat)).unwrap(), t.from_lonlat(Coord::new(lon, lat)).unwrap());
+                assert!((a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3, "{code} {lon},{lat}: {a:?} {b:?}");
+            }
+        }
+        let m = Projector::new("winkelTripel").unwrap().forward(Coord::new(10.0, 50.0)).unwrap();
+        assert!((m.x - 761_793.002_579_874_7).abs() < 1e-3 && (m.y - 5_568_704.187_526_578).abs() < 1e-3, "{m:?}");
     }
 
     #[test]

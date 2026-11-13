@@ -749,13 +749,12 @@ impl PostgisSource {
         let given = crs.map(str::trim).filter(|c| !c.is_empty());
         let mut native = g.clone();
         if srid == 0 {
-            match given.map(Crs::parse) {
-                Some(Ok(c)) if c.epsg() > 0 => {
-                    srid = i32::from(c.epsg());
+            match given {
+                Some(given) => {
+                    let (code, note) = super::given_epsg(given)?;
+                    srid = i32::from(code);
                     native = format!("ST_SetSRID({g}, {srid})");
-                }
-                Some(Ok(_)) | Some(Err(_)) => {
-                    return Err(DataError::Format(format!("'{}': give the coordinate system as EPSG:<code>", given.unwrap_or_default())));
+                    notes.extend(note);
                 }
                 None => notes.push(
                     "the geometry doesn't say its coordinate system; read as longitude/latitude (add it again with \"crs\", such as EPSG:2263)".into(),
@@ -960,6 +959,8 @@ impl PostgisSource {
                     FieldType::Double => r.try_get::<_, Option<f64>>(i).ok().flatten().map(Value::Float),
                     FieldType::Boolean => r.try_get::<_, Option<bool>>(i).ok().flatten().map(Value::Bool),
                     FieldType::Text => r.try_get::<_, Option<String>>(i).ok().flatten().map(Value::Text),
+                    // This reader gives no date fields yet: their values come as text.
+                    FieldType::Date | FieldType::DateTime => r.try_get::<_, Option<String>>(i).ok().flatten().map(Value::Text),
                     FieldType::Image => r
                         .try_get::<_, Option<i64>>(i)
                         .ok()
@@ -1168,6 +1169,7 @@ fn text_value(v: &Value) -> Option<String> {
         Value::Bool(b) => Some(b.to_string()),
         // Pictures are read only: there is no image to write back.
         Value::Image(_) => None,
+        Value::Date(_) | Value::DateTime(_) => Some(v.to_string()),
     }
 }
 

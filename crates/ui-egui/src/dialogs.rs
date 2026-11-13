@@ -19,6 +19,8 @@ pub struct Dialogs {
     pub projection_map: Option<(u64, usize, String)>,
     pub geometry: Option<crate::geometrycalc::Form>,
     pub repair: Option<crate::repairsource::Form>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub reload: Option<crate::reloaddata::Form>,
     pub open: Option<&'static str>,
     pub layer: String,
     /// GeoPackage save/discard targets use IDs because display names can repeat.
@@ -111,7 +113,6 @@ impl Dialogs {
             "bookmark" => "bookmark",
             "addField" => "addField",
             "calculateField" => "calculateField",
-            "definitionQuery" => "definitionQuery",
             "renameLayer" => "renameLayer",
             "renameMap" => "renameMap",
             "renameLayout" => "renameLayout",
@@ -150,9 +151,7 @@ impl Dialogs {
             "saveProject" => "saveProject",
             other => return Err(format!("unknown dialog '{other}'")),
         };
-        if matches!(name, "addField" | "calculateField" | "definitionQuery" | "renameLayer" | "exportLayer" | "defineProjection")
-            && active.is_none()
-        {
+        if matches!(name, "addField" | "calculateField" | "renameLayer" | "exportLayer" | "defineProjection") && active.is_none() {
             return Err("select a layer in the Layers pane first".into());
         }
         if name == "exportLayer" && active.is_some_and(|l| l.is_raster()) {
@@ -201,7 +200,6 @@ impl Dialogs {
             }
             "addField" => self.b = "Double".into(),
             "calculateField" => self.a = active.and_then(|l| l.dataset.fields.last()).map(|f| f.name.clone()).unwrap_or_default(),
-            "definitionQuery" => self.text = active.and_then(|l| l.definition_query.clone()).unwrap_or_default(),
             "renameLayer" => self.text = active.map(|l| l.name.clone()).unwrap_or_default(),
             // A file name can't hold a folder separator, which a project name may.
             "saveProject" => self.text = format!("{}.rgis", s.project.name.replace(['/', '\\'], "-")),
@@ -307,6 +305,11 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         crate::geometrycalc::show(app, ctx);
         return;
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    if which == "reloadData" {
+        crate::reloaddata::show(app, ctx);
+        return;
+    }
     if which == "repairSource" {
         crate::repairsource::show(app, ctx);
         return;
@@ -317,7 +320,6 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "bookmark" => "New Bookmark",
         "addField" => "Add Field",
         "calculateField" => "Calculate Field",
-        "definitionQuery" => "Definition Query",
         "coordinateSystem" => "Coordinate System",
         "defineProjection" => "Define Projection",
         "addShapefile" => "Import Shapefile with Projection",
@@ -537,9 +539,13 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                     ui.add(egui::TextEdit::singleline(&mut app.dialogs.a).desired_width(220.0)).labelled_by(input_label.id);
                     ui.end_row();
                     let input_label = ui.label(tl!("Data type"));
-                    egui::ComboBox::from_id_salt("af_type").selected_text(app.dialogs.b.clone()).show_ui(ui, |ui| {
-                        for ty in ["Long", "Double", "Text", "Boolean"] {
-                            ui.selectable_value(&mut app.dialogs.b, ty.to_string(), ty);
+                    // Each type as the command names it, and as the interface shows it.
+                    let types =
+                        [("Long", tl!("Long")), ("Double", tl!("Double")), ("Text", tl!("Text")), ("Boolean", tl!("Boolean")), ("Date", tl!("Date")), ("DateTime", tl!("Date and time"))];
+                    let shown = types.iter().find(|(ty, _)| *ty == app.dialogs.b).map_or_else(|| app.dialogs.b.clone(), |(_, label)| label.to_string());
+                    egui::ComboBox::from_id_salt("af_type").selected_text(shown).show_ui(ui, |ui| {
+                        for (ty, label) in &types {
+                            ui.selectable_value(&mut app.dialogs.b, ty.to_string(), label.to_string());
                         }
                     }).response.labelled_by(input_label.id);
                     ui.end_row();
@@ -571,14 +577,6 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                 }
                 ui.label(egui::RichText::new(tl!("Fields, numbers, 'text', + - * / % ^, || to join text, comparisons, CASE and functions such as round(), upper(), if() or scale_linear(). Applies to the selected rows, or every row when none is selected.")).small().weak());
                 close = buttons(app, ui, "Calculate", |app| app.run("edit.calculateField", json!({"field": app.dialogs.a, "expression": app.dialogs.text})).map(|_| ()));
-            }
-            "definitionQuery" => {
-                ui.label(egui::RichText::new(crate::i18n::fmt("Only features matching this expression draw in {layer}.", &[("layer", &app.dialogs.layer)])).weak());
-                let hint = tl!("e.g. continent = 'Europe'");
-                let edit = text_box(&mut app.dialogs.text).hint_text(hint).desired_rows(3).font(egui::TextStyle::Monospace);
-                ui.add(edit.desired_width(f32::INFINITY));
-                field_chips(app, ui);
-                close = buttons(app, ui, "Apply", |app| app.run("layer.definitionQuery", json!({"where": app.dialogs.text})).map(|_| ()));
             }
             "saveProject" => close = save_project(app, ui),
             // `a` is the map or layout being renamed; an empty or unchanged name just closes.
@@ -916,6 +914,73 @@ fn go_to(app: &mut RustGisApp, url: &str, kind: &str, way: Vec<(String, &'static
 /// How many of a service's layers Add From Service lists.
 const SHOWN_LAYERS: usize = 500;
 
+/// How long typing pauses before Add From Service searches all of a listing that stops short:
+/// reading the documents again takes a moment for a large one (IBGE's WFS, 12 MB), so not on
+/// every key (#1577).
+pub(crate) const SEARCH_PAUSE: web_time::Duration = web_time::Duration::from_millis(300);
+
+/// A filter's words as `service.layers` takes them: lower case, one space apart.
+fn filter_key(filter: &str) -> String {
+    filter.split_whitespace().map(str::to_lowercase).collect::<Vec<_>>().join(" ")
+}
+
+/// The search of all of a service's layers with the filter, when its listing stops short of them
+/// (`listedNote`) and typing has paused for [`SEARCH_PAUSE`]: `service.layers` again on the
+/// documents the dialog keeps, with `filter`, so nothing is downloaded. A listing that holds them
+/// all is filtered in the dialog, as before. Gives how long until a search is due, to draw again
+/// then. On the desktop, admitted read-ahead binds the saved login here and parses off the
+/// frame, as for document arrivals (`poll_service`). The result retains its original filter;
+/// continued typing cannot replace a newer filter's rows with an earlier search.
+fn search_all(app: &mut RustGisApp) -> Option<web_time::Duration> {
+    let conn = app.ui.service.as_mut()?;
+    let key = filter_key(&app.ui.service_browse.filter);
+    let short = conn.listing.as_ref().is_some_and(|v| v.get("listedNote").is_some());
+    if !short || key.is_empty() || conn.pending.is_some() || conn.search.as_ref().is_some_and(|s| s.filter == key) {
+        return None;
+    }
+    let now = web_time::Instant::now();
+    match &conn.typed {
+        Some((typed, at)) if *typed == key => {
+            let waited = now.duration_since(*at);
+            if waited < SEARCH_PAUSE {
+                return Some(SEARCH_PAUSE - waited);
+            }
+        }
+        _ => {
+            conn.typed = Some((key, now));
+            return Some(SEARCH_PAUSE);
+        }
+    }
+    let mut p = json!({"url": conn.url, "text": conn.text, "documents": conn.documents, "filter": key});
+    if conn.kind != "auto" {
+        p["type"] = json!(conn.kind);
+    }
+    if let Some(connection) = &conn.connection {
+        p["connection"] = json!(connection);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if app.reads_off_frame {
+        match crate::serviceui::ListingRead::start(&mut app.session, &p) {
+            Ok(reading) => {
+                conn.reading = Some(reading);
+                conn.pending = Some(conn.url.clone());
+            }
+            Err(error) => conn.search = Some(crate::ServiceSearch { filter: key, listing: Err(error) }),
+        }
+        return None;
+    }
+    // Not `app.run`: an error belongs in the dialog, as the listing's does.
+    let listing = app.session.run("service.layers", &p);
+    conn.search = Some(crate::ServiceSearch { filter: key, listing });
+    conn.added = None;
+    None
+}
+
+/// The search's answer for the filter as typed now, when there is one and it holds layers.
+fn searched<'a>(conn: &'a crate::ServiceConn, filter: &str) -> Option<&'a Value> {
+    conn.search.as_ref().filter(|s| s.filter == filter_key(filter)).and_then(|s| s.listing.as_ref().ok())
+}
+
 /// The listed layers matching `filter` (words their title or name contains), with their place in
 /// the listing.
 fn matching_rows<'a>(layers: &'a [Value], filter: &str) -> Vec<(usize, &'a Value)> {
@@ -956,13 +1021,24 @@ fn refresh_added(app: &mut RustGisApp) {
     if conn.added.as_ref().is_some_and(|a| a.revision == revision && a.map == map && a.filter == *filter) {
         return;
     }
-    let layers: &[Value] = conn.listing.as_ref().and_then(|v| v.get("layers")).and_then(Value::as_array).map_or(&[], Vec::as_slice);
-    let matching = matching_rows(layers, filter);
-    let matched = matching.len();
-    let shown: Vec<usize> = matching.into_iter().take(SHOWN_LAYERS).map(|(i, _)| i).collect();
+    // Every layer matching the filter, when all of a listing that stops short were searched: its
+    // answer holds only matches (the first 2000), and counts them all.
+    let search = searched(conn, filter);
+    let was_searched = search.is_some();
+    let listing = search.or(conn.listing.as_ref());
+    let layers: &[Value] = listing.and_then(|v| v.get("layers")).and_then(Value::as_array).map_or(&[], Vec::as_slice);
+    let (matched, shown): (usize, Vec<usize>) = match search {
+        Some(v) => {
+            (v.get("matched").and_then(Value::as_u64).map_or(layers.len(), |m| m as usize), (0..layers.len().min(SHOWN_LAYERS)).collect())
+        }
+        None => {
+            let matching = matching_rows(layers, filter);
+            (matching.len(), matching.into_iter().take(SHOWN_LAYERS).map(|(i, _)| i).collect())
+        }
+    };
     let removals = rustgis_engine::cmd::service_added::added(app.session.map(), layers, &shown);
     let rows = shown.into_iter().map(|i| (i, removals.get(i).cloned().flatten())).collect();
-    conn.added = Some(crate::ServiceAdded { revision, map, filter: filter.clone(), matched, rows });
+    conn.added = Some(crate::ServiceAdded { revision, map, filter: filter.clone(), matched, searched: was_searched, rows });
 }
 
 /// Add From Service: a WMS, WMTS, WFS, WCS, OGC API Features or ArcGIS REST service by its address
@@ -1056,6 +1132,9 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         crate::connectionui::picked(&list, app.dialogs.connection.as_deref(), url).is_none().then(|| (url.to_string(), kind))
     });
     let mut keep_root = false;
+    if let Some(due) = search_all(app) {
+        ui.ctx().request_repaint_after(due);
+    }
     refresh_added(app);
     if let Some(conn) = &app.ui.service {
         ui.separator();
@@ -1081,11 +1160,15 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             let none = Vec::new();
             let layers = v.get("layers").and_then(Value::as_array).unwrap_or(&none);
             let grouped = kind.starts_with("OGC API");
+            // A listing that stops short counts them all, and says so here in the dialog's own
+            // words instead of its note: the filter searches all of them (`search_all`).
+            let listed_note = v.get("listedNote").and_then(Value::as_str);
+            let count = crate::connectionui::layer_count(v);
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(crate::i18n::fmt(
                         "{kind} {title}: {count} layers",
-                        &[("kind", kind), ("title", title), ("count", &layers.len().to_string())],
+                        &[("kind", kind), ("title", title), ("count", &count)],
                     ))
                     .strong(),
                 );
@@ -1094,7 +1177,45 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                 }
             });
             for n in v.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
-                ui.label(egui::RichText::new(n).small().weak());
+                if Some(n) != listed_note {
+                    ui.label(egui::RichText::new(n).small().weak());
+                }
+            }
+            // The filter searches all of them, once typing pauses (`search_all`).
+            if listed_note.is_some() {
+                let key = filter_key(&app.ui.service_browse.filter);
+                let line = if key.is_empty() {
+                    Some(crate::i18n::fmt(
+                        "The first {n} of them are listed; the filter searches all of them.",
+                        &[("n", &layers.len().to_string())],
+                    ))
+                } else {
+                    match conn.search.as_ref().filter(|s| s.filter == key).map(|s| &s.listing) {
+                        None => {
+                            let total = v.get("total").and_then(Value::as_u64).map_or(layers.len().to_string(), |n| n.to_string());
+                            Some(crate::i18n::fmt("Searching all {total} layers…", &[("total", &total)]))
+                        }
+                        Some(Err(e)) => {
+                            ui.colored_label(t.red, e);
+                            None
+                        }
+                        // The search's own notes, beside the listing's: more matches than it
+                        // lists (its `listedNote`), or a list cut by its addresses' length.
+                        Some(Ok(found)) => {
+                            let shown: Vec<&str> =
+                                v.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+                            for n in found.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+                                if !shown.contains(&n) {
+                                    ui.label(egui::RichText::new(n).small().weak());
+                                }
+                            }
+                            None
+                        }
+                    }
+                };
+                if let Some(line) = line {
+                    ui.label(egui::RichText::new(line).small().weak());
+                }
             }
             // A long list is filtered by words; a directory's services lead back to it.
             let browse = &mut app.ui.service_browse;
@@ -1159,9 +1280,21 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             }
             let added = conn.added.as_ref();
             let rows: &[(usize, Option<Removal>)] = added.map_or(&[], |a| a.rows.as_slice());
-            if added.is_some_and(|a| a.matched > SHOWN_LAYERS) {
+            // A search's rows are places in its answer, which holds only matches.
+            let row_layers = match added.filter(|a| a.searched) {
+                Some(_) => {
+                    searched(conn, &app.ui.service_browse.filter).and_then(|v| v.get("layers")).and_then(Value::as_array).unwrap_or(&none)
+                }
+                None => layers,
+            };
+            if let Some(a) = added.filter(|a| a.matched > SHOWN_LAYERS) {
                 ui.label(
-                    egui::RichText::new(crate::i18n::fmt("The first {n} are listed.", &[("n", &SHOWN_LAYERS.to_string())])).small().weak(),
+                    egui::RichText::new(crate::i18n::fmt(
+                        "{n} of {m} are listed.",
+                        &[("n", &SHOWN_LAYERS.to_string()), ("m", &a.matched.to_string())],
+                    ))
+                    .small()
+                    .weak(),
                 );
             }
             let ui_width = ui.available_width();
@@ -1177,7 +1310,7 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                     egui::ScrollArea::vertical().id_salt("add_service_layers_scroll").auto_shrink([false, false]).show(ui, |ui| {
                         let style = ui.style().clone();
                         for (i, removal) in rows {
-                            let Some(l) = layers.get(*i) else { continue };
+                            let Some(l) = row_layers.get(*i) else { continue };
                             ui.horizontal(|ui| {
                                 ui.add_space(2.0);
                                 let kind = l.get("offer").and_then(|o| o.get("type")).and_then(Value::as_str);
@@ -1261,6 +1394,11 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(crate::i18n::fmt("Connecting to {url}…", &[("url", pending)]));
+                if let Some(reading) = &conn.reading
+                    && ui.button(tl!("Cancel")).clicked()
+                {
+                    reading.control.cancel();
+                }
             });
         }
     }
@@ -2152,29 +2290,30 @@ pub(crate) fn buttons(app: &mut RustGisApp, ui: &mut egui::Ui, ok: &str, f: impl
     close
 }
 
-fn field_chips(app: &mut RustGisApp, ui: &mut egui::Ui) {
-    let fields: Vec<String> = app
-        .session
-        .map()
-        .layer_by_name(&app.dialogs.layer)
-        .map(|l| l.dataset.fields.iter().map(|f| f.name.clone()).collect())
-        .unwrap_or_default();
+/// Buttons that add one of `fields` (the first 24) or an operator to the clause `text`, as Select
+/// By Attributes and the Layer Properties pane's Query tab offer them. Each is set apart from what
+/// the clause ends with, so a name typed just before isn't run into it (`nameLIKE`).
+pub(crate) fn field_chips(ui: &mut egui::Ui, fields: &[rustgis_engine::data::Field], text: &mut String) {
+    let add = |text: &mut String, word: &str| {
+        if !text.is_empty() && !text.ends_with(char::is_whitespace) {
+            text.push(' ');
+        }
+        text.push_str(word);
+        text.push(' ');
+    };
     ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new(tl!("Fields:")).small().weak());
         for f in fields.iter().take(24) {
-            if ui.small_button(f).clicked() {
-                if !app.dialogs.text.is_empty() && !app.dialogs.text.ends_with(' ') {
-                    app.dialogs.text.push(' ');
-                }
-                app.dialogs.text.push_str(f);
-                app.dialogs.text.push(' ');
+            if ui.small_button(&f.name).clicked() {
+                add(text, &f.name);
             }
         }
     });
-    ui.horizontal(|ui| {
+    // Wrapped, as the fields are: a narrow pane (the Query tab) would cut the last ones off.
+    ui.horizontal_wrapped(|ui| {
         for op in ["=", "<>", ">", "<", "LIKE", "AND", "OR", "IS NULL"] {
             if ui.small_button(op).clicked() {
-                app.dialogs.text.push_str(&format!("{op} "));
+                add(text, op);
             }
         }
     });
@@ -2226,7 +2365,8 @@ fn select_by_attributes(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) -> 
             .desired_width(f32::INFINITY)
             .font(egui::TextStyle::Monospace),
     );
-    field_chips(app, ui);
+    let fields = app.session.map().layer_by_name(&app.dialogs.layer).map(|l| l.dataset.fields.as_slice()).unwrap_or_default();
+    field_chips(ui, fields, &mut app.dialogs.text);
     // Live validation.
     let check =
         app.session.map().layer_by_name(&app.dialogs.layer).map(|l| rustgis_engine::data::query::select(&app.dialogs.text, &l.dataset));
@@ -2834,6 +2974,7 @@ mod tests {
             connection: None,
             kind: "wms",
             slot: Default::default(),
+            reading: None,
             text: None,
             documents: Vec::new(),
             pending: None,
@@ -2849,6 +2990,8 @@ mod tests {
                 }],
             })),
             added: None,
+            typed: None,
+            search: None,
             error: None,
             failure: None,
         });
@@ -2885,6 +3028,7 @@ mod tests {
             connection: None,
             kind: "wfs",
             slot: Default::default(),
+            reading: None,
             text: None,
             documents: Vec::new(),
             pending: None,
@@ -2900,6 +3044,8 @@ mod tests {
                 }],
             })),
             added: None,
+            typed: None,
+            search: None,
             error: None,
             failure: None,
         });
@@ -2941,6 +3087,7 @@ mod tests {
             connection: None,
             kind: "wcs",
             slot: Default::default(),
+            reading: None,
             text: None,
             documents: Vec::new(),
             pending: None,
@@ -2961,6 +3108,8 @@ mod tests {
                 }],
             })),
             added: None,
+            typed: None,
+            search: None,
             error: None,
             failure: None,
         });
@@ -3000,6 +3149,7 @@ mod tests {
             connection: None,
             kind: "ogcapi",
             slot: Default::default(),
+            reading: None,
             text: None,
             documents: Vec::new(),
             pending: None,
@@ -3015,6 +3165,8 @@ mod tests {
                 }],
             })),
             added: None,
+            typed: None,
+            search: None,
             error: None,
             failure: None,
         });

@@ -8,23 +8,26 @@ use crate::{CmdResult, CommandSpec as C, Session};
 
 pub fn commands() -> Vec<C> {
     vec![
-        C::new("edit.calculateGeometry", "Calculate Geometry", "Attribute Table", crate::geometry_calc::run)
+        C::new("edit.calculateGeometry", "Calculate Geometry", "Attribute Table", crate::geometry_calc::run).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(super::design::need_editable)
             .params(r#"{"layer"?, "field": string, "create": bool, "overwrite": bool, "property": string, "unit": string, "epsg"?: number, "scope": "all"|"selected"}"#),
-        C::new("edit.addFeature", "Create Feature", "Edit › Features", add_feature)
+        C::new("edit.addFeature", "Create Feature", "Edit › Features", add_feature).inputs(super::design::new_feature_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(super::design::need_editable)
             .params(r#"{"layer"?, "geometry": GeoJSON geometry (lon/lat), "attributes"?: {field: value}, "template"?: feature template}"#),
-        C::new("edit.delete", "Delete", "Edit › Features", delete).key("Delete").when(super::design::need_editable_selection),
-        C::new("edit.setValue", "Edit Attribute", "Attribute Table", set_value)
+        C::new("edit.delete", "Delete", "Edit › Features", delete).roles(&[]).effects(crate::policy::Effects::NONE).key("Delete").when(super::design::need_editable_selection),
+        C::new("edit.setValue", "Edit Attribute", "Attribute Table", set_value).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(super::design::need_editable)
             .params(r#"{"layer"?, "row": number, "field": string, "value": any}"#),
-        C::new("edit.addField", "Add Field", "Data › Data Design › Fields", add_field)
+        C::new("edit.addField", "Add Field", "Data › Data Design › Fields", add_field).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(need_layer)
-            .params(r#"{"layer"?, "name": string, "type": "long"|"double"|"text"|"boolean"}"#),
-        C::new("edit.deleteField", "Delete Field", "Data › Data Design › Fields", delete_field)
+            .params(r#"{"layer"?, "name": string, "type": "long"|"double"|"text"|"boolean"|"date"|"datetime"}"#),
+        C::new("edit.deleteField", "Delete Field", "Data › Data Design › Fields", delete_field).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(need_layer)
             .params(r#"{"layer"?, "field": string}"#),
-        C::new("edit.calculateField", "Calculate Field", "Attribute Table", calculate_field)
+        C::new("edit.convertField", "Convert Field to Dates", "Attribute Table", convert_field).roles(&[]).effects(crate::policy::Effects::NONE)
+            .when(need_layer)
+            .params(r#"{"layer"?, "field": string, "type": "date"|"datetime"}"#),
+        C::new("edit.calculateField", "Calculate Field", "Attribute Table", calculate_field).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(super::design::need_editable)
             .params(r#"{"layer"?, "field": string, "expression": "an expression: fields, 'text', numbers, + - * / % ^ ||, functions (see the Expressions page)"}"#),
     ]
@@ -32,7 +35,7 @@ pub fn commands() -> Vec<C> {
 
 pub(crate) fn add_feature(s: &mut Session, p: &Json) -> CmdResult {
     let id = s.layer_id(p)?;
-    let g = p.get("geometry").and_then(rustgis_data::io::geometry_from_geojson).ok_or("geometry must be a GeoJSON geometry")?;
+    let g = geometry_param(p)?;
     let l = s.map_mut().layer_mut(id).ok_or("no layer")?;
     let want = l.geometry_type();
     let ok = want == g.kind() || want == GeometryType::None;
@@ -47,25 +50,76 @@ pub(crate) fn add_feature(s: &mut Session, p: &Json) -> CmdResult {
         }
         None => None,
     };
-    let attrs: Vec<Value> = l
+    let mut losses = Vec::new();
+    let layer = l.dataset.name.clone();
+    let attrs: Result<Vec<Value>, String> = l
         .dataset
         .fields
         .iter()
         .map(|f| {
-            let given = p.get("attributes").and_then(|a| a.get(&f.name)).map(|v| coerce(Value::from_json(v), f.ty));
-            let default = template
-                .as_ref()
-                .and_then(|t| t.defaults.iter().find(|(k, _)| k.eq_ignore_ascii_case(&f.name)))
-                .map(|(_, v)| coerce(v.clone(), f.ty));
-            given.or(default).unwrap_or(Value::Null)
+            let given = p.get("attributes").and_then(|a| a.get(&f.name)).map(Value::from_json);
+            let default =
+                template.as_ref().and_then(|t| t.defaults.iter().find(|(k, _)| k.eq_ignore_ascii_case(&f.name))).map(|(_, v)| v.clone());
+            let value = given.or(default).unwrap_or(Value::Null);
+            if non_finite_input(&value, f.ty) {
+                return Err(format!("field '{}' requires a finite number", f.name));
+            }
+            let coerced = coerce(value.clone(), f.ty);
+            // A value a date field can't hold (`soon`, `20260305`) is refused, not stored as null.
+            if f.ty.is_temporal() && coerced.is_null() && !value.asks_null() {
+                return Err(format!("field '{}': '{value}' isn't a {} value", f.name, f.ty.label()));
+            }
+            if let Some(key) = numeric_loss(&value, &coerced, f.ty) {
+                losses.push((f.name.clone(), key));
+            }
+            // A date-time (a native caller's template default) keeps only its day in a date field.
+            if matches!(value, Value::DateTime(t) if f.ty == FieldType::Date && !t.is_date()) {
+                losses.push((f.name.clone(), "{layer}, field '{field}', row {row}: 1 attribute value kept only its day"));
+            }
+            // A date (a native caller's template default) is no yes/no value: null, and said.
+            if f.ty == FieldType::Boolean && coerced.is_null() && !value.asks_null() {
+                losses.push((
+                    f.name.clone(),
+                    "{layer}, field '{field}', row {row}: 1 attribute value was written as null because it isn't a yes/no value",
+                ));
+            }
+            Ok(coerced)
         })
         .collect();
-    l.dataset.push(Some(g), attrs);
+    l.dataset.push(Some(g), attrs?);
     l.touch_geometry();
     let row = l.dataset.features.len() - 1;
     l.selection = vec![row];
     super::design::apply(s, id, vec![super::design::Change { before: None, row: Some(row) }])?;
+    for (field, key) in losses {
+        s.notify_text(
+            crate::notice_text::NoticeText::format(
+                key,
+                [("layer", layer.clone().into()), ("field", field.into()), ("row", row.saturating_add(1).to_string().into())],
+            ),
+            false,
+        );
+    }
     Ok(json!({"row": row}))
+}
+
+/// The `geometry` parameter as a geometry. A GeometryCollection of more or fewer than one member
+/// (at any depth) is refused as such, not as something that isn't GeoJSON.
+pub(crate) fn geometry_param(p: &Json) -> Result<Geometry, String> {
+    let given = p.get("geometry");
+    if let Some(g) = given.and_then(rustgis_data::io::geometry_from_geojson) {
+        return Ok(g);
+    }
+    let mut g = given;
+    // Bounded by the JSON's own depth: each round goes one level in.
+    while let Some(c) = g.filter(|g| g.get("type").and_then(Json::as_str) == Some("GeometryCollection")) {
+        match c.get("geometries").and_then(Json::as_array).map(Vec::as_slice) {
+            Some([only]) => g = Some(only),
+            Some(_) => return Err("a GeometryCollection must hold exactly one geometry".into()),
+            None => break,
+        }
+    }
+    Err("geometry must be a GeoJSON geometry".into())
 }
 
 /// Rejects empty or degenerate geometry, which would break extents, labels and rendering.
@@ -83,7 +137,7 @@ pub(crate) fn validate(g: &Geometry) -> Result<(), String> {
     }
 }
 
-/// `v` as a value of a `ty` field. A number goes into a number field as it is, not through the
+/// `v` as a value of a `ty` field. A date-time into a date field is the day it shows. A number goes into a number field as it is, not through the
 /// text it shows (which rounds a decimal to six places); a decimal, or text written as one, into a
 /// whole-number field loses its fraction (toward zero); a whole number past 2^53 into a decimal
 /// field is the nearest decimal. Not a number is null. Other values go through their text (a
@@ -97,7 +151,8 @@ pub(crate) fn coerce(v: Value, ty: FieldType) -> Value {
     }
 }
 
-/// What [`coerce_cut`] took from a number to put it in a whole-number field.
+/// What [`coerce_cut`] took from a number to put it in a whole-number field, or from a date-time
+/// to put it in a date field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Cut {
     /// Nothing.
@@ -108,6 +163,8 @@ pub(crate) enum Cut {
     Range,
     /// All of it: not a number (NaN) is null.
     NotANumber,
+    /// A date-time's time of day or zone: a date field keeps its day.
+    Time,
 }
 
 /// How many of a field's results [`coerce_cut`] cut, of each kind, for one notice per kind.
@@ -116,6 +173,7 @@ pub(crate) struct Cuts {
     fractions: usize,
     past: usize,
     not_numbers: usize,
+    times: usize,
 }
 
 impl Cuts {
@@ -125,10 +183,11 @@ impl Cuts {
             Cut::Fraction => self.fractions += 1,
             Cut::Range => self.past += 1,
             Cut::NotANumber => self.not_numbers += 1,
+            Cut::Time => self.times += 1,
         }
     }
 
-    /// The notices for what writing the whole-number field `field` cut, each starting with `by`
+    /// The notices for what writing the whole-number or date field `field` cut, each starting with `by`
     /// (the command or rule that wrote it). Empty when nothing was cut.
     pub(crate) fn notices(&self, by: &str, field: &str) -> Vec<String> {
         let results = |n: usize| if n == 1 { "1 result".to_string() } else { format!("{n} results") };
@@ -144,6 +203,10 @@ impl Cuts {
             let are = if self.not_numbers == 1 { "isn't a number" } else { "aren't numbers" };
             out.push(format!("{by}: '{field}' is null for {} that {are}", results(self.not_numbers)));
         }
+        if self.times > 0 {
+            let their = if self.times == 1 { "its" } else { "their" };
+            out.push(format!("{by}: '{field}' holds dates, so {} kept only {their} day", results(self.times)));
+        }
         out
     }
 }
@@ -151,8 +214,22 @@ impl Cuts {
 /// [`coerce`], with a number past the 64-bit range null, and what it took from a number to put it
 /// in a whole-number field.
 pub(crate) fn coerce_cut(v: Value, ty: FieldType) -> (Value, Cut) {
+    if ty == FieldType::Double && non_finite_input(&v, ty) {
+        return (Value::Null, Cut::NotANumber);
+    }
     let (v, cut, _) = convert(v, ty);
     (v, cut)
+}
+
+/// Text and native numbers that cannot be retained as numeric field values.
+/// Ordinary invalid words keep the existing parser's behavior; non-finite numbers are explicit.
+pub(crate) fn non_finite_input(value: &Value, ty: FieldType) -> bool {
+    ty.is_numeric()
+        && match value {
+            Value::Float(f) => !f.is_finite(),
+            Value::Text(text) => text.trim().parse::<f64>().is_ok_and(|f| !f.is_finite()),
+            _ => false,
+        }
 }
 
 /// [`coerce_cut`], and for a number past the range the decimal it was read as.
@@ -163,6 +240,12 @@ fn convert(v: Value, ty: FieldType) -> (Value, Cut, Option<f64>) {
         (Value::Float(f), FieldType::Integer) => whole(f),
         (Value::Float(f), FieldType::Double) => (Value::Float(f), Cut::None, None),
         (Value::Int(i), FieldType::Double) => (Value::Float(i as f64), Cut::None, None),
+        // A date-time into a date field is the day it shows, and said so when it had a time or zone.
+        (Value::DateTime(t), FieldType::Date) => (Value::Date(t.date()), if t.is_date() { Cut::None } else { Cut::Time }, None),
+        // A date is no number or yes/no: null (and said by the caller), not read as false.
+        (Value::Date(_) | Value::DateTime(_), FieldType::Integer | FieldType::Double | FieldType::Boolean) => {
+            (Value::Null, Cut::None, None)
+        }
         // Text written as a whole number, or as a decimal without an exponent, is read from its
         // digits; any other number written as text, as a decimal.
         (Value::Text(t), FieldType::Integer) => match t.trim().parse::<i64>() {
@@ -176,7 +259,8 @@ fn convert(v: Value, ty: FieldType) -> (Value, Cut, Option<f64>) {
                 _ => (Value::parse(&t, ty), Cut::None, None),
             },
         },
-        (Value::Text(t), _) => (Value::parse(&t, ty), Cut::None, None),
+        // Uncounted coercion retains source numbers until output can explain any loss.
+        (Value::Text(t), _) => (Value::parse_source(&t, ty), Cut::None, None),
         (other, _) => (Value::parse(&other.to_string(), ty), Cut::None, None),
     }
 }
@@ -246,6 +330,23 @@ fn field_index(s: &Session, id: u32, name: &str) -> Result<usize, String> {
     s.map().layer(id).and_then(|l| l.dataset.field_index(name)).ok_or_else(|| format!("no field named '{name}'"))
 }
 
+/// A numeric conversion's loss, shared by edits and feature creation. Null entered explicitly is quiet.
+fn numeric_loss(input: &Value, v: &Value, ty: FieldType) -> Option<&'static str> {
+    if ty.is_numeric() && v.is_null() && !input.asks_null() {
+        Some("{layer}, field '{field}', row {row}: 1 attribute value was written as null because it isn't a number")
+    } else if ty == FieldType::Integer {
+        let (exact, cut) = coerce_cut(input.clone(), ty);
+        match cut {
+            Cut::Fraction => Some("{layer}, field '{field}', row {row}: 1 attribute value lost its fraction"),
+            Cut::Range => Some("{layer}, field '{field}', row {row}: 1 attribute value was clamped to the 64-bit integer range"),
+            Cut::None if &exact != v => Some("{layer}, field '{field}', row {row}: 1 attribute value lost integer precision"),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
 fn set_value(s: &mut Session, p: &Json) -> CmdResult {
     let id = s.layer_id(p)?;
     let row = p.get("row").and_then(Json::as_u64).ok_or("row is required")? as usize;
@@ -253,18 +354,48 @@ fn set_value(s: &mut Session, p: &Json) -> CmdResult {
     let l = s.map_mut().layer_mut(id).ok_or("no layer")?;
     let ty = l.dataset.fields.get(fi).map(|f| f.ty).ok_or("no field")?;
     let raw = p.get("value").cloned().unwrap_or(Json::Null);
+    let input = Value::from_json(&raw);
+    let field = l.dataset.fields.get(fi).map(|f| f.name.clone()).ok_or("no field")?;
+    let layer = l.dataset.name.clone();
     let v = match raw {
-        Json::String(t) => Value::parse(&t, ty),
-        other => coerce(Value::from_json(&other), ty),
+        // A number that isn't finite (NaN, infinity) is no value a number field holds, nor one a
+        // project can save: refused, as the attribute table refuses it.
+        Json::String(t) if ty.is_numeric() && t.trim().parse::<f64>().is_ok_and(|f| !f.is_finite()) => {
+            return Err(format!("'{}' isn't a finite number, which a {} field holds", t.trim(), ty.label()));
+        }
+        // Text a date field can't hold (`soon`) is refused, not stored as null.
+        Json::String(t) => match Value::parse(&t, ty) {
+            Value::Null if ty.is_temporal() && !t.trim().is_empty() && !t.trim().eq_ignore_ascii_case("<null>") => {
+                return Err(format!("'{}' isn't a {} value", t.trim(), ty.label()));
+            }
+            v => v,
+        },
+        // So is any other value a date field can't hold (`20260305`).
+        other => match coerce(Value::from_json(&other), ty) {
+            Value::Null if ty.is_temporal() && !other.is_null() => return Err(format!("'{other}' isn't a {} value", ty.label())),
+            v => v,
+        },
     };
+    // Keep the existing finite coercion, but say when it discards information.
+    let loss = numeric_loss(&input, &v, ty);
     let f = l.dataset.features.get_mut(row).ok_or("no such row")?;
     let before = f.clone();
     let cell = f.attrs.get_mut(fi).ok_or("no such row")?;
     *cell = v;
     super::design::apply(s, id, vec![super::design::Change { before: Some(before), row: Some(row) }])?;
+    if let Some(key) = loss {
+        s.notify_text(
+            crate::notice_text::NoticeText::format(
+                key,
+                [("layer", layer.into()), ("field", field.into()), ("row", row.saturating_add(1).to_string().into())],
+            ),
+            false,
+        );
+    }
     Ok(Json::Null)
 }
 
+/// Adds an empty field of a type: long, double, text, boolean, date or datetime.
 fn add_field(s: &mut Session, p: &Json) -> CmdResult {
     let id = s.layer_id(p)?;
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).ok_or("name is required")?;
@@ -276,6 +407,8 @@ fn add_field(s: &mut Session, p: &Json) -> CmdResult {
         "double" | "float" | "number" => FieldType::Double,
         "text" | "string" => FieldType::Text,
         "boolean" | "bool" => FieldType::Boolean,
+        "date" => FieldType::Date,
+        "datetime" | "date-time" | "timestamp" => FieldType::DateTime,
         other => return Err(format!("unknown field type '{other}'")),
     };
     let l = s.map_mut().layer_mut(id).ok_or("no layer")?;
@@ -286,11 +419,131 @@ fn add_field(s: &mut Session, p: &Json) -> CmdResult {
     Ok(Json::Null)
 }
 
+/// `edit.convertField`: makes a text field a date or date-time field, reading each value as ISO
+/// 8601 (`2026-03-05`; `2026-03-05T14:30:00+02:00`, or with a space for the `T`). A date field
+/// also takes a date-time at midnight without a zone. Values that aren't dates become null, said
+/// with their count and the first few, and undo brings them back. Refused while a data design
+/// (domain, subtype, contingent values) names the field or a definition query or display filter
+/// would stop reading with it. It runs on the UI thread: it is one parse of the text of a layer
+/// held in memory (a layer read in place is refused, as every `edit.*` command is), measured at
+/// about 60 ms for a million values, with nothing to read or wait for that progress could show.
+fn convert_field(s: &mut Session, p: &Json) -> CmdResult {
+    let id = s.layer_id(p)?;
+    let fi = field_index(s, id, ps(p, "field").ok_or("field is required")?)?;
+    let ty = match ps(p, "type").ok_or("type is required")?.to_ascii_lowercase().as_str() {
+        "date" => FieldType::Date,
+        "datetime" | "date-time" | "timestamp" => FieldType::DateTime,
+        other => return Err(format!("'{other}' isn't a type a field converts to: date or datetime")),
+    };
+    let l = s.map_mut().layer_mut(id).ok_or("no layer")?;
+    let field = l.dataset.fields.get(fi).ok_or("no such field")?;
+    let name = field.name.clone();
+    if field.ty != FieldType::Text {
+        return Err(format!("'{name}' is a {} field: only a text field converts to dates", field.ty.label()));
+    }
+    let d = &l.design;
+    let designed = d.domains.iter().any(|x| x.field.eq_ignore_ascii_case(&name))
+        || d.subtypes.as_ref().is_some_and(|st| st.field.eq_ignore_ascii_case(&name))
+        || d.contingent.iter().any(|c| c.fields.iter().any(|f| f.eq_ignore_ascii_case(&name)));
+    if designed {
+        return Err(format!("'{name}' has a domain, subtypes or contingent values, which hold text: remove them first"));
+    }
+    // Saving edits writes values, not column types: the table's column would stay text.
+    if l.gpkg.is_some() {
+        return Err(format!(
+            "'{name}' is a text column of the GeoPackage table being edited, and saving can't change a column's type: export the layer, or convert it in the file"
+        ));
+    }
+    if l.postgis.is_some() {
+        return Err(format!(
+            "'{name}' is a text column of the PostGIS table being edited, and saving can't change a column's type: change it in the database"
+        ));
+    }
+    // A filter that compares the text with a number stops reading once it's a date.
+    let mut schema = rustgis_data::Dataset::new(l.dataset.name.clone(), l.dataset.geometry_type, l.dataset.fields.clone());
+    if let Some(f) = schema.fields.get_mut(fi) {
+        f.ty = ty;
+    }
+    let reads =
+        |q: &str| rustgis_data::query::parse_fields(q, &l.dataset).is_err() || rustgis_data::query::parse_fields(q, &schema).is_ok();
+    if let Some(q) = l.definition_query.as_deref().filter(|q| !reads(q)) {
+        return Err(format!("the definition query ({q}) wouldn't read '{name}' as dates: change or clear it first"));
+    }
+    if let Some(f) = l.display_filters.iter().find(|f| !reads(&f.where_)) {
+        return Err(format!("display filter '{}' wouldn't read '{name}' as dates: change or remove it first", f.name));
+    }
+    // Classes or labels by an expression would stop drawing by it, as Delete Field says.
+    if l.renderer.expression().is_some_and(|e| !reads(e)) {
+        return Err(format!("the symbology's expression wouldn't read '{name}' as dates: change it first"));
+    }
+    for c in std::iter::once(&l.labels.default).chain(&l.labels.classes) {
+        if c.by.text.as_deref().is_some_and(|t| !reads(t)) {
+            return Err(format!("the labels' text expression wouldn't read '{name}' as dates: change it first"));
+        }
+        if c.where_.as_deref().is_some_and(|w| !reads(w)) {
+            return Err(format!("label class '{}' wouldn't read '{name}' as dates: change its clause first", c.name));
+        }
+    }
+    // An attribute rule that stops reading would stop checking or calculating, without a word.
+    let rule_reads = |r: &rustgis_map::design::AttributeRule, ds: &rustgis_data::Dataset| match r.kind {
+        rustgis_map::design::RuleKind::Calculation => Calculation::parse(&r.expression, ds).is_ok(),
+        rustgis_map::design::RuleKind::Constraint => rustgis_data::query::parse_fields(&r.expression, ds).is_ok(),
+    };
+    if let Some(r) = l.design.rules.iter().find(|r| rule_reads(r, &l.dataset) && !rule_reads(r, &schema)) {
+        return Err(format!("attribute rule '{}' wouldn't read '{name}' as dates: change or remove it first", r.name));
+    }
+    let (mut converted, mut nulled, mut examples) = (0usize, 0usize, Vec::new());
+    for f in &mut l.dataset.features {
+        let Some(v) = f.attrs.get_mut(fi) else { continue };
+        let date = match &*v {
+            v if v.asks_null() => Value::Null,
+            Value::Text(t) => Value::parse_stored(t, ty),
+            other => Value::parse(&other.to_string(), ty),
+        };
+        if date.is_null() && !v.asks_null() {
+            nulled += 1;
+            if examples.len() < 3 {
+                let text: String = v.to_string().chars().map(rustgis_data::io::dbf_notice_char).collect();
+                let short: String = text.chars().take(40).collect();
+                examples.push(if short.len() < text.len() { format!("'{short}…'") } else { format!("'{short}'") });
+            }
+        }
+        converted += usize::from(!date.is_null());
+        *v = date;
+    }
+    if let Some(f) = l.dataset.fields.get_mut(fi) {
+        f.ty = ty;
+    }
+    let (kind, one) = if ty == FieldType::Date { ("dates", "a date") } else { ("date-times", "a date-time") };
+    if nulled > 0 {
+        let rows = if nulled == 1 { "1 row".to_string() } else { format!("{nulled} rows") };
+        s.notify(
+            format!("Convert Field: '{name}' holds {kind} now, and is null in {rows} whose text isn't {one}: {}", examples.join(", ")),
+            false,
+        );
+    }
+    Ok(json!({"converted": converted, "null": nulled}))
+}
+
+/// `edit.deleteField`: removes a field and every reference to it (symbology, labels, the data
+/// design), or refuses while the definition query or a display filter reads it.
 fn delete_field(s: &mut Session, p: &Json) -> CmdResult {
     let id = s.layer_id(p)?;
     let fi = field_index(s, id, ps(p, "field").ok_or("field is required")?)?;
     let l = s.map_mut().layer_mut(id).ok_or("no layer")?;
-    let read_before = l.renderer.expression().is_some_and(|e| rustgis_data::query::parse(e, &l.dataset).is_ok());
+    // A definition query or display filter that reads the field would stop reading without it,
+    // and the layer would then draw and export the rows it leaves out: refused, naming it. What a
+    // filter reads is the field its parse resolves to, so a name matching another but for case,
+    // or a field named like a keyword, is judged by the field it actually reads.
+    let name = l.dataset.fields.get(fi).map(|f| f.name.clone()).unwrap_or_default();
+    let needs = |q: &str| rustgis_data::query::parse_fields(q, &l.dataset).is_ok_and(|e| rustgis_data::query::reads_field(&e, fi));
+    if let Some(q) = l.definition_query.as_deref().filter(|q| needs(q)) {
+        return Err(format!("the definition query ({q}) uses '{name}': change or clear it first"));
+    }
+    if let Some(f) = l.display_filters.iter().find(|f| needs(&f.where_)) {
+        return Err(format!("display filter '{}' uses '{name}': change or remove it first", f.name));
+    }
+    let read_before = l.renderer.expression().is_some_and(|e| rustgis_data::query::parse_fields(e, &l.dataset).is_ok());
     let removed = l.dataset.fields.remove(fi).name;
     for f in &mut l.dataset.features {
         if fi < f.attrs.len() {
@@ -299,7 +552,7 @@ fn delete_field(s: &mut Session, p: &Json) -> CmdResult {
     }
     // Nothing may keep referring to the deleted field.
     // (Classes by an expression that read until now go the same way.)
-    let unread = read_before && l.renderer.expression().is_some_and(|e| rustgis_data::query::parse(e, &l.dataset).is_err());
+    let unread = read_before && l.renderer.expression().is_some_and(|e| rustgis_data::query::parse_fields(e, &l.dataset).is_err());
     let mut single = None;
     if unread || l.renderer.field().is_some_and(|f| f.eq_ignore_ascii_case(&removed)) {
         l.renderer = rustgis_map::Renderer::Single(l.renderer.base_symbol());
@@ -311,7 +564,7 @@ fn delete_field(s: &mut Session, p: &Json) -> CmdResult {
     // field instead. A class clause naming it no longer reads, and takes no features, which go on
     // to the next class: it is kept to edit, not dropped with its text symbol.
     if l.labels.default.field.eq_ignore_ascii_case(&removed) {
-        let by_text = l.labels.default.by.text.as_deref().is_some_and(|t| rustgis_data::query::parse(t, &l.dataset).is_ok());
+        let by_text = l.labels.default.by.text.as_deref().is_some_and(|t| rustgis_data::query::parse_fields(t, &l.dataset).is_ok());
         if by_text {
             l.labels.default.field.clear();
         } else {
@@ -319,11 +572,8 @@ fn delete_field(s: &mut Session, p: &Json) -> CmdResult {
         }
     }
     l.labels.repoint_missing_fields(&l.dataset);
-    if let Some(q) = &l.definition_query
-        && rustgis_data::query::parse(q, &l.dataset).is_err()
-    {
-        l.definition_query = None;
-    }
+    // A definition query that reads the field was refused above; one that already didn't read is
+    // kept as it is, so its text isn't lost.
     // Nor its data design: domains, subtypes, contingent values, and rules that used it.
     let d = &mut l.design;
     d.domains.retain(|x| !x.field.eq_ignore_ascii_case(&removed));
@@ -336,13 +586,13 @@ fn delete_field(s: &mut Session, p: &Json) -> CmdResult {
         }
     }
     d.contingent.retain(|c| !c.fields.iter().any(|f| f.eq_ignore_ascii_case(&removed)));
-    let ds = &l.dataset;
+    let ds = rustgis_data::Dataset::new(l.dataset.name.clone(), l.dataset.geometry_type, l.dataset.fields.clone());
     let before = d.rules.len();
     d.rules.retain(|r| {
         !r.field.eq_ignore_ascii_case(&removed)
             && match r.kind {
-                rustgis_map::design::RuleKind::Calculation => Calculation::parse(&r.expression, ds).is_ok(),
-                rustgis_map::design::RuleKind::Constraint => rustgis_data::query::parse(&r.expression, ds).is_ok(),
+                rustgis_map::design::RuleKind::Calculation => Calculation::parse(&r.expression, &ds).is_ok(),
+                rustgis_map::design::RuleKind::Constraint => rustgis_data::query::parse_fields(&r.expression, &ds).is_ok(),
             }
     });
     let removed_rules = before - d.rules.len();
@@ -387,8 +637,14 @@ fn calculate_field(s: &mut Session, p: &Json) -> CmdResult {
     // number), said even when a calculation rule writes the field afterwards: the rule may read
     // the cut value, and says what it cuts itself.
     let mut cuts = Cuts::default();
+    // Other results the field can't hold (text that isn't a number or a date) are null too, and
+    // counted.
+    let mut unread = 0usize;
     for r in &rows {
-        let (v, cut) = coerce_cut(calc.eval(&l.dataset, *r), ty);
+        let v = calc.eval(&l.dataset, *r);
+        let asked_null = v.asks_null();
+        let (v, cut) = coerce_cut(v, ty);
+        unread += usize::from(!asked_null && v.is_null() && cut == Cut::None);
         cuts.add(cut);
         out.push((*r, v));
     }
@@ -406,6 +662,10 @@ fn calculate_field(s: &mut Session, p: &Json) -> CmdResult {
     let field = s.map().layer(id).and_then(|l| l.dataset.fields.get(fi)).map(|f| f.name.clone()).unwrap_or_default();
     for notice in cuts.notices("Calculate Field", &field) {
         s.notify(notice, false);
+    }
+    if unread > 0 {
+        let rows = if unread == 1 { "1 row" } else { &format!("{unread} rows") };
+        s.notify(format!("Calculate Field: '{field}' is null in {rows}, whose result isn't a {} value", ty.label()), false);
     }
     Ok(json!({"rows": rows.len()}))
 }
@@ -427,16 +687,34 @@ impl Calculation {
     pub(crate) fn parse(expr: &str, ds: &rustgis_data::Dataset) -> Result<Calculation, String> {
         // A field named like a literal was read as the field (`null + 1`), so what the earlier
         // calculator reads with such a field keeps its meaning (quoted text needn't).
+        // A date field in arithmetic, which the language refuses, isn't the earlier calculator's
+        // to do either.
+        let date_field = |c: &Calc| {
+            c.op.as_ref()?;
+            [Some(&c.a), c.b.as_ref()].into_iter().flatten().find_map(|t| match t {
+                Term::Field(i) => ds.fields.get(*i).filter(|f| f.ty.is_temporal()),
+                _ => None,
+            })
+        };
         let named_like_a_literal: Vec<usize> = ["true", "false", "null"].iter().filter_map(|k| ds.field_index(k)).collect();
         if !named_like_a_literal.is_empty()
             && let Ok(c) = Calc::parse(expr, ds)
             && [Some(&c.a), c.b.as_ref()].into_iter().flatten().any(|t| matches!(t, Term::Field(i) if named_like_a_literal.contains(i)))
         {
+            // The language would read the name as its literal, so it is refused here, as the
+            // language refuses arithmetic on any other date field.
+            if let Some(f) = date_field(&c) {
+                return Err(format!("'{}' holds dates, and arithmetic on dates isn't supported yet", f.name));
+            }
             return Ok(Calculation::Calc(c));
         }
         match rustgis_data::query::parse(expr, ds) {
             Ok(e) => Ok(Calculation::Expr(e)),
-            Err(err) => Calc::parse(expr, ds).map(Calculation::Calc).map_err(|_| err),
+            Err(err) => match Calc::parse(expr, ds) {
+                Ok(c) if date_field(&c).is_some() => Err(err),
+                Ok(c) => Ok(Calculation::Calc(c)),
+                Err(_) => Err(err),
+            },
         }
     }
 

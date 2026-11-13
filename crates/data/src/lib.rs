@@ -4,8 +4,12 @@
 //! bad features are skipped and counted in [`ReadReport`].
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod address;
+pub mod citygml;
 pub mod cityjson;
+mod citymodel;
 pub mod color;
+pub mod date;
 mod dbf;
 pub mod diagnostics;
 pub mod dirs;
@@ -42,6 +46,8 @@ pub mod sheets;
 pub mod source;
 pub mod source_layers;
 pub mod sqlite;
+pub mod sync;
+pub mod threads;
 pub mod time;
 pub mod topojson;
 pub mod value;
@@ -49,7 +55,8 @@ pub mod wkb;
 pub mod xml;
 pub mod zip;
 
-pub use geometry::{Geometry, GeometryType, Measure, VertexId};
+pub use date::{Date, DateTime};
+pub use geometry::{Geometry, GeometryType, Measure, VertexId, ambiguous_area_message};
 pub use rustgis_geom::{Coord, Extent};
 pub use value::{Field, FieldType, ImageValue, Value};
 
@@ -58,7 +65,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, thiserror::Error)]
 pub enum DataError {
     #[error("i/o: {0}")]
-    Io(std::io::Error),
+    Io(#[source] std::io::Error),
     #[error("{0}")]
     Format(String),
     /// The server refused the login: no password, or a wrong one.
@@ -327,6 +334,18 @@ pub struct Dataset {
     pub windowed: bool,
 }
 
+impl Dataset {
+    /// How many of its values a saved project holds as null, not as they are: numbers that aren't
+    /// finite (NaN, infinity), which JSON can't write ([`Value`]'s `Serialize`). None for a window
+    /// onto a source, whose rows aren't saved.
+    pub fn unsaved_numbers(&self) -> usize {
+        if self.windowed {
+            return 0;
+        }
+        self.features.iter().flat_map(|f| &f.attrs).filter(|v| v.is_non_finite()).count()
+    }
+}
+
 impl Serialize for Dataset {
     /// Saves CRS recovery and dropped Z/M state with the dataset, but omits disposable streamed rows.
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
@@ -362,6 +381,13 @@ impl Serialize for Dataset {
 pub struct ReadReport {
     pub skipped: usize,
     pub messages: Vec<String>,
+    /// The files read and the rows read from them, when the read recorded them
+    /// ([`sync::FileSync::around`]): what a layer kept in the project compares with its source
+    /// before writing edits back.
+    pub synced: Option<sync::Synced>,
+    /// What a read of a source says of values in date fields that weren't dates
+    /// ([`source::unread_dates_note`]), also in `messages`: for a caller that says only this.
+    pub unread_dates: Option<String>,
 }
 
 /// What a read says when it drops Z or M values (see [`Dataset::zm_dropped`]): from `features` of
@@ -403,12 +429,18 @@ fn name_list(names: &[&str]) -> String {
     format!("{shown}{more}")
 }
 
-/// What an export of `layers` (each with its whole extent, longitude/latitude, which for a layer
-/// read in place is its source's) written in `crs` says its geometry lacks, one notice per kind:
-/// Z or M values dropped on import ([`zm_export_note`]); positions only approximate, as their
-/// system had no shift to WGS 84 ([`raster::Crs::lacks_datum_shift`]; none when written back in
-/// it); and coordinates that aren't longitude/latitude (beyond ±180.5° or ±90.5°, as the
-/// readers check), which an export writes as if they were. `target` names what was written.
+/// What an export of `layers` written in `crs` says its geometry lacks, one notice per kind. Each
+/// layer comes with its whole extent in longitude/latitude (for a layer read in place, its
+/// source's). `target` names what was written. The notices:
+/// - Z or M values dropped on import ([`zm_export_note`]).
+/// - Positions only approximate, because their system had no shift to WGS 84
+///   ([`raster::Crs::lacks_datum_shift`]). Nothing is said when they are written back in it.
+/// - Another body's longitude/latitude written as the Earth's, or its system written without the
+///   body's name ([`raster::Crs::is_planetary`]).
+/// - Coordinates that aren't longitude/latitude (beyond ±180.5° or ±90.5°, as the readers check),
+///   which an export writes as if they were.
+/// - Latitudes beyond 85.05° north or south, which an export in Web Mercator writes at 85.05°,
+///   where it ends ([`rustgis_geom::lonlat_to_merc`]).
 pub fn export_notes<'a>(
     layers: impl IntoIterator<Item = (&'a Dataset, rustgis_geom::Extent)>,
     target: &str,
@@ -461,6 +493,36 @@ pub fn export_notes<'a>(
             layer_list(&many.iter().map(|ds| ds.name.as_str()).collect::<Vec<_>>())
         )),
     }
+    // Another body's layers. Written in an Earth system, their longitude/latitude become the
+    // Earth's. Written in another body's system, its WKT gives the datum only by the ellipsoid's
+    // axes (`raster::wkt::to_wkt`).
+    let other_bodies: Vec<&Dataset> = layers.iter().map(|(ds, _)| *ds).filter(|ds| ds.crs.is_some_and(raster::Crs::is_planetary)).collect();
+    let (in_planetary_system, as_earth) = if crs.is_planetary() { (other_bodies, Vec::new()) } else { (Vec::new(), other_bodies) };
+    let written = if crs == raster::Crs::LonLat { "WGS 84 (EPSG:4326)".to_string() } else { crs.label() };
+    match as_earth.as_slice() {
+        [] => {}
+        [one] => notes.push(format!(
+            "{target}: {} is on another body than the Earth ({}), but its longitude/latitude are written as {written}",
+            one.name,
+            one.crs.map(raster::Crs::label).unwrap_or_default()
+        )),
+        many => notes.push(format!(
+            "{target}: {} are on other bodies than the Earth, but their longitude/latitude are written as {written}",
+            layer_list(&many.iter().map(|ds| ds.name.as_str()).collect::<Vec<_>>())
+        )),
+    }
+    match in_planetary_system.as_slice() {
+        [] => {}
+        [one] => notes.push(format!(
+            "{target}: the coordinate system of {} ({}) is another body's, and the file gives its datum only by the ellipsoid's axes, without the body's or the datum's name",
+            one.name,
+            one.crs.map(raster::Crs::label).unwrap_or_default()
+        )),
+        many => notes.push(format!(
+            "{target}: the coordinate systems of {} are other bodies', and the file gives their datums only by the ellipsoids' axes, without the bodies' or the datums' names",
+            layer_list(&many.iter().map(|ds| ds.name.as_str()).collect::<Vec<_>>())
+        )),
+    }
     let outside = |e: &rustgis_geom::Extent| !e.is_empty() && (e.min_x < -180.5 || e.max_x > 180.5 || e.min_y < -90.5 || e.max_y > 90.5);
     let names: Vec<&str> = layers.iter().filter(|(_, e)| outside(e)).map(|(ds, _)| ds.name.as_str()).collect();
     match names.as_slice() {
@@ -473,7 +535,95 @@ pub fn export_notes<'a>(
             layer_list(&names)
         )),
     }
+    if crs == raster::Crs::WebMercator {
+        notes.extend(web_mercator_note(&layers, target));
+    }
     notes
+}
+
+/// What an export in Web Mercator says of the layers it writes past 85.05° north or south, where
+/// Web Mercator ends: [`rustgis_geom::lonlat_to_merc`] writes a latitude beyond (an infinite one
+/// too) at 85.05°. The vertices moved are counted from a layer's features, those the file holds:
+/// a Shapefile target (`.shp`, or zipped to `.zip`, as the exports name it) holds only geometry of
+/// the layer's kind, and of it only parts it can draw ([`io::shapefile_vertices`]). A missing
+/// coordinate, or an infinite longitude, isn't counted: it can't be projected, so the export
+/// refuses it. A layer whose features are only a window onto its source (`windowed`) has its
+/// extent tell instead, without a count; as a source can declare a wider extent than its data's,
+/// that notice says only that the extent reaches beyond. A streamed layer written a chunk at a
+/// time comes with no features, and its export counts them as it writes them
+/// ([`export::Exported::beyond_web_mercator`], said by [`web_mercator_moved_note`]). The count is
+/// one pass over the coordinates, without a Cancel point, as the other notices' passes are.
+fn web_mercator_note(layers: &[(&Dataset, rustgis_geom::Extent)], target: &str) -> Option<String> {
+    use rustgis_geom::MAX_LAT;
+    let shapefile = std::path::Path::new(target)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("shp") || e.eq_ignore_ascii_case("zip"));
+    let beyond: Vec<(&str, Option<usize>)> = layers
+        .iter()
+        .filter_map(|(ds, e)| {
+            let mut moved = 0usize;
+            if !ds.windowed {
+                let mut count = |c: Coord| moved += usize::from(c.x.is_finite() && c.y.abs() > MAX_LAT);
+                for g in ds.features.iter().filter_map(|f| f.geometry.as_ref()) {
+                    if shapefile {
+                        crate::io::shapefile_vertices(g, ds.geometry_type, &mut count);
+                    } else {
+                        g.for_each_coord(&mut count);
+                    }
+                }
+            }
+            let past = ds.windowed && !e.is_empty() && (e.min_y < -MAX_LAT || e.max_y > MAX_LAT);
+            if moved > 0 { Some((ds.name.as_str(), Some(moved))) } else { past.then_some((ds.name.as_str(), None)) }
+        })
+        .collect();
+    web_mercator_said(&beyond, target)
+}
+
+/// What an export in Web Mercator written a chunk at a time says of the `moved` vertices of
+/// `layer` it wrote at 85.05° north or south, where Web Mercator ends, as it counted them
+/// ([`export::Exported::beyond_web_mercator`]): as [`export_notes`] says it of a layer it has
+/// whole. `None` for none.
+pub fn web_mercator_moved_note(target: &str, layer: &str, moved: usize) -> Option<String> {
+    if moved == 0 {
+        return None;
+    }
+    web_mercator_said(&[(layer, Some(moved))], target)
+}
+
+/// The 85.05° notice for the layers `beyond` (each with its count of vertices moved, or `None`
+/// when only its extent tells), or `None` for none. Layers counted and layers told by their
+/// extent are said in one notice, each in its own clause, so neither hides the other.
+fn web_mercator_said(beyond: &[(&str, Option<usize>)], target: &str) -> Option<String> {
+    let counted: Vec<&str> = beyond.iter().filter(|(_, n)| n.is_some()).map(|(name, _)| *name).collect();
+    let total: usize = beyond.iter().filter_map(|(_, n)| *n).sum();
+    let extents: Vec<&str> = beyond.iter().filter(|(_, n)| n.is_none()).map(|(name, _)| *name).collect();
+    let mut said = Vec::new();
+    match (counted.as_slice(), total) {
+        ([], _) => {}
+        (_, 1) => said.push(format!("1 vertex of {} is beyond 85.05° north or south, and written at 85.05°", counted.join(", "))),
+        ([one], n) => said.push(format!("{n} vertices of {one} are beyond 85.05° north or south, and written at 85.05°")),
+        (_, n) => said.push(format!("{n} vertices of {} are beyond 85.05° north or south, and written at 85.05°", layer_list(&counted))),
+    }
+    match extents.as_slice() {
+        [] => {}
+        [one] => said.push(format!("the extent of {one} reaches beyond 85.05° north or south, and what lies beyond is written at 85.05°")),
+        _ => said.push(format!(
+            "the extents of {} reach beyond 85.05° north or south, and what lies beyond is written at 85.05°",
+            layer_list(&extents)
+        )),
+    }
+    if said.is_empty() {
+        return None;
+    }
+    Some(format!("{target}: {}, where Web Mercator ends", said.join("; ")))
+}
+
+/// Why exporting `ds` in `crs` would write other data than the layer's: a layer on another body
+/// projected onto another ellipsoid ([`raster::planetary::export_error`]). `None` when the export
+/// writes its numbers, which [`export_notes`] says when they go under another system's name.
+pub fn export_error(ds: &Dataset, crs: raster::Crs) -> Option<String> {
+    ds.crs.and_then(|from| raster::planetary::export_error(from, crs)).map(|e| format!("{}: {e}", ds.name))
 }
 
 impl Dataset {
@@ -646,6 +796,13 @@ mod tests {
         assert!(out.without_image_fields().is_none());
         let notes = export_notes([(&d, d.extent())], "out.gpkg", crate::raster::Crs::LonLat);
         assert_eq!(notes, ["out.gpkg: photos: its 1 image field (photo) weren't written; the images stay in the source"]);
+    }
+
+    #[test]
+    fn an_io_error_keeps_its_source() {
+        let e = DataError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
+        let source = std::error::Error::source(&e).map(ToString::to_string);
+        assert_eq!(source.as_deref(), Some("gone"));
     }
 
     #[test]

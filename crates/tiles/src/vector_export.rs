@@ -168,7 +168,8 @@ pub fn export(dataset: &Dataset, rows: &[usize], min_zoom: u8, max_zoom: u8, sou
         .map(|f| {
             let ty = match f.ty {
                 FieldType::Integer | FieldType::Double => "Number",
-                FieldType::Text => "String",
+                // Vector tiles have no dates: they are ISO text.
+                FieldType::Text | FieldType::Date | FieldType::DateTime => "String",
                 FieldType::Boolean => "Boolean",
                 // Vector tiles carry text and numbers only: image fields are left out.
                 FieldType::Image => "String",
@@ -323,6 +324,7 @@ fn properties(ds: &Dataset, attrs: &[Value]) -> Result<Vec<(String, mvt::Value)>
             Value::Bool(b) => mvt::Value::Bool(*b),
             // No binary attributes in a vector tile: the image stays in the source.
             Value::Image(_) => continue,
+            Value::Date(_) | Value::DateTime(_) => mvt::Value::String(value.to_string()),
         };
         out.push((field.name.clone(), value));
     }

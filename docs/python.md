@@ -139,6 +139,15 @@ The project, with the data that travels with it, goes to that app through the br
 (`postMessage`); nothing goes to a server. The app runs in your browser, so with the default
 address your data stays on your machine. Point `url=` only at a copy of the app you trust.
 
+The widget receives public addresses and cleaned executable parameters. Recognized credentials
+in supported fields are removed, so protected layers can remain empty there; a warning counts
+affected layer addresses. User data, foreign notebook source and opaque parameters are kept
+unchanged and may contain credentials: review them before sharing the project with a widget.
+When the widget sends a project back, Python can retain credentials only for
+unchanged, uniquely matched sources from its last exchange that still match its current project.
+Changing or replacing a source can require signing in again in Python. Exchange notices are
+available through `m.notices()` on the `Map` or `MapWidget`.
+
 ## The app in a Qt application
 
 `rustgis.qt.MapWidget` is the same app in a Qt widget, for a desktop tool or a script that opens a
@@ -228,6 +237,10 @@ The GeoLibre and Whitebox tools run as they do in the app, through the `geolibre
 (see [Analysis](user-guide/analysis.md)). `rustgis.load_plugins()`, or
 `Session(plugins=True)`, loads the [plugins](plugins.md) installed for the desktop app.
 
+`Session(threads=4)` sets the most threads one piece of work uses (1 to 1024, never more than the
+cores), for the whole process, every session in it included; `s.run("gp.threads", threads=None)`
+goes back to the default, the cores up to 16 (see [Environments](user-guide/analysis.md#analysis-workflows)).
+
 ### Saved connections and secrets
 
 `rustgis.Session(use_saved_secrets=True)` loads the desktop app's saved connection definitions
@@ -282,20 +295,33 @@ big.to_file("big-cities.gpkg", mode="replaceTable")   # its table named for the 
 
 `add_geojson` also takes any object with `__geo_interface__` (a Shapely geometry, a GeoSeries).
 `add_data`, `add_geojson` and `add_geopandas` return a `Layer` for a single layer, a list for
-multiple layers, or the command result for standalone tables. For example, a CSV without
-geometry is a table. Extra `add_data` keyword arguments go to `layer.addData`, such as `layer=`
-to choose a GeoPackage table, or `x=` and `y=` to choose coordinate columns.
+multiple layers (every feature table of a GeoPackage, or the layers GDAL reads from one file,
+such as points and lines split into a layer each), or the command result when the file adds
+only standalone tables. For example, a CSV without geometry is a table. Standalone tables added
+together with layers are listed in `s.info()["tables"]`; a GeoPackage's attribute-only tables
+are not added when the whole file is. A GeoPackage of more than 32 feature tables adds the
+first 32 (a notice says so); add the other feature tables by name with `layer=`. Extra `add_data` keyword
+arguments go to `layer.addData`, such as `layer=` to choose a GeoPackage table, or `x=` and `y=`
+to choose coordinate columns.
 
 Every format the app reads works here: GeoJSON, CSV, Shapefile, GeoPackage, GeoParquet,
 FlatGeobuf, KML/KMZ, GPX, GeoTIFF and the rest of [Supported Data
-Formats](user-guide/data-formats.md). A large file read in place keeps only the features of the
-last view in memory; run `layer.loadAll` on it before `to_geojson` or `to_geopandas` to get all
-of them.
+Formats](user-guide/data-formats.md). A layer read in place (a large file, a database table)
+keeps only the features of the last view in memory; `to_geojson` and `to_geopandas` read all of
+its features from the source each time they're called (unless asked for the selected features
+only), as Load All Features does, and rows that can't be read are left out and said in
+`s.notices()`. `to_file` can be cheaper for a large layer: to GeoJSON, CSV,
+FlatGeobuf, GeoPackage or GeoParquet it writes a chunk at a time where the source allows;
+otherwise it reads the layer whole too.
 
 Open an existing project with `Session(project="atlas.rgis")` or `s.open("atlas.rgis")`.
-`s.project_json()` returns its JSON text; `s.run("project.openText", text=...)` opens project
-JSON without an intermediate file. `to_png()` returns PNG bytes even when it also writes a
-file; omit the path to keep the image in memory.
+`s.project_json()` returns JSON with the same credential removal as Save, with notices available
+through `s.notices()`. Like Save, this explicit serialization retains a bounded, process-local
+credential-restoration snapshot for reopening its exact text; repeated identical text replaces
+the same snapshot. It refuses unfinished imports instead of writing runtime reservations.
+The widget's private peer exchange uses a separate path that never fills this save cache.
+`s.run("project.openText", text=...)` opens project JSON without an intermediate file. `to_png()`
+returns PNG bytes even when it also writes a file; omit the path to keep the image in memory.
 
 ## From source
 

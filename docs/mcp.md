@@ -130,8 +130,16 @@ Attached calls run on the open app's session through the same tools and refusal 
 private server. `snapshot` additionally supports a real window capture with `mode: "screen"`.
 If the map is not on screen, it falls back to an offscreen render and explains why in `note`.
 The relay holds a screen request until the app has taken the picture, and runs nothing else
-meanwhile. File and network commands need `--yes`, unless **Let your Agents Control RustGIS**
-is ticked.
+meanwhile. Direct `run_command` calls to `map.reloadTiles` and `map.repairTiles` validate local
+PMTiles/MBTiles archives on the desktop's existing background-read worker after admission and,
+when required, approval. Their replies and audit entries wait for the command to actually land;
+later entries in the same JSON-RPC batch and later relay requests wait too. Cancelling, revoking
+the caller or changing the original archive target prevents installation. The original agent
+still owns the resulting undo step. Arbitrary `run` scripts and file-bridge scripts retain their
+existing synchronous execution contract; this does not move their child commands to the worker.
+Notebook cells, task steps and Script pane scripts validate reload and repair inline on the window
+thread, without reload status or cancellation during validation.
+File and network commands need `--yes`, unless **Let your Agents Control RustGIS** is ticked.
 
 Without **Full access**, an attached agent cannot replace the open project:
 `project.new`, `project.open`, `project.openText`, `project.sample` and `project.fromTemplate`
@@ -158,7 +166,11 @@ Passwords, keys and tokens in the arguments, a `run` script's lines included, ar
 they are written. On Linux and macOS the folder and files are readable by you only; on Windows they're protected by
 your user profile's permissions. A batch's calls share the batch's
 `duration_s` and are marked `"batch": true`. An error whose text mentions a credential (a token, a
-password, a bearer…) is logged as withheld rather than risk keeping the credential. Days older than 30 are removed.
+password, a bearer…) is logged as withheld rather than risk keeping the credential. Log days older
+than 30 days are pruned when a logged call creates a new day's file, not by a timer; older files
+can remain while logging is idle. You can remove unwanted day files from this folder yourself.
+Updating does not rewrite old logs. If an older log exposed a credential, rotate it with its
+service before sharing the log.
 
 ### MCP over HTTP
 
@@ -326,7 +338,7 @@ These behavioral tests in `crates/assistant/src/relay.rs` check the requirements
 
 | Tool | What it does |
 | --- | --- |
-| `list_layers` | The whole project in one call: path and unsaved changes, the view (centre, longitude/latitude extent, scale, projection), the active layer, layers in table-of-contents order (group, type, source, extent, feature count, selection, definition query, renderer, labels, fields, visibility), web tile layers, basemap, tables and layouts with their map frames. `name_filter` keeps the layers and tables whose name holds it; `include_fields: false` leaves fields out |
+| `list_layers` | The whole project in one call: path and unsaved changes, the view (centre, longitude/latitude extent, scale, projection), the active layer, layers in table-of-contents order (group, type, source, extent, feature count, selection, definition query, renderer, labels, fields, visibility, transparency), web tile layers, basemap, tables and layouts with their page size in millimetres and their map frames. `name_filter` keeps the layers and tables whose name holds it; `include_fields: false` leaves fields out |
 | `view_map` | The map as a PNG image at the current view; `width` and `height` default to 1024 × 640, each clamped to 64–2048 pixels |
 | `snapshot` | The map as a PNG with JSON metadata: `mode`, `width`, `height`, `extent` (longitude/latitude), `center`, `scale`, `projection`, `render_settled`, `saved` and `note`. `mode: "screen"` captures the RustGIS window through the relay, once the map has finished drawing or after `wait_s` seconds (default 5, clamped to 0–30); `overlays: false` leaves out the map's controls, scale bar, north arrow and sketches. `mode: "render"` draws offscreen at `max_width` (default 1024, clamped to 64–2048 pixels); height follows the view's shape, with each side capped at 2048. It works while the window is hidden. `mode: "auto"` (default) takes the screen when the map is on it. Unavailable screen captures fall back to render. `save_path` also writes the PNG to a file, which needs file access |
 | `search_commands` | Finds RustGIS commands by words: their ids, ribbon locations and parameters |
@@ -372,6 +384,10 @@ protocol.
 
 ### Local-agent approvals
 
+These rules govern requests authenticated with the run's token. Local agent programs run with
+your operating-system account and their own tool permissions; a program allowed to read the main
+relay token can use its native-client access described above.
+
 Local agents launched by the assistant use `Relay::grant_reviewed(auto)`, not an unrestricted
 run grant. With automatic approval off, gated tool calls wait in a RustGIS-side queue scoped to
 that grant and exact message, including all tool calls in a batch. `--yes` and the general relay
@@ -380,6 +396,11 @@ stopping the relay cancels pending work. The approval wait has a separate 15-min
 other clients' reads can still run while it waits. Explicit automatic approval bypasses this
 extra queue for that run, but not the reserved-command refusals. Ordinary MCP clients retain
 the access policy described above.
+
+The displayed batch is frozen with its effective parameters, targets and runtime loads. If
+those change while it waits, RustGIS refuses it and the agent must request it again. Delayed
+downloads, tool results and screenshots retain the original grant, check it before starting
+another stage and before landing, and can be completed only once by their owner.
 
 Stopping the relay through its command or status-bar control also turns off its remembered
 agent-control choice. Copyable setup commands are labelled for POSIX shells or PowerShell and

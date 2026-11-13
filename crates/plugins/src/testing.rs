@@ -21,8 +21,9 @@
 //! - `q` (echo): returns the request itself, so a test sees what the plugin was sent; its
 //!   `panel` (the panel's values) is then the answer's, and is taken in again.
 //!
-//! [`panel_manifest`] declares a panel over `p` and `q`. With a panel, requests carry `panel`
-//! before `params`, so `f` reads them only from plugins without one.
+//! [`panel_manifest`] declares a panel over `p` and `q`, and [`pick_manifest`] one of picks on
+//! the map over `q`. With a panel, requests carry `panel` before `params`, so `f` reads them only
+//! from plugins without one.
 
 use std::io::Write;
 
@@ -160,9 +161,37 @@ pub fn manifest(id: &str, permissions: &[&str]) -> String {
     m.to_string()
 }
 
+/// A test module that makes one fixed host call, independent of the panel request's layout.
+pub fn wasm_with_host_call(request: &serde_json::Value) -> Vec<u8> {
+    let request = request.to_string();
+    let encoded: String = request.bytes().map(|byte| format!("\\{byte:02x}")).collect();
+    let len = request.len();
+    wat::parse_str(format!(
+        r#"
+        (module
+            (import "rustgis" "call" (func $call (param i32 i32) (result i32)))
+            (import "rustgis" "result" (func $result (param i32)))
+            (memory (export "memory") 2)
+            (global $heap (mut i32) (i32.const 4096))
+            (data (i32.const 0) "{encoded}")
+            (func (export "rustgis_alloc") (param $n i32) (result i32)
+                (local $p i32)
+                (local.set $p (global.get $heap))
+                (global.set $heap (i32.add (global.get $heap) (local.get $n)))
+                (local.get $p))
+            (func (export "rustgis_call") (param i32 i32) (result i64)
+                (local $len i32)
+                (local.set $len (call $call (i32.const 0) (i32.const {len})))
+                (call $result (i32.const 8192))
+                (i64.or (i64.shl (i64.const 8192) (i64.const 32)) (i64.extend_i32_u (local.get $len)))))
+    "#
+    ))
+    .unwrap_or_default()
+}
+
 /// A manifest for the test module with a panel like the Historical Imagery plugin's: texts, a
-/// checkbox and a stepped slider running the echo command `q`, buttons, and `p` as its state
-/// command.
+/// checkbox and a stepped slider running the echo command `q`, a range kept by the host, buttons,
+/// and `p` as its state command.
 pub fn panel_manifest(id: &str) -> String {
     let mut m: serde_json::Value = serde_json::from_str(&manifest(id, &[])).unwrap_or_default();
     if let Some(c) = m["commands"].as_array_mut() {
@@ -181,6 +210,7 @@ pub fn panel_manifest(id: &str) -> String {
             {"kind": "text", "id": "selected", "label": "Selected release", "text": "None yet"},
             {"kind": "checkbox", "id": "local", "label": "Only versions with local changes", "command": "q"},
             {"kind": "slider", "id": "release", "label": "Release timeline", "min": 0, "max": 0, "steps": true, "command": "q"},
+            {"kind": "range", "id": "span", "label": "Year span", "min": 0, "max": 10, "default": [2, 8]},
             {"kind": "button", "command": "p-older", "id": "older"},
             {"kind": "button", "command": "q-newer", "id": "newer"},
             {"kind": "button", "command": "h", "id": "hello", "label": "Say Hello"},
@@ -190,6 +220,36 @@ pub fn panel_manifest(id: &str) -> String {
     m["i18n"] =
         serde_json::json!({"de": {"Hello": "Hallo", "Historical Imagery": "Historische Luftbilder", "Release timeline": "Zeitleiste"}});
     m.to_string()
+}
+
+/// A manifest for the test module with a panel of picks on the map, as a classification plugin's
+/// might be: a point that runs the echo command `q` (a seed to grow a sample from), a box that
+/// runs it too, and a point that runs nothing (its place goes with the next request). With `edit`,
+/// as such a plugin needs to add its samples.
+pub fn pick_manifest(id: &str) -> String {
+    let mut m: serde_json::Value = serde_json::from_str(&manifest(id, &["edit"])).unwrap_or_default();
+    if let Some(c) = m["commands"].as_array_mut() {
+        c.push(serde_json::json!({"id": "q", "label": "Echo"}));
+        c.push(serde_json::json!({"id": "q-grow", "label": "Grow a Sample", "help": "Grows a training sample from the pixel clicked."}));
+    }
+    m["panel"] = serde_json::json!({
+        "title": "Training Samples",
+        "icon": "identify",
+        "help": "Pick places on the map for the plugin.",
+        "items": [
+            {"kind": "text", "id": "about", "label": "Samples", "text": "Pick a pixel to grow a sample from it."},
+            {"kind": "pick", "id": "seed", "command": "q-grow"},
+            {"kind": "pick", "id": "area", "label": "Classify Inside a Box", "shape": "box", "command": "q"},
+            {"kind": "pick", "id": "spot", "label": "Mark a Spot", "shape": "point"}
+        ]
+    });
+    m["i18n"] = serde_json::json!({"de": {"Grow a Sample": "Probe wachsen lassen"}});
+    m.to_string()
+}
+
+/// A `.rgplugin` package of the test module with [`pick_manifest`].
+pub fn pick_package(id: &str) -> Vec<u8> {
+    zip_of(&[("plugin.json", pick_manifest(id).as_bytes()), ("plugin.wasm", &wasm())])
 }
 
 /// A `.rgplugin` package of the test module with [`panel_manifest`].
@@ -248,9 +308,30 @@ pub fn process_manifest(id: &str, permissions: &[&str], run: &[String]) -> Strin
     if let Some(c) = m["commands"].as_array_mut() {
         c.push(serde_json::json!({"id": "n", "label": "Noisy"}));
         c.push(serde_json::json!({"id": "c", "label": "Crash"}));
+        c.push(serde_json::json!({"id": "d", "label": "Say, then forward"}));
     }
     if let Some(t) = m["tools"].as_array_mut() {
         t.push(serde_json::json!({"id": "w", "name": "Work Forever", "params": []}));
+    }
+    m.to_string()
+}
+
+/// A manifest for the session test plugin (`"session": true`): the process test plugin's
+/// commands, and `k`, `v`, `i` and `z` (see [`serve_if_child`]).
+pub fn session_manifest(id: &str, permissions: &[&str], run: &[String]) -> String {
+    let mut m: serde_json::Value = serde_json::from_str(&process_manifest(id, permissions, run)).unwrap_or_default();
+    m["session"] = serde_json::json!(true);
+    if let Some(c) = m["commands"].as_array_mut() {
+        c.push(serde_json::json!({"id": "k", "label": "Ask Later"}));
+        c.push(serde_json::json!({"id": "v", "label": "Heard"}));
+        c.push(serde_json::json!({"id": "i", "label": "Process"}));
+        c.push(serde_json::json!({"id": "z", "label": "Quit"}));
+        c.push(serde_json::json!({"id": "l", "label": "Launch"}));
+        c.push(serde_json::json!({"id": "p", "label": "Pause"}));
+        c.push(serde_json::json!({"id": "w", "label": "Last Words"}));
+        c.push(serde_json::json!({"id": "b", "label": "Bad Exit"}));
+        c.push(serde_json::json!({"id": "y", "label": "Long Goodbye"}));
+        c.push(serde_json::json!({"id": "r", "label": "Leave a Writer"}));
     }
     m.to_string()
 }
@@ -259,13 +340,25 @@ pub fn process_manifest(id: &str, permissions: &[&str], run: &[String]) -> Strin
 /// test module does, then exits. Elsewhere it returns at once.
 ///
 /// - `h` logs "hi" and returns `{"hello": "world"}`; `f` sends its params as a host request
-///   and returns the reply; `e` fails with "nope"; `n` prints a line that isn't JSON and a JSON object that isn't a message first;
+///   and returns the reply; `d` says an error first, then does what `f` does; `e` fails with "nope"; `n` prints a line that isn't JSON and a JSON object that isn't a message first;
 ///   `c` writes "boom" to its error output and exits without answering; `s` never answers;
 ///   `g` starts another copy of itself that never answers, logs its process id and never
 ///   answers either.
 /// - Tools: `m` returns the layer "Made"; `x` selects rows 0 and 2 of "Cities"; `r` returns the
 ///   names of the files it was given as its messages; `w` logs "working", reports
 ///   progress "step 1 of 3" and never answers; `m` reports progress "making" first.
+///
+/// Started as a session (its first line `{"session": …}`), it keeps answering commands until
+/// its input closes: `h`, `e`, `c` and `s` as above; `f` sends its params as a host request and
+/// returns the reply, skipping events; `k` sends that request and answers at once, leaving the
+/// reply for later; `v` returns what it has heard since (`events`, `answers`, and the latest
+/// `view` event's view as `last_view`); `i` returns its
+/// process id; `z` answers and exits; `l` starts a copy of itself that never answers, answers
+/// with its process id and exits, leaving it running; `p` answers, then reads nothing for two
+/// seconds; `w` answers, then sends its params as a host request, logs "last words" and exits at
+/// once; `b` answers, writes "boom" to its error output and exits with status 3; `y` answers,
+/// logs 70 lines, sends its params as a host request and exits at once; `r` starts a copy of
+/// itself that writes into its output forever, answers with that copy's process id and exits.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn serve_if_child() {
     use serde_json::{Value, json};
@@ -280,6 +373,9 @@ pub fn serve_if_child() {
     let mut line = String::new();
     let _ = input.read_line(&mut line);
     let req: Value = serde_json::from_str(&line).unwrap_or_default();
+    if req.get("session").is_some() {
+        serve_session(input, out);
+    }
     let params = req.get("params").cloned().unwrap_or_default();
     let reply = match req.get("id").and_then(Value::as_str).and_then(|s| s.chars().next()) {
         Some('h') => {
@@ -292,6 +388,26 @@ pub fn serve_if_child() {
             let mut answer = String::new();
             let _ = input.read_line(&mut answer);
             serde_json::from_str(&answer).unwrap_or_else(|_| json!({"error": "no answer"}))
+        }
+        // An error notice first, then what `f` does.
+        Some('d') => {
+            let said = json!({"call": {"op": "host.notify", "params": {"text": "said before the call", "error": true}}});
+            let _ = writeln!(out, "{said}");
+            let _ = out.flush();
+            let mut answer = String::new();
+            let _ = input.read_line(&mut answer);
+            let _ = writeln!(out, "{}", json!({"call": {"op": params["op"], "params": params["params"]}}));
+            let _ = out.flush();
+            answer.clear();
+            let _ = input.read_line(&mut answer);
+            let reply: Value = serde_json::from_str(&answer).unwrap_or_else(|_| json!({"error": "no answer"}));
+            if params.get("fail").and_then(Value::as_bool) == Some(true)
+                && reply.get("ok").and_then(|v| v.get("pending")).and_then(Value::as_bool) == Some(true)
+            {
+                json!({"error":"nope"})
+            } else {
+                reply
+            }
         }
         Some('n') => {
             let _ = writeln!(out, "a library printing");
@@ -313,6 +429,17 @@ pub fn serve_if_child() {
         Some('s') => loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
         },
+        // Logs forever, as fast as it can, saying on its error output once it has written more
+        // than a pipe holds: from then on its output is waiting to be read, whenever it runs.
+        Some('u') => {
+            for _ in 0..8_192 {
+                let _ = writeln!(out, "{}", json!({"log": "more"}));
+            }
+            eprintln!("writing");
+            loop {
+                let _ = writeln!(out, "{}", json!({"log": "more"}));
+            }
+        }
         Some('g') => {
             let argv = child_run(&std::env::args().nth(1).unwrap_or_default());
             let spawned = argv.split_first().and_then(|(exe, args)| {
@@ -335,6 +462,16 @@ pub fn serve_if_child() {
             }
         }
         Some('m') => {
+            // Hold an actual tool request for cancellation tests; ordinary calls do not wait.
+            if let (Some(ready), Some(release)) =
+                (params.get("control_ready").and_then(Value::as_str), params.get("control_release").and_then(Value::as_str))
+            {
+                let _ = std::fs::write(ready, b"started");
+                let start = std::time::Instant::now();
+                while !std::path::Path::new(release).is_file() && start.elapsed() < std::time::Duration::from_secs(20) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
             let _ = writeln!(out, "{}", json!({"progress": "making"}));
             json!({"ok": {"layers": [{"name": "Made", "geojson": {"type": "FeatureCollection", "features": [
             {"type": "Feature", "properties": {"n": 1}, "geometry": {"type": "Point", "coordinates": [1, 2]}}]}}], "messages": ["made"]}})
@@ -349,4 +486,160 @@ pub fn serve_if_child() {
     let _ = writeln!(out, "{reply}");
     let _ = out.flush();
     std::process::exit(0);
+}
+
+/// The session test plugin: see [`serve_if_child`].
+#[cfg(not(target_arch = "wasm32"))]
+fn serve_session(mut input: impl std::io::BufRead, mut out: impl std::io::Write) -> ! {
+    use serde_json::{Value, json};
+    let (mut events, mut answers) = (Vec::<Value>::new(), Vec::<Value>::new());
+    let mut last_view = Value::Null;
+    let mut asked = 0u64;
+    loop {
+        let mut line = String::new();
+        if input.read_line(&mut line).map_or(true, |n| n == 0) {
+            std::process::exit(0);
+        }
+        let msg: Value = serde_json::from_str(&line).unwrap_or_default();
+        if let Some(e) = msg.get("event") {
+            if e == "view" {
+                last_view = msg["view"].clone();
+            }
+            events.push(e.clone());
+            continue;
+        }
+        let Some(req) = msg.get("command") else {
+            answers.push(msg);
+            continue;
+        };
+        let id = msg["id"].clone();
+        let params = req.get("params").cloned().unwrap_or_default();
+        let mut ask = |out: &mut dyn std::io::Write| {
+            asked += 1;
+            let _ = writeln!(out, "{}", json!({"call": {"op": params["op"], "params": params["params"]}, "id": format!("a{asked}")}));
+            let _ = out.flush();
+            format!("a{asked}")
+        };
+        let reply = match req.get("id").and_then(Value::as_str).and_then(|s| s.chars().next()) {
+            Some('h') => json!({"ok": {"hello": "world"}}),
+            Some('f') => {
+                let want = ask(&mut out);
+                loop {
+                    let mut answer = String::new();
+                    if input.read_line(&mut answer).map_or(true, |n| n == 0) {
+                        std::process::exit(0);
+                    }
+                    let a: Value = serde_json::from_str(&answer).unwrap_or_default();
+                    if let Some(e) = a.get("event") {
+                        if e == "view" {
+                            last_view = a["view"].clone();
+                        }
+                        events.push(e.clone());
+                    } else if a["id"] == json!(want) {
+                        break a;
+                    }
+                }
+            }
+            Some('r') => {
+                let argv = child_run(&std::env::args().nth(1).unwrap_or_default());
+                // Its output is this program's: it keeps writing there after this one exits.
+                let spawned = argv.split_first().and_then(|(exe, args)| {
+                    std::process::Command::new(exe)
+                        .args(args)
+                        .stdin(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                        .ok()
+                });
+                let pid = spawned.map(|mut g| {
+                    if let Some(mut stdin) = g.stdin.take() {
+                        let _ = writeln!(stdin, "{}", json!({"id": "u", "params": {}}));
+                    }
+                    // Exits only once the copy is writing: its output is flowing when it's gone.
+                    if let Some(err) = g.stderr.take() {
+                        let mut started = String::new();
+                        let _ = std::io::BufRead::read_line(&mut std::io::BufReader::new(err), &mut started);
+                    }
+                    g.id()
+                });
+                let _ = writeln!(out, "{}", json!({"ok": pid, "id": id}));
+                let _ = out.flush();
+                std::process::exit(0);
+            }
+            Some('y') => {
+                let _ = writeln!(out, "{}", json!({"ok": "bye", "id": id}));
+                for i in 0..70 {
+                    let _ = writeln!(out, "{}", json!({"log": format!("line {i}")}));
+                }
+                ask(&mut out);
+                std::process::exit(0);
+            }
+            Some('b') => {
+                let _ = writeln!(out, "{}", json!({"ok": "bye", "id": id}));
+                let _ = out.flush();
+                eprintln!("boom");
+                std::process::exit(3);
+            }
+            Some('w') => {
+                let _ = writeln!(out, "{}", json!({"ok": "bye", "id": id}));
+                ask(&mut out);
+                let _ = writeln!(out, "{}", json!({"log": "last words"}));
+                let _ = out.flush();
+                std::process::exit(0);
+            }
+            Some('p') => {
+                let _ = writeln!(out, "{}", json!({"ok": "paused", "id": id}));
+                let _ = out.flush();
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                continue;
+            }
+            // Answered first, so the request comes after the command.
+            Some('k') => {
+                let _ = writeln!(out, "{}", json!({"ok": "asked", "id": id}));
+                ask(&mut out);
+                continue;
+            }
+            Some('v') => {
+                json!({"ok": {"events": std::mem::take(&mut events), "answers": std::mem::take(&mut answers), "last_view": last_view}})
+            }
+            Some('i') => json!({"ok": std::process::id()}),
+            Some('c') => {
+                eprintln!("boom");
+                std::process::exit(3);
+            }
+            Some('s') => loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            },
+            Some('z') => {
+                let _ = writeln!(out, "{}", json!({"ok": "bye", "id": id}));
+                let _ = out.flush();
+                std::process::exit(0);
+            }
+            Some('l') => {
+                let argv = child_run(&std::env::args().nth(1).unwrap_or_default());
+                let spawned = argv.split_first().and_then(|(exe, args)| {
+                    std::process::Command::new(exe)
+                        .args(args)
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::null())
+                        .spawn()
+                        .ok()
+                });
+                let pid = spawned.map(|mut g| {
+                    if let Some(mut stdin) = g.stdin.take() {
+                        let _ = writeln!(stdin, "{}", json!({"id": "s", "params": {}}));
+                    }
+                    g.id()
+                });
+                let _ = writeln!(out, "{}", json!({"ok": pid, "id": id}));
+                let _ = out.flush();
+                std::process::exit(0);
+            }
+            _ => json!({"error": "nope"}),
+        };
+        let mut reply = reply;
+        reply["id"] = id;
+        let _ = writeln!(out, "{reply}");
+        let _ = out.flush();
+    }
 }

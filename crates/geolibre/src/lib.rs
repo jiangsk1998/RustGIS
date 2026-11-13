@@ -57,6 +57,7 @@ pub fn register() {
 pub fn set_runner(exe: Option<std::path::PathBuf>) -> Result<Option<(std::path::PathBuf, String)>, String> {
     let found = runner::choose(exe)?;
     rustgis_analysis::reload_external_of(SOURCE);
+    let _ = rustgis_analysis::external_tools_of(SOURCE);
     Ok(found)
 }
 
@@ -73,6 +74,7 @@ pub fn set_manifests(json: &str) -> Result<usize, String> {
         *m = Some(v);
     }
     rustgis_analysis::reload_external_of(SOURCE);
+    let _ = rustgis_analysis::external_tools_of(SOURCE);
     Ok(n)
 }
 
@@ -129,6 +131,7 @@ struct MetaParam {
 /// What a run needs to know about a tool beyond its [`ToolSpec`].
 #[derive(Clone, Debug)]
 struct Meta {
+    schema: &'static [ParamSpec],
     category: String,
     params: Vec<MetaParam>,
 }
@@ -218,6 +221,7 @@ fn field_kind(name: &str) -> Option<ParamKind> {
     }
 }
 
+/// Builds the form and staging metadata together, including legacy Composite Bands inputs.
 fn spec_of(m: &Value) -> Option<(ToolSpec, Meta)> {
     let id = m.get("id")?.as_str()?;
     let name = m.get("display_name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or(id);
@@ -229,13 +233,21 @@ fn spec_of(m: &Value) -> Option<(ToolSpec, Meta)> {
     for p in m.get("params").and_then(Value::as_array).into_iter().flatten() {
         let Some(pname) = p.get("name").and_then(Value::as_str) else { continue };
         let schema = p.get("schema");
-        let data = Data::of(p.get("data_kind").and_then(Value::as_str).unwrap_or(""));
+        // GeoLibre 1.8.0/1.8.1 describe this raster list as a string option (#1684).
+        // Correct both the form and staging; leave explicit metadata from newer runners alone.
+        let composite_inputs = id == "composite_bands"
+            && pname == "inputs"
+            && p.get("io_role").is_none()
+            && p.get("data_kind").and_then(Value::as_str) == Some("string")
+            && schema.and_then(|s| s.get("kind")).and_then(Value::as_str) == Some("string");
+        let data = if composite_inputs { Data::Raster } else { Data::of(p.get("data_kind").and_then(Value::as_str).unwrap_or("")) };
         let role = match p.get("io_role").and_then(Value::as_str) {
+            None if composite_inputs => Role::Input,
             Some("input") => Role::Input,
             Some("output") => Role::Output,
             _ => Role::Option,
         };
-        let many = schema.and_then(|s| s.get("cardinality")).and_then(Value::as_str).is_some_and(|c| c != "single");
+        let many = composite_inputs || schema.and_then(|s| s.get("cardinality")).and_then(Value::as_str).is_some_and(|c| c != "single");
         let optional = !p.get("required").and_then(Value::as_bool).unwrap_or(false);
         let default = defaults.and_then(|d| d.get(pname)).filter(|v| optional && !v.is_null()).cloned();
         meta.push(MetaParam { name: pname.to_string(), role, data, default });
@@ -301,7 +313,8 @@ fn spec_of(m: &Value) -> Option<(ToolSpec, Meta)> {
         params: Box::leak(params.into_boxed_slice()),
         run: rustgis_analysis::external_placeholder,
     };
-    Some((spec, Meta { category, params: meta }))
+    let schema = spec.params;
+    Some((spec, Meta { schema, category, params: meta }))
 }
 
 /// `g` with every point converted by `f`, or `None` when a point can't be (rather than
@@ -532,6 +545,51 @@ fn option_value(v: &Value, data: Data) -> Value {
     }
 }
 
+/// Whether option value `v` is the manifest's default `d`. The form sends text, so a default that
+/// isn't text on a field shown as text comes back as its JSON (`[255,255,255,255]`, `false`).
+fn is_default(v: &Value, d: &Value, data: Data) -> bool {
+    option_value(d, data) == *v || (!d.is_string() && json_text(v).as_ref() == Some(d))
+}
+
+/// The JSON a text value spells (`"[255,255,255,255]"` gives the list), if it is text and reads.
+fn json_text(v: &Value) -> Option<Value> {
+    v.as_str().and_then(|t| serde_json::from_str(t).ok())
+}
+
+/// Immutable manifest metadata paired with one published analysis schema.
+#[derive(Clone)]
+pub struct ResolvedTool {
+    spec: &'static ToolSpec,
+    meta: Meta,
+}
+impl ResolvedTool {
+    /// Pairs a published analysis schema with metadata from that exact manifest load.
+    pub fn capture(spec: &'static ToolSpec) -> Result<Self, String> {
+        let id = spec.id.strip_prefix(PREFIX).ok_or("not a GeoLibre tool")?;
+        let meta =
+            META.lock().ok().and_then(|m| m.as_ref().and_then(|m| m.get(id)).cloned()).ok_or("the GeoLibre metadata is unavailable")?;
+        if !std::ptr::eq(meta.schema, spec.params) {
+            return Err("the GeoLibre metadata and analysis schema belong to different loads".into());
+        }
+        let pinned = Self { spec, meta };
+        pinned.check()?;
+        Ok(pinned)
+    }
+    /// Rejects a withdrawn or replaced schema before inputs or runner arguments are prepared.
+    pub fn check(&self) -> Result<(), String> {
+        if !rustgis_analysis::published_external_tools_of(SOURCE).iter().any(|spec| std::ptr::eq(spec, self.spec)) {
+            return Err("the GeoLibre tool schema was reloaded".into());
+        }
+        Ok(())
+    }
+    /// Preparation uses captured metadata, never another lookup by tool name.
+    /// Uses captured manifest metadata to prepare arguments; does not resolve the tool by name.
+    pub fn prepare(&self, inputs: &dyn Inputs, params: &Value) -> Result<Job, String> {
+        self.check()?;
+        prepare_with(self.spec, &self.meta, inputs, params)
+    }
+}
+
 /// Prepares a run of `spec` (a GeoLibre tool) on the map's layers, with `params` already
 /// resolved (defaults filled, required ones present: see `rustgis_analysis::resolve_params`).
 pub fn prepare(spec: &ToolSpec, inputs: &dyn Inputs, params: &Value) -> Result<Job, String> {
@@ -541,27 +599,26 @@ pub fn prepare(spec: &ToolSpec, inputs: &dyn Inputs, params: &Value) -> Result<J
     prepare_with(spec, &meta, inputs, params)
 }
 
+/// Validates input name lists before choosing a CRS or staging files, preserving their order.
 fn prepare_with(spec: &ToolSpec, meta: &Meta, inputs: &dyn Inputs, params: &Value) -> Result<Job, String> {
     let id = spec.id.strip_prefix(PREFIX).ok_or("not a GeoLibre tool")?;
     let value_of = |name: &str| params.get(name).filter(|v| !v.is_null() && v.as_str() != Some(""));
-    let names = |v: &Value| -> Vec<String> {
-        v.as_str().map(|s| s.split(';').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect()).unwrap_or_default()
-    };
+    let names = rustgis_analysis::layer_list;
 
     // Rasters set the coordinate system; otherwise the vector data's UTM zone.
     let mut raster_crs = Vec::new();
     let mut vector_extents = Vec::new();
     for p in meta.params.iter().filter(|p| p.role == Role::Input) {
-        for n in value_of(&p.name).map(names).unwrap_or_default() {
-            if let Some(r) = inputs.raster(&n) {
+        for n in value_of(&p.name).map(names).transpose()?.unwrap_or_default() {
+            if let Some(r) = inputs.raster(n) {
                 raster_crs.push(r.raster.crs);
-            } else if let Some((_, crs)) = inputs.raster_file(&n) {
+            } else if let Some((_, crs)) = inputs.raster_file(n) {
                 // The file's own header may say it; a coordinate system given when it was added
                 // stands in for one it doesn't.
                 if let Some(c) = crs {
                     raster_crs.push(c);
                 }
-            } else if let Some(ds) = inputs.dataset(&n) {
+            } else if let Some(ds) = inputs.dataset(n) {
                 vector_extents.push(ds.extent());
             }
         }
@@ -583,7 +640,7 @@ fn prepare_with(spec: &ToolSpec, meta: &Meta, inputs: &dyn Inputs, params: &Valu
         match p.role {
             Role::Input => {
                 let Some(v) = value_of(&p.name) else { continue };
-                let files = names(v).iter().map(|n| stage(inputs, n, p.data, &tf, &mut job)).collect::<Result<Vec<_>, _>>()?;
+                let files = names(v)?.into_iter().map(|n| stage(inputs, n, p.data, &tf, &mut job)).collect::<Result<Vec<_>, _>>()?;
                 if !files.is_empty() {
                     job.args.push((p.name.clone(), Arg::Files(files)));
                 }
@@ -601,7 +658,7 @@ fn prepare_with(spec: &ToolSpec, meta: &Meta, inputs: &dyn Inputs, params: &Valu
                 // own default, as when it runs alone. They can differ: `fill_depressions` lists
                 // a `flat_increment` of 0.0001 but, without one, picks a far smaller step that
                 // keeps flats draining (#237).
-                if p.default.as_ref().is_some_and(|d| option_value(d, p.data) == v) {
+                if p.default.as_ref().is_some_and(|d| is_default(&v, d, p.data)) {
                     continue;
                 }
                 job.args.push((p.name.clone(), Arg::Value(v)));
@@ -766,6 +823,22 @@ fn run(spec: &ToolSpec, inputs: &dyn Inputs, params: &Value) -> Result<ToolResul
         let _ = job;
         Err(format!("{}: in the browser, run GeoLibre tools from the Tools pane", spec.name))
     }
+}
+
+/// Runs the immutable native choice supplied by the engine. Development-process bytes remain
+/// unsandboxed and unattested, exactly as for the ordinary runner.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_pinned(
+    tool: &ResolvedTool,
+    inputs: &dyn Inputs,
+    params: &Value,
+    pin: &runner::ResolvedRunner,
+    live: &dyn Fn() -> Result<(), String>,
+) -> Result<ToolResult, String> {
+    pin.check()?;
+    live()?;
+    let job = tool.prepare(inputs, params)?;
+    native::run_pinned(&job, pin, live)
 }
 
 #[cfg(test)]

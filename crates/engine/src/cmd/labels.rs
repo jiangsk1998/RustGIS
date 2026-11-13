@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::layer::s_req;
 use super::{b, f, need_feature_layer, ps};
+use crate::notice_text::NoticeText;
 use crate::{CmdResult, CommandSpec as C, Session};
 
 /// A number, or a number written as text (as `f` reads a parameter).
@@ -93,21 +94,21 @@ pub fn commands() -> Vec<C> {
             let d = &mut s.map_mut().label_display;
             d.locked = b(p, "on").unwrap_or(!d.locked);
             Ok(json!({"locked": d.locked}))
-        })
+        }).roles(&[]).effects(crate::policy::Effects::NONE)
         .view()
         .params(r#"{"on"?: bool}"#),
         C::new("labels.pause", "Pause", "Labeling › Map Labeling", |s, p| {
             let d = &mut s.map_mut().label_display;
             d.paused = b(p, "on").unwrap_or(!d.paused);
             Ok(json!({"paused": d.paused}))
-        })
+        }).roles(&[]).effects(crate::policy::Effects::NONE)
         .view()
         .params(r#"{"on"?: bool}"#),
         C::new("labels.viewUnplaced", "View Unplaced", "Labeling › Map Labeling", |s, p| {
             let d = &mut s.map_mut().label_display;
             d.show_unplaced = b(p, "on").unwrap_or(!d.show_unplaced);
             Ok(json!({"showUnplaced": d.show_unplaced}))
-        })
+        }).roles(&[]).effects(crate::policy::Effects::NONE)
         .view()
         .params(r#"{"on"?: bool}"#),
         C::new("labels.fonts", "Label Fonts", "View › Windows › Labeling", |_, p| {
@@ -119,17 +120,20 @@ pub fn commands() -> Vec<C> {
             let fonts: Vec<&str> =
                 all.iter().filter(|f| f.listed && f.name.to_lowercase().contains(&search)).map(|f| f.name.as_str()).collect();
             Ok(json!({"fonts": fonts}))
-        })
+        }).roles(&[]).effects(crate::policy::Effects::NONE)
         .view()
         .params(r#"{"search"?: text in the family name} → {"fonts": [the installed font families, by name], "indexing"?: true (still being indexed: none listed yet)}"#),
-        C::new("labels.convert", "Convert To Annotation", "Labeling › Map Labeling", convert)
-            .when(need_feature_layer)
+        C::new("labels.convert", "Convert To Annotation", "Labeling › Map Labeling", convert).roles(&[]).effects(crate::policy::Effects::NONE)
+            .inputs(super::Inputs::single_layer)
+        .when(need_feature_layer)
             .params(r#"{"layer"?, "name"?: string}"#),
-        C::new("labels.scaleRange", "Label Visibility Range", "Labeling › Label Range", scale_range)
-            .when(need_feature_layer)
+        C::new("labels.scaleRange", "Label Visibility Range", "Labeling › Label Range", scale_range).roles(&[]).effects(crate::policy::Effects::NONE)
+            .inputs(super::Inputs::single_layer)
+        .when(need_feature_layer)
             .params(r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "min"?: scale|null (out beyond), "max"?: scale|null (in beyond), "clear"?: bool (clears the scale and distance limits, as Clear Limits does)}"#),
-        C::new("labels.distanceRange", "Label Distance Range", "Labeling › Label Range", distance_range)
-            .when(need_feature_layer)
+        C::new("labels.distanceRange", "Label Distance Range", "Labeling › Label Range", distance_range).roles(&[]).effects(crate::policy::Effects::NONE)
+            .inputs(super::Inputs::single_layer)
+        .when(need_feature_layer)
             .params(r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "closest"?: metres|null, "farthest"?: metres|null, "clear"?: bool}"#),
         C::new("labels.placement", "Label Placement", "Labeling › Label Placement", |s, p| {
             let pos = match ps(p, "position") {
@@ -137,8 +141,8 @@ pub fn commands() -> Vec<C> {
                 // A position that isn't a placement name is refused, not dropped for the others (null:
                 // none, as for the other keys).
                 None if p.get("position").is_some_and(|v| !v.is_null()) => return Err("position must be a placement name".into()),
-                None if ["offset", "repeat", "otherPositions", "showAll", "callout"].iter().any(|k| p.get(k).is_some()) => None,
-                None => return Err("position is required (or an offset, a repeat, otherPositions, showAll or a callout)".into()),
+                None if ["offset", "repeat", "lineOffset", "otherPositions", "showAll", "callout"].iter().any(|k| p.get(k).is_some()) => None,
+                None => return Err("position is required (or an offset, a repeat, a lineOffset, otherPositions, showAll or a callout)".into()),
             };
             let offset = match p.get("offset") {
                 None => None,
@@ -154,6 +158,15 @@ pub fn commands() -> Vec<C> {
                     _ => return Err("repeat must be a number of points, or 0 or null for none".into()),
                 },
             };
+            // Along a line, how far from it (points, above it as the text reads; negative: below).
+            let line_offset = match p.get("lineOffset") {
+                None => None,
+                Some(Value::Null) => Some(0.0),
+                Some(v) => Some(number(v).ok_or("lineOffset must be a number of points (negative: below the line), or 0 or null for on it")?),
+            };
+            // A distance outside the range is brought within it, and says so once the layer is known.
+            let line_offset_asked = line_offset.filter(|d| !rustgis_map::symbology::LABEL_OFFSET.contains(d));
+            let line_offset = line_offset.map(rustgis_map::symbology::label_line_offset);
             // Every label shown, over the others where they crowd.
             let show_all = match p.get("showAll") {
                 None => None,
@@ -206,6 +219,9 @@ pub fn commands() -> Vec<C> {
                 if let Some(r) = repeat {
                     c.repeat = r;
                 }
+                if let Some(d) = line_offset {
+                    c.line_offset = d;
+                }
                 if let Some(a) = show_all {
                     c.show_all = a;
                 }
@@ -225,11 +241,25 @@ pub fn commands() -> Vec<C> {
             if let Some(note) = callout_note {
                 s.notify(note, false);
             }
+            if let Some(asked) = line_offset_asked {
+                let name = s.map().layer(id).map(|l| l.name.clone()).unwrap_or_default();
+                let kept = rustgis_map::symbology::label_line_offset(asked);
+                // A huge value in short (1e308, not its 309 digits).
+                let asked = if asked.abs() < 1e6 { asked.to_string() } else { format!("{asked:e}") };
+                s.notify_text(
+                    NoticeText::format(
+                        "{name}: lineOffset {asked} points adjusted to {kept} (a label sits at most 200 points above or below its line)",
+                        [("name", name.into()), ("asked", asked.into()), ("kept", kept.to_string().into())],
+                    ),
+                    false,
+                );
+            }
             Ok(done)
-        })
+        }).roles(&[]).effects(crate::policy::Effects::NONE)
+        .inputs(super::Inputs::single_layer)
         .when(need_feature_layer)
         .params(
-            r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "position"?: "auto"|"center"|"above"|"below"|"left"|"right"|"aboveRight"|"aboveLeft"|"belowRight"|"belowLeft"|"parallel" (along a line, straight)|"curved" (along a line, following its bends) (required without offset, repeat, otherPositions, showAll or callout), "offset"?: [right, down] points (-200 to 200 each) the label moves from where its position puts it ([0, 0]: none; a label along a line isn't moved), "repeat"?: points (10 to 10000) between a line's labels, spaced out from the one at its middle, at most 32 a line (0 or null: the one at its middle; parallel and curved only), "otherPositions"?: bool (a label whose place is taken tries others: a point's round the point, corners first; a line's along the line, nearest its middle first, placed parallel or curved without a repeat; true is refused for any other line label and on polygons), "showAll"?: bool (every label drawn, over the others where they crowd), "callout"?: true|false|points (5 to 500: a label crowded off its spot moves to a free one nearby, a line drawn back to its feature at most this long; true keeps its length, or 40; false, 0 or null: none; not labels along a line or with an icon)}"#,
+            r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "position"?: "auto"|"center"|"above"|"below"|"left"|"right"|"aboveRight"|"aboveLeft"|"belowRight"|"belowLeft"|"parallel" (along a line, straight)|"curved" (along a line, following its bends) (required without offset, repeat, lineOffset, otherPositions, showAll or callout), "offset"?: [right, down] points (-200 to 200 each) the label moves from where its position puts it ([0, 0]: none; a label along a line isn't moved), "repeat"?: points (10 to 10000) between a line's labels, spaced out from the one at its middle, at most 32 a line (0 or null: the one at its middle; parallel and curved only), "lineOffset"?: points (-200 to 200) between a line and its label's nearest edge, above the line as the text reads, negative below it (0 or null: on the line; parallel and curved only), "otherPositions"?: bool (a label whose place is taken tries others: a point's round the point, corners first; a line's along the line, nearest its middle first, placed parallel or curved without a repeat; true is refused for any other line label and on polygons), "showAll"?: bool (every label drawn, over the others where they crowd), "callout"?: true|false|points (5 to 500: a label crowded off its spot moves to a free one nearby, a line drawn back to its feature at most this long; true keeps its length, or 40; false, 0 or null: none; not labels along a line or with an icon)}"#,
         ),
         // Labels moved by hand (the Move Label tool, as QGIS's): kept by their feature's id.
         C::new("labels.move", "Move Label", "Labeling › Label Placement", |s, p| {
@@ -291,7 +321,8 @@ pub fn commands() -> Vec<C> {
             // Locked, the labels are locked again where they are placed next (`with_labels`: the
             // moves changed), as the one moved may not have been placed when the lock was taken.
             Ok(r)
-        })
+        }).roles(&[]).effects(crate::policy::Effects::NONE)
+        .inputs(super::Inputs::single_layer)
         .when(need_feature_layer)
         .params(r#"{"layer"?, "class"?: name (none: the Default class), "feature": the feature's id, "to": [x, y] (longitude, latitude: where the label's text is centred) | null (back where its class puts it)}"#),
         C::new("labels.resetMoved", "Reset Moved", "Labeling › Label Placement", |s, p| {
@@ -311,13 +342,15 @@ pub fn commands() -> Vec<C> {
             // As after a move, those put back are locked again where they are placed next; with
             // nothing moved, nothing changes and the lock holds (`with_labels`).
             Ok(r)
-        })
+        }).roles(&[]).effects(crate::policy::Effects::NONE)
+        .inputs(super::Inputs::single_layer)
         .when(need_feature_layer)
         .params(r#"{"layer"?, "class"?: name (none: the Default class), "all"?: bool (every class of the layer)}"#),
         // Label classes: each labels every feature its clause takes, as in ArcGIS Pro; the classes
         // listed first, Default last, are placed first (`Labeling`, #732).
-        C::new("labels.class.add", "Add Label Class", "View › Windows › Labeling", add_class)
-            .when(need_feature_layer)
+        C::new("labels.class.add", "Add Label Class", "View › Windows › Labeling", add_class).roles(&[]).effects(crate::policy::Effects::NONE)
+            .inputs(super::Inputs::single_layer)
+        .when(need_feature_layer)
             .params(r#"{"layer"?, "name": string, "where"?: sql (a definition query's language; none takes every feature), "from"?: class (whose field and text symbol it starts with; none: the Default class)}"#),
         C::new("labels.class.remove", "Remove Label Class", "View › Windows › Labeling", |s, p| {
             let name = s_req(p, "class")?.trim().to_string();
@@ -326,7 +359,8 @@ pub fn commands() -> Vec<C> {
                 labels.classes.remove(i);
                 Ok(())
             })
-        })
+        }).roles(&[]).effects(crate::policy::Effects::NONE)
+        .inputs(super::Inputs::single_layer)
         .when(need_feature_layer)
         .params(r#"{"layer"?, "class": name (not Default)}"#),
         // Every class but Default; none to remove is no error, so a script can start with it.
@@ -338,7 +372,8 @@ pub fn commands() -> Vec<C> {
                 Ok(())
             })?;
             Ok(json!({"removed": removed}))
-        })
+        }).roles(&[]).effects(crate::policy::Effects::NONE)
+        .inputs(super::Inputs::single_layer)
         .when(need_feature_layer)
         .params(r#"{"layer"?}"#),
         C::new("labels.class.rename", "Rename Label Class", "View › Windows › Labeling", |s, p| {
@@ -349,7 +384,8 @@ pub fn commands() -> Vec<C> {
                 labels.class_mut(&class).ok_or_else(|| format!("no label class named '{class}'"))?.name = name;
                 Ok(())
             })
-        })
+        }).roles(&[]).effects(crate::policy::Effects::NONE)
+        .inputs(super::Inputs::single_layer)
         .when(need_feature_layer)
         .params(r#"{"layer"?, "class": name, "name": string}"#),
         C::new("labels.class.update", "Update Label Class", "View › Windows › Labeling", |s, p| {
@@ -364,7 +400,8 @@ pub fn commands() -> Vec<C> {
                     c.visible = v;
                 }
             })
-        })
+        }).roles(&[]).effects(crate::policy::Effects::NONE)
+        .inputs(super::Inputs::single_layer)
         .when(need_feature_layer)
         .params(r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "where"?: sql|null, "visible"?: bool}"#),
         C::new("labels.class.move", "Move Label Class", "View › Windows › Labeling", |s, p| {
@@ -377,11 +414,13 @@ pub fn commands() -> Vec<C> {
                 labels.classes.insert(to, c);
                 Ok(())
             })
-        })
+        }).roles(&[]).effects(crate::policy::Effects::NONE)
+        .inputs(super::Inputs::single_layer)
         .when(need_feature_layer)
         .params(r#"{"layer"?, "class": name (not Default), "to": number (its place among the classes listed before Default, 0 first: placed first when labels compete for room)}"#),
-        C::new("labels.by", "Labels by Expression", "View › Windows › Labeling", labels_by)
-            .when(need_feature_layer)
+        C::new("labels.by", "Labels by Expression", "View › Windows › Labeling", labels_by).roles(&[]).effects(crate::policy::Effects::NONE)
+            .inputs(super::Inputs::single_layer)
+        .when(need_feature_layer)
             .params(r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "text"?: expression|null (each label's text, in place of the class's field; a feature it gives null or blanks for isn't labelled), "size"?: expression|null (the text's size in points, 4 to 72), "color"?: expression|null (the text's colour: '#RRGGBB', a CSS colour name or 'r,g,b[,a]' as color_rgb gives it), "angle"?: expression|null (a point's or polygon's label turned by it, in degrees clockwise; labels along lines keep the line's)} (each expression in the language of queries, per feature, @map_scale the map's scale; a key left out keeps its expression, null or "" removes it; where a size, color or angle expression gives null the class's own setting is used)"#),
     ]
 }
@@ -629,15 +668,46 @@ fn distance_range(s: &mut Session, p: &Value) -> CmdResult {
     })
 }
 
+/// Whether layer `l` has text to convert into annotations at `scale`: a class's label field, or a
+/// text expression. Decided on its fields, so before a layer read in place is read whole.
+pub(crate) fn has_label_text(l: &rustgis_map::Layer, scale: f64) -> bool {
+    l.labels.in_order().any(|c| {
+        l.dataset.field_index(&c.field).is_some()
+            || rustgis_map::label_by::LabelExprs::new(&c.by, &l.dataset, Some(scale)).is_some_and(|e| e.has_text())
+    })
+}
+
 /// Converts a layer's labels into an annotation layer: one point per label, at the label point,
 /// carrying the label text and drawn with the same text symbol. Each class labelling a feature
 /// gives it a point (a hidden class none); with classes besides Default, a CLASS field keeps
 /// which, and the annotation has the same classes, each picking its points by it. The layer's
-/// own labels turn off.
+/// own labels turn off. A layer read in place converts all of its source's features, not just
+/// those of the view, and says the rows it couldn't read; it stays read in place. The app reads
+/// them ahead on a thread of its own, as for Load All Features, whatever asks for the conversion
+/// there; a script or the command line reads them where the command runs. The conversion itself
+/// runs on the app's thread: it adds the annotation layer and turns the layer's labels off in one
+/// undoable step, a pass over features already in memory.
 fn convert(s: &mut Session, p: &Value) -> CmdResult {
     let id = s.layer_id(p)?;
     let scale = s.map().scale();
-    let l = s.map().layer(id).ok_or("no such layer")?;
+    // Refused before a layer read in place is read whole for nothing.
+    if !has_label_text(s.map().layer(id).ok_or("no such layer")?, scale) {
+        return Err("the layer has no label field".into());
+    }
+    // Its features, all of them: a copy of a layer read in place holds those of its whole source.
+    let whole = if s.map().layer(id).ok_or("no such layer")?.is_streamed() {
+        let (ds, unread) = super::whole::take_or_read(s, id)?;
+        let mut copy = s.map().layer(id).ok_or("no such layer")?.clone();
+        copy.dataset = ds;
+        copy.source = None;
+        Some((copy, unread))
+    } else {
+        None
+    };
+    let l = match &whole {
+        Some((copy, _)) => copy,
+        None => s.map().layer(id).ok_or("no such layer")?,
+    };
     let fields: Vec<Option<usize>> = l.labels.in_order().map(|c| l.dataset.field_index(&c.field)).collect();
     // Its classes' expressions, as the map draws them now (at its scale).
     let exprs: Vec<Option<rustgis_map::label_by::LabelExprs>> =
@@ -664,6 +734,9 @@ fn convert(s: &mut Session, p: &Value) -> CmdResult {
     let by_angle = l.labels.in_order().any(|c| c.visible && c.by.angle.is_some() && !(only_lines && c.placement.along_line()));
     // Texts cut to their most characters, said once.
     let mut cut = 0usize;
+    // Labels along lines made upright points on them (not those moved by hand), and of them those
+    // whose class repeats along lines (each converted once), said once each.
+    let (mut flattened, mut repeated) = (0usize, 0usize);
     for (on, name, kind) in
         [(by_size, "SIZE", FieldType::Double), (by_color, "COLOR", FieldType::Text), (by_angle, "ANGLE", FieldType::Double)]
     {
@@ -720,6 +793,9 @@ fn convert(s: &mut Session, p: &Value) -> CmdResult {
                 attrs.push(number(e.filter(|_| turns).and_then(|e| e.angle(&l.dataset, row))));
             }
             ds.push(Some(Geometry::Point(at)), attrs);
+            let flat = put.is_none() && along(class, ft.geometry.as_ref());
+            flattened += usize::from(flat);
+            repeated += usize::from(flat && class.repeat.is_some());
             if let (Some(put), Some(new)) = (put, ds.features.last()) {
                 moved.push((i, new.id, put));
             }
@@ -729,6 +805,18 @@ fn convert(s: &mut Session, p: &Value) -> CmdResult {
         return Err("the layer has no labels to convert".into());
     }
     let n = ds.features.len();
+    let flattened_note = (flattened > 0).then(|| {
+        NoticeText::format(
+            "{name}: {n} label(s) along lines made upright points at their lines' middle vertex, no longer laid along the line",
+            [("name", ds.name.clone().into()), ("n", flattened.to_string().into())],
+        )
+    });
+    let repeated_note = (repeated > 0).then(|| {
+        NoticeText::format(
+            "{name}: {n} label(s) whose class repeats along lines converted once each",
+            [("name", ds.name.clone().into()), ("n", repeated.to_string().into())],
+        )
+    });
     let cut_note = (cut > 0).then(|| {
         format!(
             "{}: {cut} label text{} cut to {} characters",
@@ -746,6 +834,8 @@ fn convert(s: &mut Session, p: &Value) -> CmdResult {
         // On its point, never round it: an annotation stays where it is (#1011).
         c.placement = LabelPlacement::Center;
         c.other_positions = false;
+        // Not along a line any more, so its distance from one goes too (#1187).
+        c.line_offset = 0.0;
         // The annotations' ids aren't the features': each moved label is already at its place.
         c.moved.clear();
         // Each class picks the points it labelled, Default too once there are others (#732):
@@ -779,6 +869,12 @@ fn convert(s: &mut Session, p: &Value) -> CmdResult {
     }
     if let Some(note) = cut_note {
         s.notify(note, false);
+    }
+    for note in [flattened_note, repeated_note].into_iter().flatten() {
+        s.notify_text(note, false);
+    }
+    if let Some((_, unread)) = &whole {
+        unread.say(s);
     }
     Ok(json!({"layer": new_id, "annotations": n}))
 }

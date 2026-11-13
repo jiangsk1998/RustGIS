@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use rustgis_data::raster::{BandStats, ColorHint, Raster};
 use serde::{Deserialize, Serialize};
+use web_time::Instant;
 
 use crate::color::{Ramp, Rgba};
 use crate::symbology::{ClassMethod, class_breaks, fmt_num};
@@ -21,6 +22,11 @@ pub struct RasterLayer {
     /// The file it was read from; reopened when the project loads.
     #[serde(default)]
     pub path: Option<String>,
+    /// `path` is a cloud-optimised GeoTIFF's web address, read in place: the layer holds an
+    /// overview of it (its statistics, histograms and tools read that), and the map reads the part
+    /// in view as it draws (see [`set_in_place_reader`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_place: bool,
     /// The file's own name (for its format) when it is embedded.
     #[serde(default)]
     pub file_name: Option<String>,
@@ -53,9 +59,118 @@ pub struct RasterLayer {
     /// Statistics of the pixels the style's mask leaves, worked out on the first draw.
     #[serde(skip)]
     masked: MaskedStats,
+    /// The light its cast shadows leave, worked out off the frame (see [`RasterLayer::cast_shadows`]).
+    #[serde(skip)]
+    cast: CastLight,
     /// A remote reload shared with render snapshots, never serialized.
     #[serde(skip)]
     opening: Option<RasterRead>,
+    /// The initiating read's runtime lifetime, retained through queued application and retry.
+    #[serde(skip)]
+    read_still: Option<rustgis_data::source::remote::Still>,
+    /// Process-local opening identity; render and undo copies retain it, new reads do not.
+    #[serde(skip, default = "next_read_generation")]
+    read_generation: u64,
+    /// The style is the file's own look once its pixels land (a layer added before they have;
+    /// saved with a project saved before they did, so it opens in that look still).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    restyle: bool,
+    /// The look its address gave a layer read in place, applied when its pixels land (saved, as
+    /// `restyle` is, until they have).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    look: Option<AddressLook>,
+    /// What reading its pixels lost has been said (see [`RasterLayer::pixels_unsaid`]).
+    #[serde(skip)]
+    pixels_said: bool,
+    /// Why it couldn't be read in place has been said (see [`RasterLayer::error_unsaid`]).
+    #[serde(skip)]
+    error_said: bool,
+    /// When reading its overview in place failed, for the read to be made again once its wait is
+    /// over (see [`RasterLayer::read_failure`]).
+    #[serde(skip)]
+    failed_at: Option<Instant>,
+    /// How many reads of its overview in place have failed in a row: each waits longer than the
+    /// last (see [`RasterLayer::read_failure`]).
+    #[serde(skip)]
+    failures: u32,
+    /// What reading its pixels left out (`Raster::lost`) has been said (see
+    /// [`RasterLayer::lost_unsaid`]).
+    #[serde(skip)]
+    lost_said: bool,
+    /// What its address's look asked for that the file hasn't (bands past its own), said with
+    /// what the pixels lost.
+    #[serde(skip)]
+    look_lost: Option<String>,
+    /// Settings of the tile layer this one was opened from that a raster layer hasn't (see
+    /// [`RasterLayer::dropped_unsaid`]).
+    #[serde(skip)]
+    dropped: Vec<&'static str>,
+    /// Its pixels were dropped by an undo or redo step and are read again when it is drawn (see
+    /// [`RasterLayer::drop_pixels`]): not the same as pixels whose read hasn't landed yet.
+    #[serde(skip)]
+    pixels_dropped: bool,
+}
+
+/// Called once with a cloud-optimised GeoTIFF's overview, or why it couldn't be read.
+pub type InPlaceRead = Box<dyn FnOnce(Result<Raster, String>) + Send>;
+
+/// Reads the overviews of `layers` read in place and not read yet, all at once: a project of
+/// several opens in the time of the slowest, not of them all. Waited for natively when `wait`
+/// (at most two minutes in all); otherwise, as always in the browser, they land as the map draws
+/// (see [`wait_for_reads`]). Other layers are left as they are. Returns each failure, by its
+/// place in `layers`: without waiting, the reads that couldn't start.
+pub fn read_together(layers: &mut [&mut RasterLayer], wait: bool) -> Vec<(usize, String)> {
+    let mut failed = Vec::new();
+    let unread = |l: &RasterLayer| l.in_place && l.data.is_none() && l.opening.is_none() && l.time_zarr.is_none();
+    for (i, l) in layers.iter_mut().enumerate() {
+        // Started without waiting: waited for below, together.
+        if unread(l)
+            && let Err(e) = l.begin_reload()
+        {
+            failed.push((i, e));
+        }
+    }
+    if wait {
+        failed.extend(wait_for_reads(layers));
+    }
+    failed
+}
+
+/// Waits (natively; at most two minutes for all) for the overviews of `layers` being read in
+/// place (see [`read_together`]), installing them. Returns each failure, by its place in
+/// `layers`. In the browser, where nothing may wait, they land as the map draws.
+pub fn wait_for_reads(layers: &mut [&mut RasterLayer]) -> Vec<(usize, String)> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = layers;
+        Vec::new()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let deadline = Instant::now() + rustgis_data::raster::IN_PLACE_WAIT;
+        let mut failed = Vec::new();
+        for (i, l) in layers.iter_mut().enumerate() {
+            if l.in_place
+                && l.opening.is_some()
+                && let Err(e) = l.wait_for_read(deadline)
+            {
+                failed.push((i, e));
+            }
+        }
+        failed
+    }
+}
+type InPlaceReader = Arc<dyn Fn(&str, InPlaceRead) + Send + Sync>;
+
+fn in_place_reader() -> &'static Mutex<Option<InPlaceReader>> {
+    static R: std::sync::OnceLock<Mutex<Option<InPlaceReader>>> = std::sync::OnceLock::new();
+    R.get_or_init(Mutex::default)
+}
+
+/// Sets how a cloud-optimised GeoTIFF's overview is read by its address (the tile cache's reader,
+/// which checks addresses and signs requests; this crate does no networking).
+pub fn set_in_place_reader(f: impl Fn(&str, InPlaceRead) + Send + Sync + 'static) {
+    *in_place_reader().lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(f));
 }
 
 /// The renderer bands' statistics without the masked pixels, and what they were worked out for:
@@ -136,13 +251,78 @@ impl std::fmt::Debug for RasterLayer {
 }
 
 impl RasterLayer {
+    /// Whether a captured opening still owns the live source and any deferred address look.
+    pub fn same_opening(&self, other: &Self) -> bool {
+        self.read_generation == other.read_generation && self.restyle == other.restyle && self.look == other.look
+    }
+
+    /// Detaches a fully read replacement from the prior opening's pending reads and notices.
+    pub fn reset_replacement_read(&mut self) {
+        self.read_generation = next_read_generation();
+        self.masked = MaskedStats::default();
+        self.cast = CastLight::default();
+        self.opening = None;
+        self.read_still = None;
+        self.restyle = false;
+        self.look = None;
+        self.pixels_said = false;
+        self.error_said = false;
+        self.failed_at = None;
+        self.failures = 0;
+        self.lost_said = false;
+        self.look_lost = None;
+        self.dropped.clear();
+    }
+
     /// Reads a replacement without silently changing the renderer or resetting its style.
     pub fn relinked(&self, path: &str, subdataset: Option<&str>) -> Result<RasterLayer, String> {
         if self.embedded.is_some() {
             return Err("the raster's data is kept in the project: there's no file to repair".into());
         }
+        if self.in_place {
+            return Err("the raster is read in place by its address: add the address again to change it".into());
+        }
+        if !crate::paths::is_local(path) {
+            return Err("give a raster file or Zarr store on this computer: web addresses aren't repaired here".into());
+        }
         let sub = subdataset.or(self.subdataset.as_deref());
+        // The repaired file's pixels are shared with the layers reading it the same way.
         let r = read_fresh(path, sub, self.crs.as_deref(), self.placement).map_err(|e| format!("{path}: {e}"))?;
+        self.validate_replacement(&r, path)?;
+        let mut style = self.style.clone();
+        style.repair(&r);
+        Ok(RasterLayer {
+            path: Some(path.into()),
+            in_place: false,
+            file_name: None,
+            embedded: None,
+            subdataset: sub.map(String::from),
+            crs: self.crs.clone(),
+            time_zarr: None,
+            placement: self.placement,
+            style,
+            data: Some(r),
+            error: None,
+            masked: MaskedStats::default(),
+            cast: CastLight::default(),
+            opening: None,
+            read_still: None,
+            read_generation: next_read_generation(),
+            restyle: false,
+            look: None,
+            pixels_said: false,
+            error_said: false,
+            failed_at: None,
+            failures: 0,
+            lost_said: false,
+            look_lost: None,
+            dropped: Vec::new(),
+            pixels_dropped: false,
+        })
+    }
+
+    /// Checks a fresh candidate without changing the configured renderer or its palette.
+    pub fn validate_replacement(&self, r: &Raster, path: &str) -> Result<(), String> {
         let need = self.style.renderer.bands().into_iter().max().map_or(1, |b| b.saturating_add(1));
         if r.band_count() < need {
             return Err(format!(
@@ -155,22 +335,7 @@ impl RasterLayer {
                 "{path} has no color palette; the layer's Colormap style uses the file's palette: choose a raster with a color palette"
             ));
         }
-        let mut style = self.style.clone();
-        style.repair(&r);
-        Ok(RasterLayer {
-            path: Some(path.into()),
-            file_name: None,
-            embedded: None,
-            subdataset: sub.map(String::from),
-            crs: self.crs.clone(),
-            time_zarr: None,
-            placement: self.placement,
-            style,
-            data: Some(r),
-            error: None,
-            masked: MaskedStats::default(),
-            opening: None,
-        })
+        Ok(())
     }
 
     /// A raster read from a file on disk.
@@ -178,6 +343,7 @@ impl RasterLayer {
         let style = RasterStyle::default_for(&raster);
         RasterLayer {
             path: Some(path.into()),
+            in_place: false,
             file_name: None,
             embedded: None,
             subdataset: None,
@@ -188,7 +354,20 @@ impl RasterLayer {
             data: Some(Arc::new(raster)),
             error: None,
             masked: MaskedStats::default(),
+            cast: CastLight::default(),
             opening: None,
+            read_still: None,
+            read_generation: next_read_generation(),
+            restyle: false,
+            look: None,
+            pixels_said: false,
+            error_said: false,
+            failed_at: None,
+            failures: 0,
+            lost_said: false,
+            look_lost: None,
+            dropped: Vec::new(),
+            pixels_dropped: false,
         }
     }
 
@@ -197,6 +376,7 @@ impl RasterLayer {
         let style = RasterStyle::default_for(&raster);
         RasterLayer {
             path: None,
+            in_place: false,
             file_name: Some(file_name.into()),
             embedded: Some(Arc::new(bytes)),
             subdataset: None,
@@ -207,19 +387,202 @@ impl RasterLayer {
             data: Some(Arc::new(raster)),
             error: None,
             masked: MaskedStats::default(),
+            cast: CastLight::default(),
             opening: None,
+            read_still: None,
+            read_generation: next_read_generation(),
+            restyle: false,
+            look: None,
+            pixels_said: false,
+            error_said: false,
+            failed_at: None,
+            failures: 0,
+            lost_said: false,
+            look_lost: None,
+            dropped: Vec::new(),
+            pixels_dropped: false,
         }
     }
 
-    /// Reads the pixels again from the path or the embedded file (after a project opens). An S3
-    /// or login-wrapped address is downloaded whole, keeping its wrapper. A layer that follows the
-    /// time slider is left to the engine, which reads the step shown.
+    /// A cloud-optimised GeoTIFF read in place by its address, its overview `raster` read.
+    pub fn in_place(raster: Raster, address: impl Into<String>) -> RasterLayer {
+        RasterLayer { in_place: true, ..RasterLayer::from_path(raster, address) }
+    }
+
+    /// A cloud-optimised GeoTIFF read in place by its address, its overview not read yet: drawn,
+    /// in its own look, once [`RasterLayer::reload`] (or [`read_together`]) has read it.
+    pub fn unread_in_place(address: impl Into<String>) -> RasterLayer {
+        RasterLayer {
+            path: Some(address.into()),
+            in_place: true,
+            file_name: None,
+            embedded: None,
+            subdataset: None,
+            crs: None,
+            time_zarr: None,
+            placement: None,
+            style: RasterStyle::placeholder(),
+            data: None,
+            error: None,
+            masked: MaskedStats::default(),
+            cast: CastLight::default(),
+            opening: None,
+            read_still: None,
+            read_generation: next_read_generation(),
+            restyle: true,
+            look: None,
+            pixels_said: false,
+            error_said: false,
+            failed_at: None,
+            failures: 0,
+            lost_said: false,
+            look_lost: None,
+            dropped: Vec::new(),
+            pixels_dropped: false,
+        }
+    }
+
+    /// [`RasterLayer::unread_in_place`], its overview being read: it lands as the map draws
+    /// ([`RasterLayer::poll_reload`]), in the browser and on the desktop alike, and failing is
+    /// said then (see [`RasterLayer::error_unsaid`]).
+    pub fn opening_in_place(address: impl Into<String>) -> RasterLayer {
+        let mut layer = RasterLayer::unread_in_place(address);
+        let _ = layer.begin_reload();
+        layer
+    }
+
+    /// The layer in the look its address gives (see [`AddressLook`]): now, when its pixels are
+    /// here, else once they land.
+    pub fn with_look(mut self, look: AddressLook) -> RasterLayer {
+        match self.data.clone() {
+            Some(d) => {
+                self.look_lost = RasterStyle::look_lost(&d, &look);
+                if let Some(style) = RasterStyle::for_look(&d, &look) {
+                    self.style = style;
+                }
+            }
+            None => self.look = Some(look),
+        }
+        self
+    }
+
+    /// Marks the layer as one that couldn't be read, and why (a project opened without the
+    /// connection its address needs), for [`RasterLayer::error_unsaid`] to say.
+    pub fn fail(&mut self, why: impl Into<String>) {
+        self.error = Some(why.into());
+        self.error_said = false;
+        self.failed_at = None;
+    }
+
+    /// Starts reading its overview in place by the reader the app installed, which answers later
+    /// (installed by [`RasterLayer::poll_reload`] as the map draws, or waited for by
+    /// [`RasterLayer::reload`] natively). What it can't start (no address, an address that isn't a
+    /// tile layer's, no reader here) is the caller's to say.
+    fn begin_in_place_read(&mut self) -> Result<(), String> {
+        use rustgis_data::source::remote;
+        let still = remote::current_still();
+        remote::check_still(&still)?;
+        let Some(address) = self.path.clone() else { return Err("the raster has no source".to_string()) };
+        // Checked as a tile layer's address is (http(s) or s3, a host, no control characters), or
+        // as a file on this computer (an absolute .tif, which the in-place reader checks): a
+        // project edited by hand asks for nothing else.
+        if !crate::paths::is_absolute_local(&address) {
+            crate::tiles::check_url(&address)?;
+        }
+        let Some(reader) = in_place_reader().lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+            return Err(format!("{address}: can't be read in place here"));
+        };
+        self.data = None;
+        let slot = Arc::new(Mutex::new(None));
+        let land = slot.clone();
+        self.opening = Some(slot);
+        self.read_still = still.clone();
+        reader(
+            &address,
+            Box::new(move |result| {
+                *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(remote::check_still(&still).and(result.map(Arc::new)));
+                crate::source::wake();
+            }),
+        );
+        Ok(())
+    }
+
+    /// Why reading its overview in place failed, when, and how many reads in a row have failed:
+    /// for the read to be made again once its wait is over (see [`RasterLayer::read_again`]), as a
+    /// tile or a file's header is, waiting longer each time. `None` for a layer with its pixels,
+    /// one being read, and one that waits for something other than time (its bucket's connection:
+    /// see [`RasterLayer::fail`]).
+    pub fn read_failure(&self) -> Option<(&str, Instant, u32)> {
+        if !self.in_place || self.data.is_some() || self.opening.is_some() {
+            return None;
+        }
+        Some((self.error.as_deref()?, self.failed_at?, self.failures))
+    }
+
+    /// Reads its overview again after a read that failed (see [`RasterLayer::read_failure`]),
+    /// without waiting: it lands as the map draws, natively as in the browser (nothing may wait
+    /// each frame). The layer keeps its error until then, and failing the same way again isn't
+    /// said again.
+    pub fn read_again(&mut self) {
+        if self.read_failure().is_none() {
+            return;
+        }
+        use rustgis_data::source::remote;
+        let still = self.read_still.clone();
+        if let Err(e) = remote::check_still(&still) {
+            self.fail(e);
+            return;
+        }
+        self.read_generation = next_read_generation();
+        if let Err(e) = remote::with_optional_still(still, || self.begin_in_place_read()) {
+            self.land(Err(e));
+        }
+    }
+
+    /// Reads the pixels again from the path or the embedded file (after a project opens). A
+    /// layer read in place is waited for natively (at most two minutes), as a file is read;
+    /// another layer's S3 or login-wrapped address is downloaded whole, keeping its wrapper. A
+    /// layer that follows the time slider is left to the engine, which reads the step shown.
     pub fn reload(&mut self) -> Result<(), String> {
+        self.reload_in(true)
+    }
+
+    /// [`RasterLayer::reload`] without waiting for a layer read in place: its overview lands as
+    /// the map draws ([`RasterLayer::poll_reload`]), natively as in the browser, so a command on
+    /// the desktop's own thread isn't held by a slow host. The error is a read that can't start.
+    pub fn begin_reload(&mut self) -> Result<(), String> {
+        self.reload_in(false)
+    }
+
+    fn reload_in(&mut self, wait: bool) -> Result<(), String> {
         if self.time_zarr.is_some() {
             return Ok(());
         }
+        use rustgis_data::source::remote;
+        let still = remote::current_still();
+        remote::check_still(&still)?;
+        self.read_generation = next_read_generation();
+        self.read_still = still;
         self.opening = None;
         self.error = None;
+        self.failed_at = None;
+        self.failures = 0;
+        // Read in place: its overview, by the reader the app installed; waited for natively when
+        // asked to (as a file is read), else landing later, as always in the browser.
+        if self.in_place {
+            if let Err(e) = self.begin_in_place_read() {
+                self.error = Some(e.clone());
+                self.error_said = false;
+                return Err(e);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if wait {
+                return self.wait_for_read(Instant::now() + rustgis_data::raster::IN_PLACE_WAIT);
+            }
+            #[cfg(target_arch = "wasm32")]
+            let _ = wait;
+            return Ok(());
+        }
         if self.embedded.is_none()
             && let Some(path) = self.path.as_deref().filter(|p| Self::downloads_whole(Some(p)))
         {
@@ -231,16 +594,17 @@ impl RasterLayer {
             let placement = self.placement;
             let slot = Arc::new(Mutex::new(None));
             let land = slot.clone();
+            let still = self.read_still.clone();
             self.data = None;
             self.opening = Some(slot);
             rustgis_data::source::remote::fetch_whole(
                 path,
                 Box::new(move |result| {
-                    let result = result
-                        .map_err(|e| match e {
+                    let result = remote::check_still(&still)
+                        .and(result.map_err(|e| match e {
                             rustgis_data::source::remote::Failed::Other(message) => message,
                             _ => "The raster could not be downloaded.".to_string(),
-                        })
+                        }))
                         .and_then(|bytes| {
                             rustgis_data::raster::read_bytes(&name, &bytes)
                                 .and_then(|r| placed(r, placement))
@@ -248,7 +612,7 @@ impl RasterLayer {
                                 .map_err(|e| e.to_string())
                         });
                     *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
-                    crate::source::landed();
+                    crate::source::wake();
                 }),
             );
             return Ok(());
@@ -257,6 +621,9 @@ impl RasterLayer {
             Ok(r) => {
                 self.style.repair(&r);
                 self.data = Some(r);
+                self.pixels_dropped = false;
+                self.pixels_said = false;
+                self.lost_said = false;
                 Ok(())
             }
             Err(e) => {
@@ -287,13 +654,36 @@ impl RasterLayer {
         }
     }
 
+    /// Whether this layer holds the very pixels `another` holds: the same source, read once. A
+    /// layer whose read happened again (a reload) holds pixels the other doesn't.
+    pub fn same_read(&self, another: &RasterLayer) -> bool {
+        self.read_generation == another.read_generation && self.same_source(another)
+    }
+
     /// Whether the layer's pixels were dropped (an undo step's) and it can read them again.
     pub fn needs_pixels(&self) -> bool {
-        self.data.is_none()
+        self.pixels_dropped
+            && self.data.is_none()
             && self.opening.is_none()
             && self.error.is_none()
             && self.time_zarr.is_none()
             && (self.path.is_some() || self.embedded.is_some())
+    }
+
+    /// Drops the decoded pixels an undo or redo step would keep, for a layer that can read them
+    /// again from its file or embedded bytes (see [`RasterLayer::needs_pixels`]).
+    pub fn drop_pixels(&mut self) {
+        if self.data.is_some() && self.time_zarr.is_none() && (self.path.is_some() || self.embedded.is_some()) {
+            self.data = None;
+            self.pixels_dropped = true;
+        }
+    }
+
+    /// Takes pixels from the project an undo step restores (see [`RasterLayer::same_source`]): the
+    /// layer isn't waiting to read any.
+    pub fn share_pixels(&mut self, pixels: Arc<Raster>) {
+        self.data = Some(pixels);
+        self.pixels_dropped = false;
     }
 
     /// Reads a dropped layer's pixels again: in place when `block` (an export that must draw them)
@@ -303,8 +693,12 @@ impl RasterLayer {
         if !self.needs_pixels() {
             return self.opening.is_some();
         }
-        // A remote address is downloaded whole by [`Self::reload`], which shares its own slot
-        // with the render copies.
+        // A layer read in place reads its overview again by its address; a remote address is
+        // downloaded whole; both land in the slot [`Self::reload`] shares with the render copies.
+        if self.in_place {
+            let _ = if block { self.reload() } else { self.begin_reload() };
+            return self.opening.is_some();
+        }
         if Self::downloads_whole(self.embedded.is_none().then_some(self.path.as_deref()).flatten()) {
             let _ = self.reload();
             return self.opening.is_some();
@@ -348,7 +742,7 @@ impl RasterLayer {
                 {
                     reads.remove(key);
                 }
-                crate::source::landed();
+                crate::source::wake();
             };
             let capture = rustgis_data::diagnostics::Capture::current();
             match std::thread::Builder::new().name("rustgis-raster".into()).spawn(move || {
@@ -394,19 +788,131 @@ impl RasterLayer {
         })
     }
 
+    /// Waits (natively, until `deadline`) for a read under way, then installs it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn wait_for_read(&mut self, deadline: Instant) -> Result<(), String> {
+        let Some(slot) = self.opening.clone() else { return Ok(()) };
+        loop {
+            if let Err(e) = rustgis_data::source::remote::check_still(&self.read_still) {
+                self.opening = None;
+                self.fail(e.clone());
+                return Err(e);
+            }
+            if let Some(result) = slot.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                self.opening = None;
+                let error = result.as_ref().err().cloned();
+                self.land(result);
+                return error.map_or(Ok(()), Err);
+            }
+            if Instant::now() >= deadline {
+                let address = self.path.clone().unwrap_or_default();
+                let e = format!("{address}: no answer in two minutes");
+                self.opening = None;
+                self.land(Err(e.clone()));
+                return Err(e);
+            }
+            std::thread::sleep(web_time::Duration::from_millis(10));
+        }
+    }
+
+    /// Its pixels, the first time they are asked for after they landed (added with them, or read
+    /// in place later: in the browser, a project, an import), so what reading them lost (a colour
+    /// table missing, an overview held) is said once for them.
+    pub fn pixels_unsaid(&mut self) -> Option<Arc<Raster>> {
+        if self.pixels_said {
+            return None;
+        }
+        let d = self.data.clone()?;
+        self.pixels_said = true;
+        Some(d)
+    }
+
+    /// The layer, opened from a tile layer whose `dropped` settings (`"attribution"`, `"legend"`,
+    /// `"zoom range"`, `"bounds"`, `"overlay"`) a raster layer hasn't, so they aren't kept: said
+    /// once, by [`RasterLayer::dropped_unsaid`].
+    pub fn from_tiles_dropping(mut self, dropped: Vec<&'static str>) -> RasterLayer {
+        self.dropped = dropped;
+        self
+    }
+
+    /// The tile layer settings dropped when this layer was opened from one, the first time they
+    /// are asked for.
+    pub fn dropped_unsaid(&mut self) -> Vec<&'static str> {
+        std::mem::take(&mut self.dropped)
+    }
+
+    /// What reading its pixels left out (`Raster::lost`), the first time it is asked for after
+    /// they landed, so it is said once: as the layer is added, as its project opens, or when they
+    /// land later (the browser).
+    pub fn lost_unsaid(&mut self) -> Vec<String> {
+        if self.lost_said {
+            // A look applied after the pixels' losses were said: what it asked for that the file
+            // hasn't, on its own, not the pixels' losses again.
+            return self.look_lost.take().into_iter().collect();
+        }
+        let mut lost = self.data.as_ref().map(|d| d.lost.clone()).unwrap_or_default();
+        lost.extend(self.look_lost.take());
+        self.lost_said = self.data.is_some();
+        lost
+    }
+
+    /// Why a layer read in place couldn't be read, the first time it is asked for after the read
+    /// failed, so it is said once (a project, an import or the browser read it after adding it).
+    pub fn error_unsaid(&mut self) -> Option<String> {
+        if !self.in_place || self.error_said {
+            return None;
+        }
+        let e = self.error.clone()?;
+        self.error_said = true;
+        Some(e)
+    }
+
     /// Installs a completed remote read; each render copy can observe the same shared result.
     pub(crate) fn poll_reload(&mut self) -> bool {
         let Some(slot) = self.opening.as_ref() else { return false };
+        if let Err(e) = rustgis_data::source::remote::check_still(&self.read_still) {
+            self.opening = None;
+            self.fail(e);
+            crate::source::another_frame();
+            return false;
+        }
         let Some(result) = slot.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return true };
         self.opening = None;
+        self.land(result);
+        // Installed while the map draws: a frame after it says what reading them lost.
+        crate::source::another_frame();
+        false
+    }
+
+    /// Installs pixels read (or why they couldn't be): in the file's own look for a layer added
+    /// before they arrived, else in its style, repaired for them.
+    fn land(&mut self, result: Result<Arc<Raster>, String>) {
         match result {
             Ok(raster) => {
-                self.style.repair(&raster);
+                self.pixels_said = false;
+                self.lost_said = false;
+                if std::mem::take(&mut self.restyle) {
+                    let look = self.look.take();
+                    self.look_lost = look.as_ref().and_then(|look| RasterStyle::look_lost(&raster, look));
+                    let look = look.and_then(|look| RasterStyle::for_look(&raster, &look));
+                    self.style = look.unwrap_or_else(|| RasterStyle::default_for(&raster));
+                } else {
+                    self.style.repair(&raster);
+                }
                 self.data = Some(raster);
+                self.pixels_dropped = false;
+                self.error = None;
+                self.failed_at = None;
+                self.failures = 0;
             }
-            Err(error) => self.error = Some(error),
+            Err(error) => {
+                // A read made again that fails as before (see `read_again`) isn't said again.
+                self.error_said = self.error_said && self.error.as_deref() == Some(error.as_str());
+                self.error = Some(error);
+                self.failed_at = Some(Instant::now());
+                self.failures = self.failures.saturating_add(1);
+            }
         }
-        false
     }
 
     /// Statistics of the renderer's bands (one per band, in its order) without the pixels the
@@ -433,6 +939,310 @@ impl RasterLayer {
         }
         Some(stats)
     }
+
+    /// Whether it is drawn with cast shadows (Shaded Relief with a shadow above 0): its frames are
+    /// drawn again as they land (see [`RasterLayer::cast_shadows`]).
+    pub fn casts_shadows(&self) -> bool {
+        matches!(self.style.renderer, RasterRenderer::ShadedRelief { shadow, .. } if shadow > 0.0)
+    }
+
+    /// How many wait for its cast shadows now (exports), its copies' too: for tests of what an
+    /// export waits for.
+    #[doc(hidden)]
+    pub fn cast_shadow_waiters(&self) -> usize {
+        let Ok(jobs) = self.cast.0.lock() else { return 0 };
+        jobs.iter().map(|j| j.work.waiting.load(std::sync::atomic::Ordering::SeqCst)).sum()
+    }
+
+    /// The light its cast shadows leave on each cell (see [`crate::shadow::light`]), when it is
+    /// drawn as Shaded Relief with shadows. Worked out once per pixels, band, sun, Z factor and
+    /// mask and kept: each owner's latest, and a few of suns left, for going back.
+    /// `owner` is who draws it (its map's and its layer's live identities, see
+    /// [`crate::Layer::instance_id`]; a layer's id repeats from map to map): a new sun from the
+    /// same owner stops the work
+    /// for its last one, unless something waits for it. Natively it is worked out on a thread of
+    /// its own, then `landed` is called (the map asks to be drawn again); with `wait`, as an
+    /// export does, this waits for it. The browser, which has one thread, works it out here, for
+    /// at most [`crate::shadow::MAX_BROWSER_CELLS`] cells.
+    pub fn cast_shadows(&self, wait: bool, owner: (u64, u64), landed: impl FnOnce() + Send + 'static) -> CastShadows {
+        let RasterRenderer::ShadedRelief { band, azimuth, altitude, z_factor, shadow, .. } = self.style.renderer else {
+            return CastShadows::None;
+        };
+        let finite = [azimuth, altitude, z_factor].iter().all(|v| v.is_finite());
+        let Some(r) = self.data.as_ref().filter(|_| shadow > 0.0 && finite) else { return CastShadows::None };
+        // Read in place, the layer holds an overview; the part in view is read as the map draws.
+        if self.in_place && r.overview.is_some_and(|(w, _)| w > r.width) {
+            return CastShadows::Unavailable("its cast shadows aren't drawn: it is read in place, and only its overview is held".into());
+        }
+        let cells = r.width as usize * r.height as usize;
+        if cfg!(target_arch = "wasm32") && cells > crate::shadow::MAX_BROWSER_CELLS {
+            return CastShadows::Unavailable(format!(
+                "its cast shadows aren't drawn: in the browser they are worked out for rasters of at most {} cells, and it has {cells}",
+                crate::shadow::MAX_BROWSER_CELLS
+            ));
+        }
+        let key = LightKey { band, azimuth, altitude, z_factor, mask: self.style.mask.clone() };
+        let mut start = None;
+        let work = {
+            let Ok(mut jobs) = self.cast.0.lock() else { return CastShadows::None };
+            // Grids of pixels no longer held go (their work stops as it is dropped), and so does
+            // work stopped part-way (a cancelled run), to be started again.
+            jobs.retain(|j| j.pixels.strong_count() > 0 && !j.work.was_stopped());
+            let pixels = Arc::downgrade(r);
+            let same = |j: &LightJob| j.key == key && Weak::ptr_eq(&j.pixels, &pixels);
+            // The same owner's work for another sun, not done and not waited for, is superseded
+            // (going back to a sun kept too): it stops, as it is dropped. Grids done are kept, for
+            // going back.
+            jobs.retain(|j| same(j) || j.owner != owner || j.work.is_done() || j.work.waited());
+            match jobs.iter().position(same) {
+                Some(i) => {
+                    // The latest used last, so the oldest goes first.
+                    let mut job = jobs.remove(i);
+                    job.owner = owner;
+                    let work = job.work.clone();
+                    jobs.push(job);
+                    // Joining work under way (an export's, another frame's): drawn again when it
+                    // lands too.
+                    work.on_landing(landed);
+                    work
+                }
+                None => {
+                    // Each owner's latest grid is kept: it is what that owner draws, and letting it go
+                    // would only have it worked out again, letting another go (a page of more maps,
+                    // lit otherwise, than were kept never got its shadows). The grids of suns
+                    // owners have left, done and waited for by nothing, are kept for going back: the
+                    // oldest goes past a few.
+                    let left: Vec<usize> = (0..jobs.len())
+                        .filter(|i| {
+                            jobs.get(*i).is_some_and(|j| {
+                                j.work.is_done() && !j.work.waited() && jobs.iter().skip(i + 1).any(|later| later.owner == j.owner)
+                            })
+                        })
+                        .collect();
+                    if left.len() >= KEPT_LIGHTS
+                        && let Some(i) = left.first()
+                    {
+                        jobs.remove(*i);
+                    }
+                    let work = Arc::new(LightWork::default());
+                    work.on_landing(landed);
+                    jobs.push(LightJob { key: key.clone(), pixels: Arc::downgrade(r), owner, work: work.clone() });
+                    start = Some((r.clone(), key));
+                    work
+                }
+            }
+        };
+        // Started without holding the lock: a thread the system refuses runs it here.
+        if let Some((r, key)) = start {
+            start_light(r, key, work.clone());
+        }
+        work.result(wait)
+    }
+}
+
+/// [`RasterLayer::cast_shadows`]: what the map draws its cast shadows with.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CastShadows {
+    /// It casts none (another renderer, or a shadow of 0).
+    None,
+    /// The light left on each cell (0–255), row by row as the pixels are.
+    Ready(Arc<Vec<u8>>),
+    /// Being worked out: drawn without, and again once it has landed.
+    Pending,
+    /// Drawn without them, and why.
+    Unavailable(String),
+}
+
+/// What a light grid is worked out for, besides the pixels.
+#[derive(Clone, Debug, PartialEq)]
+struct LightKey {
+    band: usize,
+    azimuth: f64,
+    altitude: f64,
+    z_factor: f64,
+    mask: RasterMask,
+}
+
+/// A light grid's work, shared with the thread doing it.
+#[derive(Default)]
+struct LightWork {
+    stop: std::sync::atomic::AtomicBool,
+    /// The grid, or why there is none, once it is done.
+    done: Mutex<Option<Result<Arc<Vec<u8>>, String>>>,
+    landed: std::sync::Condvar,
+    /// How many wait for it (exports): it is neither superseded nor let go meanwhile.
+    waiting: std::sync::atomic::AtomicUsize,
+    /// Called once it is done: each frame or page drawn while it was to come asks to be drawn
+    /// again (at most [`MAX_LANDINGS`] are kept; the first already redraws them all).
+    landings: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
+}
+
+/// The most landing calls a light grid's work keeps.
+const MAX_LANDINGS: usize = 32;
+
+impl LightWork {
+    /// Calls `landed` once the work is done; nothing when it is already (the caller has it).
+    fn on_landing(&self, landed: impl FnOnce() + Send + 'static) {
+        // Checked under the calls' lock, which `land` takes after the work is done: a call is
+        // either kept and made, or not needed.
+        let Ok(mut calls) = self.landings.lock() else { return };
+        if !self.is_done() && calls.len() < MAX_LANDINGS {
+            calls.push(Box::new(landed));
+        }
+    }
+
+    /// Makes the landing calls, once the work is done.
+    fn land(&self) {
+        let calls = self.landings.lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
+        for call in calls {
+            call();
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        self.done.lock().is_ok_and(|d| d.is_some())
+    }
+
+    /// Whether it was stopped part-way, rather than done.
+    fn was_stopped(&self) -> bool {
+        self.done.lock().is_ok_and(|d| matches!(d.as_ref(), Some(Err(e)) if e == STOPPED))
+    }
+
+    fn waited(&self) -> bool {
+        self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+
+    fn finish(&self, out: Result<Arc<Vec<u8>>, String>) {
+        if let Ok(mut done) = self.done.lock() {
+            *done = Some(out);
+        }
+        self.landed.notify_all();
+    }
+
+    /// What it has: with `wait`, once it is done, unless the run waiting is cancelled (see
+    /// [`rustgis_data::progress`]). A cancelled run that was the only one waiting stops the work
+    /// too (the worker has no probe of its own): the map, drawing again, starts it over.
+    fn result(&self, wait: bool) -> CastShadows {
+        let _waiting = wait.then(|| Waiting::on(&self.waiting));
+        let Ok(mut done) = self.done.lock() else { return CastShadows::None };
+        while wait && done.is_none() && rustgis_data::progress::check().is_ok() {
+            done = match self.landed.wait_timeout(done, std::time::Duration::from_millis(100)) {
+                Ok((d, _)) => d,
+                Err(_) => return CastShadows::None,
+            };
+        }
+        if wait && done.is_none() && self.waiting.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        match done.as_ref() {
+            Some(Ok(grid)) => CastShadows::Ready(grid.clone()),
+            Some(Err(why)) => CastShadows::Unavailable(why.clone()),
+            None => CastShadows::Pending,
+        }
+    }
+}
+
+/// Counts one waiting for a light grid while it lives.
+struct Waiting<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> Waiting<'a> {
+    fn on(count: &'a std::sync::atomic::AtomicUsize) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Waiting(count)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The light grid kept for a layer, and the work for it.
+struct LightJob {
+    key: LightKey,
+    /// Held weakly, so their address isn't reused.
+    pixels: Weak<Raster>,
+    /// Who drew it last (see [`RasterLayer::cast_shadows`]).
+    owner: (u64, u64),
+    work: Arc<LightWork>,
+}
+
+impl Drop for LightJob {
+    /// Replaced, or its layer gone: the work for it stops.
+    fn drop(&mut self) {
+        self.work.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The light grids kept for a layer and its copies, the latest used last.
+#[derive(Clone, Default)]
+struct CastLight(Arc<Mutex<Vec<LightJob>>>);
+
+/// Why a light grid stopped part-way has none: superseded, or its run cancelled.
+const STOPPED: &str = "its cast shadows were stopped";
+
+/// The most grids of suns their owners have left that a layer and its copies keep, besides
+/// each owner's latest.
+const KEPT_LIGHTS: usize = 3;
+
+/// Held by [`hold_cast_shadows`]: light work waits for it before it traces.
+static LIGHT_HOLD: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Holds every light grid's work before it traces, until the guard is dropped: for tests of what
+/// is drawn, and said, while cast shadows are still to come, whatever the computer's speed.
+#[doc(hidden)]
+pub fn hold_cast_shadows() -> std::sync::RwLockWriteGuard<'static, ()> {
+    LIGHT_HOLD.write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Works out a light grid: natively on a thread of its own (here if the system refuses one),
+/// in the browser here.
+fn start_light(r: Arc<Raster>, key: LightKey, work: Arc<LightWork>) {
+    let run = move || {
+        drop(LIGHT_HOLD.read().unwrap_or_else(|e| e.into_inner()));
+        let threads = rustgis_data::threads::max();
+        let traced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::shadow::light(&r, key.band, &key.mask, key.azimuth, key.altitude, key.z_factor, threads, &work.stop)
+        }));
+        match traced {
+            // Stopped (superseded, or its export cancelled): a frame or page drawn while it was
+            // to come is drawn again, and asks for what it draws now.
+            Ok(Err(crate::shadow::Unlit::Stopped)) => {
+                work.finish(Err(STOPPED.into()));
+                work.land();
+            }
+            Ok(out) => {
+                work.finish(out.map(Arc::new).map_err(|e| match e {
+                    crate::shadow::Unlit::Failed => "its cast shadows aren't drawn: working them out failed".into(),
+                    _ => "its cast shadows aren't drawn: there isn't the memory for them".into(),
+                }));
+                work.land();
+            }
+            // Said, rather than leaving an export waiting.
+            Err(_) => {
+                work.finish(Err("its cast shadows aren't drawn: working them out failed".into()));
+                work.land();
+            }
+        }
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let run = std::sync::Arc::new(Mutex::new(Some(run)));
+        let on_thread = run.clone();
+        let spawned = std::thread::Builder::new().name("cast shadows".into()).spawn(move || {
+            if let Some(f) = on_thread.lock().ok().and_then(|mut f| f.take()) {
+                f();
+            }
+        });
+        if spawned.is_err()
+            && let Some(f) = run.lock().ok().and_then(|mut f| f.take())
+        {
+            f();
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    run();
 }
 
 /// Reapplies a scan's placement to pixels read again, without copying their bands.
@@ -451,7 +1261,7 @@ pub const MAX_ZARR_STEPS: usize = crate::time::MAX_STEPS;
 
 /// A Zarr variable that follows the time slider: the store (a folder or a web address), the
 /// variable, the other dimensions' fixed steps, and its time dimension's steps as dates.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ZarrTime {
     /// The store's folder or web address.
@@ -473,6 +1283,35 @@ pub struct ZarrTime {
     /// The step whose slice the layer holds (an index into `dates`); `None` when none is.
     #[serde(skip)]
     pub shown: Option<usize>,
+    /// Process-local read generation: explicit reload must not reuse old slices or pending reads.
+    #[serde(skip, default = "next_read_generation")]
+    pub read_generation: u64,
+}
+
+/// A process-local identity for a fresh Zarr opening or independent analysis invocation.
+pub fn next_read_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+impl Default for ZarrTime {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            variable: String::new(),
+            index: Vec::new(),
+            dim: String::new(),
+            offset: 0,
+            dates: Vec::new(),
+            crs: None,
+            shown: None,
+            read_generation: next_read_generation(),
+        }
+    }
+}
+
+fn is_no_shadow(v: &f64) -> bool {
+    *v == 0.0
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -674,8 +1513,17 @@ pub enum RasterRenderer {
     UniqueValues { band: usize, ramp: Ramp, values: Vec<(f64, Rgba)> },
     /// The file's own colour table.
     Colormap,
-    /// Hillshade, optionally tinted by elevation.
-    ShadedRelief { band: usize, ramp: Option<Ramp>, azimuth: f64, altitude: f64, z_factor: f64 },
+    /// Hillshade, optionally tinted by elevation. `shadow` (0 to 1) is how dark the shadows the
+    /// terrain casts are drawn (see [`crate::shadow`]); 0, the default, casts none.
+    ShadedRelief {
+        band: usize,
+        ramp: Option<Ramp>,
+        azimuth: f64,
+        altitude: f64,
+        z_factor: f64,
+        #[serde(default, skip_serializing_if = "is_no_shadow")]
+        shadow: f64,
+    },
 }
 
 impl RasterRenderer {
@@ -701,6 +1549,12 @@ impl RasterRenderer {
 
     pub fn label(&self) -> &'static str {
         RasterRenderer::KINDS.iter().find(|(c, _)| *c == self.code()).map(|(_, l)| *l).unwrap_or("Stretch")
+    }
+
+    /// Whether it draws classes (a colour table, unique values, class breaks), which a legend lists
+    /// as the Layers pane does (#1679), rather than a ramp or bands.
+    pub fn draws_classes(&self) -> bool {
+        matches!(self, RasterRenderer::Classify { .. } | RasterRenderer::UniqueValues { .. } | RasterRenderer::Colormap)
     }
 
     /// The bands it reads.
@@ -878,9 +1732,91 @@ fn one() -> f64 {
     1.0
 }
 
+/// The look an address gives a GeoTIFF read in place (`…/scene.tif#bands=5,3,2&range=0,3000`, as
+/// tile layers kept it): the bands drawn (from 0; one in grey, or red, green and blue) and a fixed
+/// stretch.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AddressLook {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bands: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<(f64, f64)>,
+}
+
 impl RasterStyle {
-    /// The default look: the file's colours, RGB for colour images, unique values for a few
-    /// categories, otherwise a grey stretch.
+    /// The style `look` gives `r`: its own look (see [`RasterStyle::default_for`]) with the bands
+    /// and stretch the look names (bands it hasn't are left as they are); `None` for a look that
+    /// names neither. A palette image stretched by a range, or whose address names bands, is
+    /// drawn in grey, as its tile layer was.
+    pub fn for_look(r: &Raster, look: &AddressLook) -> Option<RasterStyle> {
+        if look.bands.is_empty() && look.range.is_none() {
+            return None;
+        }
+        // Bands the file hasn't: its own look (said by `look_lost`); a palette image in grey, as
+        // its tile layer draws one whose address names bands (its colours are of one band alone).
+        if Self::look_lost(r, look).is_some() {
+            let mut style = RasterStyle::default_for(r);
+            if matches!(style.renderer, RasterRenderer::Colormap) {
+                style.renderer = RasterRenderer::Stretch { band: 0, ramp: Ramp::gray(), invert: false };
+                style.stretch = Stretch::default();
+            }
+            if let Some((lo, hi)) = look.range {
+                style.stretch = Stretch::custom(lo, hi);
+            }
+            return Some(style);
+        }
+        let mut style = RasterStyle::default_for(r);
+        let n = r.band_count();
+        match look.bands[..] {
+            [b] if b < n => style.renderer = RasterRenderer::Stretch { band: b, ramp: Ramp::gray(), invert: false },
+            [red, green, blue] if red < n && green < n && blue < n => style.renderer = RasterRenderer::Rgb { red, green, blue },
+            [] if matches!(style.renderer, RasterRenderer::Colormap) => {
+                style.renderer = RasterRenderer::Stretch { band: 0, ramp: Ramp::gray(), invert: false };
+            }
+            _ => {}
+        }
+        if let Some((lo, hi)) = look.range {
+            style.stretch = Stretch::custom(lo, hi);
+        }
+        Some(style)
+    }
+
+    /// What a look asks for that `r` can't draw: bands past its own, or two bands (one is drawn
+    /// in grey, three as red, green and blue), so the file's own look is drawn instead; `None`
+    /// when the look fits.
+    pub fn look_lost(r: &Raster, look: &AddressLook) -> Option<String> {
+        let n = r.band_count();
+        // A palette image's colours are of one band alone: in grey, as its tile layer drew it.
+        let own = if matches!(r.color, ColorHint::Palette(_)) { "drawn in grey" } else { "drawn in its own look" };
+        let past: Vec<String> = look.bands.iter().filter(|b| **b >= n).map(|b| b.saturating_add(1).to_string()).collect();
+        if !past.is_empty() {
+            return Some(format!("its address asks for band(s) {} (from 1), which it hasn't ({n} band(s)): {own}", past.join(", ")));
+        }
+        // An address written by hand: `map.setTiles` takes one band or three.
+        (!matches!(look.bands.len(), 0 | 1 | 3))
+            .then(|| format!("its address asks for {} bands; one is drawn in grey, three as red, green and blue: {own}", look.bands.len()))
+    }
+
+    /// A style for a layer whose pixels haven't arrived (its own look replaces it when they do).
+    pub fn placeholder() -> RasterStyle {
+        RasterStyle {
+            renderer: RasterRenderer::Stretch { band: 0, ramp: Ramp::gray(), invert: false },
+            stretch: Stretch::default(),
+            dra: false,
+            resampling: Resampling::Nearest,
+            brightness: 0.0,
+            contrast: 0.0,
+            gamma: 1.0,
+            rotation: 0.0,
+            mask: RasterMask::default(),
+        }
+    }
+
+    /// The default look, as the file's PhotometricInterpretation says: the file's colours, RGB for
+    /// colour images and for grey ones of exactly three bands (most remote sensing images are
+    /// grey, whatever their bands: three are taken as red, green and blue), unique values for a
+    /// few categories, otherwise a grey stretch of the first band (an image of more bands is
+    /// combined as the user picks).
     pub fn default_for(r: &Raster) -> RasterStyle {
         RasterStyle::default_with(r, &RasterDefaults::default())
     }
@@ -894,7 +1830,7 @@ impl RasterStyle {
             ColorHint::Rgb { .. } if r.band_count() >= 3 => {
                 (RasterRenderer::Rgb { red: 0, green: 1, blue: 2 }, if byte_rgb { Stretch::None } else { Stretch::default() })
             }
-            _ if r.band_count() >= 3 => (RasterRenderer::Rgb { red: 0, green: 1, blue: 2 }, Stretch::default()),
+            ColorHint::Gray if r.band_count() == 3 => (RasterRenderer::Rgb { red: 0, green: 1, blue: 2 }, Stretch::default()),
             _ => match r.bands.first().and_then(|b| b.stats.categories.as_ref()).filter(|c| c.len() <= 16 && r.data_type.contains("Int")) {
                 Some(_) => (unique_values(r, 0, Ramp::Harbour), Stretch::None),
                 None => (RasterRenderer::Stretch { band: 0, ramp: d.ramp.clone(), invert: d.invert }, d.stretch),
@@ -911,6 +1847,17 @@ impl RasterStyle {
             gamma: 1.0,
             rotation: 0.0,
             mask: RasterMask::default(),
+        }
+    }
+
+    /// Flips a Stretch's colour scheme end for end (#1355). Returns false for other renderers.
+    pub fn invert_ramp(&mut self) -> bool {
+        match &mut self.renderer {
+            RasterRenderer::Stretch { invert, .. } => {
+                *invert = !*invert;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1249,17 +2196,238 @@ impl RasterLayer {
             RasterRenderer::Colormap => {
                 let ColorHint::Palette(p) = &r.color else { return Vec::new() };
                 let cats = r.bands.first().and_then(|b| b.stats.categories.clone()).unwrap_or_default();
+                // A negative value has no entry in the table, and the map draws none for it, nor
+                // for an entry that is fully transparent (a background value).
                 cats.iter()
-                    .filter(|v| !mask.hides(**v as f32))
-                    .filter_map(|v| p.get(*v as usize).map(|c| RasterLegend::Class { color: Rgba(*c), label: class_label(0, *v) }))
+                    .filter(|v| **v >= 0.0 && !mask.hides(**v as f32))
+                    .filter_map(|v| {
+                        p.get(*v as usize).filter(|c| c[3] > 0).map(|c| RasterLegend::Class { color: Rgba(*c), label: class_label(0, *v) })
+                    })
                     .collect()
             }
+        }
+    }
+
+    /// Whether it is drawn by its colour table over values its statistics don't list (over 256
+    /// distinct values, or values that aren't whole): [`RasterLayer::legend_classes`] then has no
+    /// class to give, and a colorbar none either (#1679).
+    pub fn classes_unknown(&self) -> bool {
+        let Some(r) = self.data.as_ref().filter(|_| matches!(self.style.renderer, RasterRenderer::Colormap)) else { return false };
+        // Under a mask, the values it leaves may be few enough to list.
+        let masked = self.masked_stats();
+        let stats = masked.as_ref().and_then(|m| m.first()).or_else(|| r.bands.first().map(|b| &b.stats));
+        stats.is_some_and(|s| s.count > 0 && s.categories.is_none())
+    }
+
+    /// Whether its mask hides every pixel its masked statistics read: a legend then lists no class
+    /// the raster holds, so none can be missing from a sample or an overview (#1679).
+    fn mask_hides_all(&self) -> bool {
+        self.masked_stats().is_some_and(|m| m.first().is_some_and(|s| s.count == 0))
+    }
+
+    /// Whether the classes a legend lists for it ([`RasterLayer::legend_classes`]) come from a
+    /// sample of its pixels: under a mask, a band of more than [`MASK_STATS_SAMPLE`] cells has its
+    /// statistics read from every few cells ([`RasterMask::stats`]), so a class too rare for the
+    /// sample can be missing (#1679). Not with `all_classes` for Unique Values or Classify, nor when
+    /// no class can be listed (a mask hiding every pixel included); a colour table's come from the sample only when its own statistics,
+    /// read whole, can't list its values.
+    pub fn classes_from_sample(&self, all_classes: bool) -> bool {
+        let Some(r) = &self.data else { return false };
+        if !self.style.renderer.draws_classes() || self.style.mask.is_empty() || self.classes_unknown() || self.mask_hides_all() {
+            return false;
+        }
+        let band = self.style.renderer.bands().first().copied().unwrap_or(0);
+        let sampled = r.bands.get(band).is_some_and(|b| b.data.len() > MASK_STATS_SAMPLE);
+        let from_sample = match &self.style.renderer {
+            RasterRenderer::Colormap => r.bands.first().is_some_and(|b| b.stats.categories.is_none()),
+            _ => !all_classes,
+        };
+        sampled && from_sample
+    }
+
+    /// Whether the classes a legend lists for it ([`RasterLayer::legend_classes`]) come from the
+    /// statistics of an overview (a cloud-optimised GeoTIFF read in place, or pixels read reduced)
+    /// while the map draws the full resolution: a class too rare for the overview can be missing
+    /// (#1679). Not with `all_classes` for Unique Values or Classify, whose every class is listed
+    /// whatever the statistics, nor when no class can be listed ([`RasterLayer::classes_unknown`],
+    /// or a mask hiding every pixel).
+    pub fn classes_from_overview(&self, all_classes: bool) -> bool {
+        let Some(r) = &self.data else { return false };
+        let every = all_classes && !matches!(self.style.renderer, RasterRenderer::Colormap);
+        self.style.renderer.draws_classes()
+            && (self.in_place || r.overview.is_some())
+            && !every
+            && !self.classes_unknown()
+            && !self.mask_hides_all()
+    }
+
+    /// The classes a layout's legend lists for this raster (#1679): the Layers pane's class rows
+    /// ([`RasterLayer::legend`]), a colour and a label each, in the renderer's order. `None` for a
+    /// renderer that draws no classes (a stretch, a hillshade, RGB bands), which a colorbar keys.
+    /// Without `all_classes`, the classes the raster holds: those of the values in its statistics
+    /// (without the masked pixels). A raster with too many values to list (over 256, or not whole)
+    /// gives every Unique Values class, for Classify the classes from its lowest value's to its
+    /// highest's, and for a colour table those a mask leaves, when they are few enough, else none
+    /// ([`RasterLayer::classes_unknown`]). With `all_classes`, every class of a Unique Values or
+    /// Classify renderer. A colour table's 256 entries have no meaningful "all": it lists the
+    /// values the raster holds either way, as the Layers pane does.
+    pub fn legend_classes(&self, all_classes: bool) -> Option<Vec<(Rgba, String)>> {
+        let classes = || {
+            self.legend().into_iter().filter_map(|row| match row {
+                RasterLegend::Class { color, label } => Some((color, label)),
+                _ => None,
+            })
+        };
+        if !self.style.renderer.draws_classes() {
+            return None;
+        }
+        // Not read (yet): no class known.
+        let Some(r) = self.data.as_ref() else { return Some(Vec::new()) };
+        let masked = self.masked_stats();
+        let stats = |band: usize| masked.as_ref().and_then(|m| m.first()).or_else(|| r.bands.get(band).map(|b| &b.stats));
+        match &self.style.renderer {
+            RasterRenderer::Colormap => {
+                // The pane lists the values in the band's own statistics. With too many there, a
+                // mask may leave few enough: those, coloured and named as the pane does.
+                let own = r.bands.first().is_some_and(|b| b.stats.categories.is_some());
+                match (&r.color, stats(0).and_then(|s| s.categories.as_ref())) {
+                    (ColorHint::Palette(p), Some(left)) if !own => {
+                        let label = |v: f64| r.bands.first().and_then(|b| b.class_name(v)).map_or_else(|| fmt_num(v), str::to_owned);
+                        let shown = left.iter().filter(|v| **v >= 0.0 && !self.style.mask.hides(**v as f32));
+                        Some(shown.filter_map(|v| p.get(*v as usize).filter(|c| c[3] > 0).map(|c| (Rgba(*c), label(*v)))).collect())
+                    }
+                    _ => Some(classes().collect()),
+                }
+            }
+            RasterRenderer::UniqueValues { band, values, .. } => {
+                // A mask that hides every pixel leaves nothing drawn, so nothing to list.
+                if !all_classes && stats(*band).is_some_and(|s| s.count == 0) {
+                    return Some(Vec::new());
+                }
+                let held = stats(*band).and_then(|s| s.categories.as_ref()).filter(|_| !all_classes);
+                // The pane's rows are the values its mask doesn't hide, one each, in order.
+                let shown = values.iter().filter(|(v, _)| !self.style.mask.hides(*v as f32));
+                Some(shown.zip(classes()).filter(|((v, _), _)| held.is_none_or(|held| held.contains(v))).map(|(_, class)| class).collect())
+            }
+            RasterRenderer::Classify { band, breaks, .. } => {
+                // The class a value is drawn in, as the map draws it: the first break at or above
+                // it, else the last class.
+                let class_of = |v: f64| breaks.iter().position(|b| v <= *b).unwrap_or(breaks.len().saturating_sub(1));
+                let held: Option<Vec<usize>> = match stats(*band) {
+                    _ if all_classes => None,
+                    Some(s) if s.count == 0 => Some(Vec::new()),
+                    Some(s) => Some(match &s.categories {
+                        Some(values) => values.iter().map(|v| class_of(*v)).collect(),
+                        None => (class_of(s.min)..=class_of(s.max)).collect(),
+                    }),
+                    None => None,
+                };
+                // A flag per class, so a file with very many breaks costs one pass, not one per row.
+                let keep = held.map(|held| {
+                    let mut keep = vec![false; breaks.len()];
+                    for i in held {
+                        if let Some(k) = keep.get_mut(i) {
+                            *k = true;
+                        }
+                    }
+                    keep
+                });
+                let kept = |i: usize| keep.as_ref().is_none_or(|keep| keep.get(i).copied().unwrap_or(false));
+                Some(classes().enumerate().filter(|(i, _)| kept(*i)).map(|(_, c)| c).collect())
+            }
+            RasterRenderer::Stretch { .. } | RasterRenderer::Rgb { .. } | RasterRenderer::ShadedRelief { .. } => None,
+        }
+    }
+}
+
+impl RasterLayer {
+    /// Only owning address/path strings are offered; embedded bytes and render state stay opaque.
+    pub(crate) fn output_slots(&self) -> Vec<(crate::LayerRole, &str, bool, bool)> {
+        let RasterLayer {
+            path,
+            file_name: _,
+            embedded,
+            subdataset: _,
+            crs: _,
+            time_zarr,
+            placement: _,
+            style: _,
+            data: _,
+            error: _,
+            masked: _,
+            cast: _,
+            opening: _,
+            read_still: _,
+            read_generation: _,
+            in_place: _,
+            restyle: _,
+            look: _,
+            pixels_said: _,
+            error_said: _,
+            failed_at: _,
+            failures: _,
+            lost_said: _,
+            look_lost: _,
+            dropped: _,
+            pixels_dropped: _,
+        } = self;
+        let mut out = Vec::new();
+        if let Some(p) = path {
+            out.push((crate::LayerRole::Raster, p.as_str(), true, embedded.is_none() && crate::paths::is_local(p)));
+        }
+        if let Some(ZarrTime { store, variable: _, index: _, dim: _, offset: _, dates: _, crs: _, shown: _, read_generation: _ }) =
+            time_zarr
+        {
+            out.push((crate::LayerRole::ZarrStore, store.as_str(), true, crate::paths::is_local(store)));
+        }
+        out
+    }
+
+    /// Looks up a prepared address/path field without allocation.
+    pub(crate) fn output_slot_mut(&mut self, role: crate::LayerRole) -> Option<&mut String> {
+        match role {
+            crate::LayerRole::Raster => self.path.as_mut(),
+            crate::LayerRole::ZarrStore => Some(&mut self.time_zarr.as_mut()?.store),
+            _ => None,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// A completed read can wait for a render copy or the blocking consumer. Revocation
+    /// between callback and application must refuse both consumers of the shared slot.
+    #[test]
+    fn permission_policy_completed_raster_checks_lifetime_at_application() {
+        use rustgis_data::source::remote;
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let previous = in_place_reader().lock().unwrap().take();
+        set_in_place_reader(|_, done| done(Ok(dem())));
+        let mut failures = Vec::new();
+        for revoke in [false, true] {
+            let live = Arc::new(AtomicBool::new(true));
+            let flag = live.clone();
+            let still: remote::Still = Arc::new(move || flag.load(SeqCst));
+            let mut layer = remote::with_still(still, || RasterLayer::opening_in_place("https://raster-landing.invalid/scene.tif"));
+            assert!(layer.data.is_none() && layer.opening.as_ref().unwrap().lock().unwrap().is_some(), "callback completed before poll");
+            let mut render_copy = layer.clone();
+            live.store(!revoke, SeqCst);
+            assert!(!layer.poll_reload());
+            if layer.data.is_some() == revoke {
+                failures.push(format!("render application ignored revoke={revoke}"));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let r = render_copy.wait_for_read(Instant::now() + web_time::Duration::from_secs(1));
+                if r.is_ok() == revoke || render_copy.data.is_some() == revoke {
+                    failures.push(format!("blocking application ignored revoke={revoke}"));
+                }
+            }
+        }
+        *in_place_reader().lock().unwrap() = previous;
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
     use rustgis_data::raster::{Crs, GeoTransform};
 
     use super::*;
@@ -1292,6 +2460,176 @@ mod tests {
         assert_eq!(labels(&rl), ["1", "2", "3"], "no names: the values, as before");
     }
 
+    /// A layout's legend lists a classified raster's classes as the Layers pane draws them (#1679):
+    /// those the raster holds, or every class of a Unique Values or Classify renderer with
+    /// `all_classes`; a colour table the values it holds either way; a ramp or bands none.
+    #[test]
+    fn legend_classes_are_the_panes_rows_the_raster_holds() {
+        let gt = GeoTransform { origin_x: 10.0, origin_y: 50.0, pixel_width: 0.5, pixel_height: -0.5 };
+        let mut palette = vec![[0, 0, 0, 0]; 256];
+        for v in 1..=7u8 {
+            palette[usize::from(v)] = [v * 30, 100, 200 - v * 20, 255];
+        }
+        // Five classes held (1 to 5), two named in the file.
+        let values: Vec<f32> = (1..=5).map(|v| v as f32).collect();
+        let mut r = Raster::new("lc", 5, 1, vec![values], gt, Crs::LonLat, None, ColorHint::Palette(palette), "UInt8").unwrap();
+        r.bands[0].classes = vec![String::new(), "Forest".into(), String::new(), "Pasture".into()];
+        let mut rl = RasterLayer::from_path(r, "lc.tif");
+        let labels = |rl: &RasterLayer, all: bool| -> Vec<String> { rl.legend_classes(all).unwrap().into_iter().map(|(_, l)| l).collect() };
+        let pane = |rl: &RasterLayer| -> Vec<(Rgba, String)> {
+            rl.legend()
+                .into_iter()
+                .filter_map(|e| match e {
+                    RasterLegend::Class { color, label } => Some((color, label)),
+                    _ => None,
+                })
+                .collect()
+        };
+        rl.style.renderer = RasterRenderer::Colormap;
+        assert_eq!(labels(&rl, false), ["Forest", "2", "Pasture", "4", "5"]);
+        assert_eq!(rl.legend_classes(true), rl.legend_classes(false), "a colour table: the values held either way");
+        assert_eq!(rl.legend_classes(false).unwrap(), pane(&rl), "the pane's colours and labels");
+        // Unique values for 1 to 7: the raster holds five.
+        let unique = (1..=7u8).map(|v| (f64::from(v), Rgba::rgb(v * 30, 0, 0))).collect();
+        rl.style.renderer = RasterRenderer::UniqueValues { band: 0, ramp: Ramp::Harbour, values: unique };
+        assert_eq!(labels(&rl, false), ["Forest", "2", "Pasture", "4", "5"]);
+        assert_eq!(labels(&rl, true), ["Forest", "2", "Pasture", "4", "5", "6", "7"]);
+        assert_eq!(rl.legend_classes(true).unwrap(), pane(&rl), "every class: the pane's rows");
+        assert_eq!(rl.legend_classes(false).unwrap()[0].0, Rgba::rgb(30, 0, 0));
+        // A value its mask hides is left out, held or not.
+        rl.style.mask = RasterMask { values: vec![2.0, 6.0], ..RasterMask::default() };
+        assert_eq!(labels(&rl, false), ["Forest", "Pasture", "4", "5"]);
+        assert_eq!(labels(&rl, true), ["Forest", "Pasture", "4", "5", "7"]);
+        rl.style.mask = RasterMask::default();
+        // Class breaks: values 1 to 5 fall in the first three of four classes.
+        let breaks = vec![2.0, 4.0, 10.0, 20.0];
+        rl.style.renderer =
+            RasterRenderer::Classify { band: 0, method: ClassMethod::EqualInterval, ramp: Ramp::Harbour, breaks, classes: 4 };
+        assert_eq!(labels(&rl, false), ["1 – 2", "2 – 4", "4 – 10"]);
+        assert_eq!(labels(&rl, true), ["1 – 2", "2 – 4", "4 – 10", "10 – 20"]);
+        assert!(!rl.classes_unknown(), "breaks, not a colour table");
+        // Read whole: its statistics are its own. Read in place: an overview's, said unless every
+        // class of its breaks is listed.
+        assert!(!rl.classes_from_overview(false));
+        rl.in_place = true;
+        assert!(rl.classes_from_overview(false) && !rl.classes_from_overview(true));
+        rl.style.renderer = RasterRenderer::Colormap;
+        assert!(rl.classes_from_overview(true), "a colour table lists what the overview holds either way");
+        rl.in_place = false;
+        assert!(!rl.classes_unknown(), "its values are known");
+        // A ramp and bands have no classes: a colorbar keys them, or nothing does.
+        rl.style.renderer = RasterRenderer::Stretch { band: 0, ramp: Ramp::Harbour, invert: false };
+        assert_eq!(rl.legend_classes(false), None);
+        rl.style.renderer = RasterRenderer::Rgb { red: 0, green: 0, blue: 0 };
+        assert_eq!(rl.legend_classes(true), None);
+    }
+
+    /// A colour table has no entry for a negative value, and the map draws none: neither the
+    /// Layers pane nor a legend lists it (#1679), where `as usize` would have taken entry 0.
+    #[test]
+    fn a_colour_table_lists_no_negative_value() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 0.01, pixel_height: -0.01 };
+        let mut palette = vec![[0, 0, 0, 0]; 256];
+        palette[0] = [10, 20, 30, 255];
+        palette[1] = [200, 0, 0, 255];
+        palette[2] = [0, 200, 0, 255];
+        let values = vec![-1.0, 1.0, 2.0];
+        let r = Raster::new("change", 3, 1, vec![values], gt, Crs::LonLat, None, ColorHint::Palette(palette), "Int16").unwrap();
+        assert_eq!(r.bands[0].stats.categories.as_deref(), Some(&[-1.0, 1.0, 2.0][..]));
+        let mut rl = RasterLayer::from_path(r, "change.tif");
+        rl.style.renderer = RasterRenderer::Colormap;
+        let labels: Vec<String> = rl.legend_classes(false).unwrap().into_iter().map(|(_, l)| l).collect();
+        assert_eq!(labels, ["1", "2"]);
+        assert_eq!(rl.legend().len(), 2, "the Layers pane alike");
+    }
+
+    /// A fully transparent entry of a colour table (a background value) draws nothing on the map:
+    /// neither the Layers pane nor a legend lists it, as a colorbar leaves it out (#1679).
+    #[test]
+    fn a_colour_table_lists_no_transparent_entry() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 0.01, pixel_height: -0.01 };
+        let mut palette = vec![[0, 0, 0, 0]; 256];
+        palette[1] = [200, 0, 0, 255];
+        palette[2] = [0, 200, 0, 255];
+        let values = vec![0.0, 1.0, 2.0];
+        let r = Raster::new("clip", 3, 1, vec![values], gt, Crs::LonLat, None, ColorHint::Palette(palette), "UInt8").unwrap();
+        let mut rl = RasterLayer::from_path(r, "clip.tif");
+        rl.style.renderer = RasterRenderer::Colormap;
+        let labels: Vec<String> = rl.legend_classes(false).unwrap().into_iter().map(|(_, l)| l).collect();
+        assert_eq!(labels, ["1", "2"], "0 is transparent: not a class the map draws");
+        assert_eq!(rl.legend().len(), 2, "the Layers pane alike");
+    }
+
+    /// A mask decides what a legend lists (#1679): one hiding every pixel leaves no Unique Values
+    /// class, unless every class is asked for; a colour table over 300 values that a mask brings
+    /// down to five lists those five; a mask over more cells than its statistics read is a sample.
+    #[test]
+    fn legend_classes_follow_the_mask() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 0.01, pixel_height: -0.01 };
+        let r = Raster::new("lc", 3, 1, vec![vec![1.0, 2.0, 3.0]], gt, Crs::LonLat, None, ColorHint::Gray, "UInt8").unwrap();
+        let mut rl = RasterLayer::from_path(r, "lc.tif");
+        let unique = (1..=4u8).map(|v| (f64::from(v), Rgba::rgb(v * 30, 0, 0))).collect();
+        rl.style.renderer = RasterRenderer::UniqueValues { band: 0, ramp: Ramp::Harbour, values: unique };
+        // Every pixel hidden; the class for 4, which the raster doesn't hold, isn't.
+        rl.style.mask = RasterMask { values: vec![1.0, 2.0, 3.0], ..RasterMask::default() };
+        assert_eq!(rl.legend_classes(false), Some(Vec::new()), "nothing drawn, nothing listed");
+        assert_eq!(rl.legend_classes(true).map(|c| c.len()), Some(1), "every class asked for: those the mask doesn't hide");
+        assert!(!rl.classes_from_sample(false), "three cells, read whole");
+        // A colour table over 300 values: none listed, unless a mask leaves few.
+        let mut palette = vec![[0, 0, 0, 0]; 256];
+        for (i, c) in palette.iter_mut().enumerate() {
+            *c = [i as u8, 100, 255 - i as u8, 255];
+        }
+        let values: Vec<f32> = (0..300).map(|v| v as f32).collect();
+        let mut r = Raster::new("many", 300, 1, vec![values], gt, Crs::LonLat, None, ColorHint::Palette(palette), "UInt16").unwrap();
+        r.bands[0].classes = vec![String::new(), "Forest".into()];
+        let mut rl = RasterLayer::from_path(r, "many.tif");
+        rl.style.renderer = RasterRenderer::Colormap;
+        assert!(rl.classes_unknown() && rl.legend_classes(false) == Some(Vec::new()));
+        rl.style.mask = RasterMask { min: Some(1.0), max: Some(5.0), ..RasterMask::default() };
+        let labels: Vec<String> = rl.legend_classes(false).unwrap().into_iter().map(|(_, l)| l).collect();
+        assert_eq!(labels, ["Forest", "2", "3", "4", "5"]);
+        assert!(!rl.classes_unknown());
+        assert_eq!(rl.legend_classes(false).unwrap()[0].0, Rgba([1, 100, 254, 255]), "its colour in the table");
+        // Past the cells a mask's statistics read: a sample, said unless every class is listed.
+        let side = 2049u32;
+        let cells: Vec<f32> = (0..side * side).map(|i| (i % 4 + 1) as f32).collect();
+        let r = Raster::new("big", side, side, vec![cells], gt, Crs::LonLat, None, ColorHint::Gray, "UInt8").unwrap();
+        let mut rl = RasterLayer::from_path(r, "big.tif");
+        let unique = (1..=4u8).map(|v| (f64::from(v), Rgba::rgb(v * 30, 0, 0))).collect();
+        rl.style.renderer = RasterRenderer::UniqueValues { band: 0, ramp: Ramp::Harbour, values: unique };
+        assert!(!rl.classes_from_sample(false), "no mask: the band's own statistics");
+        rl.style.mask = RasterMask { values: vec![4.0], ..RasterMask::default() };
+        assert!(rl.classes_from_sample(false) && !rl.classes_from_sample(true));
+        // A mask hiding every pixel: no class listed, so none missing from a sample or an overview.
+        rl.in_place = true;
+        assert!(rl.classes_from_overview(false), "read in place, a class can be missing");
+        rl.style.mask = RasterMask { values: vec![1.0, 2.0, 3.0, 4.0], ..RasterMask::default() };
+        assert_eq!(rl.legend_classes(false), Some(Vec::new()));
+        assert!(!rl.classes_from_sample(false) && !rl.classes_from_overview(false));
+    }
+
+    /// Class breaks over a raster with too many values to list them: the classes from its lowest
+    /// value's to its highest's (#1679).
+    #[test]
+    fn legend_classes_of_breaks_over_many_values_follow_the_range() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 0.01, pixel_height: -0.01 };
+        // 1,000 distinct values from 100 to 199.9: no categories.
+        let values: Vec<f32> = (0..1000).map(|i| 100.0 + i as f32 / 10.0).collect();
+        let r = Raster::new("dem", 1000, 1, vec![values], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        assert!(r.bands[0].stats.categories.is_none());
+        let mut rl = RasterLayer::from_path(r, "dem.tif");
+        let breaks = vec![50.0, 120.0, 150.0, 200.0, 300.0];
+        rl.style.renderer =
+            RasterRenderer::Classify { band: 0, method: ClassMethod::EqualInterval, ramp: Ramp::Harbour, breaks, classes: 5 };
+        let n = |all| rl.legend_classes(all).unwrap().len();
+        assert_eq!((n(false), n(true)), (3, 5), "120, 150 and 200: the classes 100 to 199.9 fall in");
+        // By a colour table, over values it can't list: no class, said by `classes_unknown`.
+        rl.style.renderer = RasterRenderer::Colormap;
+        assert_eq!(rl.legend_classes(false), Some(Vec::new()));
+        assert!(rl.classes_unknown());
+    }
+
     /// A following layer's dates are its steps from `offset` on, one each: repair keeps them as
     /// they are when they are in order, and follows none rather than the wrong step otherwise.
     #[test]
@@ -1306,6 +2644,7 @@ mod tests {
                 dates,
                 crs: None,
                 shown: Some(1),
+                read_generation: 0,
             };
             z.repair();
             z
@@ -1321,6 +2660,36 @@ mod tests {
         let gt = GeoTransform { origin_x: 0.0, origin_y: 4.0, pixel_width: 1.0, pixel_height: -1.0 };
         let data: Vec<f32> = (0..16).map(|i| (i % 4 + i / 4) as f32).collect();
         Raster::new("dem", 4, 4, vec![data], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap()
+    }
+
+    /// What reading the pixels lost is said once; a look applied after that (bands the file
+    /// hasn't) says what it lost on its own, not the pixels' losses again.
+    #[test]
+    fn a_look_applied_after_the_losses_were_said_says_its_own_alone() {
+        let mut r = dem();
+        r.lost.push("its colour table is left out".into());
+        let mut rl = RasterLayer::in_place(r, "test://look-later.tif");
+        assert_eq!(rl.lost_unsaid(), vec!["its colour table is left out".to_string()]);
+        assert!(rl.lost_unsaid().is_empty());
+        let mut rl = rl.with_look(AddressLook { bands: vec![9], range: None });
+        let said = rl.lost_unsaid();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(!said[0].contains("colour table"), "{said:?}");
+        assert!(rl.lost_unsaid().is_empty());
+        // A look applied before they are said is said with them, once.
+        let mut r = dem();
+        r.lost.push("its colour table is left out".into());
+        let mut rl = RasterLayer::in_place(r, "test://look-first.tif").with_look(AddressLook { bands: vec![9], range: None });
+        assert_eq!(rl.lost_unsaid().len(), 2);
+        assert!(rl.lost_unsaid().is_empty());
+    }
+
+    /// A project file may ask for any band number: the one past the last `usize` is said by
+    /// number, not overflowed.
+    #[test]
+    fn a_look_asking_for_the_band_past_the_last_usize_is_said() {
+        let lost = RasterStyle::look_lost(&dem(), &AddressLook { bands: vec![usize::MAX], range: None }).unwrap();
+        assert!(lost.contains(&format!("band(s) {} (from 1)", usize::MAX)), "{lost}");
     }
 
     #[test]
@@ -1561,11 +2930,11 @@ mod tests {
     fn start_reload_reads_dropped_pixels_again() {
         let (dir, path) = temp_tiff("again");
         let mut layer = RasterLayer::from_path(dem(), path.display().to_string());
-        layer.data = None;
+        layer.drop_pixels();
         assert!(layer.needs_pixels());
         assert!(!layer.start_reload(true), "read in place: nothing is left pending");
         assert_eq!(layer.data.as_ref().map(|d| (d.width, d.height)), Some((4, 4)));
-        layer.data = None;
+        layer.drop_pixels();
         assert!(layer.start_reload(false), "read on a thread");
         let start = std::time::Instant::now();
         while layer.poll_reload() && start.elapsed() < std::time::Duration::from_secs(10) {
@@ -1573,5 +2942,184 @@ mod tests {
         }
         assert!(layer.data.is_some(), "{:?}", layer.error);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A tower lit from the east, drawn as Shaded Relief with `shadow`.
+    fn tower(shadow: f64) -> RasterLayer {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: 30.0, pixel_height: -30.0 };
+        let data: Vec<f32> = (0..400).map(|i| if i == 10 * 20 + 10 { 900.0 } else { 0.0 }).collect();
+        let r = Raster::new("tower", 20, 20, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut rl = RasterLayer::from_path(r, "tower.tif");
+        rl.style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 90.0, altitude: 30.0, z_factor: 1.0, shadow };
+        rl
+    }
+
+    /// A shadow of 0 casts none and starts no work; one above it is worked out once, kept, waited
+    /// for by an export, and worked out again for another sun.
+    #[test]
+    fn cast_shadows_are_worked_out_once_per_sun() {
+        assert_eq!(tower(0.0).cast_shadows(true, (0, 1), || {}), CastShadows::None);
+        let mut rl = tower(0.8);
+        // Each landing is sent: `landed` is called on the worker just after the grid is kept, so
+        // it is waited for, not read at once.
+        let (sent, landings) = std::sync::mpsc::channel::<()>();
+        let landed = |tx: &std::sync::mpsc::Sender<()>| {
+            let tx = tx.clone();
+            move || {
+                let _ = tx.send(());
+            }
+        };
+        let CastShadows::Ready(grid) = rl.cast_shadows(true, (0, 1), landed(&sent)) else { panic!("waited for") };
+        assert!(landings.recv_timeout(std::time::Duration::from_secs(60)).is_ok(), "landed once");
+        // West of the tower, in its shadow; east of it, lit.
+        assert_eq!(grid[10 * 20 + 9], 0);
+        assert_eq!(grid[10 * 20 + 11], 255);
+        // Kept: the same grid, nothing worked out again, and nothing more lands.
+        assert!(matches!(rl.cast_shadows(false, (0, 1), landed(&sent)), CastShadows::Ready(g) if Arc::ptr_eq(&g, &grid)));
+        drop(sent);
+        assert!(landings.recv().is_err(), "landed again");
+        // The shadow's strength is drawn, not worked out: the grid is kept for another.
+        if let RasterRenderer::ShadedRelief { shadow, .. } = &mut rl.style.renderer {
+            *shadow = 0.3;
+        }
+        assert!(matches!(rl.cast_shadows(false, (0, 1), || {}), CastShadows::Ready(g) if Arc::ptr_eq(&g, &grid)));
+        // Another sun: worked out again, lit from the west now.
+        if let RasterRenderer::ShadedRelief { azimuth, .. } = &mut rl.style.renderer {
+            *azimuth = 270.0;
+        }
+        let CastShadows::Ready(west) = rl.cast_shadows(true, (0, 1), || {}) else { panic!("waited for") };
+        assert_eq!((west[10 * 20 + 9], west[10 * 20 + 11]), (255, 0));
+        // A copy lit from elsewhere (another map, whose layer has the same id) keeps its own grid
+        // beside it: neither stops the other's.
+        let mut copy = rl.clone();
+        if let RasterRenderer::ShadedRelief { azimuth, .. } = &mut copy.style.renderer {
+            *azimuth = 0.0;
+        }
+        assert!(matches!(copy.cast_shadows(true, (9, 1), || {}), CastShadows::Ready(_)));
+        assert!(matches!(rl.cast_shadows(false, (0, 1), || {}), CastShadows::Ready(g) if Arc::ptr_eq(&g, &west)));
+    }
+
+    /// A new sun from the same owner stops the work for its last one, unless it is done; another
+    /// owner's (a copy on another map) goes on.
+    #[test]
+    fn a_new_sun_supersedes_the_owners_last_work() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: 30.0, pixel_height: -30.0 };
+        let data: Vec<f32> = (0..1200 * 1200).map(|i| (((i % 1200) as f32 / 7.0).sin() * 300.0) + (i / 1200) as f32).collect();
+        let r = Raster::new("hills", 1200, 1200, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut rl = RasterLayer::from_path(r, "hills.tif");
+        let lit = |rl: &mut RasterLayer, az: f64| {
+            rl.style.renderer =
+                RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: az, altitude: 10.0, z_factor: 1.0, shadow: 1.0 };
+        };
+        let other = |az: f64, rl: &RasterLayer| {
+            let mut c = rl.clone();
+            lit(&mut c, az);
+            c
+        };
+        let work_of = |rl: &RasterLayer, az: f64| rl.cast.0.lock().unwrap().iter().find(|j| j.key.azimuth == az).map(|j| j.work.clone());
+        lit(&mut rl, 10.0);
+        rl.cast_shadows(false, (0, 1), || {});
+        let copy = other(20.0, &rl);
+        copy.cast_shadows(false, (9, 1), || {});
+        let first = work_of(&rl, 10.0).unwrap();
+        lit(&mut rl, 30.0);
+        rl.cast_shadows(false, (0, 1), || {});
+        // Owner 1's last sun is stopped and let go, unless it was done; owner 2's goes on.
+        let stopped = first.stop.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(first.is_done() || (stopped && work_of(&rl, 10.0).is_none()));
+        let second = work_of(&rl, 20.0).unwrap();
+        assert!(!second.stop.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(work_of(&rl, 30.0).is_some());
+        // Going back to a sun kept stops the one just left, as a new sun would.
+        lit(&mut rl, 40.0);
+        rl.cast_shadows(false, (0, 1), || {});
+        let left = work_of(&rl, 40.0).unwrap();
+        lit(&mut rl, 30.0);
+        rl.cast_shadows(false, (0, 1), || {});
+        assert!(left.is_done() || (left.stop.load(std::sync::atomic::Ordering::SeqCst) && work_of(&rl, 40.0).is_none()));
+        assert!(matches!(copy.cast_shadows(true, (9, 1), || {}), CastShadows::Ready(_)));
+        // Waited for, the latest is drawn.
+        assert!(matches!(rl.cast_shadows(true, (0, 1), || {}), CastShadows::Ready(_)));
+    }
+
+    /// An export cancelled while it waits for a grid it alone waits for stops the work (the
+    /// worker has no probe of its own), and the grid isn't kept: the next draw starts it over.
+    #[test]
+    fn a_cancelled_export_stops_the_work_it_waited_for() {
+        struct Cancelled;
+        impl rustgis_data::progress::Probe for Cancelled {
+            fn cancelled(&self) -> bool {
+                true
+            }
+            fn begin(&self, _: u64) {}
+            fn advance(&self, _: u64) {}
+        }
+        // Gentle ground under a sun at 2°: every cell traces to the raster's edge, far longer
+        // than the stop takes.
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: 30.0, pixel_height: -30.0 };
+        let data: Vec<f32> = (0..2000 * 2000).map(|i| ((i % 2000) as f32 * 0.01) + ((i / 2000) as f32 * 0.01)).collect();
+        let r = Raster::new("plain", 2000, 2000, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut rl = RasterLayer::from_path(r, "plain.tif");
+        rl.style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 135.0, altitude: 2.0, z_factor: 1.0, shadow: 1.0 };
+        let (sent, landings) = std::sync::mpsc::channel::<()>();
+        {
+            let _cancelled = rustgis_data::progress::install(Some(std::sync::Arc::new(Cancelled)));
+            let tx = sent.clone();
+            let out = rl.cast_shadows(true, (0, 1), move || {
+                let _ = tx.send(());
+            });
+            assert_eq!(out, CastShadows::Pending, "the cancelled export gives up");
+        }
+        // The worker stops and says so (the map draws again), with no grid.
+        assert!(landings.recv_timeout(std::time::Duration::from_secs(60)).is_ok(), "landed");
+        let work = rl.cast.0.lock().unwrap().first().map(|j| j.work.clone()).unwrap();
+        assert!(work.was_stopped());
+        // Asked again, it starts over.
+        rl.cast_shadows(false, (0, 1), || {});
+        let again = rl.cast.0.lock().unwrap().first().map(|j| j.work.clone()).unwrap();
+        assert!(!Arc::ptr_eq(&work, &again));
+        again.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A frame joining work under way (an export started it) is drawn again when it lands too.
+    #[test]
+    fn who_joins_work_under_way_is_told_when_it_lands() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: 30.0, pixel_height: -30.0 };
+        let data: Vec<f32> = (0..800 * 800).map(|i| ((i % 800) as f32 * 0.01) + ((i / 800) as f32 * 0.01)).collect();
+        let r = Raster::new("plain", 800, 800, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut rl = RasterLayer::from_path(r, "plain.tif");
+        rl.style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 135.0, altitude: 3.0, z_factor: 1.0, shadow: 1.0 };
+        let (sent, landings) = std::sync::mpsc::channel::<&'static str>();
+        let told = |who: &'static str| {
+            let tx = sent.clone();
+            move || {
+                let _ = tx.send(who);
+            }
+        };
+        // Joined while under way (held before it traces), both are told.
+        let hold = hold_cast_shadows();
+        let first = rl.cast_shadows(false, (0, 1), told("starter"));
+        let joined = rl.cast_shadows(false, (5, 1), told("joiner"));
+        drop(hold);
+        assert!(first == CastShadows::Pending && joined == CastShadows::Pending, "joined while under way");
+        let mut heard = vec![landings.recv_timeout(std::time::Duration::from_secs(120)).unwrap()];
+        heard.push(landings.recv_timeout(std::time::Duration::from_secs(120)).unwrap());
+        heard.sort_unstable();
+        assert_eq!(heard, ["joiner", "starter"]);
+        assert!(matches!(rl.cast_shadows(true, (0, 1), || {}), CastShadows::Ready(_)));
+    }
+
+    /// Read in place with only its overview held, it is drawn without cast shadows, and says so;
+    /// with the whole image held, it has them.
+    #[test]
+    fn cast_shadows_of_a_raster_read_in_place_need_the_whole_image() {
+        let mut rl = tower(1.0);
+        rl.in_place = true;
+        assert!(matches!(rl.cast_shadows(true, (0, 1), || {}), CastShadows::Ready(_)));
+        let mut r = (**rl.data.as_ref().unwrap()).clone();
+        r.overview = Some((80, 80));
+        rl.data = Some(Arc::new(r));
+        let CastShadows::Unavailable(why) = rl.cast_shadows(true, (0, 1), || {}) else { panic!("said") };
+        assert!(why.contains("read in place"), "{why}");
     }
 }

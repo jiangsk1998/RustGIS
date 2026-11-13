@@ -1,5 +1,6 @@
 //! Attribute values and field definitions.
 
+use crate::date::{Date, DateTime};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,6 +12,10 @@ pub enum FieldType {
     /// An image attribute: the original bytes stay in the data source (see
     /// [`ImageValue`]); the attribute table shows a thumbnail and the viewer reads it when asked.
     Image,
+    /// A calendar day.
+    Date,
+    /// A moment: a date and time, with or without a zone.
+    DateTime,
 }
 
 impl FieldType {
@@ -21,10 +26,16 @@ impl FieldType {
             FieldType::Text => "Text",
             FieldType::Boolean => "Boolean",
             FieldType::Image => "Image",
+            FieldType::Date => "Date",
+            FieldType::DateTime => "DateTime",
         }
     }
     pub fn is_numeric(self) -> bool {
         matches!(self, FieldType::Integer | FieldType::Double)
+    }
+    /// Whether it holds dates or date-times.
+    pub fn is_temporal(self) -> bool {
+        matches!(self, FieldType::Date | FieldType::DateTime)
     }
 }
 
@@ -108,7 +119,7 @@ impl ImageValue {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub enum Value {
     #[default]
     Null,
@@ -116,10 +127,51 @@ pub enum Value {
     Float(f64),
     Text(String),
     Bool(bool),
+    Date(Date),
+    DateTime(DateTime),
     Image(ImageValue),
 }
 
+impl Serialize for Value {
+    /// As its variant, except that a number that isn't finite (NaN, infinity), which JSON can't
+    /// write, is written as null: JSON writes it as `null` in its place, which a number can't be
+    /// read from, so the file holding it wouldn't open. Saving says how many
+    /// ([`crate::Dataset::unsaved_numbers`]).
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Value::Float(f) if !f.is_finite() && s.is_human_readable() => s.serialize_unit_variant("Value", 0, "Null"),
+            Value::Null => s.serialize_unit_variant("Value", 0, "Null"),
+            Value::Int(i) => s.serialize_newtype_variant("Value", 1, "Int", i),
+            Value::Float(f) => s.serialize_newtype_variant("Value", 2, "Float", f),
+            Value::Text(t) => s.serialize_newtype_variant("Value", 3, "Text", t),
+            Value::Bool(b) => s.serialize_newtype_variant("Value", 4, "Bool", b),
+            Value::Date(d) => s.serialize_newtype_variant("Value", 5, "Date", d),
+            Value::DateTime(t) => s.serialize_newtype_variant("Value", 6, "DateTime", t),
+            Value::Image(img) => s.serialize_newtype_variant("Value", 7, "Image", img),
+        }
+    }
+}
+
 impl Value {
+    /// Whether human-readable output must substitute Null for this numeric value.
+    pub fn is_non_finite(&self) -> bool {
+        matches!(self, Value::Float(value) if !value.is_finite())
+    }
+
+    /// Parses a typed numeric source field without truncating or clamping its numbers. Integer
+    /// text is kept as an integer when exact; other numeric text is kept as a float, as native
+    /// real source cells are. Non-finite values stay available until counted output conversion.
+    /// Interactive edits use [`Self::parse`] and refuse non-finite input at command ingress.
+    pub fn parse_source(text: &str, ty: FieldType) -> Value {
+        if ty.is_numeric()
+            && let Ok(number) = text.trim().parse::<f64>()
+            && (ty == FieldType::Double || text.trim().parse::<i64>().is_err())
+        {
+            return Value::Float(number);
+        }
+        Self::parse(text, ty)
+    }
+
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Int(i) => Some(*i as f64),
@@ -132,6 +184,39 @@ impl Value {
     }
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
+    }
+    /// The value as a file writes it in text: a number in full, as the shortest text that reads
+    /// back as the same number, and nothing for null. [`Display`](std::fmt::Display) is for
+    /// showing a value, and rounds numbers to 6 decimals.
+    pub fn to_file_text(&self) -> String {
+        match self {
+            Value::Null => String::new(),
+            Value::Float(f) => f.to_string(),
+            other => other.to_string(),
+        }
+    }
+    /// How a date or date-time compares: microseconds since 1970, a date at its midnight and a
+    /// time without a zone as if it were UTC. `None` for other values.
+    pub fn temporal_key(&self) -> Option<i64> {
+        match self {
+            Value::Date(d) => Some(d.sort_key()),
+            Value::DateTime(t) => Some(t.sort_key()),
+            _ => None,
+        }
+    }
+    /// The comparison keys of two values when one is a date or date-time and the other is one
+    /// too, or text that reads as one (`'2026-01-01'`, `'2026-01-01T12:00Z'`): how
+    /// `issued >= '2026-01-01'` compares dates. `None` otherwise, so text that isn't a full date
+    /// (`'2026'`, `''`) compares as text.
+    pub fn temporal_keys(&self, other: &Value) -> Option<(i64, i64)> {
+        let key = |v: &Value| match v {
+            Value::Text(s) => DateTime::parse(s).map(DateTime::sort_key),
+            v => v.temporal_key(),
+        };
+        if self.temporal_key().is_none() && other.temporal_key().is_none() {
+            return None;
+        }
+        Some((key(self)?, key(other)?))
     }
     /// Converts a JSON value to an attribute value.
     pub fn from_json(v: &serde_json::Value) -> Value {
@@ -155,23 +240,49 @@ impl Value {
             Value::Bool(b) => (*b).into(),
             // Only what the image is, never its bytes: an external payload isn't accepted back.
             Value::Image(img) => serde_json::json!({"image": img.meta_json()}),
+            Value::Date(_) | Value::DateTime(_) => self.to_string().into(),
         }
     }
-    /// Parses user text into a value of `ty` (empty → Null).
+    /// Whether it asks for null: null itself, or text that is empty or `<null>`, as
+    /// [`parse`](Value::parse) and the table take it. Such a value becoming null is no loss, so
+    /// nothing reports or refuses it.
+    pub fn asks_null(&self) -> bool {
+        match self {
+            Value::Null => true,
+            Value::Text(t) => t.trim().is_empty() || t.trim().eq_ignore_ascii_case("<null>"),
+            _ => false,
+        }
+    }
+    /// [`parse`](Value::parse), for dates held as text in a file or a text field: a date field also
+    /// takes a midnight without a zone (`2026-03-05T00:00:00`), which says only its day.
+    pub fn parse_stored(text: &str, ty: FieldType) -> Value {
+        match (ty, Value::parse(text, ty)) {
+            (FieldType::Date, Value::Null) => DateTime::parse(text).filter(|t| t.is_date()).map_or(Value::Null, |t| Value::Date(t.date())),
+            (_, v) => v,
+        }
+    }
+
+    /// Parses user text into a value of `ty` (empty → Null). Text a number field can't hold,
+    /// including a non-finite Double (`NaN`, `inf`), is Null. Dates are ISO 8601: `YYYY-MM-DD`
+    /// for a date; that, a time and an optional zone for a date-time. Text that isn't one is Null.
     pub fn parse(text: &str, ty: FieldType) -> Value {
         let t = text.trim();
         if t.is_empty() || t.eq_ignore_ascii_case("<null>") {
             return Value::Null;
         }
         match ty {
-            FieldType::Integer => {
-                t.parse::<i64>().map(Value::Int).or_else(|_| t.parse::<f64>().map(|f| Value::Int(f as i64))).unwrap_or(Value::Null)
-            }
-            FieldType::Double => t.parse::<f64>().map(Value::Float).unwrap_or(Value::Null),
+            FieldType::Integer => t
+                .parse::<i64>()
+                .ok()
+                .or_else(|| t.parse::<f64>().ok().filter(|f| f.is_finite()).map(|f| f as i64))
+                .map_or(Value::Null, Value::Int),
+            FieldType::Double => t.parse::<f64>().ok().filter(|f| f.is_finite()).map_or(Value::Null, Value::Float),
             FieldType::Boolean => Value::Bool(matches!(t.to_ascii_lowercase().as_str(), "true" | "yes" | "1" | "y")),
             FieldType::Text => Value::Text(t.to_string()),
             // Image fields are read-only: text typed into one isn't a picture.
             FieldType::Image => Value::Null,
+            FieldType::Date => Date::parse(t).map(Value::Date).unwrap_or(Value::Null),
+            FieldType::DateTime => DateTime::parse(t).map(Value::DateTime).unwrap_or(Value::Null),
         }
     }
 }
@@ -191,13 +302,21 @@ impl std::fmt::Display for Value {
             Value::Text(s) => write!(f, "{s}"),
             Value::Bool(b) => write!(f, "{}", if *b { "True" } else { "False" }),
             Value::Image(img) => write!(f, "{}", img.summary()),
+            Value::Date(d) => write!(f, "{d}"),
+            Value::DateTime(t) => write!(f, "{t}"),
         }
     }
 }
 
 impl PartialOrd for Value {
+    /// Dates by instant (also against date text), numbers as numbers, nulls first, then text
+    /// ignoring case. Two date-times at one instant with different offsets are `Equal` here but
+    /// not `==`, which compares what is stored (see [`DateTime`]).
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         use std::cmp::Ordering;
+        if let Some((a, b)) = self.temporal_keys(other) {
+            return Some(a.cmp(&b));
+        }
         match (self.as_f64(), other.as_f64()) {
             (Some(a), Some(b)) if !matches!(self, Value::Text(_)) || !matches!(other, Value::Text(_)) => a.partial_cmp(&b),
             _ => match (self, other) {
@@ -458,6 +577,66 @@ pub fn sort_class_values(values: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dates_compare_with_dates_and_date_text() {
+        let d = Value::parse("2026-03-05", FieldType::Date);
+        let t = Value::parse("2026-03-05T00:00:00+01:00", FieldType::DateTime);
+        assert_eq!(d.to_string(), "2026-03-05");
+        assert!(t < d, "an hour before UTC midnight");
+        assert!(d > Value::Text("2026-01-01".into()));
+        assert!(d < Value::Text("2026-03-05T00:00:01".into()));
+        // Text that isn't a full date compares as text.
+        assert_eq!(d.temporal_keys(&Value::Text("2026".into())), None);
+        assert!(d > Value::Text("2026".into()));
+        assert!(d > Value::Null);
+        assert_eq!(Value::parse("2026-02-30", FieldType::Date), Value::Null);
+        assert_eq!(d.to_json(), serde_json::json!("2026-03-05"));
+    }
+
+    #[test]
+    fn project_files_hold_dates_as_iso_text() {
+        let vals = vec![Value::parse("2026-03-05", FieldType::Date), Value::parse("2026-03-05T14:30:00+02:00", FieldType::DateTime)];
+        let json = serde_json::to_string(&vals).unwrap_or_default();
+        assert_eq!(json, r#"[{"Date":"2026-03-05"},{"DateTime":"2026-03-05T14:30:00+02:00"}]"#);
+        assert_eq!(serde_json::from_str::<Vec<Value>>(&json).ok(), Some(vals));
+        assert!(serde_json::from_str::<Value>(r#"{"Date":"2026-02-30"}"#).is_err());
+    }
+
+    /// Interactive Double text rejects non-finite numbers, while source parsing preserves them
+    /// for the counted output notice. Exact integer text stays integer; source decimals stay real.
+    #[test]
+    fn a_number_field_reads_text_that_is_not_a_finite_number_as_null() {
+        for text in ["NaN", "inf", "-inf", "infinity", "1e400"] {
+            assert_eq!(Value::parse(text, FieldType::Double), Value::Null, "{text}");
+            assert_eq!(Value::parse(text, FieldType::Integer), Value::Null, "{text}");
+            assert!(matches!(Value::parse_source(text, FieldType::Integer), Value::Float(f) if !f.is_finite()));
+            assert!(matches!(Value::parse_source(text, FieldType::Double), Value::Float(f) if !f.is_finite()));
+        }
+        assert_eq!(Value::parse("2.5", FieldType::Double), Value::Float(2.5));
+        assert_eq!(Value::parse("2.5", FieldType::Integer), Value::Int(2));
+        assert_eq!(Value::parse("1e3", FieldType::Integer), Value::Int(1000));
+        assert_eq!(Value::parse_source("3", FieldType::Integer), Value::Int(3));
+        assert_eq!(Value::parse_source("2.7", FieldType::Integer), Value::Float(2.7));
+        assert_eq!(Value::parse_source("1e30", FieldType::Integer), Value::Float(1e30));
+    }
+
+    /// JSON cannot represent non-finite numbers; output uses a null value with the save report.
+    /// Finite values keep their established encoding.
+    #[test]
+    fn a_value_that_is_not_finite_is_written_and_read_as_null() {
+        for f in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(serde_json::to_string(&Value::Float(f)).ok().as_deref(), Some(r#""Null""#));
+        }
+        for v in [Value::Null, Value::Int(-3), Value::Float(0.1), Value::Text("NaN".into()), Value::Bool(true)] {
+            let text = serde_json::to_string(&v).unwrap_or_default();
+            assert_eq!(serde_json::from_str::<Value>(&text).ok(), Some(v.clone()), "{text}");
+        }
+        assert_eq!(serde_json::to_string(&Value::Float(0.1)).ok().as_deref(), Some(r#"{"Float":0.1}"#), "the format is unchanged");
+        // A variant this version doesn't know is refused by name, which is how a release before
+        // dates refuses a project holding them.
+        assert!(serde_json::from_str::<Value>(r#"{"Time":"12:00"}"#).is_err_and(|e| e.to_string().contains("unknown variant")));
+    }
 
     fn sorted(values: &[&str]) -> Vec<String> {
         let mut v: Vec<String> = values.iter().map(|s| s.to_string()).collect();

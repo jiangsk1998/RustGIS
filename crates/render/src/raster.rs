@@ -86,7 +86,9 @@ fn place_is_flat(p: &Place) -> bool {
 }
 
 /// Draws a raster layer onto `pm` at `opacity`. `stats` are the renderer bands' statistics
-/// without the masked pixels, when the style has a mask.
+/// without the masked pixels, when the style has a mask. `light` is the light its cast shadows
+/// leave on each of its cells, for Shaded Relief with shadows (see
+/// [`rustgis_map::raster::RasterLayer::cast_shadows`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw(
     pm: &mut Pixmap,
@@ -97,9 +99,281 @@ pub(crate) fn draw(
     opacity: f32,
     full_res: bool,
     place: Place,
+    light: Option<&[u8]>,
 ) {
     let threads = threads_for(pm.width() as usize * pm.height() as usize);
-    draw_with(pm, r, style, stats, view, opacity, full_res, place, threads);
+    draw_with(pm, r, style, stats, view, opacity, full_res, place, threads, light);
+}
+
+/// Screen points a side sampled to find the part of a raster read in place that is in view, and
+/// how finely.
+const WINDOW_GRID: usize = 17;
+/// Why a part in view was drawn from a coarser level than it needs.
+const TOO_LARGE: &str = "the view is too large a part of the image to read at the resolution it needs";
+/// Why a turned layer is drawn from its overview.
+const TURNED: &str = "turned, it is drawn from its overview, not at the resolution the view needs";
+
+/// Whether `rotation` (degrees) turns the raster: anything but a whole number of turns. A hair
+/// either side of none (`-1e-7` as much as `1e-7`) isn't one.
+fn turned(rotation: f64) -> bool {
+    let r = rotation.rem_euclid(360.0);
+    r.min(360.0 - r) > 1e-6
+}
+
+/// Why a see-through layer with tiles to come is drawn from its overview alone: no memory for
+/// the image that blends the part in view with it.
+const UNBLENDED: &str = "no memory to blend the part in view with its overview, so it is drawn from its overview";
+
+/// Draws a raster layer read in place (a cloud-optimised GeoTIFF by its address, see
+/// [`rustgis_map::raster::RasterLayer::in_place`]) as [`draw`] draws one held whole: its overview
+/// `r` (the layer's pixels), or, zoomed in past it, the part in view read from the level the view
+/// needs, drawn over the overview until its tiles arrive. `stats` are the renderer's bands'
+/// statistics (the overview's when not given), so the part in view is stretched as the whole is.
+/// Returns whether tiles are still to come (the map is drawn again as they land), or why it drew
+/// less than the view needs (the overview, or other levels for tiles that couldn't be read): the
+/// map shows what it has, an export refuses it. `light` is as [`draw`] takes it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_in_place(
+    pm: &mut Pixmap,
+    address: &str,
+    r: &Raster,
+    style: &RasterStyle,
+    stats: Option<&[BandStats]>,
+    view: &View,
+    opacity: f32,
+    full_res: bool,
+    place: Place,
+    light: Option<&[u8]>,
+) -> Result<bool, String> {
+    let bands = style.renderer.bands();
+    let own: Vec<BandStats> = match stats {
+        Some(_) => Vec::new(),
+        None => bands.iter().map(|b| r.bands.get(*b).map(|b| b.stats.clone()).unwrap_or_default()).collect(),
+    };
+    let stats = stats.unwrap_or(&own);
+    // Its cast shadows are only worked out when the overview is the whole image (see
+    // `RasterLayer::cast_shadows`), so only it is drawn with them.
+    let whole = |pm: &mut Pixmap| draw(pm, r, style, Some(stats), view, opacity, full_res, place, light);
+    let full = r.overview.unwrap_or((r.width, r.height));
+    if full.0 <= r.width {
+        whole(pm);
+        return Ok(false);
+    }
+    // A rotated raster turns about the whole image's centre, not the part in view's: the
+    // overview is drawn, and zoomed in past it (a screen pixel under 0.8 of its pixels) that is
+    // less than the view needs: said, and refused by exports.
+    if turned(style.rotation) {
+        whole(pm);
+        let zoomed_in = in_view(r, view, place, pm.width(), pm.height(), full_res).is_some_and(|w| w.per_px < 0.8);
+        return if zoomed_in { Err(TURNED.into()) } else { Ok(false) };
+    }
+    let info = match rustgis_tiles::cog::info(address) {
+        Ok(Some(info)) => info,
+        Ok(None) => {
+            whole(pm);
+            return Ok(true);
+        }
+        Err(e) => {
+            whole(pm);
+            return Err(e);
+        }
+    };
+    let Some(want) = in_view(r, view, place, pm.width(), pm.height(), full_res) else {
+        whole(pm);
+        return Ok(false);
+    };
+    // The coarsest level at least as fine as the view (within a quarter); zoomed in past the full
+    // image, the full image.
+    let levels = &info.layout.levels;
+    let full_px = want.per_px * f64::from(full.0) / f64::from(r.width.max(1));
+    let fine_enough = |l: &rustgis_data::raster::cog::Level| f64::from(full.0) / f64::from(l.width.max(1)) <= full_px * 1.25;
+    let mut level = levels.iter().rposition(fine_enough).unwrap_or(0);
+    let needed = level;
+    // The renderer's bands, then the image's alpha band (again, when a colour draws it too), read
+    // as the window's own bands, as `draw` reads a raster held whole.
+    let mut read = bands.clone();
+    let alpha = match (&style.renderer, &r.color) {
+        (RasterRenderer::Rgb { .. }, ColorHint::Rgb { alpha: true }) if r.band_count() >= 4 => Some(3),
+        (RasterRenderer::Stretch { band: 0, .. } | RasterRenderer::ShadedRelief { band: 0, .. }, ColorHint::GrayAlpha) => Some(1),
+        _ => None,
+    };
+    read.extend(alpha);
+    // The strips in view: one, or two across a 0–360° grid's seam.
+    let strips: Vec<(f64, f64)> = std::iter::once(want.cols).chain(want.cols2).collect();
+    let mut window = None;
+    while let Some(l) = levels.get(level) {
+        // The part in view, in the level's pixels, a pixel past each side (for bilinear sampling).
+        let (sx, sy) = (f64::from(l.width) / f64::from(r.width.max(1)), f64::from(l.height) / f64::from(r.height.max(1)));
+        let edge = |v: f64, k: f64, max: u32| ((v * k).floor() as i64).clamp(0, i64::from(max)) as u32;
+        let cols: Vec<(u32, u32)> = strips
+            .iter()
+            .map(|c| (edge(c.0, sx, l.width).saturating_sub(1), edge(c.1, sx, l.width).saturating_add(2).min(l.width)))
+            .collect();
+        let rows = (edge(want.rows.0, sy, l.height).saturating_sub(1), edge(want.rows.1, sy, l.height).saturating_add(2).min(l.height));
+        if cols.iter().all(|cols| rustgis_tiles::cog::raster::fits(address, level, *cols, rows, &read)) {
+            window = Some((level, cols, rows));
+            break;
+        }
+        // Too large a part for the tiles kept (a view far wider than the screen, a file of many
+        // bands stored together): a coarser level.
+        level += 1;
+    }
+    let Some((level, cols, rows)) = window else {
+        whole(pm);
+        return Err(TOO_LARGE.into());
+    };
+    // The image at the overview's level is the overview: reached from a finer level the view
+    // needs (too large a part for the tiles kept), it is drawn but refused, as a coarser level is
+    // below.
+    if levels.get(level).is_some_and(|l| l.width <= r.width) {
+        whole(pm);
+        return if level > needed { Err(TOO_LARGE.into()) } else { Ok(false) };
+    }
+    let color = match (&style.renderer, &r.color) {
+        (_, ColorHint::Palette(p)) => ColorHint::Palette(p.clone()),
+        (RasterRenderer::Rgb { .. }, _) => ColorHint::Rgb { alpha: alpha.is_some() },
+        _ if alpha.is_some() => ColorHint::GrayAlpha,
+        _ => ColorHint::Gray,
+    };
+    // Each strip read from the tiles kept, the missing ones asked for.
+    let (mut parts, mut pending, mut failed) = (Vec::new(), false, false);
+    for cols in cols {
+        match rustgis_tiles::cog::raster::window(address, level, cols, rows, &read, color.clone()) {
+            Ok(w) => {
+                pending |= w.pending;
+                failed |= w.failed;
+                parts.extend(w.raster);
+            }
+            Err(e) => {
+                whole(pm);
+                return Err(e);
+            }
+        }
+    }
+    if parts.is_empty() {
+        whole(pm);
+        return Ok(pending);
+    }
+    let mut own_style = style.clone();
+    own_style.renderer = renumbered(&style.renderer);
+    // While it has gaps (tiles to come, or that couldn't be read and no level kept stands in for),
+    // the part in view goes over the overview: both drawn opaque, then blended once, so a
+    // see-through layer isn't darker where they overlap.
+    if pending || failed {
+        if opacity >= 1.0 {
+            whole(pm);
+            for part in &parts {
+                draw(pm, part, &own_style, Some(stats), view, 1.0, full_res, place, None);
+            }
+        } else if let Some(mut both) = Pixmap::new(pm.width(), pm.height()) {
+            draw(&mut both, r, style, Some(stats), view, 1.0, full_res, place, None);
+            for part in &parts {
+                draw(&mut both, part, &own_style, Some(stats), view, 1.0, full_res, place, None);
+            }
+            pm.draw_pixmap(0, 0, both.as_ref(), &PixmapPaint { opacity, ..PixmapPaint::default() }, Transform::identity(), None);
+        } else {
+            // No image to blend in: the overview alone, and said (the map shows it, an export
+            // refuses it), rather than nothing.
+            whole(pm);
+            return Err(UNBLENDED.into());
+        }
+    } else {
+        for part in &parts {
+            draw(pm, part, &own_style, Some(stats), view, opacity, full_res, place, None);
+        }
+    }
+    match (pending, failed) {
+        (true, _) => Ok(true),
+        (false, true) => Err("some of its tiles couldn't be read".into()),
+        // Read coarser than the view needs (too large a part for the tiles kept): the map shows
+        // it, an export refuses it.
+        (false, false) if level > needed => Err(TOO_LARGE.into()),
+        (false, false) => Ok(false),
+    }
+}
+
+/// A renderer drawing the same bands of a raster holding only those, in its order (see
+/// [`RasterRenderer::bands`]).
+fn renumbered(renderer: &RasterRenderer) -> RasterRenderer {
+    let mut out = renderer.clone();
+    match &mut out {
+        RasterRenderer::Stretch { band, .. }
+        | RasterRenderer::Classify { band, .. }
+        | RasterRenderer::UniqueValues { band, .. }
+        | RasterRenderer::ShadedRelief { band, .. } => *band = 0,
+        RasterRenderer::Rgb { red, green, blue } => (*red, *green, *blue) = (0, 1, 2),
+        RasterRenderer::Colormap => {}
+    }
+    out
+}
+
+/// The part of a raster in view: its columns and rows (half-open, in its own pixels, possibly
+/// fractional), and how many of its pixels a pixel drawn spans.
+#[derive(Debug, PartialEq)]
+struct InView {
+    cols: (f64, f64),
+    /// A second run of columns: a geographic grid stored from 0 to 360° seen across its seam has
+    /// the places west of 0° at its far columns, so the part in view is two strips, not the width.
+    cols2: Option<(f64, f64)>,
+    rows: (f64, f64),
+    per_px: f64,
+}
+
+/// [`InView`] of a raster drawn into a `width × height` pixmap, from a grid of screen points;
+/// `None` when it isn't in view.
+fn in_view(r: &Raster, view: &View, place: Place, width: u32, height: u32, full_res: bool) -> Option<InView> {
+    let k = if view.pixels_per_point >= 1.5 && !full_res { view.pixels_per_point } else { 1.0 };
+    let (vw, vh) = (f64::from(width) / k, f64::from(height) / k);
+    let n = WINDOW_GRID;
+    let at = |i: usize, j: usize| source(r, view, place, k, vw * i as f64 / (n - 1) as f64, vh * j as f64 / (n - 1) as f64);
+    let grid: Vec<Option<(f64, f64)>> = (0..n * n).map(|p| at(p % n, p / n)).collect();
+    let (mut c0, mut c1, mut r0, mut r1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    let (rw, rh) = (f64::from(r.width), f64::from(r.height));
+    // A geographic grid stored from 0 to 360° has the places west of 0° at its far columns (see
+    // `Raster::wrap_col`): seen across that seam, the part in view is two strips, one at each end.
+    let (mut w0, mut w1) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (c, row) in grid.iter().flatten() {
+        let col = r.wrap_col(*c);
+        if col != *c {
+            w0 = w0.min(col.clamp(0.0, rw));
+            w1 = w1.max(col.clamp(0.0, rw));
+        } else {
+            c0 = c0.min(col.clamp(0.0, rw));
+            c1 = c1.max(col.clamp(0.0, rw));
+        }
+        r0 = r0.min(row.clamp(0.0, rh));
+        r1 = r1.max(row.clamp(0.0, rh));
+    }
+    let mut cols2 = None;
+    if w0 < w1 {
+        if c0 < c1 {
+            // Both sides: the seam is in view, so each strip runs to it (the sample points stop
+            // short of it by up to a grid step).
+            cols2 = Some((w0, rw));
+            c0 = 0.0;
+        } else {
+            (c0, c1) = (w0, w1);
+        }
+    }
+    if !(c0 < c1 && r0 < r1) {
+        return None;
+    }
+    // The raster's pixels a screen pixel spans: the smallest step between neighbouring points,
+    // where the view is finest (a tilted or curved view is finer near its centre).
+    let step = (vw / (n - 1) as f64).max(1.0);
+    let mut per_px = f64::INFINITY;
+    for j in 0..n {
+        for i in 0..n - 1 {
+            if let (Some(Some(a)), Some(Some(b))) = (grid.get(j * n + i), grid.get(j * n + i + 1)) {
+                let d = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt() / step;
+                if d > 0.0 {
+                    per_px = per_px.min(d);
+                }
+            }
+        }
+    }
+    // In the pixels drawn (a work pixel is `k` device pixels).
+    per_px.is_finite().then_some(InView { cols: (c0, c1), cols2, rows: (r0, r1), per_px })
 }
 
 /// [`draw`], its rows spread over `threads` threads.
@@ -114,6 +388,7 @@ fn draw_with(
     full_res: bool,
     place: Place,
     threads: usize,
+    light: Option<&[u8]>,
 ) {
     // On high-density screens, compute at logical-pixel resolution and scale up (unless asked
     // for full resolution, as exports are): a quarter of the work at 2×.
@@ -180,20 +455,33 @@ fn draw_with(
     }
     let (bw, bh) = (x1 - x0, y1 - y0);
 
-    // Exact source positions on a coarse grid.
+    // Exact source positions on a coarse grid, its rows spread over the threads (a projected
+    // raster's transformation is most of a frame's work on one, #1792): each position is worked
+    // out alone, so the grid is the same on any number.
     let (gw, gh) = (bw / STEP + 2, bh / STEP + 2);
-    let mut grid = Vec::with_capacity(gw * gh);
-    for gy in 0..gh {
-        for gx in 0..gw {
-            grid.push(source(r, view, place, k, (x0 + gx * STEP) as f64, (y0 + gy * STEP) as f64));
+    let mut grid = vec![None; gw * gh];
+    // (A few points aren't worth a thread.)
+    let grid_threads = if gw * gh < 1024 { 1 } else { threads.clamp(1, gh) };
+    let grid_rows = gh.div_ceil(grid_threads);
+    each_chunk(grid_threads, grid.chunks_mut(grid_rows * gw).enumerate(), |(i, chunk)| {
+        for (j, cell) in chunk.iter_mut().enumerate() {
+            let (gx, gy) = (j % gw, i * grid_rows + j / gw);
+            *cell = source(r, view, place, k, (x0 + gx * STEP) as f64, (y0 + gy * STEP) as f64);
         }
-    }
+    });
 
     // Pass 1: band values (and hillshade) for each screen pixel.
     let bands = style.renderer.bands();
     let nb = bands.len().max(1);
     let relief = match style.renderer {
         RasterRenderer::ShadedRelief { azimuth, altitude, z_factor, .. } => Some((azimuth, altitude, z_factor)),
+        _ => None,
+    };
+    // Cast shadows darken the direct light by their strength, the ambient light left as it is.
+    let shadow = match style.renderer {
+        RasterRenderer::ShadedRelief { shadow, .. } if shadow > 0.0 => {
+            light.filter(|g| g.len() == r.width as usize * r.height as usize).map(|g| (g, shadow.min(1.0)))
+        }
         _ => None,
     };
     // Blending neighbours would invent values that aren't classes or palette entries.
@@ -224,9 +512,12 @@ fn draw_with(
         bands: &bands,
         data: bands.iter().map(|b| r.bands.get(*b).map(|b| b.data.as_slice())).collect(),
         relief,
+        shadow,
         resampling,
         alpha_band,
+        alpha_max: rustgis_data::raster::alpha_max(&r.data_type),
         cell: r.cell_size_m(),
+        east_north: (if r.transform.pixel_width < 0.0 { -1 } else { 1 }, if r.transform.pixel_height > 0.0 { -1 } else { 1 }),
         mask: &style.mask,
     };
     let mut vals = vec![f32::NAN; bw * bh * nb];
@@ -284,7 +575,40 @@ fn draw_with(
     }
     let quality = if style.resampling == Resampling::Bilinear { FilterQuality::Bilinear } else { FilterQuality::Nearest };
     let at = Transform::from_row(k as f32, 0.0, 0.0, k as f32, (x0 as f64 * k) as f32, (y0 as f64 * k) as f32);
-    pm.draw_pixmap(0, 0, lay.as_ref(), &PixmapPaint { opacity, quality, ..PixmapPaint::default() }, at, None);
+    // The rows it covers on screen.
+    let rows = ((y0 as f64 * k).floor().max(0.0) as usize, (((y0 + bh) as f64 * k).ceil() as usize).min(pm.height() as usize));
+    draw_scaled(pm, &lay, &PixmapPaint { opacity, quality, ..PixmapPaint::default() }, at, rows, threads);
+}
+
+/// Rows of the screen drawn as one band when a raster is scaled up (see [`draw_scaled`]).
+const BAND: usize = 64;
+
+/// Draws `src` onto `pm` through `at` as tiny-skia's `draw_pixmap` does, on `threads` threads.
+/// The screen rows `rows` (where `src` lands) are drawn in bands of [`BAND`] rows, each on its
+/// own as the same rows of `pm` with `at` moved up by the band's top, and the threads take runs
+/// of whole bands: the bands are the same on any number of threads, so the pixels are too.
+/// (Moving `at` rounds a bilinear sample a unit differently here and there from drawing the
+/// whole at once.) Scaling a frame's raster up to a high-density screen on one thread took more
+/// than half the frame (#1792).
+fn draw_scaled(pm: &mut Pixmap, src: &Pixmap, paint: &PixmapPaint, at: Transform, (top, bottom): (usize, usize), threads: usize) {
+    let (w, stride) = (pm.width(), pm.width() as usize * 4);
+    let bottom = bottom.min(pm.height() as usize);
+    let Some(covered) = pm.data_mut().get_mut(top.min(bottom) * stride..bottom * stride) else { return };
+    let bands = (bottom.saturating_sub(top)).div_ceil(BAND);
+    if bands == 0 {
+        return;
+    }
+    let threads = threads.clamp(1, bands);
+    let run = bands.div_ceil(threads) * BAND;
+    each_chunk(threads, covered.chunks_mut(run * stride).enumerate(), |(i, data)| {
+        for (j, band) in data.chunks_mut(BAND * stride).enumerate() {
+            let h = (band.len() / stride) as u32;
+            let first = top + i * run + j * BAND;
+            if let Some(mut part) = tiny_skia::PixmapMut::from_bytes(band, w, h) {
+                part.draw_pixmap(0, 0, src.as_ref(), paint, at.post_translate(0.0, -(first as f32)), None);
+            }
+        }
+    });
 }
 
 /// What pass 1 of [`draw`] reads: where each screen pixel falls in the raster, and how to
@@ -311,9 +635,16 @@ struct Pass1<'a> {
     /// The renderer's bands' values.
     data: Vec<Option<&'a [f32]>>,
     relief: Option<(f64, f64, f64)>,
+    /// The light cast shadows leave on each cell, and how dark they are drawn (0 to 1).
+    shadow: Option<(&'a [u8], f64)>,
     resampling: Resampling,
     alpha_band: Option<usize>,
+    /// The alpha band's opaque value (its pixel type's: 65535 for 16 bits).
+    alpha_max: f32,
     cell: (f64, f64),
+    /// The grid steps (columns, rows) that lead east and north: -1 for a grid stored right to left
+    /// or bottom up, which the hillshade's north-up window must undo.
+    east_north: (i64, i64),
     /// Values drawn as no data.
     mask: &'a RasterMask,
 }
@@ -385,7 +716,7 @@ impl Pass1<'_> {
                     last = Some((cell, dx));
                 }
                 if let (Some(ab), Some(a)) = (self.alpha_band, alpha.get_mut(i)) {
-                    *a = r.value(ab, cell.0, cell.1).map(|v| v.clamp(0.0, 255.0) as u8).unwrap_or(0);
+                    *a = r.value(ab, cell.0, cell.1).map(|v| ((v / self.alpha_max).clamp(0.0, 1.0) * 255.0).round() as u8).unwrap_or(0);
                     if *a == 0 {
                         continue;
                     }
@@ -412,10 +743,17 @@ impl Pass1<'_> {
                     for (k, (dx, dy)) in
                         [(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0), (-1, 1), (0, 1), (1, 1)].into_iter().enumerate()
                     {
+                        let (dx, dy) = (dx * self.east_north.0, dy * self.east_north.1);
                         z[k] = value(r, self.mask, *b, ci + dx, ri + dy, self.wrap_width).map(f64::from).unwrap_or(centre);
                     }
                     if let Some(s) = shade.get_mut(i) {
                         *s = hillshade(&z, self.cell.0, self.cell.1, az, alt, zf);
+                        if let Some((grid, strength)) = self.shadow
+                            && let Some(lit) = grid.get(ri as usize * r.width as usize + ci as usize)
+                        {
+                            let left = 1.0 - strength * (1.0 - f64::from(*lit) / 255.0);
+                            *s = (f64::from(*s) * left).round().clamp(0.0, 255.0) as u8;
+                        }
                     }
                 }
             }
@@ -433,24 +771,43 @@ fn chunks_or_empty(v: &mut [u8], n: usize) -> Box<dyn Iterator<Item = &mut [u8]>
     if v.is_empty() { Box::new(std::iter::repeat_with(|| &mut [][..])) } else { Box::new(v.chunks_mut(n.max(1))) }
 }
 
-/// How many threads to draw `pixels` with: one for a small image, and always one in the browser.
+/// The most threads a raster is drawn on. A frame's raster takes milliseconds, and #331 measured
+/// its speed-up up to 8 threads; whether more pays off past the cost of starting them is
+/// untested, so this keeps the cap it was tuned at, below the shared count.
+const MAX_DRAW_THREADS: usize = 8;
+
+/// How many threads to draw `pixels` with: one for a small image, and always one in the browser;
+/// the shared count ([`rustgis_data::threads::max`]) up to [`MAX_DRAW_THREADS`] for a large one.
 fn threads_for(pixels: usize) -> usize {
     if cfg!(target_arch = "wasm32") || pixels < 64 * 1024 {
         return 1;
     }
-    std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8)
+    rustgis_data::threads::max().min(MAX_DRAW_THREADS)
 }
 
-/// Runs `f` on each item, spread over `threads` threads (in turn on this one when it is one).
+/// Runs `f` on each item, spread over `threads` threads (in turn on this one when it is one). An
+/// item whose thread the system refuses is run on this one: it costs speed, not the drawing.
 fn each_chunk<T: Send>(threads: usize, items: impl Iterator<Item = T>, f: impl Fn(T) + Sync) {
     if threads <= 1 {
         items.for_each(f);
         return;
     }
     let f = &f;
+    // Each item in a slot of its own, so one whose thread wasn't started is still at hand.
+    let slots: Vec<std::sync::Mutex<Option<T>>> = items.map(|item| std::sync::Mutex::new(Some(item))).collect();
+    let take = |slot: &std::sync::Mutex<Option<T>>| slot.lock().ok().and_then(|mut s| s.take());
     std::thread::scope(|scope| {
-        for item in items {
-            scope.spawn(move || f(item));
+        for slot in &slots {
+            let started = std::thread::Builder::new().spawn_scoped(scope, move || {
+                if let Some(item) = take(slot) {
+                    f(item);
+                }
+            });
+            if started.is_err()
+                && let Some(item) = take(slot)
+            {
+                f(item);
+            }
         }
     });
 }
@@ -463,6 +820,18 @@ mod tests {
     use rustgis_map::raster::RasterStyle;
 
     use super::*;
+
+    /// A raster turned by a hair either side of none isn't turned: it is drawn at the view's
+    /// resolution, not from its overview.
+    #[test]
+    fn a_hair_of_rotation_either_way_isnt_a_turn() {
+        for r in [0.0, 1e-7, -1e-7, 360.0, -360.0, 720.0 + 1e-7, f64::NAN] {
+            assert!(!turned(r), "{r}");
+        }
+        for r in [1.0, -1.0, 359.0, 180.0, 1e-5, -1e-5] {
+            assert!(turned(r), "{r}");
+        }
+    }
 
     fn sampling_grid(pixel_width: f64, crs: Crs, nodata: Option<f64>) -> Raster {
         let gt = GeoTransform { origin_x: 0.0, origin_y: 90.0, pixel_width, pixel_height: -60.0 };
@@ -508,13 +877,65 @@ mod tests {
         assert!(sample(&nodata, &mask, 0, 3.75, 1.5, Resampling::Bilinear, full_turn_width(&nodata)).is_nan());
     }
 
+    /// A grid's stored direction doesn't change where the light comes from: bottom up and right to
+    /// left rasters shade like the north-up one.
+    #[test]
+    fn shaded_relief_follows_the_grids_orientation() {
+        let view = View {
+            width: 1.0,
+            height: 1.0,
+            pixels_per_point: 1.0,
+            camera: Camera { center: lonlat_to_merc(Coord::new(0.05, 0.05)), res: 1000.0, bearing: 0.0, pitch: 0.0 },
+            sky: false,
+        };
+        // Terrain `height(east, north)` on a 10 x 10 grid of 0.01 degree cells, stored in each direction.
+        let shade = |right_to_left: bool, bottom_up: bool, azimuth: f64, height: &dyn Fn(usize, usize) -> f32| {
+            let gt = GeoTransform {
+                origin_x: if right_to_left { 0.1 } else { 0.0 },
+                origin_y: if bottom_up { 0.0 } else { 0.1 },
+                pixel_width: if right_to_left { -0.01 } else { 0.01 },
+                pixel_height: if bottom_up { 0.01 } else { -0.01 },
+            };
+            let data = (0..10usize)
+                .flat_map(|row| (0..10usize).map(move |col| (col, row)))
+                .map(|(col, row)| height(if right_to_left { 9 - col } else { col }, if bottom_up { row } else { 9 - row }))
+                .collect();
+            let r = Raster::new("relief", 10, 10, vec![data], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+            let mut style = RasterStyle::default_for(&r);
+            style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth, altitude: 45.0, z_factor: 1.0, shadow: 0.0 };
+            style.resampling = Resampling::Nearest;
+            let mut pm = Pixmap::new(1, 1).unwrap();
+            draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), None);
+            let p = pm.pixel(0, 0).unwrap();
+            [p.red(), p.green(), p.blue(), p.alpha()]
+        };
+        let north = |_: usize, n: usize| n as f32 * 300.0;
+        let flat = |_: usize, _: usize| 0.0;
+        let diagonal = |e: usize, n: usize| (e + 2 * n) as f32 * 300.0;
+        // Terrain rising to the north, lit from the north: darker than flat ground, in every direction.
+        let lit = shade(false, false, 0.0, &north);
+        assert_eq!(lit[0], 159);
+        assert!(lit[0] < shade(false, false, 0.0, &flat)[0]);
+        for (right_to_left, bottom_up) in [(false, true), (true, false), (true, true)] {
+            assert_eq!(shade(right_to_left, bottom_up, 0.0, &north), lit, "north, rtl {right_to_left}, bottom up {bottom_up}");
+            for azimuth in [45.0, 135.0, 225.0, 315.0] {
+                let want = shade(false, false, azimuth, &diagonal);
+                assert_eq!(
+                    shade(right_to_left, bottom_up, azimuth, &diagonal),
+                    want,
+                    "{azimuth} deg, rtl {right_to_left}, bottom up {bottom_up}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn regional_relief_keeps_the_centre_fallback_at_its_edge() {
         let gt = GeoTransform { origin_x: 0.0, origin_y: 90.0, pixel_width: 10.0, pixel_height: -10.0 };
         let data = [0.0, 1_000_000.0, 2_000_000.0, 3_000_000.0].repeat(18);
         let r = Raster::new("regional relief", 4, 18, vec![data], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
         let mut style = RasterStyle::default_for(&r);
-        style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 270.0, altitude: 45.0, z_factor: 1.0 };
+        style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 270.0, altitude: 45.0, z_factor: 1.0, shadow: 0.0 };
         style.resampling = Resampling::Nearest;
         let view = View {
             width: 1.0,
@@ -524,13 +945,80 @@ mod tests {
             sky: false,
         };
         let mut pm = Pixmap::new(1, 1).unwrap();
-        draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));
+        draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), None);
         let z = [0.0, 0.0, 1_000_000.0, 0.0, 0.0, 1_000_000.0, 0.0, 0.0, 1_000_000.0];
         let (cell_x, cell_y) = r.cell_size_m();
         let shade = hillshade(&z, cell_x, cell_y, 270.0, 45.0, 1.0);
         let expected = Colorizer::new(&style, &r, None).color(&[0.0], Some(shade)).unwrap();
         let actual = pm.pixel(0, 0).unwrap();
         assert_eq!([actual.red(), actual.green(), actual.blue(), actual.alpha()], expected);
+    }
+
+    /// Cast shadows darken the hillshade by their strength, the ambient light left; a shadow of 0
+    /// draws today's pixels, with a light grid or without.
+    #[test]
+    fn cast_shadows_darken_the_direct_light_by_their_strength() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 90.0, pixel_width: 10.0, pixel_height: -10.0 };
+        let data = [0.0, 1_000_000.0, 2_000_000.0, 3_000_000.0].repeat(18);
+        let r = Raster::new("relief", 4, 18, vec![data], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let view = View {
+            width: 1.0,
+            height: 1.0,
+            pixels_per_point: 1.0,
+            camera: Camera { center: lonlat_to_merc(Coord::new(5.0, 0.0)), res: 1000.0, bearing: 0.0, pitch: 0.0 },
+            sky: false,
+        };
+        let z = [0.0, 0.0, 1_000_000.0, 0.0, 0.0, 1_000_000.0, 0.0, 0.0, 1_000_000.0];
+        let (cell_x, cell_y) = r.cell_size_m();
+        let lit = hillshade(&z, cell_x, cell_y, 270.0, 45.0, 1.0);
+        let dark = vec![0u8; 4 * 18];
+        let drawn = |shadow: f64, light: Option<&[u8]>| {
+            let mut style = RasterStyle::default_for(&r);
+            style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 270.0, altitude: 45.0, z_factor: 1.0, shadow };
+            style.resampling = Resampling::Nearest;
+            let mut pm = Pixmap::new(1, 1).unwrap();
+            draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), light);
+            let p = pm.pixel(0, 0).unwrap();
+            let want = |shade: u8| Colorizer::new(&style, &r, None).color(&[0.0], Some(shade)).unwrap();
+            ([p.red(), p.green(), p.blue(), p.alpha()], want(lit), want(0), want((f64::from(lit) * 0.5).round() as u8))
+        };
+        let none = Some(dark.as_slice());
+        // Without shadows, today's pixels, a grid or not; with them, the direct light by their strength.
+        for (shadow, light, which) in [(0.0, None, 0), (0.0, none, 0), (1.0, None, 0), (1.0, none, 1), (0.5, none, 2)] {
+            let (pixel, lit, unlit, half) = drawn(shadow, light);
+            assert_eq!(pixel, [lit, unlit, half][which], "shadow {shadow}, grid {}", light.is_some());
+        }
+        // In full shadow the relief keeps its ambient light (a quarter of its colour), not black.
+        let (pixel, _, _, _) = drawn(1.0, none);
+        assert_eq!(pixel, [64, 64, 64, 255]);
+        // A grid of another size isn't read.
+        let (pixel, lit, _, _) = drawn(1.0, Some(&dark[..10]));
+        assert_eq!(pixel, lit);
+    }
+
+    /// A 0–360° grid seen across its seam: the part in view is two strips, one at each end of
+    /// the grid, not the whole width.
+    #[test]
+    fn a_view_across_the_seam_of_a_full_turn_grid_is_two_strips() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 90.0, pixel_width: 10.0, pixel_height: -10.0 };
+        let r = Raster::new("turn", 36, 18, vec![vec![1.0; 36 * 18]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        // About 90° to each side of 0°: the east strip from column 0, the west one to column 36.
+        let view = View {
+            width: 400.0,
+            height: 200.0,
+            pixels_per_point: 1.0,
+            camera: Camera { center: Coord::new(0.0, 0.0), res: 50_000.0, bearing: 0.0, pitch: 0.0 },
+            sky: false,
+        };
+        let w = in_view(&r, &view, Place::Flat(&Flat::Mercator, "mercator"), 400, 200, true).unwrap();
+        assert!(w.cols.0 == 0.0 && w.cols.1 > 5.0 && w.cols.1 < 18.0, "{:?}", w.cols);
+        let (a, b) = w.cols2.unwrap();
+        assert!(a > 18.0 && a < 31.0 && b == 36.0, "{:?}", (a, b));
+        // East of 0° only: one strip.
+        let east =
+            View { camera: Camera { center: lonlat_to_merc(Coord::new(100.0, 0.0)), res: 50_000.0, bearing: 0.0, pitch: 0.0 }, ..view };
+        let w = in_view(&r, &east, Place::Flat(&Flat::Mercator, "mercator"), 400, 200, true).unwrap();
+        assert!(w.cols2.is_none() && w.cols.0 > 0.0, "{:?}", (w.cols, w.cols2));
     }
 
     #[test]
@@ -548,10 +1036,11 @@ mod tests {
             let data: Vec<f32> = (0..36 * 18).map(|i| elevations[(i % 36 + shift) % 36]).collect();
             let r = Raster::new("relief", 36, 18, vec![data], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
             let mut style = RasterStyle::default_for(&r);
-            style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 270.0, altitude: 45.0, z_factor: 1.0 };
+            style.renderer =
+                RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 270.0, altitude: 45.0, z_factor: 1.0, shadow: 0.0 };
             style.resampling = Resampling::Nearest;
             let mut pm = Pixmap::new(80, 40).unwrap();
-            draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));
+            draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), None);
             pm
         };
         let seam = render(0.0, 0);
@@ -576,7 +1065,7 @@ mod tests {
         style.resampling = Resampling::Bilinear;
         let draw_it = |style: &RasterStyle, stats: Option<&[BandStats]>| {
             let mut pm = Pixmap::new(200, 200).unwrap();
-            draw(&mut pm, &r, style, stats, &view, 1.0, false, flat);
+            draw(&mut pm, &r, style, stats, &view, 1.0, false, flat, None);
             pm
         };
         let px = |pm: &Pixmap, x: u32| pm.pixel(x, 100).map(|p| (p.alpha(), p.red())).unwrap_or((0, 0));
@@ -620,7 +1109,7 @@ mod tests {
         let camera = Camera { center: lonlat_to_merc(Coord::new(-81.0, 42.0)), res: 2000.0, bearing: 0.0, pitch: 0.0 };
         let view = View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
         let mut pm = Pixmap::new(200, 200).unwrap();
-        draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));
+        draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), None);
         let alpha = |x: u32, y: u32| pm.pixel(x, y).map(|p| p.alpha()).unwrap_or(0);
         assert_eq!(alpha(100, 100), 255, "the centre is covered");
         assert_eq!(alpha(2, 2), 0, "the corner of the view is outside the raster");
@@ -634,16 +1123,16 @@ mod tests {
                 "rgb" => RasterRenderer::Rgb { red: 0, green: 0, blue: 0 },
                 "classify" => rustgis_map::raster::classify(&r, 0, 5, Default::default(), Default::default()),
                 "unique" => rustgis_map::raster::unique_values(&r, 0, Default::default()),
-                _ => RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 315.0, altitude: 45.0, z_factor: 1.0 },
+                _ => RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 315.0, altitude: 45.0, z_factor: 1.0, shadow: 0.0 },
             };
             s.dra = true;
             s.resampling = Resampling::Bilinear;
-            draw(&mut pm, &r, &s, None, &view, 0.5, false, Place::Flat(&Flat::Mercator, "mercator"));
+            draw(&mut pm, &r, &s, None, &view, 0.5, false, Place::Flat(&Flat::Mercator, "mercator"), None);
         }
         // High-density screens draw at logical resolution, scaled up.
         let hi = View { pixels_per_point: 2.0, ..view };
         let mut pm2 = Pixmap::new(400, 400).unwrap();
-        draw(&mut pm2, &r, &style, None, &hi, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));
+        draw(&mut pm2, &r, &style, None, &hi, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), None);
         assert_eq!(pm2.pixel(200, 200).map(|p| p.alpha()), Some(255));
         assert_eq!(pm2.pixel(4, 4).map(|p| p.alpha()), Some(0));
         // Spread over threads, every pixel comes out as drawn on one, for each renderer.
@@ -652,19 +1141,50 @@ mod tests {
             let mut s = style.clone();
             s.renderer = match kind {
                 "rgb" => RasterRenderer::Rgb { red: 0, green: 0, blue: 0 },
-                "shadedRelief" => RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 315.0, altitude: 45.0, z_factor: 1.0 },
+                "shadedRelief" => {
+                    RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 315.0, altitude: 45.0, z_factor: 1.0, shadow: 0.0 }
+                }
                 _ => s.renderer,
             };
             let mut one = Pixmap::new(420, 300).unwrap();
             let mut many = Pixmap::new(420, 300).unwrap();
-            draw_with(&mut one, &r, &s, None, &wide, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), 1);
-            draw_with(&mut many, &r, &s, None, &wide, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), 7);
+            draw_with(&mut one, &r, &s, None, &wide, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), 1, None);
+            draw_with(&mut many, &r, &s, None, &wide, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), 7, None);
             assert!(one.data() == many.data(), "{kind}");
             assert!(one.pixels().iter().any(|p| p.alpha() == 255), "{kind} draws");
         }
         let far = View { width: 3.0, height: 1.0, pixels_per_point: 2.0, camera: Camera::world(), sky: false };
         let mut tiny = Pixmap::new(6, 2).unwrap();
-        draw(&mut tiny, &r, &style, None, &far, 1.0, true, Place::Flat(&Flat::Mercator, "mercator"));
+        draw(&mut tiny, &r, &style, None, &far, 1.0, true, Place::Flat(&Flat::Mercator, "mercator"), None);
+    }
+
+    /// #1792: a projected raster scaled up to a high-density screen, its reprojection grid and
+    /// its scaling spread over threads, comes out as drawn on one, pixel for pixel, at any
+    /// scale, opacity and resampling, partly in view or filling it.
+    #[test]
+    fn scaled_up_on_threads_as_on_one() {
+        // 200 × 200 cells of 5 m in Swiss LV95, valued in a ramp with a few holes.
+        let gt = GeoTransform { origin_x: 2_696_000.0, origin_y: 1_262_000.0, pixel_width: 5.0, pixel_height: -5.0 };
+        let data: Vec<f32> = (0..200 * 200).map(|i| if i % 97 == 0 { -9999.0 } else { ((i % 200) + (i / 200)) as f32 }).collect();
+        let r =
+            Raster::new("dem", 200, 200, vec![data], gt, Crs::from_epsg(2056).unwrap(), Some(-9999.0), ColorHint::Gray, "Float32").unwrap();
+        let centre = lonlat_to_merc(Coord::new(8.7205, 47.4985));
+        for (res, ppp) in [(2.0, 1.5), (2.0, 2.0), (0.7, 1.5), (0.7, 1.75), (6.0, 2.0)] {
+            for (opacity, resampling) in [(1.0, Resampling::Bilinear), (0.6, Resampling::Nearest), (1.0, Resampling::Nearest)] {
+                let mut style = RasterStyle::default_for(&r);
+                style.resampling = resampling;
+                let camera = Camera { center: centre, res, bearing: 0.0, pitch: 0.0 };
+                let view = View { width: 300.0, height: 200.0, pixels_per_point: ppp, camera, sky: false };
+                let size = ((300.0 * ppp).ceil() as u32, (200.0 * ppp).ceil() as u32);
+                let mut one = Pixmap::new(size.0, size.1).unwrap();
+                one.fill(tiny_skia::Color::from_rgba8(20, 120, 40, 255));
+                let mut many = one.clone();
+                draw_with(&mut one, &r, &style, None, &view, opacity, false, Place::Flat(&Flat::Mercator, "mercator"), 1, None);
+                draw_with(&mut many, &r, &style, None, &view, opacity, false, Place::Flat(&Flat::Mercator, "mercator"), 7, None);
+                assert!(one.data() == many.data(), "res {res} ppp {ppp} opacity {opacity} {resampling:?}");
+                assert!(one.pixels().iter().any(|p| p.green() != 120), "res {res} ppp {ppp}: the raster is drawn");
+            }
+        }
     }
 
     /// #1109: a lon/lat grid stored from 0 to 360° draws west of Greenwich too, from its columns
@@ -679,7 +1199,7 @@ mod tests {
         let camera = Camera { center: Coord::new(0.0, 0.0), res: 100_000.0, bearing: 0.0, pitch: 0.0 };
         let view = View { width: 400.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
         let mut pm = Pixmap::new(400, 200).unwrap();
-        draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));
+        draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), None);
         let at = |lon: f64| {
             let (x, y) = view.to_screen(lonlat_to_merc(Coord::new(lon, 10.0)));
             pm.pixel(x as u32, y as u32).map(|p| (p.alpha(), p.red())).unwrap_or((0, 0))
@@ -706,7 +1226,7 @@ mod tests {
             let camera = Camera { center: Coord::new(0.0, 0.0), res: 100_000.0, bearing: 0.0, pitch: 0.0 };
             let view = View { width: 400.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
             let mut pm = Pixmap::new(400, 200).unwrap();
-            draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&flat, "robinson +lon_0=150"));
+            draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&flat, "robinson +lon_0=150"), None);
             let screen = |lon: f64| view.to_screen(flat.forward(Coord::new(lon, 10.0)).unwrap());
             let red = |x: f64, y: f64| pm.pixel(x as u32, y as u32).map(|p| (p.alpha(), p.red())).unwrap_or((0, 0));
             let ((xa, y), (xb, _)) = (screen(170.5), screen(-170.5));

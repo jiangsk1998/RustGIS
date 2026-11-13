@@ -279,9 +279,27 @@ impl SqliteMemSource {
         e
     }
 
-    /// A row's field values, in `info.fields` order.
-    fn attrs(&self, r: &[Val]) -> Vec<Value> {
-        self.info.fields.iter().zip(&self.field_cols).map(|(f, &c)| r.get(c).map(|v| value(v, f.ty)).unwrap_or(Value::Null)).collect()
+    /// A row's field values, in `info.fields` order, counting in `unread_dates` the dates that
+    /// aren't ones (read as null).
+    fn attrs(&self, r: &[Val], unread_dates: &mut Vec<usize>) -> Vec<Value> {
+        self.info
+            .fields
+            .iter()
+            .zip(&self.field_cols)
+            .enumerate()
+            .map(|(k, (f, &c))| {
+                let cell = r.get(c);
+                let v = cell.map(|v| value(v, f.ty)).unwrap_or(Value::Null);
+                // A date field's text that isn't a date is read as null, and said.
+                if matches!(f.ty, FieldType::Date | FieldType::DateTime)
+                    && v.is_null()
+                    && matches!(cell, Some(Val::Text(t)) if !t.trim().is_empty())
+                {
+                    super::unread_date(unread_dates, k);
+                }
+                v
+            })
+            .collect()
     }
 
     /// The original bytes of one row's image column.
@@ -357,20 +375,22 @@ impl FeatureSource for SqliteMemSource {
         let Some(geom_col) = self.geom_col else {
             // An attributes table: every row is a feature, whatever the extent.
             let mut sample = Sampler::with_total(limit, self.info.count.unwrap_or(0));
+            let mut unread_dates = Vec::new();
             self.db
                 .rows(&self.table, |rowid, r| {
                     if !sample.wants() {
                         return ControlFlow::Continue(());
                     }
-                    sample.keep(Feature { id: rowid as u64, geometry: None, attrs: self.attrs(r) });
+                    sample.keep(Feature { id: rowid as u64, geometry: None, attrs: self.attrs(r, &mut unread_dates) });
                     ControlFlow::Continue(())
                 })
                 .map_err(err)?;
-            return Ok(Batch { matched: sample.seen(), complete: sample.complete(), features: sample.items, skipped: 0 });
+            return Ok(Batch { matched: sample.seen(), complete: sample.complete(), features: sample.items, skipped: 0, unread_dates });
         };
         let native = req.extent.map(|e| self.reproject.extent_from_lonlat(&e));
         let mut sample = if native.is_none() { Sampler::with_total(limit, self.info.count.unwrap_or(0)) } else { Sampler::new(limit) };
         let mut skipped = 0;
+        let mut unread_dates = Vec::new();
         self.db
             .rows(&self.table, |rowid, r| {
                 let blob = match r.get(geom_col) {
@@ -405,11 +425,11 @@ impl FeatureSource for SqliteMemSource {
                     return ControlFlow::Continue(());
                 }
                 // Integer keys, negative ones too, map to distinct ids.
-                sample.keep(Feature { id: rowid as u64, geometry: Some(geometry), attrs: self.attrs(r) });
+                sample.keep(Feature { id: rowid as u64, geometry: Some(geometry), attrs: self.attrs(r, &mut unread_dates) });
                 ControlFlow::Continue(())
             })
             .map_err(err)?;
-        Ok(Batch { matched: sample.seen(), complete: sample.complete(), features: sample.items, skipped })
+        Ok(Batch { matched: sample.seen(), complete: sample.complete(), features: sample.items, skipped, unread_dates })
     }
 
     /// The upload is held in memory already, so every table can be visited.
@@ -464,7 +484,7 @@ impl FeatureSource for SqliteMemSource {
                     None => None,
                 };
                 out.matched += 1;
-                match chunks.push(Feature { id: rowid as u64, geometry, attrs: self.attrs(r) }) {
+                match chunks.push(Feature { id: rowid as u64, geometry, attrs: self.attrs(r, &mut out.unread_dates) }) {
                     Ok(()) => ControlFlow::Continue(()),
                     Err(e) => {
                         failed = Some(e);

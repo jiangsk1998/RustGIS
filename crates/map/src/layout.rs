@@ -4,10 +4,13 @@
 //! Element positions are in millimetres from the page's top-left corner. A map frame shows a map
 //! of the project at its own centre and scale, independent of the map view.
 
+use std::collections::BTreeMap;
+
 use rustgis_geom::Coord;
 use serde::{Deserialize, Serialize};
 
 use crate::raster::{Colorizer, Normalizer, RasterLayer, RasterMask, RasterRenderer, RasterStyle};
+use crate::symbology::Dash;
 use crate::{Camera, Layer, Map, Rgba};
 
 /// Logical points per millimetre (96 points per inch).
@@ -117,6 +120,11 @@ pub struct Grid {
     /// digits (`43` for 543,000 m); off, the whole value.
     #[serde(default, skip_serializing_if = "is_false")]
     pub short: bool,
+    /// A measured grid labelled as MGRS: each 100 km square named with its grid zone designation
+    /// (`32T MT`), and the lines by their kilometres' last two digits (`05`). Its system is a WGS 84 UTM
+    /// zone: the one named, else the map's own when it is one, else the zone at the frame's centre.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mgrs: bool,
 }
 
 /// What a grid's lines are.
@@ -173,6 +181,26 @@ pub fn utm_epsg(lon: f64, lat: f64) -> u32 {
     if lat < 0.0 { 32_700 + zone } else { 32_600 + zone }
 }
 
+/// The WGS 84 UTM zone a coordinate system names by its EPSG code (`EPSG:32632`, `32632`, any
+/// case): its zone and whether it is the northern hemisphere's. `None` for any other system, and
+/// for a UTM zone given as WKT or a PROJ string, which MGRS labels don't read.
+pub fn utm_zone_of(crs: &str) -> Option<(u8, bool)> {
+    let t = crs.trim();
+    let digits = match t.get(..5) {
+        Some(p) if p.eq_ignore_ascii_case("EPSG:") => t.get(5..)?.trim(),
+        _ => t,
+    };
+    if !(digits.len() == 5 && digits.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    let code: u32 = digits.parse().ok()?;
+    let zone = u8::try_from(code % 100).ok()?;
+    match code / 100 {
+        326 | 327 if (1..=60).contains(&zone) => Some((zone, code / 100 == 326)),
+        _ => None,
+    }
+}
+
 impl Default for Grid {
     fn default() -> Grid {
         Grid {
@@ -189,6 +217,7 @@ impl Default for Grid {
             kind: GridKind::Graticule,
             crs: None,
             short: false,
+            mgrs: false,
         }
     }
 }
@@ -246,11 +275,13 @@ impl Grid {
         // Off by rounding error from the stepped loop: put back on the step.
         let v = if step > 0.0 { (v / step).round() * step } else { v };
         // (Short labels of a step of 100 km or more would all read 0: whole ones.)
-        if self.short && step < 100_000.0 {
+        if (self.short || self.mgrs) && step < 100_000.0 {
             let km = (v / 1000.0).rem_euclid(100.0);
             // (99.9999… after rounding error is 0 again.)
             let km = if (km - 100.0).abs() < 1e-6 { 0.0 } else { km };
-            return decimal(km, step / 1000.0);
+            let s = decimal(km, step / 1000.0);
+            // MGRS prints its two digits always: `05`, `00`.
+            return if self.mgrs && km < 10.0 { format!("0{s}") } else { s };
         }
         let s = decimal(v.abs(), step);
         if v < 0.0 && s.chars().any(|c| c.is_ascii_digit() && c != '0') { format!("-{s}") } else { s }
@@ -461,6 +492,12 @@ fn is_left(a: &TextAlign) -> bool {
 
 /// The most layers a legend leaves out.
 pub const MAX_LEGEND_EXCLUDED: usize = 1000;
+
+/// The most layers a legend labels.
+pub const MAX_LEGEND_LABELS: usize = 1000;
+
+/// The most characters of a legend's label for a layer.
+pub const MAX_LEGEND_LABEL_CHARS: usize = 200;
 
 /// Which way a line element runs across its box.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -793,6 +830,17 @@ fn divisions() -> usize {
     4
 }
 
+/// The most columns a legend lays its rows in.
+pub const MAX_LEGEND_COLUMNS: usize = 3;
+
+fn one_column() -> usize {
+    1
+}
+
+fn is_one_column(columns: &usize) -> bool {
+    *columns == 1
+}
+
 fn ink() -> Rgba {
     Rgba::rgb(0x22, 0x22, 0x22)
 }
@@ -912,12 +960,22 @@ pub enum ElementKind {
         /// highlight, a basemap-like layer. Empty, it lists every layer it would otherwise.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exclude: Vec<String>,
+        /// The columns its rows are laid in, 1 to [`MAX_LEGEND_COLUMNS`], under its title: as even
+        /// as they can be, a layer's name staying with the row under it.
+        #[serde(default = "one_column", skip_serializing_if = "is_one_column")]
+        columns: usize,
+        /// The label it shows for a layer instead of the layer's name, by the layer's name (any
+        /// case, as the map spells it): its row, or the name over its classes (#1654). The layer
+        /// keeps its name everywhere else. A layer not in it shows its name.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        labels: BTreeMap<String, String>,
     },
     /// The colour scale of a raster layer in a frame's map: a gradient bar for a stretch, steps
     /// for classes, a block per value for unique values and colour tables (#326).
     Colorbar {
         frame: u32,
-        /// The raster layer (by name); `None` is the top visible raster of the frame's map.
+        /// The raster layer (by name); `None` is the frame map's top shown raster with a colour scale
+        /// that isn't drawn by classes ([`colorbar_layer`]).
         #[serde(default)]
         layer: Option<String>,
         /// Drawn beside the bar, e.g. the units: `Elevation (m)`.
@@ -961,6 +1019,11 @@ pub enum ElementKind {
         /// (trimmed, bounded, none when not a name).
         #[serde(default, deserialize_with = "crate::symbology::de_font", skip_serializing_if = "Option::is_none")]
         font_name: Option<String>,
+        /// Turned about the centre of its box, in degrees clockwise as a frame's `bearing` is
+        /// (90 reads top to bottom, -90 bottom to top), -180 to 180 ([`rotation()`]); the element's
+        /// box stays the unturned one. Left out when 0, so layouts saved before keep their bytes.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        rotation: f64,
     },
     Picture {
         /// Base64 PNG or JPEG.
@@ -991,9 +1054,21 @@ pub enum ElementKind {
         /// Its corners rounded by this much, in millimetres (0: square corners).
         #[serde(default, skip_serializing_if = "is_zero")]
         radius: f64,
+        /// Dashed: the pattern along the outline, in points, as a line layer's stroke takes it
+        /// ([`Dash`]); `None` is solid. Left out when solid, so layouts saved before keep their bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::symbology::de_dash")]
+        dash: Option<Dash>,
     },
     /// An ellipse filling the element's box: a circle in a square one.
-    Ellipse { fill: Rgba, outline: Rgba, width: f64 },
+    Ellipse {
+        fill: Rgba,
+        outline: Rgba,
+        width: f64,
+        /// Dashed: the pattern along the outline, in points, as a line layer's stroke takes it
+        /// ([`Dash`]); `None` is solid. Left out when solid, so layouts saved before keep their bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::symbology::de_dash")]
+        dash: Option<Dash>,
+    },
     /// A straight line across the element's box, `width` points wide.
     Line {
         color: Rgba,
@@ -1003,6 +1078,11 @@ pub enum ElementKind {
         /// Arrowheads: none makes it a plain line.
         #[serde(default)]
         head: LineHead,
+        /// Dashed: the pattern along the line, in points, as a line layer's stroke takes it
+        /// ([`Dash`]); `None` is solid. Only the shaft is dashed: arrowheads stay solid. Left out
+        /// when solid, so layouts saved before keep their bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::symbology::de_dash")]
+        dash: Option<Dash>,
     },
 }
 
@@ -1023,6 +1103,7 @@ impl ElementKind {
             letter_spacing: 0.0,
             font: FontFamily::Sans,
             font_name: None,
+            rotation: 0.0,
         }
     }
 
@@ -1108,9 +1189,49 @@ pub struct Element {
 }
 
 impl Element {
+    /// Whether the point (mm) is on the element, its box turned as it is drawn.
     pub fn contains(&self, x: f64, y: f64) -> bool {
+        let (x, y) = self.unturned(x, y);
         x >= self.x && x <= self.x + self.w && y >= self.y && y <= self.y + self.h
     }
+
+    /// How far it is turned about its centre, in degrees clockwise: a text's `rotation`, else 0.
+    pub fn rotation(&self) -> f64 {
+        match self.kind {
+            ElementKind::Text { rotation, .. } => rotation,
+            _ => 0.0,
+        }
+    }
+
+    /// The point (mm) seen in the element's unturned box: turned back about its centre.
+    pub fn unturned(&self, x: f64, y: f64) -> (f64, f64) {
+        if self.rotation() == 0.0 {
+            return (x, y);
+        }
+        let (cx, cy) = (self.x + self.w / 2.0, self.y + self.h / 2.0);
+        let (sin, cos) = (-self.rotation()).to_radians().sin_cos();
+        let (dx, dy) = (x - cx, y - cy);
+        (cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
+    }
+
+    /// The rectangle (x, y, w, h in mm) its turned box takes up on the page: its box when it isn't
+    /// turned.
+    pub fn bounds(&self) -> (f64, f64, f64, f64) {
+        let (sin, cos) = self.rotation().to_radians().sin_cos();
+        let (w, h) = (self.w * cos.abs() + self.h * sin.abs(), self.w * sin.abs() + self.h * cos.abs());
+        (self.x + (self.w - w) / 2.0, self.y + (self.h - h) / 2.0, w, h)
+    }
+}
+
+/// An angle in degrees as a text's `rotation` keeps it: within -180..=180 (450 is 90, 270 is -90),
+/// 0 when it isn't a number.
+pub fn rotation(degrees: f64) -> f64 {
+    if !degrees.is_finite() {
+        return 0.0;
+    }
+    let a = degrees.rem_euclid(360.0);
+    // `rem_euclid` of a tiny negative angle can round to 360 itself.
+    if a > 180.0 { a - 360.0 } else { a }
 }
 
 /// A map series: one page per feature of an index layer, the main frame zoomed to each.
@@ -1261,8 +1382,11 @@ impl Layout {
     }
 
     /// Keeps the page and elements sane after loading or editing (layout files are untrusted):
-    /// sizes in range, unique element ids, and no references to missing frames.
-    pub fn clamp(&mut self) {
+    /// sizes in range, unique element ids, and no references to missing frames. Returns what it
+    /// changed, so a project reader can say so.
+    pub fn clamp(&mut self) -> LayoutRepairs {
+        let page = (self.width, self.height, self.guides.clone(), self.series.clone());
+        let count = self.elements.len();
         self.width = finite_or(self.width, 210.0).clamp(20.0, 5000.0);
         self.height = finite_or(self.height, 297.0).clamp(20.0, 5000.0);
         // The same limits `layout.guides` sets: the view walks these lists every frame.
@@ -1273,7 +1397,28 @@ impl Layout {
         self.elements.truncate(500);
         let mut seen = std::collections::HashSet::new();
         let mut next = self.elements.iter().map(|e| e.id).filter(|id| *id <= MAX_ID).max().unwrap_or(0).saturating_add(1);
+        let mut changed = Vec::with_capacity(self.elements.len());
+        let mut mgrs_off = 0usize;
         for e in &mut self.elements {
+            // A picture's image (often large) is never changed here, so it isn't copied.
+            let mut before = Element {
+                name: e.name.clone(),
+                kind: match &e.kind {
+                    ElementKind::Picture { .. } => ElementKind::Picture { image: String::new() },
+                    kind => kind.clone(),
+                },
+                ..*e
+            };
+            // A bearing past half a turn names the same direction once normalized, and a pitch
+            // too small to tilt is drawn flat: neither is a change.
+            if let ElementKind::MapFrame { bearing, pitch, .. } = &mut before.kind {
+                if bearing.is_finite() {
+                    *bearing = crate::camera::normalize_bearing(*bearing);
+                }
+                if (0.0..1e-6).contains(pitch) {
+                    *pitch = 0.0;
+                }
+            }
             // Ids stay well below u32::MAX so new elements never run out of numbers. A repeated id
             // (only a hand-edited file has one) is renumbered; references to it keep meaning the
             // first element with that id, as they did when the file was written.
@@ -1286,6 +1431,7 @@ impl Layout {
             e.h = finite_or(e.h, 20.0).clamp(MIN_ELEMENT_MM, 5000.0);
             e.x = finite_or(e.x, 0.0).clamp(-5000.0, 5000.0);
             e.y = finite_or(e.y, 0.0).clamp(-5000.0, 5000.0);
+            let mut cut = e.name.chars().nth(200).is_some();
             e.name = e.name.chars().take(200).collect();
             match &mut e.kind {
                 ElementKind::MapFrame { center, scale, shape, grid, bearing, pitch, extent_width, .. } => {
@@ -1299,8 +1445,10 @@ impl Layout {
                     center.x = center.x.clamp(-540.0, 540.0);
                     center.y = center.y.clamp(-85.0, 85.0);
                     if let FrameShape::Polygon(p) = shape {
+                        let points = p.len();
                         p.retain(|(u, v)| u.is_finite() && v.is_finite());
                         p.truncate(10_000);
+                        cut |= p.len() < points;
                         p.iter_mut().for_each(|(u, v)| (*u, *v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)));
                         if p.len() < 3 {
                             *shape = FrameShape::Rectangle;
@@ -1315,18 +1463,53 @@ impl Layout {
                             GridKind::Measured => step.clamp(MIN_MEASURED_STEP, MAX_MEASURED_STEP),
                         };
                         g.tick_length = finite_or(g.tick_length, tick_length()).clamp(0.0, MAX_TICK_MM);
+                        // MGRS labels name a WGS 84 UTM zone's squares, on a measured grid: on a
+                        // graticule, or with another system named (only a hand-edited file has
+                        // either), they are left off, and counted on their own.
+                        let named_other = g.crs.as_deref().is_some_and(|c| !c.trim().is_empty() && utm_zone_of(c).is_none());
+                        if g.mgrs && (g.kind != GridKind::Measured || named_other) {
+                            g.mgrs = false;
+                            mgrs_off = mgrs_off.saturating_add(1);
+                            // (Counted by `mgrs_off` and said in its own notice, so `before` matches:
+                            // not an adjusted element too.)
+                            if let ElementKind::MapFrame { grid: Some(b), .. } = &mut before.kind {
+                                b.mgrs = false;
+                            }
+                        }
                         g.width = finite_or(g.width, grid_width()).clamp(0.0, MAX_GRID_WIDTH);
                     }
                 }
-                ElementKind::Legend { exclude, .. } => {
+                ElementKind::Legend { exclude, columns, labels, .. } => {
                     // Names stay whole: a layer's own name isn't cut, and a cut one would no
                     // longer match it.
+                    cut |= exclude.len() > MAX_LEGEND_EXCLUDED;
                     exclude.truncate(MAX_LEGEND_EXCLUDED);
+                    *columns = (*columns).clamp(1, MAX_LEGEND_COLUMNS);
+                    // The same for the names labelled; a label is cut to its length, and a blank
+                    // one shows the name, as it would without.
+                    labels.retain(|_, label| !label.trim().is_empty());
+                    let labelled = labels.len();
+                    // One label per layer, as a command keeps: of two spellings of a name (any
+                    // case), the first in order stays and the other is cut.
+                    let mut seen = std::collections::HashSet::new();
+                    labels.retain(|name, _| seen.insert(name.to_ascii_lowercase()));
+                    while labels.len() > MAX_LEGEND_LABELS {
+                        labels.pop_last();
+                    }
+                    cut |= labels.len() < labelled;
+                    for label in labels.values_mut() {
+                        let end = label.char_indices().nth(MAX_LEGEND_LABEL_CHARS).map_or(label.len(), |(i, _)| i);
+                        cut |= end < label.len();
+                        label.truncate(end);
+                    }
                 }
-                ElementKind::Text { text, size, letter_spacing, .. } => {
+                ElementKind::Text { text, size, letter_spacing, rotation: turn, .. } => {
+                    *turn = rotation(*turn);
                     *size = finite_or(*size, 12.0).clamp(*crate::graphics::FONT_SIZE.start(), *crate::graphics::FONT_SIZE.end());
                     *letter_spacing = finite_or(*letter_spacing, 0.0).clamp(MIN_LETTER_SPACING, MAX_LETTER_SPACING);
-                    text.truncate(text.char_indices().nth(5000).map_or(text.len(), |(i, _)| i));
+                    let end = text.char_indices().nth(5000).map_or(text.len(), |(i, _)| i);
+                    cut |= end < text.len();
+                    text.truncate(end);
                 }
                 ElementKind::Table { rows, .. } => *rows = (*rows).clamp(1, 500),
                 ElementKind::ScaleBar { divisions, .. } => *divisions = (*divisions).clamp(1, MAX_SCALE_DIVISIONS),
@@ -1336,26 +1519,79 @@ impl Layout {
                 ElementKind::Line { width, .. } => *width = finite_or(*width, 1.0).clamp(0.1, 50.0),
                 _ => {}
             }
+            let kind_changed = !matches!(e.kind, ElementKind::Picture { .. }) && e.kind != before.kind;
+            changed.push((
+                kind_changed
+                    || (e.id, &e.name, e.x, e.y, e.w, e.h, e.visible, e.locked)
+                        != (before.id, &before.name, before.x, before.y, before.w, before.h, before.visible, before.locked),
+                cut,
+            ));
         }
         self.next_id = next;
         // References must point at map frames that exist.
         let frames: std::collections::HashSet<u32> =
             self.elements.iter().filter(|e| matches!(e.kind, ElementKind::MapFrame { .. })).map(|e| e.id).collect();
-        self.elements.retain(|e| e.kind.frame().is_none_or(|f| frames.contains(&f)));
-        for e in &mut self.elements {
+        let (mut adjusted, mut cut_count) = (0usize, 0usize);
+        let elements = std::mem::take(&mut self.elements);
+        for (mut e, (mut changed, cut)) in elements.into_iter().zip(changed) {
+            if e.kind.frame().is_some_and(|f| !frames.contains(&f)) {
+                continue;
+            }
             if let ElementKind::MapFrame { extent_of, .. } = &mut e.kind
                 && extent_of.is_some_and(|o| !frames.contains(&o) || o == e.id)
             {
                 *extent_of = None;
+                changed = true;
             }
+            adjusted = adjusted.saturating_add(usize::from(changed));
+            cut_count = cut_count.saturating_add(usize::from(cut));
+            self.elements.push(e);
         }
+        let mut series_removed = false;
         if let Some(s) = &mut self.series {
             if !frames.contains(&s.frame) {
                 self.series = None;
+                series_removed = true;
             } else {
                 s.margin = finite_or(s.margin, 0.1).clamp(0.0, 5.0);
             }
         }
+        let series_adjusted = !series_removed && self.series != page.3;
+        let page_adjusted = series_adjusted || (self.width, self.height, &self.guides) != (page.0, page.1, &page.2);
+        LayoutRepairs {
+            elements_adjusted: adjusted,
+            elements_cut: cut_count,
+            elements_removed: count.saturating_sub(self.elements.len()),
+            page_adjusted: usize::from(page_adjusted),
+            series_removed: usize::from(series_removed),
+            mgrs_off,
+        }
+    }
+}
+
+/// What [`Layout::clamp`] changed in a layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LayoutRepairs {
+    /// Elements kept with a value brought into range, a new id, or a reference cleared.
+    pub elements_adjusted: usize,
+    /// Elements with a name, text, polygon points, legend exclusions or legend labels cut to their
+    /// limits (the same element may count as adjusted too).
+    pub elements_cut: usize,
+    /// Elements removed: beyond the 500 a layout holds, or tied to a map frame it doesn't have.
+    pub elements_removed: usize,
+    /// Whether the page size, guides or map series margin changed (0 or 1).
+    pub page_adjusted: usize,
+    /// Whether the map series was removed, its map frame missing (0 or 1).
+    pub series_removed: usize,
+    /// Map frames whose grid had MGRS labels on a graticule or over a system other than a WGS 84
+    /// UTM zone, turned off.
+    pub mgrs_off: usize,
+}
+
+impl LayoutRepairs {
+    /// Whether nothing was changed.
+    pub fn is_empty(&self) -> bool {
+        *self == LayoutRepairs::default()
     }
 }
 
@@ -1450,11 +1686,21 @@ pub const MAX_COLORBAR_VALUES: usize = 64;
 /// Colours sampled along a continuous colorbar.
 const RAMP_SAMPLES: usize = 256;
 
-/// The raster layer a colorbar shows: `layer` by name, or the top visible raster of the map.
+/// The raster layer a colorbar shows: `layer` by name, or the topmost raster the map shows (its
+/// groups visible too) with a colour scale ([`color_scale`]) that isn't drawn by classes: a legend lists those (#1679), and a colorbar
+/// of their codes would be the only key a land cover had. An RGB composite or a land cover over a
+/// DEM leaves it to the DEM. A raster on a ramp (Stretch, a tinted hillshade) whose pixels aren't
+/// read yet keeps its place: it is returned with no colour scale to show, rather than the one of
+/// a raster under it.
 pub fn colorbar_layer<'a>(map: &'a Map, layer: Option<&str>) -> Option<&'a Layer> {
     match layer {
         Some(n) => map.layer_by_name(n).filter(|l| l.is_raster()),
-        None => map.layers.iter().find(|l| l.visible && l.is_raster()),
+        None => map.layers.iter().filter(|l| map.shows(l)).find(|l| {
+            l.raster.as_ref().is_some_and(|r| match r.data {
+                None => matches!(r.style.renderer, RasterRenderer::Stretch { .. } | RasterRenderer::ShadedRelief { ramp: Some(_), .. }),
+                Some(_) => !r.style.renderer.draws_classes() && color_scale(r).is_some(),
+            })
+        }),
     }
 }
 
@@ -1522,11 +1768,12 @@ pub fn color_scale(rl: &RasterLayer) -> Option<ColorScale> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbology::MAX_DASH_STEP;
 
     #[test]
     fn elements_are_arranged_in_the_drawing_order() {
         let mut l = Layout::new("L", 100.0, 100.0);
-        let rect = || ElementKind::Rectangle { fill: Rgba::rgb(0, 0, 0), outline: Rgba::rgb(0, 0, 0), width: 0.0, radius: 0.0 };
+        let rect = || ElementKind::Rectangle { fill: Rgba::rgb(0, 0, 0), outline: Rgba::rgb(0, 0, 0), width: 0.0, radius: 0.0, dash: None };
         let ids: Vec<u32> = (0..4).map(|i| l.add(format!("E{i}"), (10.0, 10.0, 50.0, 50.0), rect())).collect();
         let order = |l: &Layout| l.elements.iter().map(|e| e.id).collect::<Vec<_>>();
         // All four overlap: the one drawn last is the one a click picks.
@@ -1612,7 +1859,21 @@ mod tests {
             {"id":9,"name":"c","x":0,"y":0,"w":10,"h":10,"kind":{"Legend":{"frame":42,"title":"L"}}}],
             "series":{"frame":77,"layer":"x"}}"#;
         let mut l: Layout = serde_json::from_str(text).unwrap_or_else(|e| panic!("{e}"));
-        l.clamp();
+        let repairs = l.clamp();
+        assert_eq!(
+            repairs,
+            LayoutRepairs { elements_adjusted: 2, elements_cut: 0, elements_removed: 1, page_adjusted: 1, series_removed: 1, mgrs_off: 0 },
+            "what changed is counted"
+        );
+        assert!(l.clamp().is_empty(), "a repaired layout needs nothing more");
+        if let ElementKind::MapFrame { bearing, .. } = &mut l.elements[0].kind {
+            *bearing = 270.0;
+        }
+        assert!(l.clamp().is_empty(), "a bearing of 270 is -90 by another name, not a repair");
+        if let ElementKind::MapFrame { pitch, .. } = &mut l.elements[0].kind {
+            *pitch = 1e-7;
+        }
+        assert!(l.clamp().is_empty(), "a pitch too small to tilt is flat, not a repair");
         let ids: Vec<u32> = l.elements.iter().map(|e| e.id).collect();
         assert_eq!(ids.len(), 2, "the legend of a missing frame goes");
         assert_ne!(ids[0], ids[1], "duplicate ids are renumbered");
@@ -1636,7 +1897,7 @@ mod tests {
         let a = big.add(
             "a",
             (0.0, 0.0, 1.0, 1.0),
-            ElementKind::Rectangle { fill: Rgba::rgb(0, 0, 0), outline: Rgba::rgb(0, 0, 0), width: 1.0, radius: 0.0 },
+            ElementKind::Rectangle { fill: Rgba::rgb(0, 0, 0), outline: Rgba::rgb(0, 0, 0), width: 1.0, radius: 0.0, dash: None },
         );
         assert!(a != big.elements[0].id && a <= MAX_ID + 1);
     }
@@ -1644,7 +1905,7 @@ mod tests {
     #[test]
     fn hairline_rectangles_keep_their_height() {
         let mut l = Layout::new("Layout", 210.0, 297.0);
-        let rule = ElementKind::Rectangle { fill: Rgba::rgb(0, 0, 0), outline: Rgba::rgb(0, 0, 0), width: 0.0, radius: 0.0 };
+        let rule = ElementKind::Rectangle { fill: Rgba::rgb(0, 0, 0), outline: Rgba::rgb(0, 0, 0), width: 0.0, radius: 0.0, dash: None };
         let id = l.add("Rule", (14.0, 33.0, 182.0, 0.15), rule.clone());
         assert_eq!(l.element(id).map(|e| e.h), Some(0.15));
         // A zero height becomes the thinnest element, not a 1 mm box.
@@ -1764,6 +2025,67 @@ mod tests {
         assert_eq!(GridKind::from_name("utm"), None);
     }
 
+    /// MGRS labels: the kilometres' last two digits on the lines, saved only when on; a WGS 84 UTM
+    /// zone is read from its EPSG code alone; a file with them on a graticule or naming another
+    /// system has them left off, counted on their own.
+    #[test]
+    fn mgrs_labels_need_a_wgs84_utm_zone() {
+        let g = Grid { kind: GridKind::Measured, mgrs: true, ..Grid::default() };
+        assert_eq!(g.measured_label(543_000.0, 1000.0), "43");
+        assert_eq!(g.measured_label(5_262_500.0, 500.0), "62.5");
+        assert_eq!(g.measured_label(500_000.0, 1000.0), "00", "two digits, as MGRS prints them");
+        assert_eq!(g.measured_label(505_500.0, 500.0), "05.5");
+        assert_eq!(Grid { mgrs: false, short: true, ..g.clone() }.measured_label(505_000.0, 1000.0), "5");
+        assert_eq!(g.measured_label(500_000.0, 100_000.0), "500000");
+        assert!(serde_json::to_value(Grid::default()).unwrap().get("mgrs").is_none());
+        let v = serde_json::to_value(&g).unwrap();
+        assert_eq!(v["mgrs"].as_bool(), Some(true));
+        assert_eq!(serde_json::from_value::<Grid>(v).unwrap(), g);
+        for (crs, zone) in [
+            ("EPSG:32632", Some((32, true))),
+            (" epsg:32760 ", Some((60, false))),
+            ("32601", Some((1, true))),
+            ("EPSG: 32733", Some((33, false))),
+            ("EPSG:32600", None),
+            ("EPSG:32661", None),
+            ("EPSG:32761", None),
+            ("EPSG:25832", None),
+            ("EPSG:2056", None),
+            ("EPSG:326320", None),
+            ("+proj=utm +zone=32 +datum=WGS84", None),
+            ("", None),
+        ] {
+            assert_eq!(utm_zone_of(crs), zone, "{crs}");
+        }
+        let frame = |crs: Option<&str>, kind: GridKind| {
+            let mut l = Layout::new("Layout", 297.0, 210.0);
+            l.add(
+                "Map Frame",
+                (10.0, 10.0, 200.0, 150.0),
+                ElementKind::MapFrame {
+                    map: "Map".into(),
+                    center: Coord::new(8.7, 47.5),
+                    scale: 25_000.0,
+                    shape: FrameShape::Rectangle,
+                    grid: Some(Grid { crs: crs.map(Into::into), kind, ..g.clone() }),
+                    extent_of: None,
+                    extent_color: INDICATOR_COLOR,
+                    extent_width: INDICATOR_WIDTH,
+                    bearing: 0.0,
+                    pitch: 0.0,
+                },
+            );
+            let r = l.clamp();
+            let ElementKind::MapFrame { grid: Some(g), .. } = &l.elements[0].kind else { panic!() };
+            (g.mgrs, r.mgrs_off, r.elements_adjusted)
+        };
+        assert_eq!(frame(None, GridKind::Measured), (true, 0, 0));
+        assert_eq!(frame(Some("EPSG:32632"), GridKind::Measured), (true, 0, 0));
+        assert_eq!(frame(Some(" "), GridKind::Measured), (true, 0, 0));
+        assert_eq!(frame(Some("EPSG:2056"), GridKind::Measured), (false, 1, 0), "said on its own, not as a value out of range");
+        assert_eq!(frame(None, GridKind::Graticule), (false, 1, 0));
+    }
+
     #[test]
     fn grid_labels_follow_the_format() {
         let g = Grid::default();
@@ -1820,6 +2142,107 @@ mod tests {
         assert_eq!(grid, Grid { step: 10.0, ..Grid::default() });
         assert_eq!(grid.edges, GridEdges { top: false, bottom: true, left: true, right: false });
         assert_eq!(grid.style, GridStyle::Lines);
+    }
+
+    /// Lines and the outlines of rectangles and ellipses keep a dash pattern through a save
+    /// (#1763); solid, nothing is written, so a layout saved before is written back byte for
+    /// byte; a pattern read from a file is brought into range as a line layer's is.
+    #[test]
+    fn dashes_round_trip_and_old_layouts_keep_their_bytes() {
+        let black = Rgba::rgb(0, 0, 0);
+        let mut l = Layout::new("L", 100.0, 100.0);
+        let line = l.add(
+            "Line",
+            (10.0, 10.0, 60.0, 6.0),
+            ElementKind::Line { color: black, width: 1.0, dir: LineDir::Horizontal, head: LineHead::End, dash: None },
+        );
+        let rect = l.add(
+            "Box",
+            (10.0, 30.0, 60.0, 30.0),
+            ElementKind::Rectangle { fill: black, outline: black, width: 1.0, radius: 0.0, dash: None },
+        );
+        let oval = l.add("Oval", (10.0, 70.0, 30.0, 20.0), ElementKind::Ellipse { fill: black, outline: black, width: 1.0, dash: None });
+        let old = serde_json::to_string(&l).unwrap();
+        assert!(!old.contains("dash"), "solid writes no pattern");
+        assert_eq!(serde_json::to_string(&serde_json::from_str::<Layout>(&old).unwrap()).unwrap(), old, "written back byte for byte");
+        let dash_of = |l: &Layout, id: u32| match l.element(id).map(|e| &e.kind) {
+            Some(ElementKind::Line { dash, .. } | ElementKind::Rectangle { dash, .. } | ElementKind::Ellipse { dash, .. }) => {
+                dash.map(|d| d.steps().to_vec())
+            }
+            _ => panic!("a line or a shape"),
+        };
+        let pattern = Dash::new(&[4.0, 2.0, 1.0, 2.0]);
+        for id in [line, rect, oval] {
+            if let Some(ElementKind::Line { dash, .. } | ElementKind::Rectangle { dash, .. } | ElementKind::Ellipse { dash, .. }) =
+                l.element_mut(id).map(|e| &mut e.kind)
+            {
+                *dash = pattern;
+            }
+        }
+        let saved = serde_json::to_string(&l).unwrap();
+        assert!(saved.contains(r#""dash":[4.0,2.0,1.0,2.0]"#), "{saved}");
+        let back: Layout = serde_json::from_str(&saved).unwrap();
+        for id in [line, rect, oval] {
+            assert_eq!(dash_of(&back, id), Some(vec![4.0, 2.0, 1.0, 2.0]));
+        }
+        // From a file, as a line layer's pattern: steps clamped, all-zero read as solid.
+        let file = saved.replacen("[4.0,2.0,1.0,2.0]", "[4,1e9,-2]", 1).replacen("[4.0,2.0,1.0,2.0]", "[0,0]", 1);
+        let read: Layout = serde_json::from_str(&file).unwrap();
+        assert_eq!(dash_of(&read, line), Some(vec![4.0, MAX_DASH_STEP, 0.0]));
+        assert_eq!(dash_of(&read, rect), None);
+        assert_eq!(dash_of(&read, oval), Some(vec![4.0, 2.0, 1.0, 2.0]));
+    }
+
+    /// A text turned 90° or -90° (#1763) keeps its turn through a save; one saved before reads
+    /// upright and is written back byte for byte; a turn read from a file is kept within -180 to
+    /// 180.
+    #[test]
+    fn text_rotation_round_trips_and_old_layouts_keep_their_bytes() {
+        let turn_of = |l: &Layout, id: u32| l.element(id).map(Element::rotation);
+        let mut l = Layout::new("L", 100.0, 100.0);
+        let upright = l.add("Title", (10.0, 10.0, 60.0, 10.0), ElementKind::text("Brasil", 12.0, Rgba::rgb(0, 0, 0), false));
+        let old = serde_json::to_string(&l).unwrap();
+        assert!(!old.contains("rotation"), "an upright text writes no turn");
+        let back: Layout = serde_json::from_str(&old).unwrap();
+        assert_eq!(turn_of(&back, upright), Some(0.0));
+        assert_eq!(serde_json::to_string(&back).unwrap(), old, "written back byte for byte");
+        for turn in [90.0, -90.0] {
+            let mut l = l.clone();
+            if let Some(ElementKind::Text { rotation, .. }) = l.element_mut(upright).map(|e| &mut e.kind) {
+                *rotation = turn;
+            }
+            let back: Layout = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+            assert_eq!(turn_of(&back, upright), Some(turn));
+        }
+        // Read from a file, a turn is kept within -180..=180.
+        let file = old.replace(r#""bold":false"#, r#""bold":false,"rotation":450"#);
+        let mut read: Layout = serde_json::from_str(&file).unwrap();
+        read.clamp();
+        assert_eq!(turn_of(&read, upright), Some(90.0));
+        assert_eq!(
+            [rotation(270.0), rotation(-270.0), rotation(180.0), rotation(-180.0), rotation(f64::NAN)],
+            [-90.0, 90.0, 180.0, 180.0, 0.0]
+        );
+    }
+
+    /// A turned text is hit, and takes up the page, where it is drawn: its box turned about its
+    /// centre (#1763).
+    #[test]
+    fn a_turned_text_is_hit_on_its_turned_box() {
+        let mut l = Layout::new("L", 100.0, 100.0);
+        let id = l.add("Source", (20.0, 45.0, 60.0, 10.0), ElementKind::text("Fonte: IBGE", 8.0, Rgba::rgb(0, 0, 0), false));
+        // Upright: 60 wide, 10 high, centred on (50, 50).
+        assert_eq!((l.hit(25.0, 50.0), l.hit(50.0, 25.0)), (Some(id), None));
+        if let Some(ElementKind::Text { rotation, .. }) = l.element_mut(id).map(|e| &mut e.kind) {
+            *rotation = 90.0;
+        }
+        // Turned: 10 wide, 60 high, about the same centre.
+        assert_eq!((l.hit(25.0, 50.0), l.hit(50.0, 25.0)), (None, Some(id)));
+        let (x, y, w, h) = l.element(id).unwrap().bounds();
+        assert!((x - 45.0).abs() < 1e-9 && (y - 20.0).abs() < 1e-9 && (w - 10.0).abs() < 1e-9 && (h - 60.0).abs() < 1e-9);
+        // The element keeps its unturned box.
+        let e = l.element(id).unwrap();
+        assert_eq!((e.x, e.y, e.w, e.h), (20.0, 45.0, 60.0, 10.0));
     }
 
     #[test]

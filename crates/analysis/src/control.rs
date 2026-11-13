@@ -21,6 +21,10 @@ pub struct Control {
     total: AtomicU64,
     /// Someone can stop the run while it goes ([`Control::stoppable`]).
     stoppable: bool,
+    /// Cancelled as soon as its run starts ([`Control::cancelled_once_started`]).
+    cancel_at_start: bool,
+    /// How often the work looked at the flag ([`Control::looked`]).
+    looked: AtomicU64,
 }
 
 impl Control {
@@ -32,6 +36,37 @@ impl Control {
     /// tools take no work cap ([`uncapped`]). Not in the browser, whose one thread a run holds.
     pub fn stoppable() -> Arc<Control> {
         Arc::new(Control { stoppable: !cfg!(target_arch = "wasm32"), ..Control::default() })
+    }
+
+    /// A control that [`crate::run_under`] cancels as soon as the work has started, past the
+    /// check before it: the work's own looks at the flag ([`Control::looked`]) decide whether it
+    /// stops. For tests that a long command checks for Cancel (#1562), with no timing.
+    pub fn cancelled_once_started() -> Arc<Control> {
+        Arc::new(Control { cancel_at_start: true, ..Control::default() })
+    }
+
+    /// How often the work under a [`Control::cancelled_once_started`] control looked at its flag:
+    /// the tool's checks, and the data writers' (not those of whoever runs it, before and after).
+    /// Always 0 for other controls.
+    pub fn looked(&self) -> u64 {
+        self.looked.load(Ordering::Relaxed)
+    }
+
+    /// Cancels a [`Control::cancelled_once_started`] control: called by [`crate::run_under`] once
+    /// the work is about to start.
+    pub(crate) fn cancel_if_started(&self) {
+        if self.cancel_at_start {
+            self.cancel();
+        }
+    }
+
+    /// The flag, looked at by the work: counted for a test's control only, so an ordinary run's
+    /// threads don't share a counter.
+    fn looked_at(&self) -> bool {
+        if self.cancel_at_start {
+            self.looked.fetch_add(1, Ordering::Relaxed);
+        }
+        self.is_cancelled()
     }
 
     /// Asks the tool to stop at its next check.
@@ -55,7 +90,7 @@ impl Control {
 /// their steps count here, and they stop when the run is cancelled.
 impl rustgis_data::progress::Probe for Control {
     fn cancelled(&self) -> bool {
-        self.is_cancelled()
+        self.looked_at()
     }
     fn begin(&self, total: u64) {
         self.done.store(0, Ordering::Relaxed);
@@ -66,12 +101,44 @@ impl rustgis_data::progress::Probe for Control {
     }
 }
 
+/// Carries the initiating request predicate to the data writer's last commit check as well as
+/// its loops. Progress still belongs to the original control; revocation never changes its flag.
+struct Progress {
+    control: Option<Arc<Control>>,
+    still: Option<rustgis_data::source::remote::Still>,
+}
+
+impl rustgis_data::progress::Probe for Progress {
+    fn cancelled(&self) -> bool {
+        self.control.as_ref().is_some_and(|c| c.looked_at()) || rustgis_data::source::remote::check_still(&self.still).is_err()
+    }
+    fn begin(&self, total: u64) {
+        if let Some(control) = &self.control {
+            rustgis_data::progress::Probe::begin(control.as_ref(), total);
+        }
+    }
+    fn advance(&self, n: u64) {
+        if let Some(control) = &self.control {
+            rustgis_data::progress::Probe::advance(control.as_ref(), n);
+        }
+    }
+}
+
+/// Installs the existing progress carrier with the current owned request predicate. With no
+/// explicit control, forwards the enclosing analysis run's, if any; authority is captured even
+/// when no run control exists, for a synchronous command's file commit checks.
+pub fn install_progress(control: Option<Arc<Control>>) -> rustgis_data::progress::Installed {
+    let control = control.or_else(current);
+    let still = rustgis_data::source::remote::current_still();
+    rustgis_data::progress::install(Some(Arc::new(Progress { control, still })))
+}
+
 /// A tool stopped because it was asked to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cancelled;
 
-/// What [`crate::run_with`] says of a run that was cancelled (it names the tool and how far it
-/// came).
+/// The error text the `From<Cancelled>` conversions carry. [`crate::run_with`] replaces it with
+/// its own "… was cancelled" message, which names the tool and how far it came.
 pub(crate) const CANCELLED: &str = "cancelled";
 
 impl From<Cancelled> for String {
@@ -91,7 +158,7 @@ thread_local! {
 }
 
 /// The control of the run on this thread, if any.
-pub(crate) fn current() -> Option<Arc<Control>> {
+pub fn current() -> Option<Arc<Control>> {
     CURRENT.with(|c| c.borrow().clone())
 }
 
@@ -113,7 +180,8 @@ impl Drop for Installed {
 
 /// Whether the run on this thread was asked to stop.
 pub(crate) fn cancelled() -> bool {
-    CURRENT.with(|c| c.borrow().as_ref().is_some_and(|c| c.is_cancelled()))
+    CURRENT.with(|c| c.borrow().as_ref().is_some_and(|c| c.looked_at()))
+        || rustgis_data::source::remote::check_still(&rustgis_data::source::remote::current_still()).is_err()
 }
 
 /// Whether the run on this thread can be stopped while it goes ([`Control::stoppable`]), and so
@@ -190,6 +258,70 @@ pub(crate) fn advance(n: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A control cancelled once its run starts passes the check before the work, is cancelled for
+    /// the work's own looks, and counts them: work that looks stops, work that doesn't is seen.
+    #[test]
+    fn a_control_cancelled_once_started_counts_the_works_looks() {
+        let control = Control::cancelled_once_started();
+        let looks = crate::run_under("Looks", &control, || {
+            check()?;
+            Ok::<_, String>(())
+        });
+        assert!(looks.unwrap_err().contains("Looks was cancelled"));
+        assert_eq!(control.looked(), 1);
+        let blind = Control::cancelled_once_started();
+        let res = crate::run_under("Blind", &blind, || Ok::<_, String>(()));
+        assert!(res.is_err(), "cancelled all the same, by whoever ran it");
+        assert_eq!(blind.looked(), 0, "but the work never looked");
+        // An ordinary control isn't cancelled by starting.
+        let plain = Control::new();
+        assert!(crate::run_under("Plain", &plain, || Ok::<_, String>(())).is_ok());
+    }
+
+    /// Revocation during real file construction must reach the data writer's final rename,
+    /// even though the person did not press Cancel. Its prior file and the next run survive.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_owned_write_rechecks_authority_before_installing_its_file() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("rustgis-owned-progress-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("output");
+        std::fs::write(&path, b"before")?;
+        let live = Arc::new(AtomicBool::new(true));
+        let current = live.clone();
+        let control = Control::new();
+        for controlled in [true, false] {
+            live.store(true, Ordering::SeqCst);
+            std::fs::write(&path, b"before")?;
+            let current = current.clone();
+            let result = rustgis_data::source::remote::with_still(Arc::new(move || current.load(Ordering::SeqCst)), || {
+                let write = || {
+                    let written: std::io::Result<()> = rustgis_data::io::write_atomic_with(&path, |out| {
+                        out.write_all(b"replacement")?;
+                        live.store(false, Ordering::SeqCst);
+                        Ok(())
+                    });
+                    assert!(written.is_err(), "revocation must stop the actual file commit");
+                    written.map_err(|e| e.to_string())
+                };
+                if controlled {
+                    crate::run_under("Export", &control, write)
+                } else {
+                    let _progress = install_progress(None);
+                    write()
+                }
+            });
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&path)?, b"before");
+            assert!(!control.is_cancelled(), "revocation did not change the user's cancel flag");
+            rustgis_data::io::write_atomic(&path, b"next run")?;
+            assert_eq!(std::fs::read(&path)?, b"next run");
+        }
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn a_run_sees_its_own_control_and_the_one_before_comes_back() {

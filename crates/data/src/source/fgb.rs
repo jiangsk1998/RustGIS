@@ -39,12 +39,23 @@ pub struct FgbSource {
     reproject: Reproject,
     /// The field each of the header's columns is read into, `None` for one left out (binary).
     slots: Vec<Option<usize>>,
+    /// Kept after the input so all readers close before the private workspace is removed.
+    #[cfg(not(target_arch = "wasm32"))]
+    _workspace: Option<Arc<super::gdal::ReloadWorkspace>>,
 }
 
 impl FgbSource {
     pub fn open_path(path: &Path, name: &str) -> Result<Self> {
         let f = BufReader::new(std::fs::File::open(path)?);
         Self::new(f, Input::Path(path.to_path_buf()), name)
+    }
+
+    /// Opens a private conversion, keeping its files alive for every shared reader.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_owned_path(path: &Path, name: &str, workspace: Arc<super::gdal::ReloadWorkspace>) -> Result<Self> {
+        let mut source = Self::open_path(path, name)?;
+        source._workspace = Some(workspace);
+        Ok(source)
     }
 
     pub fn open_bytes(bytes: Vec<u8>, name: &str) -> Result<Self> {
@@ -76,14 +87,28 @@ impl FgbSource {
         // The code is an EPSG one only when the organization is EPSG (or not given, which means EPSG).
         let epsg_org = h.crs().is_none_or(|c| c.org().is_none_or(|o| o.eq_ignore_ascii_case("epsg")));
         let code = h.crs().map(|c| c.code()).and_then(|c| u32::try_from(c).ok()).filter(|c| *c > 0 && epsg_org);
-        if !epsg_org && let Some(org) = h.crs().and_then(|c| c.org()) {
-            notes.push(format!("its coordinate system is defined by {org}, not EPSG; read as longitude/latitude"));
-        }
-        // A coordinate system described (by WKT or name) but without an EPSG code can't be converted.
-        if code.is_none() && h.crs().is_some_and(|c| c.wkt().is_some_and(|w| !w.contains("WGS 84") && !w.contains("WGS84"))) {
-            notes.push("its coordinate system has no EPSG code; read as longitude/latitude".into());
-        }
-        let reproject = Reproject::from_epsg(code, &mut notes);
+        // Another body's system (an IAU organization, or WKT that says so) is said, or refused when
+        // its coordinates aren't longitude/latitude. It is checked whenever there's no EPSG code
+        // RustGIS converts, because an unknown code is read as longitude/latitude too.
+        let other_body = match h.crs() {
+            Some(c) if code.and_then(Crs::from_epsg).is_none() => {
+                Reproject::planetary("its coordinate system", c.org(), Some(i64::from(c.code())), c.wkt(), &mut notes)
+            }
+            _ => None,
+        };
+        let reproject = match other_body {
+            Some(r) => r?,
+            None => {
+                if !epsg_org && let Some(org) = h.crs().and_then(|c| c.org()) {
+                    notes.push(format!("its coordinate system is defined by {org}, not EPSG; read as longitude/latitude"));
+                }
+                // A coordinate system described (by WKT or name) but without an EPSG code can't be converted.
+                if code.is_none() && h.crs().is_some_and(|c| c.wkt().is_some_and(|w| !w.contains("WGS 84") && !w.contains("WGS84"))) {
+                    notes.push("its coordinate system has no EPSG code; read as longitude/latitude".into());
+                }
+                Reproject::from_epsg(code, &mut notes)
+            }
+        };
         let mut fields = Vec::new();
         let mut slots = Vec::new();
         let mut left_out = Vec::new();
@@ -162,7 +187,8 @@ impl FgbSource {
             fields,
             extent,
             count: (count > 0).then_some(count),
-            crs: reproject.label(),
+            crs: reproject.info_crs(),
+            // The crate's index search assumes the default node size; other files are scanned.
             indexed,
             notes,
             zm_dropped: false,
@@ -174,7 +200,14 @@ impl FgbSource {
         if has_zm {
             info.drop_zm((count > 0).then_some(count));
         }
-        let mut src = FgbSource { info, input, reproject, slots };
+        let mut src = FgbSource {
+            info,
+            input,
+            reproject,
+            slots,
+            #[cfg(not(target_arch = "wasm32"))]
+            _workspace: None,
+        };
         if src.info.geometry_type == GeometryType::None {
             src.info.geometry_type = src.peek_kind();
         }
@@ -804,6 +837,11 @@ fn writable(browser: bool) -> Result<()> {
 /// temporary file and only its index entry in memory, so a whole layer needn't be held. The
 /// writer needs that file whether or not it writes an index, and the web app has no files, so
 /// there a FlatGeobuf is refused rather than written.
+///
+/// A point layer's file takes the type of its first point. Should a later one be of the other
+/// kind (a multipoint after points, or a point after multipoints), the export starts again
+/// (feeding the features again) with each feature's type in the file, which a file of one type
+/// can't hold. Nothing reaches `out` before the last feature, so the first run leaves it empty.
 pub(crate) fn write_features(
     name: &str,
     geometry_type: GeometryType,
@@ -812,6 +850,29 @@ pub(crate) fn write_features(
     out: &mut dyn std::io::Write,
     feed: &mut dyn FnMut(&mut dyn FnMut(&[Feature]) -> Result<()>) -> Result<()>,
 ) -> Result<usize> {
+    for mixed_points in [false, true] {
+        if let Some(left_out) = write_run(name, geometry_type, fields, crs, mixed_points, out, feed)? {
+            return Ok(left_out);
+        }
+    }
+    Err(DataError::Format("FlatGeobuf: the export didn't settle on a geometry type".into()))
+}
+
+/// One run of [`write_features`], each feature's geometry type in the file when `mixed_points`:
+/// how many were left out, or `None` when a point layer turned out to mix points and
+/// multipoints and the export must start again so. With `mixed_points`, a point layer's
+/// geometry of another kind (a line, a polygon) is refused: a file of mixed types is read as
+/// the layer of its first feature's kind.
+#[allow(clippy::too_many_arguments)]
+fn write_run(
+    name: &str,
+    geometry_type: GeometryType,
+    fields: &[Field],
+    crs: Crs,
+    mixed_points: bool,
+    out: &mut dyn std::io::Write,
+    feed: &mut dyn FnMut(&mut dyn FnMut(&[Feature]) -> Result<()>) -> Result<()>,
+) -> Result<Option<usize>> {
     use flatgeobuf::geozero::wkb::Wkb;
     use flatgeobuf::{FgbCrs, FgbWriter, FgbWriterOptions, GeometryType as G};
     writable(cfg!(target_arch = "wasm32"))?;
@@ -825,6 +886,7 @@ pub(crate) fn write_features(
     let code = i32::from(crs.epsg());
     let options = FgbWriterOptions {
         crs: FgbCrs { org: (code > 0).then_some("EPSG"), code, wkt: wkt.as_deref(), ..Default::default() },
+        detect_type: !mixed_points,
         ..Default::default()
     };
     let mut w = FgbWriter::create_with_options(name, ty, options).map_err(err)?;
@@ -834,19 +896,42 @@ pub(crate) fn write_features(
             FieldType::Double => ColumnType::Double,
             FieldType::Boolean => ColumnType::Bool,
             FieldType::Text => ColumnType::String,
+            // Dates are ISO text until FlatGeobuf's own date-times are written.
+            FieldType::Date | FieldType::DateTime => ColumnType::String,
             // Only the metadata reaches a dataset: an export filters image fields out first.
             FieldType::Image => ColumnType::Binary,
         };
         w.add_column(&f.name, t, |_, c| c.nullable = true);
     }
-    let mut left_out = 0;
-    feed(&mut |features| {
+    let (mut left_out, mut first_multi, mut again) = (0, None, false);
+    let fed = feed(&mut |features| {
         for feat in features {
             crate::progress::step(1)?;
             let Some(g) = &feat.geometry else {
                 left_out += 1;
                 continue;
             };
+            if geometry_type == GeometryType::Point {
+                let multi = match g {
+                    crate::Geometry::Point(_) => Some(false),
+                    crate::Geometry::MultiPoint(_) => Some(true),
+                    _ => None,
+                };
+                match (multi, mixed_points) {
+                    (Some(m), false) if *first_multi.get_or_insert(m) != m => {
+                        again = true;
+                        // Stops the traversal; the export starts again.
+                        return Err(DataError::Format("FlatGeobuf: starting again".into()));
+                    }
+                    (None, true) => {
+                        return Err(DataError::Format(format!(
+                            "FlatGeobuf: feature {} of a point layer isn't a point or multipoint",
+                            feat.id
+                        )));
+                    }
+                    _ => {}
+                }
+            }
             let mut failed = None;
             w.add_feature_geom(Wkb(wkb::encode(g)), |out| {
                 use flatgeobuf::geozero::PropertyProcessor;
@@ -857,6 +942,7 @@ pub(crate) fn write_features(
                         Value::Float(x) => out.property(i, &f.name, &ColumnValue::Double(*x)),
                         Value::Bool(x) => out.property(i, &f.name, &ColumnValue::Bool(*x)),
                         Value::Text(x) => out.property(i, &f.name, &ColumnValue::String(x)),
+                        Value::Date(_) | Value::DateTime(_) => out.property(i, &f.name, &ColumnValue::String(&v.to_string())),
                         Value::Image(_) => continue,
                     };
                     if let Err(e) = r {
@@ -870,9 +956,13 @@ pub(crate) fn write_features(
             }
         }
         Ok(())
-    })?;
+    });
+    if again {
+        return Ok(None);
+    }
+    fed?;
     w.write(out).map_err(err)?;
-    Ok(left_out)
+    Ok(Some(left_out))
 }
 
 #[cfg(test)]
@@ -885,5 +975,55 @@ mod write_tests {
     fn flatgeobuf_is_refused_in_the_browser_and_written_on_the_desktop() {
         assert!(matches!(writable(true), Err(DataError::Unsupported(m)) if m.contains("browser")));
         assert!(writable(false).is_ok());
+    }
+
+    /// A point layer with points and multipoints (as a GeoJSON file gives) is written whole,
+    /// each feature its own kind; a layer of points alone keeps its one geometry type.
+    #[test]
+    fn a_point_layer_mixing_points_and_multipoints_is_written() {
+        use crate::{Coord, Dataset, Geometry};
+        let mut ds = Dataset::new("m", GeometryType::Point, vec![Field::new("n", FieldType::Integer)]);
+        ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Int(1)]);
+        ds.push(Some(Geometry::MultiPoint(vec![Coord::new(3.0, 4.0), Coord::new(5.0, 6.0)])), vec![Value::Int(2)]);
+        let bytes = write_in(&ds, Crs::LonLat).unwrap();
+        let (back, _) = crate::io::read_bytes("m.fgb", &bytes).unwrap();
+        let mut got: Vec<(Value, Option<Geometry>)> = back.features.iter().map(|f| (f.attrs[0].clone(), f.geometry.clone())).collect();
+        got.sort_by_key(|(n, _)| n.as_f64().map(|n| n as i64));
+        let want: Vec<(Value, Option<Geometry>)> = ds.features.iter().map(|f| (f.attrs[0].clone(), f.geometry.clone())).collect();
+        assert_eq!(got, want);
+        let mut points = Dataset::new("p", GeometryType::Point, vec![]);
+        points.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![]);
+        let header = flatgeobuf::FgbReader::open(std::io::Cursor::new(write_in(&points, Crs::LonLat).unwrap())).unwrap();
+        assert_eq!(header.header().geometry_type(), flatgeobuf::GeometryType::Point);
+    }
+
+    /// Fed a chunk at a time (a layer read in place), the multipoint arrives after the point
+    /// has set the file's type: the export starts again and writes both. A line in a point layer
+    /// isn't written into a file of mixed types, which would read back as a line layer.
+    #[test]
+    fn a_streamed_point_layer_mixing_points_and_multipoints_starts_again() {
+        use crate::{Coord, Geometry};
+        let chunks = [
+            vec![Feature { id: 1, geometry: Some(Geometry::Point(Coord::new(1.0, 2.0))), attrs: vec![] }],
+            vec![Feature { id: 2, geometry: Some(Geometry::MultiPoint(vec![Coord::new(3.0, 4.0), Coord::new(5.0, 6.0)])), attrs: vec![] }],
+        ];
+        let mut runs = 0;
+        let mut out = Vec::new();
+        write_features("m", GeometryType::Point, &[], Crs::LonLat, &mut out, &mut |add| {
+            runs += 1;
+            chunks.iter().try_for_each(|c| add(c))
+        })
+        .unwrap();
+        assert_eq!(runs, 2);
+        let (back, _) = crate::io::read_bytes("m.fgb", &out).unwrap();
+        let mut got: Vec<_> = back.features.iter().filter_map(|f| f.geometry.clone()).collect();
+        got.sort_by_key(|g| matches!(g, Geometry::MultiPoint(_)));
+        assert_eq!(got, chunks.iter().flatten().filter_map(|f| f.geometry.clone()).collect::<Vec<_>>());
+        let line = Feature { id: 3, geometry: Some(Geometry::Line(vec![vec![Coord::new(0.0, 0.0), Coord::new(1.0, 1.0)]])), attrs: vec![] };
+        let with_line = [chunks[0].clone(), chunks[1].clone(), vec![line]];
+        let e = write_features("m", GeometryType::Point, &[], Crs::LonLat, &mut Vec::new(), &mut |add| {
+            with_line.iter().try_for_each(|c| add(c))
+        });
+        assert!(matches!(&e, Err(DataError::Format(m)) if m.contains("feature 3 of a point layer isn't a point")), "{e:?}");
     }
 }

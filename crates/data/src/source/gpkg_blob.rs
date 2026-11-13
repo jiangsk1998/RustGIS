@@ -9,6 +9,24 @@ pub(crate) fn is_empty_blob(b: &[u8]) -> bool {
     b.starts_with(b"GP") && b.get(3).is_some_and(|f| f & 0b1_0000 != 0)
 }
 
+/// A blob flagged empty whose header is whole (version 0, the one GeoPackage defines; 8 bytes and
+/// the envelope its flags give): a row the readers keep without geometry. Any other is unreadable,
+/// not empty.
+pub(crate) fn is_whole_empty_blob(b: &[u8]) -> bool {
+    is_empty_blob(b) && b.get(2) == Some(&0) && b.get(3).and_then(|&f| envelope_len(f)).is_some_and(|n| b.len() >= 8 + n)
+}
+
+/// The length of the envelope a header's flags give; `None` for a code the standard doesn't define.
+fn envelope_len(flags: u8) -> Option<usize> {
+    match (flags >> 1) & 0b111 {
+        0 => Some(0),
+        1 => Some(32),
+        2 | 3 => Some(48),
+        4 => Some(64),
+        _ => None,
+    }
+}
+
 /// A GeoPackage geometry blob: the header's envelope (if any) and the WKB after it.
 pub(crate) fn split_blob(b: &[u8]) -> Option<(Option<Extent>, &[u8])> {
     let (magic, rest) = b.split_at_checked(2)?;
@@ -18,13 +36,7 @@ pub(crate) fn split_blob(b: &[u8]) -> Option<(Option<Extent>, &[u8])> {
     }
     let &flags = rest.get(1)?;
     let little = flags & 1 == 1;
-    let env_len = match (flags >> 1) & 0b111 {
-        0 => 0,
-        1 => 32,
-        2 | 3 => 48,
-        4 => 64,
-        _ => return None,
-    };
+    let env_len = envelope_len(flags)?;
     if flags & 0b1_0000 != 0 {
         // The empty flag.
         return None;
@@ -43,7 +55,14 @@ pub(crate) fn split_blob(b: &[u8]) -> Option<(Option<Extent>, &[u8])> {
 /// stay in the file, and only the metadata describing them is read.
 pub(crate) fn field_type(decl: &str) -> Option<FieldType> {
     let d = decl.to_ascii_uppercase();
-    Some(if d.contains("BOOL") {
+    // Dates by the type's own name (`DATE`, `DATETIME`, `TIMESTAMP(3)`), not a part of another
+    // (`UPDATED_INT` is an integer).
+    let named = |n: &str| d.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').any(|w| w == n);
+    Some(if named("DATETIME") || named("TIMESTAMP") {
+        FieldType::DateTime
+    } else if named("DATE") {
+        FieldType::Date
+    } else if d.contains("BOOL") {
         FieldType::Boolean
     } else if d.contains("INT") {
         FieldType::Integer
@@ -54,4 +73,13 @@ pub(crate) fn field_type(decl: &str) -> Option<FieldType> {
     } else {
         FieldType::Text
     })
+}
+
+/// A DATE or DATETIME column's value, from its text (`None` for a number or a blob): ISO 8601, as
+/// GeoPackage stores them ([`crate::Value::parse_stored`]). `None` when it isn't a date of the field's type, which a read gives as
+/// null and counts ([`super::Batch::unread_dates`]); empty text is null without being counted.
+pub(crate) fn temporal(text: Option<&str>, ty: FieldType) -> Option<crate::Value> {
+    let text = text?;
+    let v = crate::Value::parse_stored(text, ty);
+    (!v.is_null() || crate::Value::Text(text.to_string()).asks_null()).then_some(v)
 }

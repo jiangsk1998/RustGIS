@@ -5,7 +5,10 @@
 
 use serde_json::Value;
 
+pub mod area;
 pub mod catalog;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod dated;
 
 /// Element 84's Earth Search (Sentinel-2, Landsat, Copernicus DEM and more, on AWS), the default.
 pub const EARTH_SEARCH: &str = "https://earth-search.aws.element84.com/v1";
@@ -30,6 +33,8 @@ const MAX_TEXT: usize = 2000;
 const MAX_FOOTPRINT: usize = 20_000;
 /// The most properties kept with an item.
 const MAX_PROPERTIES: usize = 100;
+/// The most codes for a failed retrieval kept with an asset.
+pub const MAX_INVALID: usize = 32;
 
 /// A collection an API offers.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +59,12 @@ pub struct Asset {
     /// Its first band's stored no-data value (`raster:bands` or `eo:bands` `nodata`), for files
     /// whose own header doesn't name it.
     pub nodata: Option<f64>,
+    /// Stored values that are codes for a failed retrieval rather than values (JAXA Earth's
+    /// `je:rasters` `dn.error`).
+    pub invalid: Vec<f64>,
+    /// Whether its metadata names such codes but they couldn't be read whole (one isn't a number,
+    /// or there are more than are kept): its values can't be told from them.
+    pub codes_unread: bool,
 }
 
 /// An item: a scene (or tile) with its footprint, time and assets.
@@ -90,6 +101,9 @@ pub struct Search {
     pub collections: Vec<String>,
     /// West, south, east, north, in longitude/latitude.
     pub bbox: Option<[f64; 4]>,
+    /// A shape the items must meet (STAC's `intersects`), in longitude/latitude, as
+    /// [`area::merge`] makes it. It replaces `bbox`: Item Search takes one or the other.
+    pub intersects: Option<rustgis_data::Geometry>,
     /// A date or a range: `2024-06-01`, `2024-06-01/2024-06-30`, `2024-06-01/..`, or RFC 3339.
     pub datetime: Option<String>,
     pub limit: usize,
@@ -123,7 +137,14 @@ pub fn search_url(api: &str, s: &Search) -> Result<String, String> {
     if !ids.is_empty() {
         q.push(format!("collections={}", encode(&ids.join(","))));
     }
-    if let Some([w, south, e, n]) = s.bbox {
+    if let Some(shape) = &s.intersects {
+        let json = intersects_json(shape)?;
+        // The query carries it as JSON, and servers refuse a long one.
+        if json.len() > MAX_GET_SHAPE {
+            return Err("the search area is too detailed to send in a web address: simplify it".into());
+        }
+        q.push(format!("intersects={}", encode(&json)));
+    } else if let Some([w, south, e, n]) = s.bbox {
         let ok = |x: f64, lim: f64| x.is_finite() && (-lim..=lim).contains(&x);
         if !(ok(w, 180.0) && ok(e, 180.0) && ok(south, 90.0) && ok(n, 90.0) && south < n) {
             return Err("bbox is [west, south, east, north] in longitude/latitude".into());
@@ -137,19 +158,74 @@ pub fn search_url(api: &str, s: &Search) -> Result<String, String> {
         let c = c.clamp(0.0, 100.0);
         q.push(format!("query={}", encode(&format!(r#"{{"eo:cloud_cover":{{"lte":{c}}}}}"#))));
     }
-    if let Some(by) = s.sortby.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
-        let (sign, field) = by.strip_prefix('-').map(|f| ("-", f)).unwrap_or(("+", by.trim_start_matches('+')));
-        if field.is_empty() || field.len() > 100 || !field.chars().all(|c| c.is_ascii_alphanumeric() || "_:.-".contains(c)) {
-            return Err(format!("{by}: sortby is a property's name, - first for descending"));
-        }
-        let field = if field.starts_with("properties.") || matches!(field, "id" | "collection") {
-            field.to_string()
-        } else {
-            format!("properties.{field}")
-        };
+    if let Some((sign, field)) = sort_parts(s.sortby.as_deref())? {
         q.push(format!("sortby={}", encode(&format!("{sign}{field}"))));
     }
     Ok(crate::template::join(api, &format!("{}/search?{}", crate::logins::inner(api), q.join("&"))))
+}
+
+/// The longest shape (as JSON) a GET request carries.
+const MAX_GET_SHAPE: usize = 4000;
+
+/// A search shape as the JSON `intersects` takes, refused when it isn't on the globe or has more
+/// positions than a request should.
+fn intersects_json(shape: &rustgis_data::Geometry) -> Result<String, String> {
+    if !area::on_globe(shape) {
+        return Err("the search area has a position that isn't a longitude (-180 to 180) and latitude (-90 to 90)".into());
+    }
+    if area::positions(shape) > area::MAX_POSITIONS {
+        return Err(format!("the search area has more than {} positions: simplify it", area::MAX_POSITIONS));
+    }
+    Ok(area::to_geojson(shape).to_string())
+}
+
+/// A sort as a sign (`+` or `-`) and a property's full name, or none.
+fn sort_parts(sortby: Option<&str>) -> Result<Option<(&'static str, String)>, String> {
+    let Some(by) = sortby.map(str::trim).filter(|b| !b.is_empty()) else { return Ok(None) };
+    let (sign, field) = by.strip_prefix('-').map(|f| ("-", f)).unwrap_or(("+", by.trim_start_matches('+')));
+    if field.is_empty() || field.len() > 100 || !field.chars().all(|c| c.is_ascii_alphanumeric() || "_:.-".contains(c)) {
+        return Err(format!("{by}: sortby is a property's name, - first for descending"));
+    }
+    let field = if field.starts_with("properties.") || matches!(field, "id" | "collection") {
+        field.to_string()
+    } else {
+        format!("properties.{field}")
+    };
+    Ok(Some((sign, field)))
+}
+
+/// The address a POST search goes to.
+pub fn search_post_url(api: &str) -> String {
+    crate::template::join(api, &format!("{}/search", crate::logins::inner(api)))
+}
+
+/// The body of a POST search (STAC API's `POST /search`), which carries a shape of any size.
+pub fn search_body(s: &Search) -> Result<Value, String> {
+    let mut b = serde_json::json!({"limit": s.limit.clamp(1, MAX_ITEMS)});
+    let ids: Vec<&str> = s.collections.iter().map(|c| c.trim()).filter(|c| !c.is_empty()).take(50).collect();
+    if !ids.is_empty() {
+        b["collections"] = serde_json::json!(ids);
+    }
+    if let Some(shape) = &s.intersects {
+        intersects_json(shape)?;
+        b["intersects"] = area::to_geojson(shape);
+    } else if let Some([w, south, e, n]) = s.bbox {
+        let ok = |x: f64, lim: f64| x.is_finite() && (-lim..=lim).contains(&x);
+        if !(ok(w, 180.0) && ok(e, 180.0) && ok(south, 90.0) && ok(n, 90.0) && south < n) {
+            return Err("bbox is [west, south, east, north] in longitude/latitude".into());
+        }
+        b["bbox"] = serde_json::json!([w, south, e, n]);
+    }
+    if let Some(d) = s.datetime.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        b["datetime"] = Value::String(datetime(d)?);
+    }
+    if let Some(c) = s.max_cloud.filter(|c| c.is_finite()) {
+        b["query"] = serde_json::json!({"eo:cloud_cover": {"lte": c.clamp(0.0, 100.0)}});
+    }
+    if let Some((sign, field)) = sort_parts(s.sortby.as_deref())? {
+        b["sortby"] = serde_json::json!([{"field": field, "direction": if sign == "-" { "desc" } else { "asc" }}]);
+    }
+    Ok(b)
 }
 
 /// Whether an address is a web address.
@@ -248,6 +324,18 @@ pub fn parse_items(bytes: &[u8], from: &str) -> Result<(Vec<Item>, Option<String
     Ok((items, next))
 }
 
+/// Whether a search's answer has a `next` link of any method. [`parse_items`] gives none for a
+/// POST link (it needs its body, which isn't an address), so this tells a POST search that more
+/// items match than the page holds.
+pub fn has_next(bytes: &[u8]) -> bool {
+    json(bytes)
+        .ok()
+        .and_then(|v| {
+            v.get("links")?.as_array().map(|ls| ls.iter().take(100).any(|l| l.get("rel").and_then(Value::as_str) == Some("next")))
+        })
+        .unwrap_or(false)
+}
+
 /// How many items a search's answer says match in all (`numberMatched`, or the context
 /// extension's `matched`).
 pub fn parse_matched(bytes: &[u8]) -> Option<u64> {
@@ -336,6 +424,16 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
         .flatten()
         .take(MAX_ASSETS)
         .filter_map(|(k, a)| {
+            // Codes for a failed retrieval are stored values that aren't values: read whole, or
+            // `None` when one isn't a number or there are more than are kept, so that none is read
+            // as a value (a data cube leaves such an asset's item out, and says so).
+            let invalid = match a.get("je:rasters").and_then(|r| r.get("dn")?.get("error")) {
+                None => Some(Vec::new()),
+                Some(codes) => codes
+                    .as_array()
+                    .filter(|c| c.len() <= MAX_INVALID)
+                    .and_then(|c| c.iter().map(|c| c.as_f64().filter(|v| v.is_finite())).collect::<Option<Vec<f64>>>()),
+            };
             Some(Asset {
                 key: k.chars().take(200).collect(),
                 href: {
@@ -360,6 +458,8 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
                 scale: band_number(a, "scale"),
                 offset: band_number(a, "offset"),
                 nodata: band_number(a, "nodata"),
+                invalid: invalid.clone().unwrap_or_default(),
+                codes_unread: invalid.is_none(),
             })
         })
         .collect();
@@ -418,9 +518,22 @@ fn tile_of(p: &Value) -> Option<String> {
 }
 
 /// An asset's first band's number `key` (`scale`, `offset`, `nodata`): from `raster:bands`, else from
-/// `eo:bands`, where some catalogs (Brazil Data Cube's) put it.
+/// `eo:bands`, where some catalogs (Brazil Data Cube's) put it, else from JAXA Earth's `je:rasters`.
 fn band_number(asset: &Value, key: &str) -> Option<f64> {
-    ["raster:bands", "eo:bands"].iter().find_map(|b| asset.get(*b)?.as_array()?.first()?.get(key)?.as_f64()).filter(|v| v.is_finite())
+    let je = || {
+        let (group, name) = match key {
+            "scale" => ("dn2value", "slope"),
+            "offset" => ("dn2value", "offset"),
+            "nodata" => ("dn", "nodata"),
+            _ => return None,
+        };
+        asset.get("je:rasters")?.get(group)?.get(name)?.as_f64()
+    };
+    ["raster:bands", "eo:bands"]
+        .iter()
+        .find_map(|b| asset.get(*b)?.as_array()?.first()?.get(key)?.as_f64())
+        .or_else(je)
+        .filter(|v| v.is_finite())
 }
 
 /// How many numbers a GeoJSON geometry holds (bounded by how deep it goes).
@@ -594,7 +707,10 @@ pub fn sas_token_url(href: &str) -> Result<String, String> {
     let ok =
         |s: &str, max: usize| (3..=max).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     if !ok(account, 24) || !ok(container, 63) {
-        return Err(format!("{href}: not an Azure Blob Storage address the Planetary Computer signs"));
+        return Err(rustgis_data::diagnostics::message_with_address(
+            href,
+            "not an Azure Blob Storage address the Planetary Computer signs",
+        ));
     }
     Ok(format!("{SAS_API}/{account}/{container}"))
 }
@@ -726,6 +842,7 @@ mod tests {
 
     #[test]
     fn bound_stac_api_catalog_and_assets_follow_only_same_origin_links() {
+        let _turn = crate::cache::turn();
         let origin = "https://stac-bound.test";
         // A binding is authority only while its runtime owns it, so install a live one.
         let token = crate::logins::activate(origin, "test-owner", crate::logins::Method::Header("X-Key".into()), "secret", false).unwrap();
@@ -785,12 +902,34 @@ mod tests {
             limit: 999,
             max_cloud: Some(20.0),
             sortby: None,
+            intersects: None,
         };
         let u = search_url("https://x.org/v1", &s).unwrap();
         assert_eq!(
             u,
             "https://x.org/v1/search?limit=200&collections=sentinel-2-l2a&bbox=7,46,7.1,46.1&datetime=2024-06-01T00%3A00%3A00Z%2F2024-06-30T23%3A59%3A59Z&query=%7B%22eo%3Acloud_cover%22%3A%7B%22lte%22%3A20%7D%7D"
         );
+        // A shape replaces the box, in the query and in the body.
+        let shape = rustgis_data::Geometry::Point(rustgis_geom::Coord::new(7.5, 46.5));
+        let with_shape = Search { intersects: Some(shape.clone()), sortby: Some("-datetime".into()), max_cloud: Some(10.0), ..s.clone() };
+        let u = search_url("https://x.org/v1", &with_shape).unwrap();
+        assert!(u.contains("intersects=%7B%22coordinates%22%3A%5B7.5%2C46.5%5D%2C%22type%22%3A%22Point%22%7D"), "{u}");
+        assert!(!u.contains("bbox="), "{u}");
+        let body = search_body(&with_shape).unwrap();
+        assert_eq!(body["intersects"], serde_json::json!({"type": "Point", "coordinates": [7.5, 46.5]}));
+        assert!(body.get("bbox").is_none());
+        assert_eq!(body["sortby"], serde_json::json!([{"field": "properties.datetime", "direction": "desc"}]));
+        assert_eq!(body["query"], serde_json::json!({"eo:cloud_cover": {"lte": 10.0}}));
+        assert_eq!(body["limit"], 200);
+        assert_eq!(search_body(&s).unwrap()["bbox"], serde_json::json!([7.0, 46.0, 7.1, 46.1]));
+        assert_eq!(search_post_url("https://x.org/v1"), "https://x.org/v1/search");
+        // A long shape goes in a body, not in a web address; one off the globe goes nowhere.
+        let long = rustgis_data::Geometry::MultiPoint((0..2000).map(|i| rustgis_geom::Coord::new(f64::from(i) / 100.0, 1.0)).collect());
+        let long = Search { intersects: Some(long), ..Default::default() };
+        assert!(search_url("https://x.org/v1", &long).is_err());
+        assert!(search_body(&long).is_ok());
+        let off = Search { intersects: Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(500.0, 0.0))), ..Default::default() };
+        assert!(search_url("https://x.org/v1", &off).is_err() && search_body(&off).is_err());
         let sorted = |by: &str| search_url("https://x.org/v1", &Search { sortby: Some(by.into()), ..Default::default() });
         assert!(sorted("eo:cloud_cover").unwrap().ends_with("&sortby=%2Bproperties.eo%3Acloud_cover"));
         assert!(sorted("-datetime").unwrap().ends_with("&sortby=-properties.datetime"));
@@ -824,6 +963,12 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(next.as_deref(), Some("https://x.org/v1/search?token=abc"));
         assert_eq!(parse_matched(page), None);
+        // A POST link is no address (`parse_items` drops it) but still says there is more.
+        let post = br#"{"features": [], "links": [{"rel": "next", "method": "POST", "href": "https://x.org/v1/search", "body": {}}]}"#;
+        assert_eq!(parse_items(post, "https://x.org/v1/search").unwrap().1, None);
+        assert!(has_next(post) && has_next(page));
+        assert!(!has_next(br#"{"features": [], "links": [{"rel": "self", "href": "https://x.org/"}]}"#));
+        assert!(!has_next(br#"{"features": []}"#) && !has_next(b"nope"));
         assert_eq!(parse_matched(br#"{"numberMatched": 1234}"#), Some(1234));
         assert_eq!(parse_matched(br#"{"context": {"matched": 7}}"#), Some(7));
         assert_eq!(parse_matched(br#"{"numberMatched": -1}"#), None);
@@ -854,6 +999,8 @@ mod tests {
             scale: None,
             offset: None,
             nodata: None,
+            invalid: Vec::new(),
+            codes_unread: false,
         }];
         // A Planetary Computer asset is added after signing it with its container's token.
         let (_, href) = pc.asset_href(None).unwrap();
@@ -873,7 +1020,9 @@ mod tests {
             assert!(parse_sas(bad).is_err());
         }
         assert!(sas_token_url("https://evil.org/x.blob.core.windows.net/c/x.tif").is_err());
-        assert!(sas_token_url("https://a.blob.core.windows.net/").is_err());
+        let error = sas_token_url("https://a.blob.core.windows.net/?token=hidden unescaped hidden").unwrap_err();
+        let error = rustgis_data::diagnostics::redact(&error);
+        assert!(error.contains("not an Azure Blob Storage address") && !error.contains("hidden"), "{error}");
         remember_token("k", "sig=1");
         assert_eq!(cached_token("k").as_deref(), Some("sig=1"));
         // A web item can't point into the local network.
@@ -935,6 +1084,24 @@ mod tests {
         assert_eq!(resolve("https://x.org/a", "//y.org/d.tif").as_deref(), Some("https://y.org/d.tif"));
         assert_eq!(resolve("https://x.org/a", "s3://b/k").as_deref(), Some("s3://b/k"));
         assert_eq!(resolve("https://x.org/a", ""), None);
+    }
+
+    /// JAXA Earth's codes for a failed retrieval: read whole, or the asset says they weren't.
+    #[test]
+    fn retrieval_error_codes_are_read_whole_or_said_unread() {
+        let with = |codes: serde_json::Value| {
+            let v = serde_json::json!({"type": "Feature", "id": "t", "properties": {"datetime": "2024-01-01T00:00:00Z"},
+                "assets": {"V": {"href": "https://x.org/v.tiff", "je:rasters": {"dn": {"error": codes}}}}});
+            item_from_json(&v, None).unwrap().assets
+        };
+        let read = |codes: serde_json::Value| with(codes).pop().map(|a| (a.invalid, a.codes_unread)).unwrap();
+        assert_eq!(read(serde_json::json!([5, 6.5])), (vec![5.0, 6.5], false));
+        assert_eq!(read(serde_json::json!(null)), (vec![], true), "named but not a list");
+        // A code that isn't a number, or more than are kept, would be read as a value: the asset
+        // stays (a search shows it) but says its codes weren't read.
+        assert_eq!(read(serde_json::json!([5, "x"])), (vec![], true));
+        assert!(read(serde_json::json!((0..=MAX_INVALID).collect::<Vec<_>>())).1);
+        assert_eq!(read(serde_json::json!((0..MAX_INVALID).collect::<Vec<_>>())).0.len(), MAX_INVALID);
     }
 
     /// A data cube's tile and a band's scale (#559): the grid codes catalogs use, and

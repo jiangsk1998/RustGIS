@@ -34,17 +34,17 @@ fn need_report(s: &Session) -> Option<&'static str> {
 
 pub fn commands() -> Vec<C> {
     vec![
-        C::new("report.new", "New Report", "Publish › Report", new_report).params(
+        C::new("report.new", "New Report", "Publish › Report", new_report).inputs(new_inputs).roles(&[]).effects(crate::policy::Effects::NONE).params(
             r#"{"layer"?: name (default: the selected layer), "name"?, "title"?, "fields"?: [names] (default: all), "where"?: SQL, "selectedOnly"?: bool, "groups"?: [fields], "sort"?: field, "descending"?: bool, "page"?: "letter"|"a4"|…, "orientation"?: "portrait"|"landscape"}"#,
         ),
-        C::new("report.update", "Report Properties", "Report", update).when(need_report).params(
+        C::new("report.update", "Report Properties", "Report", update).inputs(update_inputs).roles(&[]).effects(crate::policy::Effects::NONE).when(need_report).params(
             r#"{"report"?: name|index, "name"?, "title"?, "layer"?, "where"?, "selectedOnly"?, "sort"?: field|null, "descending"?, "page"?, "orientation"?, "width"?, "height"?: mm}"#,
         ),
         C::new("report.activate", "Open Report", "Browser", |s, p| {
             let i = index(s, p)?;
             s.active_report = Some(i);
             Ok(json!({"report": i}))
-        })
+        }).inputs(object_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .view()
         .when(need_report)
         .params(r#"{"report": name|index}"#),
@@ -57,7 +57,7 @@ pub fn commands() -> Vec<C> {
             }
             s.active_report = None;
             Ok(Value::Null)
-        })
+        }).inputs(object_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?}"#),
         // Report sections.
@@ -65,7 +65,7 @@ pub fn commands() -> Vec<C> {
             let title: String = ps(p, "title").unwrap_or("About this report").chars().take(500).collect();
             let text: String = ps(p, "text").unwrap_or("").chars().take(100_000).collect();
             add_section(s, p, Section::Page { title, text, end: b(p, "end").unwrap_or(false) })
-        })
+        }).inputs(object_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?, "title"?, "text"?, "end"?: bool (after the records; default before)}"#),
         C::new("report.newTemplate", "New Template", "Publish › Report", |s, p| {
@@ -79,13 +79,13 @@ pub fn commands() -> Vec<C> {
             s.active_layout = before;
             let layout = r["name"].as_str().unwrap_or_default().to_string();
             add_section(s, &json!({"report": i}), Section::Layout { layout, end: b(p, "end").unwrap_or(false) })
-        })
+        }).inputs(object_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?, "name"?, "page"?, "orientation"?, "template"?: "map"|"blank", "end"?: bool}"#),
         C::new("report.existingTemplate", "Existing Template", "Publish › Report", |s, p| {
             let i = index(s, p)?;
             let layout = if let Some(n) = ps(p, "layout") {
-                s.project.layouts.iter().find(|l| l.name.eq_ignore_ascii_case(n)).map(|l| l.name.clone()).ok_or_else(|| format!("no layout '{n}'"))?
+                s.project.layouts.get(template_at(s,n)?).ok_or("no layout")?.name.clone()
             } else {
                 let text = super::items::read_text(p).map_err(|e| format!("{e} (pass a layout name, or a layout file's path or text)"))?;
                 let before = s.active_layout;
@@ -94,22 +94,22 @@ pub fn commands() -> Vec<C> {
                 r["name"].as_str().unwrap_or_default().to_string()
             };
             add_section(s, &json!({"report": i}), Section::Layout { layout, end: b(p, "end").unwrap_or(false) })
-        })
+        }).inputs(template_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
         .when(need_report)
         .params(r#"{"report"?, "layout"?: a layout's name, "path"?: "*.rgislayout", "text"?: layout JSON, "data"?: base64 file, "end"?: bool}"#),
         C::new("report.relatedReport", "Related Report", "Publish › Report", |s, p| {
             let i = index(s, p)?;
             let other = ps(p, "related").ok_or("related is required (another report's name)")?;
-            let j = s.project.reports.iter().position(|r| r.name.eq_ignore_ascii_case(other)).ok_or_else(|| format!("no report '{other}'"))?;
+            let j = related_report_at(s,other)?;
             if i == j {
                 return Err("a report can't follow itself".into());
             }
             let report = s.project.reports.get(j).map(|r| r.name.clone()).unwrap_or_default();
             add_section(s, &json!({"report": i}), Section::Related { report })
-        })
+        }).inputs(related_report_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?, "related": report name}"#),
-        C::new("report.subreport", "Subreport", "Publish › Report", subreport)
+        C::new("report.subreport", "Subreport", "Publish › Report", subreport).inputs(subreport_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(need_report)
             .params(r#"{"report"?, "relationship": name (Data Design › Relationships), "fields"?: [related fields]}"#),
         C::new("report.removeSection", "Remove Section", "Report", |s, p| {
@@ -121,7 +121,7 @@ pub fn commands() -> Vec<C> {
             }
             r.sections.remove(k);
             Ok(json!({"sections": r.sections.len()}))
-        })
+        }).inputs(object_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?, "index": section number}"#),
         // Data.
@@ -130,7 +130,7 @@ pub fn commands() -> Vec<C> {
             let r = s.project.reports.get_mut(i).ok_or("no report")?;
             toggle(&mut r.fields, field, b(p, "remove").unwrap_or(false));
             Ok(json!({"fields": r.fields}))
-        })
+        }).inputs(layer_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?, "field": name, "remove"?: bool}"#),
         C::new("report.autofill", "Autofill Fields", "Data › Data Design", |s, p| {
@@ -139,7 +139,7 @@ pub fn commands() -> Vec<C> {
             let r = s.project.reports.get_mut(i).ok_or("no report")?;
             r.fields = names;
             Ok(json!({"fields": r.fields}))
-        })
+        }).inputs(layer_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?}"#),
         C::new("report.statistics", "Statistics", "Data › Data Design", |s, p| {
@@ -157,7 +157,7 @@ pub fn commands() -> Vec<C> {
                 _ => {}
             }
             Ok(json!({"stats": r.stats.len()}))
-        })
+        }).inputs(layer_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?, "field": name, "kind"?: "count"|"sum"|"mean"|"min"|"max", "remove"?: bool}"#),
         C::new("report.group", "Group", "Data › Data Design", |s, p| {
@@ -169,7 +169,7 @@ pub fn commands() -> Vec<C> {
             }
             toggle(&mut r.groups, field, remove);
             Ok(json!({"groups": r.groups}))
-        })
+        }).inputs(layer_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?, "field": name, "remove"?: bool}"#),
         C::new("report.attachments", "Attachments", "Data › Data Design", |s, p| {
@@ -177,7 +177,7 @@ pub fn commands() -> Vec<C> {
             let r = s.project.reports.get_mut(i).ok_or("no report")?;
             r.attachments_field = field;
             Ok(json!({"field": r.attachments_field}))
-        })
+        }).inputs(optional_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?, "field": name of a field listing each record's attachments (paths separated by ';')|null}"#),
         C::new("report.dynamicPicture", "Dynamic Picture", "Data › Data Design", |s, p| {
@@ -185,7 +185,7 @@ pub fn commands() -> Vec<C> {
             let r = s.project.reports.get_mut(i).ok_or("no report")?;
             r.picture_field = field;
             Ok(json!({"field": r.picture_field}))
-        })
+        }).inputs(optional_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?, "field": name of a field holding a picture path or base64 PNG/JPEG|null}"#),
         C::new("report.chart", "Chart Frame", "Data › Data Design", |s, p| {
@@ -204,42 +204,32 @@ pub fn commands() -> Vec<C> {
             let r = s.project.reports.get_mut(i).ok_or("no report")?;
             r.chart = chart;
             Ok(json!({"chart": r.chart.is_some()}))
-        })
+        }).inputs(chart_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?, "category": field|null (no chart), "value"?: field to sum (default: count records)}"#),
         // Output.
-        C::new("report.export", "Export Report", "Publish › Output", |s, p| {
-            let path = ps(p, "path").ok_or("path is required")?.to_string();
-            let i = index(s, p)?;
-            let dpi = f(p, "dpi").unwrap_or(150.0).clamp(72.0, 600.0);
-            let lower = path.to_ascii_lowercase();
-            let pdf = lower.ends_with(".pdf");
-            if !pdf && !lower.ends_with(".png") {
-                return Err("export to a .pdf or .png file".into());
-            }
-            let (bytes, pages) = report_bytes(s, i, dpi, pdf)?;
-            rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
-            Ok(json!({"path": path, "pages": pages, "bytes": bytes.len()}))
-        })
+        C::new("report.export", "Export Report", "Publish › Output", |s, p| super::exports::write_here(s, p, "report.export")).inputs(export_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
         .view()
         .when(need_report)
         .params(r#"{"report"?, "path": "*.pdf|*.png" (PNG: the first page), "dpi"?: 72..600}"#),
-        C::new("report.save", "Report File", "Publish › Save As", |s, p| save(s, p, false))
+        C::new("report.save", "Report File", "Publish › Save As", |s, p| save(s, p, false)).inputs(object_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
             .when(need_report)
             .params(r#"{"report"?, "path": "*.rgisreport"}"#),
-        C::new("report.saveTemplate", "Report Template", "Publish › Save As", |s, p| save(s, p, true))
+        C::new("report.saveTemplate", "Report Template", "Publish › Save As", |s, p| save(s, p, true)).inputs(object_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
             .when(need_report)
             .params(r#"{"report"?, "path": "*.rgisrpttemplate"}"#),
-        C::new("report.open", "Import Report", "Publish › Report", open).params(
+        C::new("report.open", "Import Report", "Publish › Report", open).inputs(open_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"path"?: "*.rgisreport|*.rgisrpttemplate", "text"?: report JSON, "data"?: base64 file, "layer"?: the layer a template reports on (default: the selected layer)}"#,
         ),
     ]
 }
 
 /// The report named or numbered by `report`, else the active one, else the last one.
-pub fn index(s: &Session, p: &Value) -> Result<usize, String> {
+fn index_input(input: &impl super::InputSource, p: &Value) -> Result<usize, String> {
+    let context = input.input_context();
+    let s = &context;
     let rs = &s.project.reports;
     match p.get("report") {
         Some(Value::Number(n)) => {
@@ -259,31 +249,33 @@ pub fn index(s: &Session, p: &Value) -> Result<usize, String> {
 }
 
 /// A layer by name: the active map's, else any map's.
-fn find_layer<'a>(s: &'a Session, name: &str) -> Option<&'a Layer> {
-    s.map().layer_by_name(name).or_else(|| s.project.maps.iter().find_map(|m| m.layer_by_name(name)))
+fn find_layer<'a>(input: &'a impl super::InputSource, name: &str) -> Option<&'a Layer> {
+    find_layer_map(input, name).map(|(_, layer)| layer)
 }
 
 /// The layer report `i` lists (the active map's first, else any map's).
-pub fn layer_of(s: &Session, i: usize) -> Result<&Layer, String> {
+fn layer_of_input(input: &impl super::InputSource, i: usize) -> Result<&Layer, String> {
+    let context = input.input_context();
+    let s = &context;
     let r = s.project.reports.get(i).ok_or("no report")?;
-    find_layer(s, &r.layer).ok_or_else(|| format!("the report's layer '{}' isn't in the project", r.layer))
+    find_layer(input, &r.layer).ok_or_else(|| format!("the report's layer '{}' isn't in the project", r.layer))
 }
 
 /// The report and a field of its layer named by `key` (spelled as the layer spells it).
-fn field_of(s: &Session, p: &Value, key: &str) -> Result<(usize, String), String> {
-    let i = index(s, p)?;
+fn field_of(input: &impl super::InputSource, p: &Value, key: &str) -> Result<(usize, String), String> {
+    let i = index_input(input, p)?;
     let name = ps(p, key).ok_or_else(|| format!("{key} is required"))?;
-    let l = layer_of(s, i)?;
+    let l = layer_of_input(input, i)?;
     let fi = l.dataset.field_index(name).ok_or_else(|| format!("'{}' has no field '{name}'", l.name))?;
     let field = l.dataset.fields.get(fi).map(|f| f.name.clone()).ok_or("no such field")?;
     Ok((i, field))
 }
 
 /// `field` as a field of the report's layer, or `None` for null/absent.
-fn optional_field(s: &Session, p: &Value) -> Result<(usize, Option<String>), String> {
+fn optional_field(input: &impl super::InputSource, p: &Value) -> Result<(usize, Option<String>), String> {
     match p.get("field") {
-        None | Some(Value::Null) => Ok((index(s, p)?, None)),
-        Some(_) => field_of(s, p, "field").map(|(i, f)| (i, Some(f))),
+        None | Some(Value::Null) => Ok((index_input(input, p)?, None)),
+        Some(_) => field_of(input, p, "field").map(|(i, f)| (i, Some(f))),
     }
 }
 
@@ -308,23 +300,87 @@ fn add_section(s: &mut Session, p: &Value, sec: Section) -> CmdResult {
     Ok(json!({"report": i, "sections": r.sections.len()}))
 }
 
-/// Drops what a layer lacks from a report (fields, groups, statistics, sort, picture,
-/// attachments, chart, and a where clause it can't read), so the report draws on that layer.
-fn fit_to_layer(r: &mut Report, ds: &rustgis_data::Dataset) {
+/// Counted changes needed to fit a report to a different layer's schema.
+#[derive(Default)]
+struct Fitted {
+    fields: usize,
+    groups: usize,
+    statistics: usize,
+    settings: usize,
+    filter_cleared: bool,
+    columns_replaced: bool,
+    subreports: usize,
+    subreport_fields: usize,
+}
+
+impl Fitted {
+    /// Publishes only completed changes, with literal report names and translated operation text.
+    fn notify(self, s: &mut Session, name: &str, when: &'static str) {
+        use crate::notice_text::NoticeText;
+        for (n, key) in [
+            (self.fields, "{name}: {n} report column(s) missing from the layer removed {when}"),
+            (self.groups, "{name}: {n} report grouping field(s) missing from the layer removed {when}"),
+            (self.statistics, "{name}: {n} report statistic(s) whose fields are missing removed {when}"),
+            (self.settings, "{name}: {n} report sort, picture, attachment or chart setting(s) whose fields are missing removed {when}"),
+            (
+                usize::from(self.columns_replaced),
+                "{name}: {n} report column set(s) replaced with the layer's default columns because none of the requested columns exist {when}",
+            ),
+            (self.subreports, "{name}: {n} subreport(s) whose relationship no longer involves the layer removed {when}"),
+            (self.subreport_fields, "{name}: {n} subreport field(s) missing from the related layer removed {when}"),
+        ] {
+            if n > 0 {
+                s.notify_text(
+                    NoticeText::format(
+                        key,
+                        [("name", name.to_string().into()), ("n", n.to_string().into()), ("when", NoticeText::term(when))],
+                    ),
+                    false,
+                );
+            }
+        }
+        if self.filter_cleared {
+            s.notify_text(NoticeText::format(
+                "{name}: 1 report filter that could not be read for its layer removed {when}; that filter no longer limits included records",
+                [("name", name.to_string().into()), ("when", NoticeText::term(when))],
+            ), false);
+        }
+    }
+}
+
+/// Drops what a layer lacks so the report draws on that layer, returning every removed binding
+/// and whether missing columns were replaced with the default field list.
+fn fit_to_layer(r: &mut Report, ds: &rustgis_data::Dataset) -> Fitted {
     let has = |n: &str| ds.field_index(n).is_some();
+    let mut fitted = Fitted { fields: r.fields.len(), groups: r.groups.len(), statistics: r.stats.len(), ..Fitted::default() };
+    let settings = usize::from(r.sort.is_some())
+        + usize::from(r.picture_field.is_some())
+        + usize::from(r.attachments_field.is_some())
+        + usize::from(r.chart.is_some());
     r.fields.retain(|f| has(f));
     r.groups.retain(|f| has(f));
     r.stats.retain(|x| has(&x.field));
+    fitted.fields -= r.fields.len();
+    fitted.groups -= r.groups.len();
+    fitted.statistics -= r.stats.len();
     r.sort = r.sort.take().filter(|f| has(f));
     r.picture_field = r.picture_field.take().filter(|f| has(f));
     r.attachments_field = r.attachments_field.take().filter(|f| has(f));
     r.chart = r.chart.take().filter(|c| has(&c.category) && c.value.as_deref().is_none_or(has));
+    fitted.settings = settings
+        - usize::from(r.sort.is_some())
+        - usize::from(r.picture_field.is_some())
+        - usize::from(r.attachments_field.is_some())
+        - usize::from(r.chart.is_some());
     if r.fields.is_empty() {
+        fitted.columns_replaced = fitted.fields > 0;
         r.fields = ds.fields.iter().take(MAX_ITEMS).map(|f| f.name.clone()).collect();
     }
-    if !r.where_clause.is_empty() && rustgis_data::query::parse(&r.where_clause, ds).is_err() {
+    fitted.filter_cleared = !r.where_clause.is_empty() && rustgis_data::query::parse_fields(&r.where_clause, ds).is_err();
+    if fitted.filter_cleared {
         r.where_clause.clear();
     }
+    fitted
 }
 
 /// A join key: numbers by value (so 1 and 1.0 match), anything else as text; empty for none.
@@ -361,10 +417,7 @@ fn page(p: &Value, current: Option<(f64, f64)>) -> Result<Option<(f64, f64)>, St
 }
 
 fn new_report(s: &mut Session, p: &Value) -> CmdResult {
-    let layer = match ps(p, "layer") {
-        Some(n) => find_layer(s, n).ok_or_else(|| format!("no layer named '{n}'"))?,
-        None => s.active_layer.and_then(|id| s.map().layer(id)).ok_or("select a layer, or pass layer")?,
-    };
+    let layer = new_layer(s, p)?;
     if layer.is_raster() {
         return Err("reports list a feature layer's records, not a raster's".into());
     }
@@ -419,6 +472,7 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
     let mut r = s.project.reports.get(i).cloned().ok_or("no report")?;
     let old_name = r.name.clone();
     let mut renamed = None;
+    let mut fitted = Fitted::default();
     if let Some(n) = ps(p, "layer") {
         let l = find_layer(s, n).ok_or_else(|| format!("no layer named '{n}'"))?;
         if l.is_raster() {
@@ -428,26 +482,21 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         // What the new layer lacks is dropped, so the report doesn't show blank columns, and so
         // are subreports through relationships that don't involve it. A kept subreport may now
         // list the other end of its relationship, so its fields are fitted to that layer.
-        fit_to_layer(&mut r, &l.dataset);
+        fitted = fit_to_layer(&mut r, &l.dataset);
         let name = l.name.clone();
         r.sections.retain_mut(|x| match x {
             Section::Subreport { relationship, fields } => {
-                let other = relationships(s).find_map(|rel| {
-                    if !rel.name.eq_ignore_ascii_case(relationship) {
-                        None
-                    } else if rel.origin.eq_ignore_ascii_case(&name) {
-                        Some(rel.destination.clone())
-                    } else if rel.destination.eq_ignore_ascii_case(&name) {
-                        Some(rel.origin.clone())
-                    } else {
-                        None
-                    }
-                });
-                let Some(other) = other else { return false };
+                let other = update_other(s, relationship, &name);
+                let Some(other) = other else {
+                    fitted.subreports += 1;
+                    return false;
+                };
+                let before = fields.len();
                 match find_layer(s, &other) {
                     Some(o) => fields.retain(|f| o.dataset.field_index(f).is_some()),
                     None => fields.clear(),
                 }
+                fitted.subreport_fields += before - fields.len();
                 true
             }
             _ => true,
@@ -502,6 +551,10 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
             }
         }
     }
+    if ps(p, "where").is_some() {
+        fitted.filter_cleared = false;
+    }
+    fitted.notify(s, &name, "while changing the report layer");
     Ok(json!({"report": i, "name": name}))
 }
 
@@ -510,13 +563,7 @@ fn subreport(s: &mut Session, p: &Value) -> CmdResult {
     let rel = ps(p, "relationship").ok_or("relationship is required")?;
     let layer = s.project.reports.get(i).map(|r| r.layer.clone()).unwrap_or_default();
     let r = relationships(s).find(|r| r.name.eq_ignore_ascii_case(rel)).ok_or_else(|| format!("no relationship '{rel}'"))?;
-    let other = if r.origin.eq_ignore_ascii_case(&layer) {
-        r.destination.clone()
-    } else if r.destination.eq_ignore_ascii_case(&layer) {
-        r.origin.clone()
-    } else {
-        return Err(format!("the relationship '{}' doesn't involve '{layer}'", r.name));
-    };
+    let other = opposite(r, &layer).ok_or_else(|| format!("the relationship '{}' doesn't involve '{layer}'", r.name))?.to_string();
     let name = r.name.clone();
     let ds = &find_layer(s, &other).ok_or_else(|| format!("no layer named '{other}'"))?.dataset;
     let mut fields = Vec::new();
@@ -529,7 +576,9 @@ fn subreport(s: &mut Session, p: &Value) -> CmdResult {
 }
 
 /// Every map's relationships.
-fn relationships(s: &Session) -> impl Iterator<Item = &rustgis_map::design::Relationship> {
+fn relationships(input: &impl super::InputSource) -> impl Iterator<Item = &rustgis_map::design::Relationship> {
+    let context = input.input_context();
+    let s = &context;
     s.project.maps.iter().flat_map(|m| m.editing.relationships.iter())
 }
 
@@ -551,21 +600,10 @@ pub fn report_file(s: &Session, i: usize, template: bool) -> Result<Vec<u8>, Str
 fn open(s: &mut Session, p: &Value) -> CmdResult {
     let text = super::items::read_text(p)?;
     let mut r: Report = serde_json::from_str(&text).map_err(|e| format!("not a RustGIS report: {e}"))?;
-    r.clamp();
-    if let Some(n) = ps(p, "layer") {
-        r.layer = find_layer(s, n).ok_or_else(|| format!("no layer named '{n}'"))?.name.clone();
-    } else if find_layer(s, &r.layer).is_none() {
-        // A template (or a report on a layer this project lacks) reports on the selected layer.
-        r.layer = s
-            .active_layer
-            .and_then(|id| s.map().layer(id))
-            .map(|l| l.name.clone())
-            .ok_or("select the layer to report on, or pass layer")?;
-    }
+    let repairs = r.clamp();
+    import_layer(s, p, &mut r)?;
     // Drop what the layer lacks, so the report still draws.
-    if let Some(l) = find_layer(s, &r.layer) {
-        fit_to_layer(&mut r, &l.dataset);
-    }
+    let fitted = find_layer(s, &r.layer).map(|l| fit_to_layer(&mut r, &l.dataset)).unwrap_or_default();
     r.name = unique_name(s, &r.name, None);
     let name = r.name.clone();
     if s.project.reports.len() >= crate::project::MAX_ITEMS {
@@ -574,6 +612,10 @@ fn open(s: &mut Session, p: &Value) -> CmdResult {
     s.project.reports.push(r);
     let i = s.project.reports.len() - 1;
     s.active_report = Some(i);
+    for notice in crate::project::content_notices(repairs, &name) {
+        s.notify_text(notice, false);
+    }
+    fitted.notify(s, &name, "while importing the report");
     Ok(json!({"report": i, "name": name}))
 }
 
@@ -720,6 +762,19 @@ fn blocks(s: &Session, i: usize, out: &mut Vec<Block>, seen: &mut Vec<usize>, de
     if truncated {
         about.push_str(&format!(" — the first {MAX_RECORDS} are listed"));
     }
+    // Only a preview draws a layer read in place (an export reads it whole first), here or
+    // under a record through a relationship.
+    let related_in_view = r.sections.iter().any(|sec| {
+        let Section::Subreport { relationship, .. } = sec else { return false };
+        relationships(s)
+            .find(|x| x.name.eq_ignore_ascii_case(relationship))
+            .and_then(|rel| opposite(rel, &layer.name))
+            .and_then(|other| find_layer(s, other))
+            .is_some_and(Layer::is_streamed)
+    });
+    if layer.is_streamed() || related_in_view {
+        about.push_str(" — in this preview, only the records in the map's view; the export lists them all");
+    }
     out.push(Block::Text(about));
     let fi: Vec<Option<usize>> = r.fields.iter().map(|n| ds.field_index(n)).collect();
     let columns = Block::Columns(r.fields.clone());
@@ -735,13 +790,7 @@ fn blocks(s: &Session, i: usize, out: &mut Vec<Block>, seen: &mut Vec<usize>, de
             let Section::Subreport { relationship, fields } = sec else { return None };
             let rel = relationships(s).find(|x| x.name.eq_ignore_ascii_case(relationship))?;
             // A relationship that doesn't involve this layer is skipped.
-            let (here_key, other, other_key) = if rel.origin.eq_ignore_ascii_case(&layer.name) {
-                (&rel.origin_key, &rel.destination, &rel.destination_key)
-            } else if rel.destination.eq_ignore_ascii_case(&layer.name) {
-                (&rel.destination_key, &rel.origin, &rel.origin_key)
-            } else {
-                return None;
-            };
+            let (here_key, other, other_key) = relationship_columns(rel, &layer.name)?;
             let ods = &find_layer(s, other)?.dataset;
             let ok = ods.field_index(other_key)?;
             let mut by_key: HashMap<String, Vec<usize>> = HashMap::new();
@@ -899,33 +948,180 @@ fn blocks(s: &Session, i: usize, out: &mut Vec<Block>, seen: &mut Vec<usize>, de
     Ok(())
 }
 
-/// The report's pages, laid out.
+/// The report's pages, laid out: for the preview, from the features the layers hold now (a layer
+/// read in place holds those of the view, and the report says so); an export reads them whole
+/// ([`report_bytes`]).
 pub fn pages(s: &Session, i: usize) -> Result<(Doc, Vec<rustgis_render::report::Page>), String> {
     let doc = build(s, i)?;
     let pages = rustgis_render::report::paginate(&doc);
     Ok((doc, pages))
 }
 
-/// The report as a PDF (every page) or a PNG (the first page), and its page count.
+/// The report as a PDF (every page) or a PNG (the first page), and its page count: every record of
+/// a layer read in place, read whole on a copy of the project ([`whole_copy`]); what reading and
+/// drawing it said is said in `s`. The browser's export, where the whole read runs here; the
+/// app's runs on a thread of its own ([`export_work`]).
 pub fn report_bytes(s: &mut Session, i: usize, dpi: f64, pdf: bool) -> Result<(Vec<u8>, usize), String> {
+    let name = s.project.reports.get(i).map(|r| r.name.clone()).unwrap_or_default();
+    let (bytes, mut copy) = whole_bytes(detached(&s.project), s.path.clone(), i, dpi, pdf);
+    super::exports::say(s, super::exports::copy_notices(&mut copy, &name));
+    bytes
+}
+
+/// What Export Report reads of the session (a copy of the project, its layers' reads left with
+/// the live ones), and the work that reads the report's layers whole, draws it and writes it.
+pub(crate) fn export_work(s: &Session, p: &Value) -> Result<super::exports::Work, String> {
+    let path = ps(p, "path").ok_or("path is required")?.to_string();
+    let i = index(s, p)?;
+    let dpi = f(p, "dpi").unwrap_or(150.0).clamp(72.0, 600.0);
+    let lower = path.to_ascii_lowercase();
+    let pdf = lower.ends_with(".pdf");
+    if !pdf && !lower.ends_with(".png") {
+        return Err("export to a .pdf or .png file".into());
+    }
+    let (project, folder) = (detached(&s.project), s.path.clone());
+    Ok(Box::new(move || {
+        let (bytes, mut copy) = whole_bytes(project, folder, i, dpi, pdf);
+        let written = bytes.and_then(|(bytes, pages)| {
+            rustgis_data::progress::check().map_err(|e| e.to_string())?;
+            rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
+            Ok(json!({"path": path, "pages": pages, "bytes": bytes.len()}))
+        });
+        // The layers it lists are read whole; a layout drawn in it draws the others' views, and
+        // one whose source fails there is said, as Export Layout says it.
+        let said = super::exports::copy_notices(&mut copy, &path);
+        super::exports::drawn(&copy.project.maps, said, written, path)
+    }))
+}
+
+/// `project`, its streamed layers' reads under way left with the live layers.
+fn detached(project: &crate::project::Project) -> crate::project::Project {
+    let mut project = project.clone();
+    for m in &mut project.maps {
+        m.detach_reads();
+    }
+    project
+}
+
+/// Report `i` drawn ([`drawn_bytes`]) from a copy of `project` saved at `path` (pictures are found
+/// beside it), its layers read whole ([`whole_copy`]), with the copy, which holds what reading and
+/// drawing it said.
+fn whole_bytes(
+    project: crate::project::Project,
+    path: Option<std::path::PathBuf>,
+    i: usize,
+    dpi: f64,
+    pdf: bool,
+) -> (Result<(Vec<u8>, usize), String>, Session) {
+    let mut copy = Session::new(project);
+    copy.path = path;
+    let bytes = whole_copy(&mut copy, i).and_then(|()| drawn_bytes(&mut copy, i, dpi, pdf));
+    (bytes, copy)
+}
+
+/// Reads whole, in `copy` (a copy of the project to draw report `i` from), the layers read in
+/// place that the report lists records of ([`reported_layers`]), so the report lists every
+/// record of their sources and not only those of the view, their selections kept; the rows a
+/// source couldn't read are said on the copy. Each read looks at Cancel as Load All Features'
+/// does: between the chunks of a source read so, not during one read at once.
+pub(crate) fn whole_copy(copy: &mut Session, i: usize) -> Result<(), String> {
+    for (m, id) in reported_layers(copy, i) {
+        // Cancelled after one layer's read: the next isn't started.
+        rustgis_data::progress::check().map_err(|e| e.to_string())?;
+        let Some(l) = copy.project.maps.get_mut(m).and_then(|map| map.layer_mut(id)) else { continue };
+        let unread = super::whole::load_into(l)?;
+        unread.say(copy);
+    }
+    rustgis_data::progress::check().map_err(|e| e.to_string())
+}
+
+/// The layers report `i` lists records of, by map and id: its own, its subreports' related
+/// layers, and those of the reports it appends, as far as [`blocks`] draws them (the same
+/// reports, in the same order, to the same depth), so an export reads no layer it doesn't list.
+pub(crate) fn reported_layers(input: &impl super::InputSource, i: usize) -> Vec<(usize, u32)> {
+    /// Report `i`'s layers at `depth`, then those of the reports it appends, as `blocks` walks
+    /// them (sharing its `seen`).
+    fn walk(input: &impl super::InputSource, i: usize, depth: usize, seen: &mut Vec<usize>, out: &mut Vec<(usize, u32)>) {
+        let context = input.input_context();
+        let s = &context;
+        let place = |name: &str| {
+            let (map, l) = find_layer_map(input, name)?;
+            Some((s.project.maps.iter().position(|m| std::ptr::eq(m, map))?, l.id, l.name.clone()))
+        };
+        let Some(r) = s.project.reports.get(i) else { return };
+        // A report whose layer is gone draws nothing (`blocks` fails), nor the reports it appends.
+        let Some((m, id, name)) = place(&r.layer) else { return };
+        out.push((m, id));
+        for sec in &r.sections {
+            if let Section::Subreport { relationship, .. } = sec {
+                let other = relationships(input)
+                    .find(|x| x.name.eq_ignore_ascii_case(relationship))
+                    .and_then(|rel| opposite(rel, &name).map(str::to_string));
+                out.extend(other.and_then(|other| place(&other)).map(|(m, id, _)| (m, id)));
+            }
+        }
+        for sec in &r.sections {
+            if let Section::Related { report } = sec
+                && depth < MAX_DEPTH
+                && let Some(j) = s.project.reports.iter().position(|x| x.name.eq_ignore_ascii_case(report))
+                && !seen.contains(&j)
+            {
+                seen.push(j);
+                walk(input, j, depth + 1, seen, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(input, i, 0, &mut vec![i], &mut out);
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The report as a PDF (every page) or a PNG (the first page), and its page count, drawn from
+/// the features `s`'s layers hold.
+fn drawn_bytes(s: &mut Session, i: usize, dpi: f64, pdf: bool) -> Result<(Vec<u8>, usize), String> {
     let (doc, pages) = pages(s, i)?;
+    let revision = |s: &Session| {
+        pages
+            .iter()
+            .take(if pdf { usize::MAX } else { 1 })
+            .filter_map(|page| {
+                let rustgis_render::report::Page::Layout(li) = page else { return None };
+                s.project.layouts.get(*li).map(|layout| rustgis_render::layout::archive_revisions(layout, &s.project.maps))
+            })
+            .max()
+            .unwrap_or_default()
+    };
+    let before = revision(s);
+    let result = super::share::saying_shadows(s, "The report", |s| report_pages_bytes(s, &doc, &pages, dpi, pdf));
+    before.finish_revision(revision(s), Some(result), "could not draw the report")?
+}
+
+fn report_pages_bytes(
+    s: &mut Session,
+    doc: &Doc,
+    pages: &[rustgis_render::report::Page],
+    dpi: f64,
+    pdf: bool,
+) -> Result<(Vec<u8>, usize), String> {
     let n = if pdf { pages.len() } else { 1 };
     let mut out = Vec::new();
     let mut held = 0usize;
     let (mut frames_pictured, mut pages_pictured) = (Vec::new(), Vec::new());
+    // Counted, and stopped on Cancel, a page at a time.
+    rustgis_data::progress::begin(n);
     for k in 0..n {
+        rustgis_data::progress::step(1).map_err(|e| e.to_string())?;
         if !pdf {
-            let (img, ..) = rustgis_render::report::draw_page(&doc, &pages, k, dpi, &s.project.layouts, &mut s.project.maps)
-                .ok_or("the page is too large to draw")?;
+            let (img, ..) = rustgis_render::report::draw_page(doc, pages, k, dpi, &s.project.layouts, &mut s.project.maps)?;
             return Ok((img.encode_png().map_err(|e| e.to_string())?, pages.len()));
         }
-        let (page, pictured) = rustgis_render::report::pdf_page(&doc, &pages, k, dpi, &s.project.layouts, &mut s.project.maps)
-            .ok_or("the page is too large to draw")?;
+        let (page, pictured) = rustgis_render::report::pdf_page(doc, pages, k, dpi, &s.project.layouts, &mut s.project.maps)?;
         if page.overflowed() {
             // Too large for vectors all the same: the page as one picture.
             pages_pictured.push(k + 1);
-            let (img, w, h) = rustgis_render::report::draw_page(&doc, &pages, k, dpi, &s.project.layouts, &mut s.project.maps)
-                .ok_or("the page is too large to draw")?;
+            let (img, w, h) = rustgis_render::report::draw_page(doc, pages, k, dpi, &s.project.layouts, &mut s.project.maps)?;
             out.push(rustgis_render::pdf::Page::new(&img, w, h));
         } else {
             frames_pictured.extend(pictured);
@@ -938,4 +1134,238 @@ pub fn report_bytes(s: &mut Session, i: usize, dpi: f64, pdf: bool) -> Result<(V
     }
     super::layout::pictured_notices(s, &frames_pictured, &pages_pictured);
     Ok((rustgis_render::pdf::write(&out, &doc.title), pages.len()))
+}
+
+/// Resolves the report creator's string-name or active/default layer convention.
+fn new_layer<'a>(input: &'a impl super::InputSource, p: &Value) -> Result<&'a Layer, String> {
+    let context = input.input_context();
+    let s = &context;
+    Ok(match ps(p, "layer") {
+        Some(n) => find_layer(input, n).ok_or_else(|| format!("no layer named '{n}'"))?,
+        None => s.active_layer.and_then(|id| s.map().layer(id)).ok_or("select a layer, or pass layer")?,
+    })
+}
+
+/// Fits an imported report to its explicit or stored existing layer without opening data.
+fn import_layer(input: &impl super::InputSource, p: &Value, r: &mut Report) -> Result<(), String> {
+    let context = input.input_context();
+    let s = &context;
+    if let Some(n) = ps(p, "layer") {
+        r.layer = find_layer(input, n).ok_or_else(|| format!("no layer named '{n}'"))?.name.clone();
+    } else if find_layer(input, &r.layer).is_none() {
+        // A template (or a report on a layer this project lacks) reports on the selected layer.
+        r.layer = s
+            .active_layer
+            .and_then(|id| s.map().layer(id))
+            .map(|l| l.name.clone())
+            .ok_or("select the layer to report on, or pass layer")?;
+    }
+    Ok(())
+}
+
+/// Finds a literal feature layer active-map first, then in project order.
+fn find_layer_map<'a>(input: &'a impl super::InputSource, name: &str) -> Option<(&'a rustgis_map::Map, &'a Layer)> {
+    let context = input.input_context();
+    let s = &context;
+    let in_map = |map: &'a rustgis_map::Map| map.layer_by_name(name).map(|l| (map, l));
+    in_map(s.map()).or_else(|| s.project.maps.iter().find_map(in_map))
+}
+/// Retains the owning map of the already resolved layer, including repeated ids in other maps.
+fn owning_inputs(input: &impl super::InputSource, layer: &Layer) -> super::Inputs {
+    let context = input.input_context();
+    let s = &context;
+    super::Inputs::layers(
+        s.project.maps.iter().flat_map(|map| map.layers.iter().filter(|l| std::ptr::eq(*l, layer)).map(move |l| (map, l))),
+    )
+}
+/// Binds the creator's actual layer without constructing report rows.
+fn new_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::Inputs, String> {
+    Ok(owning_inputs(input, new_layer(input, p)?))
+}
+/// Binds the selected report's stored layer through the report executor's lookup.
+fn layer_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::Inputs, String> {
+    let mut inputs = owning_inputs(input, layer_of_input(input, index_input(input, p)?)?);
+    inputs.extend(object_inputs(input, p)?);
+    Ok(inputs)
+}
+/// Binds a field-dependent layer only when an optional field is actually supplied.
+fn optional_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::Inputs, String> {
+    let (i, field) = optional_field(input, p)?;
+    let mut inputs =
+        if field.is_some() { owning_inputs(input, layer_of_input(input, i)?) } else { super::Inputs::layers(std::iter::empty()) };
+    inputs.extend(object_inputs(input, p)?);
+    Ok(inputs)
+}
+/// Clearing a chart consumes no field; a new chart uses the existing field resolver.
+fn chart_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::Inputs, String> {
+    if p.get("category").is_none_or(Value::is_null) {
+        return object_inputs(input, p);
+    }
+    let (i, _) = field_of(input, p, "category")?;
+    {
+        let mut inputs = owning_inputs(input, layer_of_input(input, i)?);
+        inputs.extend(object_inputs(input, p)?);
+        Ok(inputs)
+    }
+}
+/// Returns the matching relationship direction and both keys for a report's current layer.
+fn relationship_columns<'a>(rel: &'a rustgis_map::design::Relationship, here: &str) -> Option<(&'a str, &'a str, &'a str)> {
+    if rel.origin.eq_ignore_ascii_case(here) {
+        Some((&rel.origin_key, &rel.destination, &rel.destination_key))
+    } else if rel.destination.eq_ignore_ascii_case(here) {
+        Some((&rel.destination_key, &rel.origin, &rel.origin_key))
+    } else {
+        None
+    }
+}
+/// Selects the other relationship endpoint using the same direction test as row construction.
+fn opposite<'a>(rel: &'a rustgis_map::design::Relationship, here: &str) -> Option<&'a str> {
+    relationship_columns(rel, here).map(|(_, other, _)| other)
+}
+
+/// Selects the first named relationship and its active-first other endpoint.
+fn subreport_input<'a>(input: &'a impl super::InputSource, here: &str, name: &str) -> Option<(&'a rustgis_map::Map, &'a Layer)> {
+    let rel = relationships(input).find(|rel| rel.name.eq_ignore_ascii_case(name))?;
+    find_layer_map(input, opposite(rel, here)?)
+}
+/// Collects the layer used to fit a new subreport's fields, without joining rows.
+fn subreport_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::Inputs, String> {
+    let s = input;
+    let report = s.project.reports.get(index_input(input, p)?).ok_or("no report")?;
+    let name = ps(p, "relationship").ok_or("relationship is required")?;
+    let mut inputs = super::Inputs::layers(subreport_input(input, &report.layer, name));
+    inputs.extend(object_inputs(input, p)?);
+    inputs.state["relationship"] = json!(relationships(input).find(|r| r.name.eq_ignore_ascii_case(name)));
+    Ok(inputs)
+}
+/// A report layer change retains the first named relationship that involves the new layer.
+fn update_other(input: &impl super::InputSource, relationship: &str, layer: &str) -> Option<String> {
+    relationships(input).filter(|rel| rel.name.eq_ignore_ascii_case(relationship)).find_map(|rel| opposite(rel, layer)).map(str::to_string)
+}
+/// Binds only layer/field and retained-subreport dependencies consumed by this update.
+fn update_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::Inputs, String> {
+    let s = input;
+    let report = s.project.reports.get(index_input(input, p)?).ok_or("no report")?;
+    let mut inputs = object_inputs(input, p)?;
+    if let Some(name) = ps(p, "layer") {
+        let (map, layer) = find_layer_map(input, name).ok_or_else(|| format!("no layer named '{name}'"))?;
+        inputs.layers.push((map.instance_id(), layer.id));
+        for sec in &report.sections {
+            if let Section::Subreport { relationship, .. } = sec
+                && let Some(other) = update_other(input, relationship, &layer.name)
+                && let Some((map, layer)) = find_layer_map(input, &other)
+            {
+                inputs.layers.push((map.instance_id(), layer.id));
+            }
+        }
+    } else if ps(p, "where").is_some_and(|w| !w.trim().is_empty()) || ps(p, "sort").is_some() {
+        inputs.extend(layer_inputs(input, p)?);
+    }
+    Ok(inputs)
+}
+/// Uses inline data/text precedence for pure import planning; path-held selectors remain unresolved.
+fn open_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::Inputs, String> {
+    if let Some(name) = ps(p, "layer") {
+        return Ok(super::Inputs::layers([find_layer_map(input, name).ok_or_else(|| format!("no layer named '{name}'"))?]));
+    }
+    let Some(text) = super::items::inline_text(p)? else {
+        return Ok(super::Inputs::unresolved());
+    };
+    let mut report: Report = serde_json::from_str(&text).map_err(|e| format!("not a RustGIS report: {e}"))?;
+    report.clamp();
+    import_layer(input, p, &mut report)?;
+    Ok(super::Inputs::layers(find_layer_map(input, &report.layer)))
+}
+/// Walks bounded report references before any row building, picture reading or output write.
+fn export_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::Inputs, String> {
+    let root = index_input(input, p)?;
+    let mut inputs = layer_inputs(input, p)?;
+    let mut seen = vec![root];
+    report_dependencies(input, root, &mut inputs, &mut seen, 0);
+    Ok(inputs)
+}
+/// The same bounded related-report graph as blocks, without building rows or reading pictures.
+fn report_dependencies(input: &impl super::InputSource, i: usize, inputs: &mut super::Inputs, seen: &mut Vec<usize>, depth: usize) {
+    let context = input.input_context();
+    let s = &context;
+    let Some(report) = s.project.reports.get(i) else { return };
+    if let Some(found) = find_layer_map(input, &report.layer) {
+        inputs.layers.push((found.0.instance_id(), found.1.id));
+    } else {
+        return;
+    }
+    let mut own = super::Inputs::layers(std::iter::empty());
+    own.state = json!({"report":i,"name":report.name,"layer":report.layer,"picture":report.picture_field,"attachments":report.attachments_field,
+        "refs":report.sections.iter().filter_map(|section|match section {Section::Layout{layout,..}=>Some(json!({"layout":layout})),Section::Related{report}=>Some(json!({"report":report})),Section::Subreport{relationship,fields}=>Some(json!({"relationship":relationship,"fields":fields})),_=>None}).collect::<Vec<_>>()});
+    inputs.extend(own);
+    for sec in &report.sections {
+        match sec {
+            Section::Subreport { relationship, .. } => {
+                if let Some((map, layer)) = subreport_input(input, &report.layer, relationship) {
+                    inputs.layers.push((map.instance_id(), layer.id));
+                }
+            }
+            Section::Layout { layout, .. } => {
+                if let Some(li) = s.project.layouts.iter().position(|l| l.name.eq_ignore_ascii_case(layout)) {
+                    inputs.extend(super::layout::render_inputs_at(input, li));
+                }
+            }
+            Section::Related { report } if depth < MAX_DEPTH => {
+                if let Some(j) = s.project.reports.iter().position(|r| r.name.eq_ignore_ascii_case(report))
+                    && !seen.contains(&j)
+                {
+                    seen.push(j);
+                    report_dependencies(input, j, inputs, seen, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Reference-only edits bind the actual report without requiring its stored layer to still exist.
+fn object_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::Inputs, String> {
+    let s = input;
+    let i = index_input(input, p)?;
+    let mut inputs = super::Inputs::layers(std::iter::empty());
+    inputs.state = json!({"report":i,"name":s.project.reports.get(i).map(|r|&r.name)});
+    Ok(inputs)
+}
+/// A related report is the first literal name match used by section insertion.
+fn related_report_at(input: &impl super::InputSource, name: &str) -> Result<usize, String> {
+    let context = input.input_context();
+    let s = &context;
+    s.project.reports.iter().position(|r| r.name.eq_ignore_ascii_case(name)).ok_or_else(|| format!("no report '{name}'"))
+}
+/// Binds both existing report objects, without building either one's rows.
+fn related_report_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::Inputs, String> {
+    let s = input;
+    let mut inputs = object_inputs(input, p)?;
+    let i = related_report_at(input, ps(p, "related").ok_or("related is required (another report's name)")?)?;
+    inputs.state["related"] = json!((i, &s.project.reports.get(i).map(|r| &r.name)));
+    Ok(inputs)
+}
+/// An existing layout is a stored reference here; an imported document stays frozen as raw params.
+fn template_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::Inputs, String> {
+    let mut inputs = object_inputs(input, p)?;
+    if let Some(name) = ps(p, "layout") {
+        inputs.state["layout"] = json!(template_at(input, name)?);
+    }
+    Ok(inputs)
+}
+/// Shares the exact first-name layout lookup with the reference-only template insertion.
+fn template_at(input: &impl super::InputSource, name: &str) -> Result<usize, String> {
+    let context = input.input_context();
+    let s = &context;
+    s.project.layouts.iter().position(|l| l.name.eq_ignore_ascii_case(name)).ok_or_else(|| format!("no layout '{name}'"))
+}
+
+/// The presentation/report selected by the live session, using the same pure resolver as approval.
+pub fn index(s: &Session, p: &Value) -> Result<usize, String> {
+    index_input(s, p)
+}
+
+/// The live report layer, using the same active-first resolver as approval.
+pub fn layer_of(s: &Session, i: usize) -> Result<&Layer, String> {
+    layer_of_input(s, i)
 }

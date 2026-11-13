@@ -327,8 +327,11 @@ impl SqliteEditTable {
                     .iter()
                     .zip(&attrs)
                     .map(|(f, &i)| row.get_ref(i + 1).map(|v| value(v, f.ty)))
-                    .collect::<rusqlite::Result<_>>()
-                    .map_err(err)?;
+                    .collect::<rusqlite::Result<Vec<Option<Value>>>>()
+                    .map_err(err)?
+                    .into_iter()
+                    .map(|v| v.unwrap_or(Value::Null))
+                    .collect();
                 out.versions.push((id, hash.cast_signed()));
                 out.features.push(Feature { id, geometry, attrs });
             }
@@ -469,7 +472,7 @@ impl SqliteEditTable {
                 }
                 let old = row.get(c + 1).ok_or_else(|| self.shape_error())?;
                 let attr = f.attrs.get(i).unwrap_or(&Value::Null);
-                if value(ValueRef::from(old), field.ty) != *attr {
+                if value(ValueRef::from(old), field.ty).as_ref() != Some(attr) {
                     sets.push(format!("{} = ?", quote(names.get(c).ok_or_else(|| self.shape_error())?)));
                     args.push(sql_value(attr, field.ty));
                 }
@@ -611,7 +614,7 @@ impl SqliteEditTable {
             for &(i, c) in &snapshot_columns {
                 let field = fields.get(i).ok_or_else(|| self.shape_error())?;
                 let attr = feature.attrs.get_mut(i).ok_or_else(|| self.shape_error())?;
-                *attr = value(ValueRef::from(row.get(c + 1).ok_or_else(|| self.shape_error())?), field.ty);
+                *attr = value(ValueRef::from(row.get(c + 1).ok_or_else(|| self.shape_error())?), field.ty).unwrap_or(Value::Null);
             }
             saved.versions.push((k.cast_unsigned(), fingerprint(row.iter().map(ValueRef::from))));
             features.push(feature);

@@ -21,10 +21,24 @@ than relying only on the model's reply. Commands that would read or write files,
 an address on the internet, run a plugin, script, task or model, or replace the project wait
 for you: **Allow** or **Decline**. SQL queries also ask, because SQL can access files and the
 network. **Allow such actions for this conversation** remembers the exact command and all
-its parameters, not general access to a file or server. Plugin commands, user automation and
-project replacement ask every time. **Approve actions automatically**, the checkbox under the
+its parameters, not general access to a file or server. Plugin commands and tools, user automation
+and project replacement ask every time. **Approve actions automatically**, the checkbox under the
 message box, allows all of these without asking, handing tasks to agents on this computer
 included; it is off unless you turn it on and is kept for the next start.
+
+The approval freezes the ordered operations shown, including tool defaults, target layers,
+selected layers used implicitly, and the current source and account choices. Changing those,
+editing a task or notebook, reloading a plugin, or replacing the project requires a new review.
+A remembered operation must match the same contents and targets; at most 64 are retained for
+the conversation. Large or unresolved requests refuse before running: split them into smaller
+steps or run them yourself. Reviews are bounded to 1,000 operations, four nested items, 64 KiB
+of frozen parameters and bindings, and 4 KiB of displayed text.
+
+Queued tools and downloads keep the initiating caller's authority. Stop, a revoked agent grant,
+a disabled plugin or project replacement prevents a new stage or result from being applied.
+A network request already sent may still finish; its revoked result is discarded. Tasks,
+notebooks and models opened from files, or made or changed by an assistant, agent or plugin,
+remain restricted to project edits. Undo restores the provenance of the exact content it restores.
 
 Enter sends, Shift+Enter starts a new line, and Up and Down recall earlier messages when the
 message box is empty or showing a recalled message. Drag the grip above it to resize it.
@@ -38,16 +52,19 @@ From the command line, `rustgis-cli ask` sends one request (see
 
 Click the model name or the gear to open the settings. The assistant works with:
 
-| Provider          | Default model                                     | Key                                                                                                                                          |
-| ----------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Anthropic         | `claude-opus-5-5`                                 | [console.anthropic.com](https://console.anthropic.com/settings/keys), or `ANTHROPIC_API_KEY`                                                 |
-| OpenAI            | `gpt-5.5`                                         | [platform.openai.com](https://platform.openai.com/api-keys), or `OPENAI_API_KEY`                                                             |
-| ChatGPT (sign in) | the first model in your account’s current catalog | none: **Continue with ChatGPT** to use your ChatGPT plan (desktop app and command line)                                                      |
-| Google Gemini     | `gemini-3.8-flash`                                | [aistudio.google.com](https://aistudio.google.com/apikey), or `GEMINI_API_KEY` / `GOOGLE_API_KEY`                                            |
-| OpenRouter        | `openrouter/auto`                                 | [openrouter.ai](https://openrouter.ai/keys), or `OPENROUTER_API_KEY`                                                                         |
-| Requesty          | `anthropic/claude-sonnet-5-5`                     | [app.requesty.ai](https://app.requesty.ai/api-keys), or `REQUESTY_API_KEY`; for the EU, set the **Address** to `https://router.eu.requesty.ai/v1` |
-| Ollama (local)    | `qwen3`                                           | none; the server from `OLLAMA_BASE_URL` (default `http://localhost:11434`)                                                                   |
-| OpenAI-compatible | —                                                 | LM Studio, vLLM, llama.cpp…: `OPENAI_COMPATIBLE_BASE_URL` (default `http://localhost:1234/v1`), with an optional `OPENAI_COMPATIBLE_API_KEY` |
+| Provider | Default model | Key |
+| --- | --- | --- |
+| Anthropic | `claude-opus-5-5` | [console.anthropic.com](https://console.anthropic.com/settings/keys), or `ANTHROPIC_API_KEY` |
+| OpenAI | `gpt-5.5` | [platform.openai.com](https://platform.openai.com/api-keys), or `OPENAI_API_KEY` |
+| ChatGPT (sign in) | the first model in your account’s current catalog | none: **Continue with ChatGPT** to use your ChatGPT plan (desktop app and command line) |
+| Google Gemini | `gemini-3.8-flash` | [aistudio.google.com](https://aistudio.google.com/apikey), or `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
+| OpenRouter | `openrouter/auto` | [openrouter.ai](https://openrouter.ai/keys), or `OPENROUTER_API_KEY` |
+| Requesty | `anthropic/claude-sonnet-5-5` | [app.requesty.ai](https://app.requesty.ai/api-keys), or `REQUESTY_API_KEY`; for the EU, set the **Address** to `https://router.eu.requesty.ai/v1` |
+| TrustedRouter | `trustedrouter/auto` | [trustedrouter.com](https://trustedrouter.com), or `TRUSTEDROUTER_API_KEY` |
+| Opper | `claude-sonnet-5-5` | [platform.opper.ai](https://platform.opper.ai), or `OPPER_API_KEY` |
+| UberLLM | `anthropic/claude-sonnet-5.5` | [uberllm.dev](https://uberllm.dev/signup), or `UBERLLM_API_KEY` |
+| Ollama (local) | `qwen3` | none; the server from `OLLAMA_BASE_URL` (default `http://localhost:11434`) |
+| OpenAI-compatible | — | LM Studio, vLLM, llama.cpp…: `OPENAI_COMPATIBLE_BASE_URL` (default `http://localhost:1234/v1`), with an optional `OPENAI_COMPATIBLE_API_KEY` |
 
 The ↻ button lists the provider's models. The provider and model you last chose in the settings
 are used at start. Until you choose one, `RUSTGIS_ASSISTANT_PROVIDER` and
@@ -253,7 +270,11 @@ fetch the USGS stream gauges in Texas and add them to the map."
   file it writes) waits for **Allow**, **Always allow** (when the agent offers it) or
   **Decline** in its window. **Allow** never becomes a persistent approval: if no once-only
   option exists, use the explicitly labelled **Always allow** or decline. **Approve agents' actions without asking** lets them through
-  instead. Turn it on only if you trust the agent with your computer.
+  instead. Turn it on only if you trust the agent with your computer. With it off, RustGIS
+  sends a task only after confirming an asking or read-only mode; an agent with unknown or
+  missing modes must first report a compatible mode. Turning the setting off during a turn
+  that bypasses approval cancels that turn and requests an asking mode where available.
+  Cancellation cannot recall actions the agent already performed.
 - **RustGIS checks its own tools.** File, network, plugin-command and project-replacement
   requests from a local agent wait for a separate **Allow** or **Decline** in its window.
   Approval applies only to that exact MCP message and that agent's run; a batch is approved or
@@ -265,7 +286,7 @@ fetch the USGS stream gauges in Texas and add them to the map."
   the agent and its inputs. It also selects the agent's own full-access mode where available.
 - **Its work is kept.** Each task gets a folder in `Documents/RustGIS/Agent work`, and what the
   agent adds to the map comes from there. The assistant's reply names the folder.
-- **On the map, it has its thread's permission only.** It reaches the map through the MCP relay
+- **Its relay token carries its thread's permission.** It reaches the map through the MCP relay
   with a token of its own, which RustGIS revokes when the thread ends. **Stop** in its window, or
   **×** in the list, revokes its token immediately and terminates its live process tree on a
   background thread. A reaped leader's old process ID is never signalled.
@@ -321,7 +342,7 @@ can be used only once), and the keychain is read under the same lock.
 Plain HTTP is only used for servers on your computer or local network.
 
 In the web app, the browser calls the provider directly. Anthropic, OpenAI, Gemini,
-OpenRouter and Requesty accept that; a local Ollama server must allow the page's origin
+OpenRouter, Requesty, TrustedRouter, Opper and UberLLM accept that; a local Ollama server must allow the page's origin
 (`OLLAMA_ORIGINS=https://web.rustgis.app ollama serve`).
 
 ## Retries and long conversations
@@ -372,3 +393,10 @@ ACP input uses a bounded background writer queue, so a stalled agent cannot bloc
 buttons or follow-up submission. Queue overflow reports an error instead of blocking. On Linux
 and macOS, an exited leader is observed without reaping until cleanup; its reserved identity
 lets Stop terminate surviving process-group descendants before finally reaping the leader.
+
+Exact approvals can follow an ordered activation of an existing map: later default layers use
+that map's normal selection rules. Layer identities include their owning map, even when two
+maps use the same numeric layer ids. A later step after a map creation, duplication, removal or
+rename cannot yet be frozen without running the change, so an exact approval refuses that
+combined request. Split it into requests, or perform the map change yourself first. Ordinary
+native commands and already allowed execution keep their existing behavior.

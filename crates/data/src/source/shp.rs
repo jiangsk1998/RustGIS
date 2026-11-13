@@ -127,7 +127,7 @@ impl ShpSource {
         }
         let reproject = match crs {
             Some(c) => Reproject::from_crs(c, &mut notes),
-            None => shp_reproject(crate::raster::read_prj(path).as_deref(), &mut notes),
+            None => shp_reproject(crate::raster::read_prj(path).as_deref(), &mut notes)?,
         };
         let extent = if native.is_empty() || !native.min_x.is_finite() { Extent::EMPTY } else { reproject.extent_to_lonlat(&native) };
         if reproject.is_lonlat()
@@ -182,7 +182,7 @@ impl FeatureSource for ShpSource {
         let mut buf = Vec::new();
         let mut row = vec![0u8; self.table.row_len];
         let mut features = Vec::new();
-        let mut skipped = 0;
+        let (mut skipped, mut unread_dates) = (0, Vec::new());
         let (matched, complete) = self.index.visit(bounds, limit, |i, place| {
             if u64::from(place.len) > MAX_RECORD {
                 skipped += 1;
@@ -217,14 +217,14 @@ impl FeatureSource for ShpSource {
                 if row.first() == Some(&b'*') {
                     return Ok(());
                 }
-                self.table.columns.iter().map(|c| value(c, row.get(1 + c.offset..1 + c.offset + c.len).unwrap_or(&[]), &encoding)).collect()
+                self.table.values(&row, &encoding, &mut unread_dates)
             } else {
                 vec![Value::Null; self.table.columns.len()]
             };
             features.push(Feature { id: u64::from(i) + 1, geometry, attrs });
             Ok(())
         })?;
-        Ok(Batch { features, matched, complete, skipped })
+        Ok(Batch { features, matched, complete, skipped, unread_dates })
     }
     fn streams_chunks(&self) -> bool {
         true
@@ -241,7 +241,7 @@ impl FeatureSource for ShpSource {
         let mut dbf = Cursor::open(&self.dbf)?;
         let mut buf = Vec::new();
         let mut row = vec![0u8; self.table.row_len];
-        let mut skipped = 0;
+        let (mut skipped, mut unread_dates) = (0, Vec::new());
         // The same directory, ordering, extent rules and read-only scan fallback as sampled
         // reads, with no interaction row cap. The index visits records without materializing
         // their directory or the complete feature collection in memory.
@@ -281,14 +281,14 @@ impl FeatureSource for ShpSource {
                 if row.first() == Some(&b'*') {
                     return Ok(());
                 }
-                self.table.columns.iter().map(|c| value(c, row.get(1 + c.offset..1 + c.offset + c.len).unwrap_or(&[]), &encoding)).collect()
+                self.table.values(&row, &encoding, &mut unread_dates)
             } else {
                 vec![Value::Null; self.table.columns.len()]
             };
             chunks.push(Feature { id: u64::from(i) + 1, geometry, attrs })
         })?;
         chunks.flush()?;
-        Ok(Batch { features: Vec::new(), matched, complete, skipped })
+        Ok(Batch { features: Vec::new(), matched, complete, skipped, unread_dates })
     }
 }
 
@@ -440,6 +440,7 @@ fn read_table(path: &Path) -> Result<Table> {
             b'I' => FieldType::Integer,
             b'N' | b'F' | b'O' | b'Y' => FieldType::Double,
             b'L' => FieldType::Boolean,
+            b'D' => FieldType::Date,
             _ => FieldType::Text,
         };
         columns.push(Column { ty, offset, len, out });
@@ -449,6 +450,28 @@ fn read_table(path: &Path) -> Result<Table> {
         return Err(bad("the .dbf's fields are wider than its rows"));
     }
     Ok(Table { header_len, row_len, rows, columns, ldid: head.get(29).copied().unwrap_or(0) })
+}
+
+impl Table {
+    /// A row's values (after its deletion flag), counting in `unread_dates` the dates that
+    /// aren't ones ([`Batch::unread_dates`]).
+    fn values(&self, row: &[u8], encoding: &dyn shapefile::dbase::Encoding, unread_dates: &mut Vec<usize>) -> Vec<Value> {
+        let mut out = Vec::with_capacity(self.columns.len());
+        for (k, c) in self.columns.iter().enumerate() {
+            let b = row.get(1 + c.offset..1 + c.offset + c.len).unwrap_or(&[]);
+            out.push(if c.ty == b'D' {
+                crate::dbf::date(b)
+                    .unwrap_or_else(|()| {
+                        super::unread_date(unread_dates, k);
+                        None
+                    })
+                    .map_or(Value::Null, Value::Date)
+            } else {
+                value(c, b, encoding)
+            });
+        }
+        out
+    }
 }
 
 /// The `.dbf`'s column names, in order (read again: the layout above keeps only offsets).
@@ -475,7 +498,8 @@ fn trimmed(b: &[u8]) -> &[u8] {
     b.get(start..end).unwrap_or(&[])
 }
 
-/// One `.dbf` value, as a Shapefile read whole gives it (blank and unreadable values are null).
+/// One `.dbf` value, as a Shapefile read whole gives it (blank and unreadable values are null;
+/// [`Table::values`] counts the dates).
 fn value(c: &Column, b: &[u8], encoding: &dyn shapefile::dbase::Encoding) -> Value {
     let text = || encoding.decode(trimmed(b)).unwrap_or_else(|_| String::from_utf8_lossy(trimmed(b))).into_owned();
     let number = || {
@@ -510,16 +534,7 @@ fn value(c: &Column, b: &[u8], encoding: &dyn shapefile::dbase::Encoding) -> Val
             Some(b'0' | b'F' | b'f' | b'N' | b'n') => Value::Bool(false),
             _ => Value::Null,
         },
-        b'D' => {
-            let t = trimmed(b);
-            match t.get(..8) {
-                Some(d) if d.iter().all(u8::is_ascii_digit) => {
-                    let part = |r: std::ops::Range<usize>| String::from_utf8_lossy(d.get(r).unwrap_or(&[])).into_owned();
-                    Value::Text(format!("{}-{}-{}", part(0..4), part(4..6), part(6..8)))
-                }
-                _ => Value::Null,
-            }
-        }
+        b'D' => crate::dbf::date(b).ok().flatten().map_or(Value::Null, Value::Date),
         // Memos (in a `.dbt` beside the file), date-times and binary fields aren't read.
         b'M' | b'T' | b'@' | b'B' | b'G' | b'P' => Value::Null,
         _ => {
@@ -529,22 +544,27 @@ fn value(c: &Column, b: &[u8], encoding: &dyn shapefile::dbase::Encoding) -> Val
     }
 }
 
-/// The coordinate system in a `.prj`, with what couldn't be understood said in the notes.
-fn shp_reproject(prj: Option<&str>, notes: &mut Vec<String>) -> Reproject {
-    let crs = match prj.map(crate::raster::wkt::read_wkt) {
+/// The coordinate system in a `.prj`, with what couldn't be understood said in the notes. Another
+/// body's system that can't be read is an error, as when the file is read whole.
+fn shp_reproject(prj: Option<&str>, notes: &mut Vec<String>) -> Result<Reproject> {
+    use crate::raster::planetary;
+    let crs = match prj.map(|p| (p, crate::raster::wkt::read_wkt(p))) {
         None => crate::raster::Crs::LonLat,
-        Some(Ok((c, note))) => {
+        Some((_, Ok((c, note)))) => {
             if let Some(n) = note {
                 notes.push(format!("the .prj file: {n}"));
             }
             c
         }
-        Some(Err(e)) => {
+        Some((p, Err(e))) => {
+            if let Some(refused) = planetary::refused_wkt(p, &e) {
+                return Err(DataError::Format(format!("the .prj file: {refused}")));
+            }
             notes.push(format!("the .prj file: {e}; coordinates are read as longitude/latitude"));
             crate::raster::Crs::LonLat
         }
     };
-    Reproject::from_crs(crs, notes)
+    Ok(Reproject::from_crs(crs, notes))
 }
 
 #[cfg(test)]

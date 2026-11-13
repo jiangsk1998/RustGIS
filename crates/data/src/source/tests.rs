@@ -1,8 +1,307 @@
 use super::*;
+use crate::raster::wkt::tests::{PlacementCase, metres_apart, placement_cases};
 use crate::{Dataset, Field, FieldType, Geometry, Value, wkb};
 use rustgis_geom::{Coord, lonlat_to_merc};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+#[test]
+fn explicit_method_1028_warns_for_known_geopackage_authorities() {
+    let wkt = r#"PROJCRS["World EQC",BASEGEOGCRS["WGS 84",DATUM["WGS_1984",ELLIPSOID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0]],CONVERSION["EQC",METHOD["Equidistant Cylindrical",ID["EPSG",1028]]],CS[Cartesian,2],AXIS["Easting",east],AXIS["Northing",north],LENGTHUNIT["metre",1]]"#;
+    let sphere = wkt.replace("298.257223563", "0");
+    let wkt1 = crate::raster::wkt::to_wkt(Crs::from_epsg(4087).unwrap()).unwrap();
+    for (definition, code, warned) in [(wkt, 4087, true), (&sphere, 4087, false), (&wkt1, 4087, false), (wkt, 3857, false)] {
+        let mut notes = Vec::new();
+        let row =
+            GpkgSrs { organization: Some("EPSG".into()), code: Some(code), definition: Some(definition.into()), definition_12_063: None };
+        let read = gpkg_reproject(100001, Some(row), &mut notes).unwrap();
+        assert_eq!(notes.iter().filter(|n| n.contains("EPSG method 1028")).count(), usize::from(warned), "{definition}: {notes:?}");
+        if warned {
+            assert!(
+                notes[0].contains("srs_id 100001")
+                    && notes[0].contains("PROJ/GDAL")
+                    && notes[0].contains("using EPSG:4087 parameters in preference to the WKT definition"),
+                "{notes:?}"
+            );
+            let point = Geometry::Point(Coord::new(0.0, 5_009_377.085_697_311));
+            let Geometry::Point(at) = read.geometry(point).unwrap() else { panic!("not a point") };
+            assert!(at.x.abs() < 1e-9 && (at.y - 45.0).abs() < 1e-9, "{at:?}");
+        }
+    }
+    // The WKT1 names the method when the WKT2 can't be parsed: still said. A WKT2 that is read
+    // counts, also when the WKT1 says otherwise (here, on a sphere: nothing to say).
+    for (wkt2, warned) in
+        [("GEOGCRS[", true), (r#"ENGCRS["site",EDATUM["site"]]"#, true), (&wkt.replace(r#",ID["EPSG",1028]"#, ""), true), (&sphere, false)]
+    {
+        assert_ne!(wkt2, wkt);
+        let mut notes = Vec::new();
+        let row = GpkgSrs {
+            organization: Some("EPSG".into()),
+            code: Some(4087),
+            definition: Some(wkt.into()),
+            definition_12_063: Some(wkt2.into()),
+        };
+        gpkg_reproject(100001, Some(row), &mut notes).unwrap();
+        assert_eq!(notes.iter().filter(|n| n.contains("EPSG method 1028")).count(), usize::from(warned), "{wkt2}: {notes:?}");
+    }
+}
+
+/// PROJ 9.8.1's WKT2 for EPSG:23031 (ED50 / UTM zone 31N), without its usage.
+pub(crate) const ED50_UTM31: &str = r#"PROJCRS["ED50 / UTM zone 31N",BASEGEOGCRS["ED50",DATUM["European Datum 1950",ELLIPSOID["International 1924",6378388,297,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4230]],CONVERSION["UTM zone 31N",METHOD["Transverse Mercator",ID["EPSG",9807]],PARAMETER["Latitude of natural origin",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8801]],PARAMETER["Longitude of natural origin",3,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8802]],PARAMETER["Scale factor at natural origin",0.9996,SCALEUNIT["unity",1],ID["EPSG",8805]],PARAMETER["False easting",500000,LENGTHUNIT["metre",1],ID["EPSG",8806]],PARAMETER["False northing",0,LENGTHUNIT["metre",1],ID["EPSG",8807]]],CS[Cartesian,2],AXIS["(E)",east,ORDER[1],LENGTHUNIT["metre",1]],AXIS["(N)",north,ORDER[2],LENGTHUNIT["metre",1]],ID["EPSG",23031]]"#;
+
+/// NAD 27 longitude/latitude in WKT2. Its shift to WGS 84 is a grid, so RustGIS knows none.
+const NAD27_WKT2: &str = r#"GEOGCRS["NAD27",DATUM["North American Datum 1927",ELLIPSOID["Clarke 1866",6378206.4,294.978698213898]],CS[ellipsoidal,2],AXIS["lat",north],AXIS["lon",east],ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",4267]]"#;
+
+/// [`ED50_UTM31`] bound to WGS 84 by Spain's NTv2 grid from ED50 (PROJ reads it).
+pub(crate) fn ed50_utm31_bound() -> String {
+    format!(
+        r#"BOUNDCRS[SOURCECRS[{ED50_UTM31}],TARGETCRS[GEOGCRS["WGS 84",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],CS[ellipsoidal,2],AXIS["latitude",north,ORDER[1],ANGLEUNIT["degree",0.0174532925199433]],AXIS["longitude",east,ORDER[2],ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4326]]],ABRIDGEDTRANSFORMATION["ED50 to WGS 84 (NTv2)",METHOD["NTv2",ID["EPSG",9615]],PARAMETERFILE["Latitude and longitude difference file","SPED2ETV2.gsb",ID["EPSG",8656]]]]"#
+    )
+}
+
+/// A GeoPackage row read by its EPSG code (ED50 / UTM zone 31N, EPSG:23031) whose definition binds
+/// it to WGS 84 by an NTv2 grid (Spain's, from ED50) is still read by the code, and says the grid
+/// isn't applied, as `read_wkt` would; with the system alone as its definition it says nothing
+/// (#1678).
+#[test]
+fn a_geopackage_row_read_by_its_code_says_its_definitions_grid() {
+    let bound = ed50_utm31_bound();
+    // Read by its code, whose own Helmert shift stands in for the grid.
+    let said = "its coordinate system (srs_id 100001): the definition's NTv2 transformation to WGS 84 (SPED2ETV2.gsb) isn't applied; EPSG:23031's own shift to WGS 84 is used in its place, so positions may be off by the difference between the two";
+    // Near Barcelona, where EPSG:23031 (and its own Helmert shift) places it.
+    let xy = Coord::new(430_000.0, 4_580_000.0);
+    let by_code = Crs::from_epsg(23031).unwrap().transformer().unwrap().to_lonlat(xy).unwrap();
+    for (definition, wkt2, notice) in [(bound.as_str(), false, true), (bound.as_str(), true, true), (ED50_UTM31, false, false)] {
+        let mut notes = Vec::new();
+        let row = GpkgSrs {
+            organization: Some("EPSG".into()),
+            code: Some(23031),
+            definition: (!wkt2).then(|| definition.into()),
+            definition_12_063: wkt2.then(|| definition.into()),
+        };
+        let read = gpkg_reproject(100001, Some(row), &mut notes).unwrap();
+        assert_eq!(notes, if notice { vec![said] } else { vec![] }, "{definition}");
+        let Geometry::Point(at) = read.geometry(Geometry::Point(xy)).unwrap() else { panic!("not a point") };
+        assert!((at.x - by_code.x).abs() < 1e-9 && (at.y - by_code.y).abs() < 1e-9, "{at:?} {by_code:?}");
+    }
+}
+
+/// EPSG:27700's own shift to WGS 84, as RustGIS writes it in WKT1.
+const BNG_SHIFT: &str = "TOWGS84[446.448,-125.157,542.06,0.15,0.247,0.842,-20.489]";
+
+/// A GeoPackage row's EPSG code is used as a `.prj`'s own `AUTHORITY` is (#1677): when its
+/// definition gives no shift to WGS 84, or the code's own, with nothing to say. Another shift is
+/// read from the definition: a `TOWGS84`, a WKT2 `BOUNDCRS`'s over a WKT1 with the code's own, or
+/// a shift of zero, which is said. A definition that can't be read with its shift leaves the code,
+/// said; so does one that can't be parsed, as it is without a code. One that parses but whose
+/// system can't be read from its parameters leaves the code silently: its shift is the code's.
+#[test]
+fn a_geopackage_rows_code_gives_way_to_its_definitions_shift() {
+    use crate::raster::wkt::tests::{WGS84_WKT2, bound_crs};
+    use crate::raster::wkt::{read_wkt, to_wkt};
+    let row = |code: i64, definition: &str, wkt2: Option<&str>| GpkgSrs {
+        organization: Some("EPSG".into()),
+        code: Some(code),
+        definition: Some(definition.into()),
+        definition_12_063: wkt2.map(Into::into),
+    };
+    let read = |row: GpkgSrs| {
+        let mut notes = Vec::new();
+        let read = gpkg_reproject(100001, Some(row), &mut notes).unwrap();
+        (read, notes)
+    };
+    // Where a reading puts `xy`, and where a `.prj` of `wkt` would.
+    let at = |r: &Reproject, xy: Coord| match r.geometry(Geometry::Point(xy)) {
+        Some(Geometry::Point(c)) => c,
+        g => panic!("{g:?}"),
+    };
+    let prj = |wkt: &str, xy: Coord| read_wkt(wkt).unwrap().0.transformer().unwrap().to_lonlat(xy).unwrap();
+    // In England, in British National Grid metres.
+    let xy = Coord::new(450_000.0, 250_000.0);
+    let by_code = Crs::Epsg(27700).transformer().unwrap().to_lonlat(xy).unwrap();
+    let bng = to_wkt(Crs::Epsg(27700)).unwrap();
+    assert!(bng.contains(BNG_SHIFT), "{bng}");
+    let unshifted = bng.replace(&format!(",{BNG_SHIFT}"), "");
+    assert_ne!(unshifted, bng);
+    for definition in [&bng, &unshifted] {
+        let (r, notes) = read(row(27700, definition, None));
+        assert_eq!(r.crs, Crs::Epsg(27700));
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+    // Another `TOWGS84` puts the point some 4 m from where the code's does.
+    let other = bng.replace(BNG_SHIFT, "TOWGS84[375,-111,431,0,0,0,0]");
+    let (r, notes) = read(row(27700, &other, None));
+    assert!(metres_apart(at(&r, xy), prj(&other, xy)) < 0.001 && metres_apart(at(&r, xy), by_code) > 1.0, "{:?}", at(&r, xy));
+    assert!(notes.is_empty(), "{notes:?}");
+    // A WKT2 `BOUNDCRS` (ED50 / UTM zone 31N, near Barcelona) with another Helmert shift than
+    // EPSG:23031's counts over the code's own WKT1.
+    let xy = Coord::new(430_000.0, 4_580_000.0);
+    let bound = bound_crs(ED50_UTM31, WGS84_WKT2, &[-100.0, -100.0, -100.0]);
+    let (r, notes) = read(row(23031, &to_wkt(Crs::Epsg(23031)).unwrap(), Some(&bound)));
+    let by_code = Crs::Epsg(23031).transformer().unwrap().to_lonlat(xy).unwrap();
+    assert!(metres_apart(at(&r, xy), prj(&bound, xy)) < 0.001 && metres_apart(at(&r, xy), by_code) > 1.0, "{:?}", at(&r, xy));
+    assert!(notes.is_empty(), "{notes:?}");
+    // A shift of zero where the code has one.
+    let (r, notes) = read(row(27700, &bng.replace(BNG_SHIFT, "TOWGS84[0,0,0,0,0,0,0]"), None));
+    assert!(matches!(r.crs, Crs::Custom(_)), "{:?}", r.crs);
+    assert_eq!(
+        notes,
+        [
+            "its coordinate system (srs_id 100001): the file gives a shift of zero to WGS 84, which is used in place of EPSG:27700's transformation"
+        ]
+    );
+    // A projection that can't be read from its parameters, with its own shift: the code, said.
+    let unread = other.replace(r#"PROJECTION["Transverse_Mercator"]"#, r#"PROJECTION["Unheard_Of"]"#);
+    assert_ne!(unread, other);
+    let (r, notes) = read(row(27700, &unread, None));
+    assert_eq!(r.crs, Crs::Epsg(27700));
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0]
+            .starts_with("its coordinate system (srs_id 100001): the file's own shift to WGS 84 is set aside for EPSG:27700's, because"),
+        "{notes:?}"
+    );
+    // Text that isn't WKT, said as without a code.
+    let (r, notes) = read(row(27700, "PROJCS[", None));
+    assert_eq!(r.crs, Crs::Epsg(27700));
+    let e = read_wkt("PROJCS[").unwrap_err();
+    assert_eq!(notes, [format!("its coordinate system (srs_id 100001): its definition can't be read ({e}), so EPSG:27700 is used")]);
+    // Hungary's EOV (EPSG:23700) as ArcGIS writes it: the method isn't read from its parameters, but
+    // the code names the system.
+    let (r, notes) = read(row(23700, EOV_ESRI, None));
+    assert!(read_wkt(EOV_ESRI).is_err());
+    assert_eq!(r.crs, Crs::Epsg(23700));
+    assert!(notes.is_empty(), "{notes:?}");
+}
+
+/// EPSG:23700 in Esri's WKT, with no `AUTHORITY`, by a method `read_wkt` doesn't read.
+const EOV_ESRI: &str = r#"PROJCS["Hungarian_1972_Egyseges_Orszagos_Vetuleti",GEOGCS["GCS_Hungarian_1972",DATUM["D_Hungarian_1972",SPHEROID["GRS_1967",6378160.0,298.247167427]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Hotine_Oblique_Mercator_Azimuth_Center"],PARAMETER["False_Easting",650000.0],PARAMETER["False_Northing",200000.0],PARAMETER["Scale_Factor",0.99993],PARAMETER["Azimuth",90.0],PARAMETER["Longitude_Of_Center",19.0485717777778],PARAMETER["Latitude_Of_Center",47.1443937222222],UNIT["Meter",1.0]]"#;
+
+/// A GeoPackage row's WKT2 that can't be read is said as it is without a code (#1677), with what is
+/// used in its place: the WKT1 when it is read in place of the row's code, else the code. A WKT2
+/// that is read says nothing of the kind.
+#[test]
+fn a_geopackage_rows_unread_wkt2_is_said_beside_its_code() {
+    use crate::raster::wkt::tests::{WGS84_WKT2, bound_crs};
+    use crate::raster::wkt::{read_wkt, to_wkt};
+    let row = |code: Option<i64>, definition: &str, wkt2: &str| GpkgSrs {
+        organization: code.map(|_| "EPSG".into()),
+        code,
+        definition: Some(definition.into()),
+        definition_12_063: Some(wkt2.into()),
+    };
+    let read = |row: GpkgSrs| {
+        let mut notes = Vec::new();
+        let read = gpkg_reproject(100001, Some(row), &mut notes).unwrap();
+        (read, notes)
+    };
+    let other = to_wkt(Crs::Epsg(27700)).unwrap().replace(BNG_SHIFT, "TOWGS84[375,-111,431,0,0,0,0]");
+    assert!(other.contains("TOWGS84[375,"), "{other}");
+    let (r, notes) = read(row(Some(27700), &other, "PROJCRS["));
+    assert_eq!(Ok(r.crs), read_wkt(&other).map(|r| r.0));
+    assert!(matches!(r.crs, Crs::Custom(_)), "{:?}", r.crs);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].starts_with("its coordinate system (srs_id 100001): its WKT2 definition can't be read (")
+            && notes[0].ends_with("), so its WKT1 definition is used"),
+        "{notes:?}"
+    );
+    // The same notice as without a code.
+    assert_eq!(read(row(None, &other, "PROJCRS[")).1, notes);
+    // And when the code is used: the WKT1 gives the code's own shift, or none, or there is none.
+    let by_code = notes[0].replace("so its WKT1 definition is used", "so EPSG:27700 is used");
+    let bng = to_wkt(Crs::Epsg(27700)).unwrap();
+    for wkt1 in [Some(bng.clone()), Some(bng.replace(&format!(",{BNG_SHIFT}"), "")), None] {
+        let (r, used) = read(GpkgSrs { definition: wkt1, ..row(Some(27700), "", "PROJCRS[") });
+        assert_eq!(r.crs, Crs::Epsg(27700));
+        assert_eq!(used, [by_code.as_str()]);
+    }
+    // A WKT2 bound to a system whose shift to WGS 84 isn't known can't be read either. Its
+    // transformation is passed over with it, which the notice says.
+    let unknown = bound_crs(ED50_UTM31, NAD27_WKT2, &[-100.0, -100.0, -100.0]);
+    let ed50 = to_wkt(Crs::Epsg(23031)).unwrap();
+    let (r, notes) = read(row(Some(23031), &ed50, &unknown));
+    assert_eq!(r.crs, Crs::Epsg(23031));
+    assert_eq!(
+        notes,
+        [
+            "its coordinate system (srs_id 100001): its WKT2 definition can't be read (the shift from NAD27 to WGS 84 isn't known), so EPSG:23031 is used"
+        ]
+    );
+    // A WKT2 that is read, with another shift than the code's, says nothing of the WKT1.
+    let bound = bound_crs(ED50_UTM31, WGS84_WKT2, &[-100.0, -100.0, -100.0]);
+    let (r, notes) = read(row(Some(23031), &other, &bound));
+    assert_eq!(Ok(r.crs), read_wkt(&bound).map(|r| r.0));
+    assert!(notes.is_empty(), "{notes:?}");
+    // Nor does one that leaves the code in use, whatever the WKT1 beside it.
+    for wkt1 in [ed50.as_str(), "PROJCS["] {
+        let (r, notes) = read(row(Some(23031), wkt1, ED50_UTM31));
+        assert_eq!(r.crs, Crs::Epsg(23031));
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+}
+
+/// A GeoPackage row whose only definition is a `BOUNDCRS` that can't be read with its
+/// transformation (to a system whose shift to WGS 84 isn't known) is read by its code, and says
+/// that the definition's shift is set aside (#1677). Without a code it is read as
+/// longitude/latitude, said.
+#[test]
+fn a_geopackage_rows_unread_bound_definition_is_said_beside_its_code() {
+    use crate::raster::wkt::tests::bound_crs;
+    let row = |code: Option<i64>, definition: &str, wkt2: Option<&str>| GpkgSrs {
+        organization: code.map(|_| "EPSG".into()),
+        code,
+        definition: Some(definition.into()),
+        definition_12_063: wkt2.map(Into::into),
+    };
+    let read = |row: GpkgSrs| {
+        let mut notes = Vec::new();
+        let read = gpkg_reproject(100001, Some(row), &mut notes).unwrap();
+        (read, notes)
+    };
+    let unknown = bound_crs(ED50_UTM31, NAD27_WKT2, &[-100.0, -100.0, -100.0]);
+    let set_aside = "its coordinate system (srs_id 100001): the file's own shift to WGS 84 is set aside for EPSG:23031's, because the shift from NAD27 to WGS 84 isn't known";
+    // As the WKT2 beside a `definition` that defines nothing, and as the `definition` itself.
+    for (definition, wkt2) in [("undefined", Some(unknown.as_str())), (unknown.as_str(), None)] {
+        let (r, notes) = read(row(Some(23031), definition, wkt2));
+        assert_eq!(r.crs, Crs::Epsg(23031));
+        assert_eq!(notes, [set_aside]);
+        let (r, notes) = read(row(None, definition, wkt2));
+        assert_eq!(r.crs, Crs::LonLat);
+        assert_eq!(
+            notes,
+            [
+                "its coordinate system (srs_id 100001) can't be read (the shift from NAD27 to WGS 84 isn't known); read as longitude/latitude"
+            ]
+        );
+    }
+    // A definition that can't be read and holds a transformation bound to no system gives no
+    // shift to set aside: the code, said only as a definition that can't be read.
+    let unbound = r#"COMPOUNDCRS["no horizontal part",ABRIDGEDTRANSFORMATION["t",PARAMETER["X-axis translation",375]]]"#;
+    let (r, notes) = read(row(Some(23031), unbound, None));
+    assert_eq!(r.crs, Crs::Epsg(23031));
+    assert_eq!(
+        notes,
+        [
+            "its coordinate system (srs_id 100001): its definition can't be read (the compound coordinate system has no horizontal part), so EPSG:23031 is used"
+        ]
+    );
+}
+
+/// A database layer's `crs` is read by its EPSG code. WKT whose system has one but binds it to WGS
+/// 84 by a grid (ED50 / UTM zone 31N, by Spain's) says the grid isn't applied; a code, or the
+/// system alone, says nothing; text without a code is refused, as before (#1678).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_database_crs_read_by_its_code_says_its_definitions_grid() {
+    let said = "crs: the definition's NTv2 transformation to WGS 84 (SPED2ETV2.gsb) isn't applied; EPSG:23031's own shift to WGS 84 is used in its place, so positions may be off by the difference between the two";
+    assert_eq!(given_epsg(&ed50_utm31_bound()).unwrap(), (23031, Some(said.to_string())));
+    assert_eq!(given_epsg(ED50_UTM31).unwrap(), (23031, None));
+    assert_eq!(given_epsg("EPSG:23031").unwrap(), (23031, None));
+    for refused in [crate::raster::wkt::tests::BOUND_BY_A_GRID, "Mercator"] {
+        assert_eq!(given_epsg(refused).unwrap_err().to_string(), format!("'{refused}': give the coordinate system as EPSG:<code>"));
+    }
+}
 
 #[test]
 fn file_geodatabase_names() {
@@ -54,6 +353,12 @@ fn in_box(e: &Extent) -> usize {
 fn dir() -> PathBuf {
     let d = std::env::temp_dir().join(format!("rustgis-source-tests-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
+    // Private to this user: a Shapefile's index cache refuses a folder others may write to.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     d
 }
 
@@ -535,6 +840,112 @@ fn whole_reads_by_chunk_stay_within_the_memory_budget() {
     }
 }
 
+/// A GeoParquet column in another body's system (PROJJSON, as PROJ writes IAU_2015) is read as
+/// its longitude/latitude with a notice, refused when its coordinates are projected or count west,
+/// and an EPSG one says nothing of bodies.
+#[test]
+fn geoparquet_planetary_systems_are_said_or_refused() {
+    let d = dir().join("parquet-planetary");
+    std::fs::create_dir_all(&d).unwrap();
+    let body = |m: &String| m.contains("belongs to another body than the Earth");
+    let mars = |kind: &str, code: u32, lon: &str| {
+        format!(
+            r#"["Point"],"crs":{{"type":"{kind}","name":"Mars (2015)","datum":{{"type":"GeodeticReferenceFrame","name":"Mars (2015) - Sphere","ellipsoid":{{"name":"Mars (2015) - Sphere","radius":3396190}}}},"coordinate_system":{{"subtype":"ellipsoidal","axis":[{{"name":"Geodetic latitude","direction":"north","unit":"degree"}},{{"name":"Geodetic longitude","direction":"{lon}","unit":"degree"}}]}},"id":{{"authority":"IAU","version":2015,"code":{code}}}}}"#
+        )
+    };
+    let p = d.join("mars.parquet");
+    write_parquet_typed(&p, false, &mars("GeographicCRS", 49900, "east"));
+    let src = open_path(&p, None).unwrap();
+    assert_eq!(src.info().notes.iter().filter(|m| body(m)).count(), 1, "{:?}", src.info().notes);
+    assert!(!src.info().notes.iter().any(|m| m.contains("no EPSG code")), "{:?}", src.info().notes);
+    let (ds, _) = materialize(src.as_ref()).unwrap();
+    assert_eq!(
+        ds.features.iter().filter_map(|f| f.geometry.as_ref()?.label_point()).collect::<Vec<_>>(),
+        points().iter().map(|p| p.0).collect::<Vec<_>>()
+    );
+    // The definition goes before the code: a projected or mirrored one under a planetocentric
+    // code is refused too.
+    for (kind, code, lon, why) in [
+        ("ProjectedCRS", 49910, "east", "metres"),
+        ("GeographicCRS", 49901, "west", "west"),
+        ("ProjectedCRS", 49900, "east", "metres"),
+        ("GeographicCRS", 49900, "west", "west"),
+    ] {
+        write_parquet_typed(&p, false, &mars(kind, code, lon));
+        let e = open_path(&p, None).err().unwrap().to_string();
+        assert!(e.contains("belongs to another body than the Earth") && e.contains(why), "{kind} {code} {lon}: {e}");
+    }
+    let no_id = |s: String| s.replace(r#","id":{"authority":"IAU","version":2015,"code":49900}"#, "");
+    // Latitudes counted south, by code or by ellipsoid.
+    for crs in [mars("GeographicCRS", 49900, "east"), no_id(mars("GeographicCRS", 49900, "east"))] {
+        write_parquet_typed(&p, false, &crs.replace(r#""direction":"north""#, r#""direction":"south""#));
+        let e = open_path(&p, None).err().unwrap().to_string();
+        assert!(e.contains("belongs to another body than the Earth") && e.contains("south"), "{e}");
+    }
+    // By its ellipsoid alone (no IAU code): said by the ellipsoid, not by a code it hasn't; and an
+    // Earth one.
+    write_parquet_typed(&p, false, &no_id(mars("GeographicCRS", 49900, "east")));
+    let notes = open_path(&p, None).unwrap().info().notes.clone();
+    let said: Vec<&String> = notes.iter().filter(|m| body(m)).collect();
+    assert_eq!(said.len(), 1, "{notes:?}");
+    assert!(said[0].contains("as only its ellipsoid says") && !said[0].contains("code"), "{said:?}");
+    write_parquet_typed(&p, false, r#"["Point"],"crs":{"type":"GeographicCRS","name":"WGS 84","id":{"authority":"EPSG","code":4326}}"#);
+    assert!(open_path(&p, None).unwrap().info().notes.is_empty());
+
+    // Its coordinate system's own axes, by code or by ellipsoid: geocentric X/Y/Z, and
+    // longitude/latitude in another unit than degrees, would be read as degrees, so are refused.
+    let axes = |kind: &str, id: &str, cs: &str| {
+        format!(
+            r#"["Point"],"crs":{{"type":"{kind}","name":"Mars (2015)","datum":{{"type":"GeodeticReferenceFrame","name":"Mars (2015) - Sphere","ellipsoid":{{"name":"Mars (2015) - Sphere","radius":3396190}}}},"coordinate_system":{cs}{id}}}"#
+        )
+    };
+    const IAU: &str = r#","id":{"authority":"IAU","version":2015,"code":49900}"#;
+    let lonlat = |lat: &str, lon: &str| {
+        format!(
+            r#"{{"subtype":"ellipsoidal","axis":[{{"name":"Geodetic latitude","abbreviation":"Lat","direction":"north","unit":{lat}}},{{"name":"Geodetic longitude","abbreviation":"Lon","direction":"east","unit":{lon}}}]}}"#
+        )
+    };
+    let xyz = r#"{"subtype":"Cartesian","axis":[{"name":"Geocentric X","abbreviation":"X","direction":"geocentricX","unit":"metre"},{"name":"Geocentric Y","abbreviation":"Y","direction":"geocentricY","unit":"metre"},{"name":"Geocentric Z","abbreviation":"Z","direction":"geocentricZ","unit":"metre"}]}"#;
+    let grad = r#"{"type":"AngularUnit","name":"grad","conversion_factor":0.015707963267949}"#;
+    let degree = r#"{"type":"AngularUnit","name":"degree","conversion_factor":0.0174532925199433}"#;
+    for id in ["", IAU] {
+        for (kind, cs, why) in [
+            ("GeodeticCRS", xyz.to_string(), "geocentric X/Y/Z"),
+            ("GeographicCRS", lonlat(r#""radian""#, r#""radian""#), "in radian, not degrees"),
+            ("GeographicCRS", lonlat(r#""degree""#, grad), "in grad, not degrees"),
+        ] {
+            write_parquet_typed(&p, false, &axes(kind, id, &cs));
+            let e = open_path(&p, None).err().unwrap().to_string();
+            assert!(e.contains("belongs to another body than the Earth") && e.contains(why), "{kind} {id}: {e}");
+            let bytes = std::fs::read(&p).unwrap();
+            assert!(open_bytes("mars.parquet", bytes, None).err().unwrap().to_string().contains(why), "{kind} {id}");
+        }
+        // Degrees, by name or by factor; a geodetic system on ellipsoidal or spherical axes; and an
+        // ellipsoidal height in metres: read, with the notice.
+        let height = lonlat(r#""degree""#, r#""degree""#)
+            .replace("]}", r#",{"name":"Ellipsoidal height","abbreviation":"h","direction":"up","unit":"metre"}]}"#);
+        for (kind, cs) in [
+            ("GeodeticCRS", lonlat(r#""degree""#, r#""degree""#)),
+            ("GeodeticCRS", lonlat(r#""degree""#, r#""degree""#).replace("ellipsoidal", "spherical")),
+            ("GeographicCRS", lonlat(degree, r#"{"name":"degree"}"#)),
+            ("GeographicCRS", lonlat(r#""Degree""#, r#""deg""#)),
+            ("GeographicCRS", height),
+        ] {
+            write_parquet_typed(&p, false, &axes(kind, id, &cs));
+            let src = open_path(&p, None).unwrap_or_else(|e| panic!("{kind} {cs} {id}: {e}"));
+            assert_eq!(src.info().notes.iter().filter(|m| body(m)).count(), 1, "{kind} {cs} {id}: {:?}", src.info().notes);
+            let (ds, _) = materialize(src.as_ref()).unwrap();
+            assert_eq!(ds.features.len(), points().len());
+        }
+    }
+    // An Earth system, in radians or as X/Y/Z, says nothing of bodies (it is read as before).
+    for cs in [lonlat(r#""radian""#, r#""radian""#), xyz.to_string()] {
+        write_parquet_typed(&p, false, &axes("GeographicCRS", "", &cs).replace("3396190", "6378137"));
+        let notes = open_path(&p, None).unwrap().info().notes.clone();
+        assert!(!notes.iter().any(body), "{notes:?}");
+    }
+}
+
 #[test]
 fn geoparquet_with_and_without_a_covering() {
     let d = dir();
@@ -598,6 +1009,38 @@ fn geoparquet_refuses_invalid_column_ranges() {
             assert!(matches!(open_url_blocking(&url), Err(DataError::Format(_))));
         }
     }
+}
+
+/// A dictionary page whose header says it holds two billion values is refused before the `parquet`
+/// crate makes room for them (64 GB for a binary column; fuzzing, #1498). The page patched is the
+/// file's last column chunk, so no other chunk moves.
+#[test]
+fn geoparquet_refuses_dictionary_counts_its_page_cannot_hold() {
+    use ::parquet::file::reader::{FileReader, SerializedFileReader};
+    let path = dir().join("dictionary-count.parquet");
+    write_parquet(&path, false);
+    let original = std::fs::read(&path).unwrap();
+    assert!(crate::io::read_layers("x.parquet", &original).is_ok());
+    let md = SerializedFileReader::new(bytes::Bytes::copy_from_slice(&original)).unwrap().metadata().clone();
+    let mut groups = md.row_groups().to_vec();
+    let last = groups.len() - 1;
+    let mut cols = groups[last].columns().to_vec();
+    let geometry = cols.len() - 1;
+    let start = cols[geometry].dictionary_page_offset().unwrap() as usize;
+    // In the page header, the dictionary page header (field 7, a struct) and its first field, the
+    // count (an i32 varint).
+    let at = start + original[start..].windows(2).position(|w| w == [0x4c, 0x15]).unwrap() + 2;
+    let end = at + original[at..].iter().position(|b| b & 0x80 == 0).unwrap() + 1;
+    let count = [0x80, 0xd0, 0xac, 0xf3, 0x0e]; // zigzag(2_000_000_000)
+    let grown = (count.len() - (end - at)) as i64;
+    let mut bytes = [&original[..at], &count, &original[end..start + cols[geometry].compressed_size() as usize]].concat();
+    let size = cols[geometry].compressed_size() + grown;
+    cols[geometry] = cols[geometry].clone().into_builder().set_total_compressed_size(size).build().unwrap();
+    groups[last] = groups[last].clone().into_builder().set_column_metadata(cols).build().unwrap();
+    let md = md.into_builder().set_row_groups(groups).build();
+    ::parquet::file::metadata::ParquetMetaDataWriter::new(&mut bytes, &md).finish().unwrap();
+    let error = crate::io::read_layers("x.parquet", &bytes).err().unwrap().to_string();
+    assert!(error.contains("dictionary page says it holds 2000000000 values"), "{error}");
 }
 
 #[test]
@@ -938,6 +1381,207 @@ fn a_gpkg_system_without_an_epsg_code_is_read_from_its_definition() {
     }
 }
 
+/// [`write_custom_srs_gpkg`] with its point at `xy` and, when given, `wkt2` in the column
+/// GeoPackage 1.2's `gpkg_crs_wkt` extension adds for WKT2, `definition_12_063`.
+fn write_wkt2_srs_gpkg(path: &Path, definition: &str, wkt2: Option<&str>, xy: Coord) {
+    write_custom_srs_gpkg(path, "CUSTOM", 0, definition);
+    let c = rusqlite::Connection::open(path).unwrap();
+    let mut blob = b"GP\x00\x01".to_vec();
+    blob.extend_from_slice(&300_001i32.to_le_bytes());
+    blob.extend(wkb::encode(&Geometry::Point(xy)));
+    c.execute("UPDATE via SET geom = ?1", [blob]).unwrap();
+    if let Some(wkt2) = wkt2 {
+        c.execute("ALTER TABLE gpkg_spatial_ref_sys ADD COLUMN definition_12_063 TEXT", []).unwrap();
+        c.execute("UPDATE gpkg_spatial_ref_sys SET definition_12_063 = ?1", [wkt2]).unwrap();
+    }
+}
+
+/// The point a reader read, said to be within a centimetre of `lonlat`.
+fn assert_placed(what: &str, geometry: Option<&Geometry>, lonlat: Coord) {
+    let Some(Geometry::Point(c)) = geometry else { panic!("{what}: {geometry:?}") };
+    let off = metres_apart(*c, lonlat);
+    assert!(off < 0.01, "{what}: {off} m off");
+}
+
+/// #1486: the placement cases, each read from a Shapefile's `.prj` (in place and whole) and a
+/// GeoPackage's definition, on the desktop and in the browser: WKT1 in `definition`, WKT2 in
+/// `definition_12_063`.
+#[test]
+fn placement_cases_are_placed_from_a_prj_and_a_geopackage() {
+    let d = dir().join("placement");
+    std::fs::create_dir_all(&d).unwrap();
+    for (i, PlacementCase { what, wkt, xy, lonlat }) in placement_cases().into_iter().enumerate() {
+        let p = d.join(format!("case{i}.shp"));
+        let mut ds = Dataset::new("case", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        ds.push(Some(Geometry::Point(xy)), vec![Value::Text(what.into())]);
+        write_shapefile(&ds, &p);
+        std::fs::write(p.with_extension("prj"), &wkt).unwrap();
+        let src = open_path(&p, None).unwrap();
+        let read = src.read(&Request::all()).unwrap();
+        assert_placed(what, read.features.first().and_then(|f| f.geometry.as_ref()), lonlat);
+        assert!(src.info().notes.is_empty(), "{what}: {:?}", src.info().notes);
+        let (whole, report) = crate::io::read_path(&p).unwrap();
+        assert_placed(what, whole.features.first().and_then(|f| f.geometry.as_ref()), lonlat);
+        assert!(report.messages.is_empty(), "{what}: {:?}", report.messages);
+
+        let g = d.join(format!("case{i}.gpkg"));
+        if wkt.starts_with("PROJCS[") || wkt.starts_with("GEOGCS[") {
+            write_wkt2_srs_gpkg(&g, &wkt, None, xy);
+        } else {
+            write_wkt2_srs_gpkg(&g, "undefined", Some(&wkt), xy);
+        }
+        for (geometry, notes) in custom_srs_reads(&g) {
+            assert_placed(what, geometry.as_ref(), lonlat);
+            assert!(notes.is_empty(), "{what}: {notes:?}");
+        }
+    }
+}
+
+/// A GeoPackage system defined in WKT2, in `definition_12_063`, is read from it: when
+/// `definition` is `undefined`, empty or missing, and over a WKT1 `definition` too (OGC 12-128r19
+/// F.10). An EPSG code still comes first.
+#[test]
+fn a_gpkg_system_defined_in_wkt2_is_read_from_it() {
+    let p = dir().join("wkt2_definition.gpkg");
+    // Origen-Nacional (EPSG:9377) in WKT2, as PROJ writes it, without its ID.
+    let wkt2 = r#"PROJCRS["MAGNA-SIRGAS / Origen-Nacional",BASEGEOGCRS["MAGNA-SIRGAS",DATUM["Marco Geocentrico Nacional de Referencia",ELLIPSOID["GRS 1980",6378137,298.257222101,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]]],CONVERSION["Colombia Transverse Mercator",METHOD["Transverse Mercator",ID["EPSG",9807]],PARAMETER["Latitude of natural origin",4,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8801]],PARAMETER["Longitude of natural origin",-73,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8802]],PARAMETER["Scale factor at natural origin",0.9992,SCALEUNIT["unity",1],ID["EPSG",8805]],PARAMETER["False easting",5000000,LENGTHUNIT["metre",1],ID["EPSG",8806]],PARAMETER["False northing",2000000,LENGTHUNIT["metre",1],ID["EPSG",8807]]],CS[Cartesian,2],AXIS["northing (N)",north,ORDER[1],LENGTHUNIT["metre",1]],AXIS["easting (E)",east,ORDER[2],LENGTHUNIT["metre",1]]]"#;
+    let xy = Coord::new(4_874_000.0, 2_580_000.0);
+    let expected = crate::raster::Crs::from_epsg(9377).unwrap().transformer().unwrap().to_lonlat(xy).unwrap();
+    let placed = |p: &Path| {
+        for (geometry, notes) in custom_srs_reads(p) {
+            assert_placed("Origen-Nacional", geometry.as_ref(), expected);
+            assert!(notes.is_empty(), "{notes:?}");
+        }
+    };
+    for definition in ["undefined", "", "  "] {
+        write_wkt2_srs_gpkg(&p, definition, Some(wkt2), xy);
+        placed(&p);
+    }
+    // A null definition, and none at all.
+    write_wkt2_srs_gpkg(&p, "undefined", Some(wkt2), xy);
+    rusqlite::Connection::open(&p).unwrap().execute("UPDATE gpkg_spatial_ref_sys SET definition = NULL", []).unwrap();
+    placed(&p);
+    rusqlite::Connection::open(&p).unwrap().execute("ALTER TABLE gpkg_spatial_ref_sys DROP COLUMN definition", []).unwrap();
+    placed(&p);
+    // Neither defines it: longitude/latitude, said.
+    write_wkt2_srs_gpkg(&p, "undefined", Some("undefined"), xy);
+    for (_, notes) in custom_srs_reads(&p) {
+        assert!(notes.iter().any(|n| n.contains("srs_id 300001") && n.contains("has no EPSG code")), "{notes:?}");
+    }
+    // The WKT2 takes priority over a WKT1 definition: Web Mercator's, here, which would put the
+    // point near 44°E.
+    let mercator = crate::raster::wkt::to_wkt(crate::raster::Crs::WebMercator).unwrap();
+    write_wkt2_srs_gpkg(&p, &mercator, Some(wkt2), xy);
+    placed(&p);
+    // A WKT2 that can't be read gives way to the WKT1, said.
+    write_wkt2_srs_gpkg(&p, &mercator, Some(r#"PROJCRS["x",CONVERSION["unknown"]]"#), xy);
+    for (geometry, notes) in custom_srs_reads(&p) {
+        assert!(matches!(geometry, Some(Geometry::Point(c)) if (43.0..45.0).contains(&c.x)), "{geometry:?}");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("srs_id 300001") && notes[0].contains("WKT1 definition is used"), "{notes:?}");
+    }
+    // An EPSG code comes before both.
+    write_wkt2_srs_gpkg(&p, "undefined", Some(&mercator), xy);
+    rusqlite::Connection::open(&p)
+        .unwrap()
+        .execute("UPDATE gpkg_spatial_ref_sys SET organization = 'EPSG', organization_coordsys_id = 9377", [])
+        .unwrap();
+    placed(&p);
+}
+
+/// #1677: a GeoPackage row naming EPSG:27700 whose definition gives another shift to WGS 84 places
+/// its point where the same WKT in a Shapefile's `.prj` does, on the desktop and in the browser,
+/// not where the code alone would. So does one whose WKT2 is a `BOUNDCRS` with another shift. A
+/// GeoPackage RustGIS writes is read back by its code, with nothing to say.
+#[test]
+fn a_geopackage_definitions_shift_places_points_as_a_prj_does() {
+    use crate::raster::wkt::tests::{WGS84_WKT2, bound_crs};
+    use crate::raster::wkt::to_wkt;
+    let d = dir().join("code_and_shift");
+    std::fs::create_dir_all(&d).unwrap();
+    // Where a Shapefile with `prj` puts `xy`.
+    let from_prj = |name: &str, prj: &str, xy: Coord| {
+        let p = d.join(format!("{name}.shp"));
+        let mut ds = Dataset::new(name, GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        ds.push(Some(Geometry::Point(xy)), vec![Value::Text(name.into())]);
+        write_shapefile(&ds, &p);
+        std::fs::write(p.with_extension("prj"), prj).unwrap();
+        let src = open_path(&p, None).unwrap();
+        assert!(src.info().notes.is_empty(), "{name}: {:?}", src.info().notes);
+        match src.read(&Request::all()).unwrap().features.first().and_then(|f| f.geometry.clone()) {
+            Some(Geometry::Point(c)) => c,
+            g => panic!("{name}: {g:?}"),
+        }
+    };
+    // A GeoPackage whose row names EPSG `code`, with its point at `xy`.
+    let geopackage = |name: &str, code: i64, definition: &str, wkt2: Option<&str>, xy: Coord| {
+        let p = d.join(format!("{name}.gpkg"));
+        write_wkt2_srs_gpkg(&p, definition, wkt2, xy);
+        rusqlite::Connection::open(&p)
+            .unwrap()
+            .execute("UPDATE gpkg_spatial_ref_sys SET organization = 'EPSG', organization_coordsys_id = ?1", [code])
+            .unwrap();
+        p
+    };
+    let bng = to_wkt(Crs::Epsg(27700)).unwrap();
+    let other = bng.replace(BNG_SHIFT, "TOWGS84[375,-111,431,0,0,0,0]");
+    assert_ne!(other, bng);
+    let xy = Coord::new(450_000.0, 250_000.0);
+    let by_code = Crs::Epsg(27700).transformer().unwrap().to_lonlat(xy).unwrap();
+    // Some 4 m from where the code puts it.
+    let shifted = from_prj("bng_other", &other, xy);
+    assert!(metres_apart(shifted, by_code) > 1.0, "{shifted:?} {by_code:?}");
+    for (geometry, notes) in custom_srs_reads(&geopackage("bng_other", 27700, &other, None, xy)) {
+        assert_placed("another TOWGS84", geometry.as_ref(), shifted);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+    assert!(metres_apart(from_prj("bng", &bng, xy), by_code) < 0.001);
+    for (geometry, notes) in custom_srs_reads(&geopackage("bng", 27700, &bng, None, xy)) {
+        assert_placed("the code's own TOWGS84", geometry.as_ref(), by_code);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+    // ED50 / UTM zone 31N, near Barcelona.
+    let xy = Coord::new(430_000.0, 4_580_000.0);
+    let bound = bound_crs(ED50_UTM31, WGS84_WKT2, &[-100.0, -100.0, -100.0]);
+    let shifted = from_prj("ed50_bound", &bound, xy);
+    let by_code = Crs::Epsg(23031).transformer().unwrap().to_lonlat(xy).unwrap();
+    assert!(metres_apart(shifted, by_code) > 1.0, "{shifted:?} {by_code:?}");
+    let ed50 = to_wkt(Crs::Epsg(23031)).unwrap();
+    for (geometry, notes) in custom_srs_reads(&geopackage("ed50_bound", 23031, &ed50, Some(&bound), xy)) {
+        assert_placed("a BOUNDCRS's shift", geometry.as_ref(), shifted);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+    // A `BOUNDCRS` to a system whose shift to WGS 84 isn't known can't be read: the point is
+    // where the code puts it, and each reader says that the definition's shift isn't used.
+    let unknown = bound_crs(ED50_UTM31, NAD27_WKT2, &[-100.0, -100.0, -100.0]);
+    for (name, definition, said) in [
+        ("ed50_unknown", "undefined", "the file's own shift to WGS 84 is set aside for EPSG:23031's, because the shift from NAD27"),
+        ("ed50_unknown_wkt1", ed50.as_str(), "its WKT2 definition can't be read (the shift from NAD27"),
+    ] {
+        for (geometry, notes) in custom_srs_reads(&geopackage(name, 23031, definition, Some(&unknown), xy)) {
+            assert_placed(name, geometry.as_ref(), by_code);
+            assert_eq!(notes.len(), 1, "{name}: {notes:?}");
+            assert!(notes[0].contains(said), "{name}: {notes:?}");
+        }
+    }
+    // As RustGIS writes them: `definition` is the system's WKT, with the code's own shift.
+    for code in [27700, 23031, 31467, 2056, 32631, 3857] {
+        let crs = Crs::from_epsg(code).unwrap();
+        let p = d.join(format!("written_{code}.gpkg"));
+        let _ = std::fs::remove_file(&p);
+        let xy = crs.transformer().unwrap().from_lonlat(Coord::new(5.0, 47.0)).unwrap();
+        let mut ds = Dataset::new("written", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        ds.push(Some(Geometry::Point(xy)), vec![Value::Text("p".into())]);
+        gpkg::write_in(&ds, &p, crs).unwrap();
+        let desktop = open_path(&p, None).unwrap();
+        let browser = gpkg_mem::GpkgMemSource::open_shared(Shared(Arc::new(std::fs::read(&p).unwrap())), None).unwrap();
+        for src in [desktop.as_ref(), &browser as &dyn FeatureSource] {
+            assert_eq!(src.info().coordinate_system(), Some(crs), "EPSG:{code}");
+            assert!(src.info().notes.is_empty(), "EPSG:{code}: {:?}", src.info().notes);
+        }
+    }
+}
+
 #[test]
 fn flatgeobuf_round_trips_a_dataset() {
     let mut ds = Dataset::new("mixed", GeometryType::Polygon, vec![Field::new("n", FieldType::Integer), Field::new("s", FieldType::Text)]);
@@ -1092,8 +1736,8 @@ fn writes_geopackage_geoparquet_and_shapefile() {
         let holds_all = matches!(ext, "gpkg" | "parquet");
         assert_eq!(left_out, if holds_all { 0 } else { 1 }, "{ext}");
         let (back, _) = crate::io::read_path(&p).unwrap();
-        // GeoParquet retains nullable geometry; the other readers omit rows without a shape.
-        assert_eq!(back.features.len(), if ext == "parquet" { 3 } else { 2 }, "{ext}");
+        // GeoParquet and GeoPackage keep a row without a shape; the other formats can't hold it.
+        assert_eq!(back.features.len(), if holds_all { 3 } else { 2 }, "{ext}");
         assert_eq!(back.geometry_type, GeometryType::Polygon, "{ext}");
         let e = back.extent();
         assert_eq!((e.min_x, e.min_y, e.max_x, e.max_y), (-30.0, -40.0, 21.0, 21.0), "{ext}");
@@ -1410,6 +2054,37 @@ fn writes_points_lines_kmz_and_zipped_shapefiles() {
     let (back, _) = crate::io::read_path(&d.join("c.gpkg")).unwrap();
     assert_eq!(back.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["A", "a_1"]);
     assert_eq!(back.features[0].attrs, [Value::Int(1), Value::Text("x".into())]);
+    // And the export says so, as the file has it; names kept (an id or geometry column moves
+    // aside for a field) say nothing.
+    assert_eq!(
+        crate::io::geopackage_names_note(&cased.fields, "c.gpkg").as_deref(),
+        Some("c.gpkg: 1 field name was changed to fit a GeoPackage (unique ignoring case): 'a' → 'a_1'")
+    );
+    let kept: Vec<Field> = ["fid", "geom", "a"].iter().map(|n| Field::new(*n, FieldType::Integer)).collect();
+    assert_eq!(crate::io::geopackage_names_note(&kept, "k.gpkg"), None);
+    // A long name shows its start and the ending that makes it unique.
+    let long: Vec<Field> =
+        ["Ab", "ab", "Bb", "bb"].iter().map(|n| Field::new(format!("{n}{}", "x".repeat(50)), FieldType::Integer)).collect();
+    let note = crate::io::geopackage_names_note(&long, "l.gpkg").unwrap();
+    let x = |n| "x".repeat(n);
+    assert!(
+        note.ends_with(&format!(
+            "'ab{}…{}' → 'ab{}…{}_1', 'bb{}…{}' → 'bb{}…{}_1'",
+            x(18),
+            x(20),
+            x(18),
+            x(18),
+            x(18),
+            x(20),
+            x(18),
+            x(18)
+        )),
+        "{note}"
+    );
+    // So does one that fits until it is made unique.
+    let edge: Vec<Field> = ["A".repeat(40), "a".repeat(40)].iter().map(|n| Field::new(n, FieldType::Integer)).collect();
+    let note = crate::io::geopackage_names_note(&edge, "e.gpkg").unwrap();
+    assert!(note.ends_with(&format!("'{}' → '{}…{}_1'", "a".repeat(40), "a".repeat(20), "a".repeat(18))), "{note}");
     // An empty layer writes too.
     let empty = Dataset::new("e", GeometryType::Point, vec![]);
     assert!(crate::io::write_bytes(&empty, "parquet").is_ok());
@@ -1573,8 +2248,10 @@ fn flatgeobuf_and_geoparquet_by_address() {
         assert!(!s.complete && s.features.len() <= 500 && s.features.len() >= 250, "{name}: {}", s.features.len());
     }
 
-    // Files without an index or a covering are read whole instead.
-    let p = d.join("plain.parquet");
+    // Files without an index or a covering are read whole instead. Not plain.parquet: the
+    // tests run at once and share this folder, and geoparquet_with_and_without_a_covering
+    // writes and reads that one.
+    let p = d.join("r-plain.parquet");
     write_parquet(&p, false);
     remote::testing::serve("https://test.example/plain.parquet", std::fs::read(&p).unwrap());
     let e = open_url_blocking("https://test.example/plain.parquet").err().map(|e| e.to_string()).unwrap_or_default();
@@ -1726,6 +2403,11 @@ fn shapefile_in_place_reprojects_from_its_prj() {
 fn damaged_shapefiles_are_errors_or_skips_not_panics() {
     let d = dir().join("shp-junk");
     std::fs::create_dir_all(&d).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let good = d.join("good.shp");
     write_shapefile(&export_sample(), &good);
     let (shp, dbf) = (std::fs::read(&good).unwrap(), std::fs::read(good.with_extension("dbf")).unwrap());
@@ -2473,6 +3155,48 @@ fn shapefile_complete_chunks_keep_all_rows_order_attributes_and_budget() {
     assert_eq!(rows, expected.features);
 }
 
+/// GeoPackage rows without geometry (NULL, or an empty geometry) keep their row and attributes in
+/// whole reads and visits, with and without the R-tree and in the browser's reader, and are left
+/// out of a read of an extent; one flagged empty with an unreadable header is skipped and counted.
+#[test]
+fn geopackage_keeps_rows_without_geometry() {
+    let d = dir().join("geometryless");
+    std::fs::create_dir_all(&d).unwrap();
+    let (indexed, scan) = (d.join("indexed.gpkg"), d.join("scan.gpkg"));
+    for (p, rtree) in [(&indexed, true), (&scan, false)] {
+        write_gpkg(p, rtree);
+        let c = rusqlite::Connection::open(p).unwrap();
+        let empty = b"GP\x00\x11\x11\x0f\x00\x00".to_vec();
+        c.execute("INSERT INTO \"grid \"\"q\"\"\" VALUES (601, NULL, 'no place', 7, 1)", []).unwrap();
+        c.execute("INSERT INTO \"grid \"\"q\"\"\" VALUES (602, ?1, 'empty', 8, 0)", [empty]).unwrap();
+        // Flagged empty but unreadable, each skipped and counted: cut off before its header ends,
+        // with an envelope code the standard doesn't define, an envelope declared but missing, and a
+        // header version the standard doesn't define.
+        for (fid, blob) in [(603, "47500011"), (604, "4750001b0f000000"), (605, "475000130f000000"), (606, "475001110f000000")] {
+            c.execute(&format!("INSERT INTO \"grid \"\"q\"\"\" VALUES ({fid}, X'{blob}', 'cut', 9, 1)"), []).unwrap();
+        }
+    }
+    let sources: Vec<Box<dyn FeatureSource>> = vec![
+        open_path(&indexed, None).unwrap(),
+        open_path(&scan, None).unwrap(),
+        Box::new(gpkg_mem::GpkgMemSource::open_shared(Shared(Arc::new(std::fs::read(&scan).unwrap())), None).unwrap()),
+    ];
+    for src in &sources {
+        let format = src.info().format;
+        assert_eq!(src.info().count, Some(606), "{format}");
+        let whole = src.read(&Request::all()).unwrap();
+        assert_eq!((whole.features.len(), whole.skipped), (602, 4), "{format}");
+        let bare: Vec<_> = whole.features.iter().filter(|f| f.geometry.is_none()).map(|f| (f.id, f.attrs[0].clone())).collect();
+        assert_eq!(bare, vec![(601, Value::Text("no place".into())), (602, Value::Text("empty".into()))], "{format}");
+        let (rows, summary, _) = visit_all(src.as_ref(), None, 1024);
+        assert_eq!((rows, summary.matched, summary.skipped), (whole.features, 602, 4), "{format}");
+        let world = Extent::new(-180.0, -85.0, 180.0, 85.0);
+        let part = src.read(&Request { extent: Some(world), limit: 10_000 }).unwrap();
+        assert_eq!(part.features.len(), 600, "{format}");
+        assert_eq!(visit_all(src.as_ref(), Some(world), 1024).0.len(), 600, "{format}");
+    }
+}
+
 /// Every feature of a complete traversal, in order, checking each chunk against the budget.
 fn visit_all(src: &dyn FeatureSource, extent: Option<Extent>, budget: usize) -> (Vec<Feature>, Batch, usize) {
     let (mut rows, mut calls) = (Vec::new(), 0);
@@ -2582,20 +3306,20 @@ fn geopackage_flatgeobuf_and_geoparquet_visit_what_a_whole_read_gives() {
         let error = src.visit_chunks(None, 4096, &mut |_| Ok(())).unwrap_err();
         assert!(matches!(&error, crate::DataError::Io(e) if e.kind() == std::io::ErrorKind::NotFound), "{error}");
     }
-    // An unreadable geometry is skipped and counted, and a row without one left out, as a read does.
+    // An unreadable geometry is skipped and counted, and a row without one kept, as a read does.
     drop(sources);
     let c = rusqlite::Connection::open(&gpkg_scan).unwrap();
     c.execute_batch("INSERT INTO \"grid \"\"q\"\"\" (geom, name) VALUES (X'4750000300000000DEAD', 'bad'), (NULL, 'none');").unwrap();
     drop(c);
     let src = open_path(&gpkg_scan, None).unwrap();
     let whole = src.read(&Request::all()).unwrap();
-    assert_eq!((whole.features.len(), whole.skipped), (600, 1));
+    assert_eq!((whole.features.len(), whole.skipped), (601, 1));
     let (rows, summary, _) = visit_all(src.as_ref(), None, 4096);
     assert_eq!((rows, summary.skipped), (whole.features, 1));
-    // The browser's reader of the same file skips and leaves out the same rows.
+    // The browser's reader of the same file skips and keeps the same rows.
     let mem = gpkg_mem::GpkgMemSource::open_shared(Shared(Arc::new(std::fs::read(&gpkg_scan).unwrap())), None).unwrap();
     let whole = mem.read(&Request::all()).unwrap();
-    assert_eq!((whole.features.len(), whole.skipped), (600, 1));
+    assert_eq!((whole.features.len(), whole.skipped), (601, 1));
     let (rows, summary, _) = visit_all(&mem, None, 4096);
     assert_eq!((rows, summary.skipped), (whole.features, 1));
 }
@@ -2765,6 +3489,104 @@ fn gpkg_tables(path: &Path) -> Vec<String> {
     st.query_map([], |r| r.get(0)).unwrap().collect::<std::result::Result<_, _>>().unwrap()
 }
 
+/// A GeoPackage export writes DATE and DATETIME columns, as GeoPackage gives them: a date-time with
+/// a zone in UTC with `Z` (its other offset said), one without a zone without, milliseconds always.
+/// The desktop and browser readers read them back as dates; a value that isn't one, as null, said
+/// with its field.
+#[test]
+fn geopackage_dates_are_written_and_read_as_dates() {
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().join("permits.gpkg");
+    let fields = vec![Field::new("issued", FieldType::Date), Field::new("seen", FieldType::DateTime)];
+    let mut permits = Dataset::new("permits", GeometryType::Point, fields);
+    let (day, at) = (|d| Value::parse(d, FieldType::Date), |t| Value::parse(t, FieldType::DateTime));
+    let rows = [
+        [day("2026-03-05"), at("2026-03-05T14:30:00+02:00")],
+        [day("1999-12-31"), at("2026-03-05T14:30:00.000250")],
+        [Value::Null, Value::Null],
+        // What another program may leave: text that isn't a date, a number, and empty text (no loss).
+        [Value::Text("2026-02-30".into()), Value::Int(1_772_700_000)],
+        [Value::Text(String::new()), Value::Null],
+        // A midnight without a zone says a day: a date.
+        [Value::Text("2026-01-01T00:00:00".into()), Value::Null],
+    ];
+    for row in &rows {
+        permits.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), row.to_vec());
+    }
+    crate::io::write_path(&permits, &path).unwrap();
+    assert_eq!(
+        crate::io::utc_dates_note(&permits.fields, &crate::io::offset_dates(permits.features.iter(), &permits.fields), "permits.gpkg")
+            .as_deref(),
+        Some("permits.gpkg: 1 date-time was written in UTC, as GeoPackage stores them, without their own offsets, in 'seen'")
+    );
+    let c = rusqlite::Connection::open(&path).unwrap();
+    let declared: Vec<String> = c
+        .prepare("SELECT type FROM pragma_table_info('permits') WHERE name IN ('issued', 'seen') ORDER BY cid")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(declared, ["DATE", "DATETIME"]);
+    let stored: Vec<(Option<String>, Option<String>)> = c
+        .prepare("SELECT issued, seen FROM permits ORDER BY fid LIMIT 3")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    let text = |s: &str| Some(s.to_string());
+    assert_eq!(
+        stored,
+        [(text("2026-03-05"), text("2026-03-05T12:30:00.000Z")), (text("1999-12-31"), text("2026-03-05T14:30:00.000250")), (None, None)]
+    );
+    drop(c);
+    let desktop = open_path(&path, None).unwrap();
+    let browser = gpkg_mem::GpkgMemSource::open_shared(Shared(Arc::new(std::fs::read(&path).unwrap())), None).unwrap();
+    for src in [desktop.as_ref(), &browser as &dyn FeatureSource] {
+        assert_eq!(src.info().fields.iter().map(|f| f.ty).collect::<Vec<_>>(), [FieldType::Date, FieldType::DateTime]);
+        let (ds, report) = materialize(src).unwrap();
+        let read: Vec<_> = ds.features.iter().map(|f| f.attrs.clone()).collect();
+        let null = vec![Value::Null; 2];
+        // The moment is kept, at UTC.
+        let utc = vec![day("2026-03-05"), at("2026-03-05T12:30:00Z")];
+        assert_eq!(read, [utc, rows[1].to_vec(), null.clone(), null.clone(), null.clone(), vec![day("2026-01-01"), Value::Null]]);
+        assert!(
+            report.messages.contains(&"permits: 2 values aren't dates and were read as empty, in 'issued', 'seen'".to_string()),
+            "{report:?}"
+        );
+    }
+    // The export says the text it wrote in a date field that isn't a date, and a date-time with a
+    // time in one, which reads back empty too.
+    let mut moment = Dataset::new("m", GeometryType::None, permits.fields.clone());
+    moment.push(None, vec![at("2026-03-05T14:30:00"), Value::Int(1_772_700_000)]);
+    assert_eq!(crate::io::text_in_dates(moment.features.iter(), &moment.fields), [1, 1]);
+    let text = crate::io::text_in_dates(permits.features.iter(), &permits.fields);
+    assert_eq!(
+        crate::io::text_in_dates_note(&permits.fields, &text, "permits.gpkg").as_deref(),
+        Some("permits.gpkg: 2 values aren't dates and were written as they are, and read back empty, in 'issued', 'seen'")
+    );
+    // Dates by a declared type's own name, not a part of another.
+    let ty = |d: &str| super::gpkg_blob::field_type(d);
+    assert_eq!(
+        ["DATE", "datetime", "TIMESTAMP(3)", "UPDATED_INT", "DATEish TEXT", "TEXT"].map(ty),
+        [
+            Some(FieldType::Date),
+            Some(FieldType::DateTime),
+            Some(FieldType::DateTime),
+            Some(FieldType::Integer),
+            Some(FieldType::Text),
+            Some(FieldType::Text)
+        ]
+    );
+    // A clean table says nothing.
+    let clean = workspace.path().join("clean.gpkg");
+    permits.features = permits.features.iter().take(3).cloned().collect::<Vec<_>>().into();
+    crate::io::write_path(&permits, &clean).unwrap();
+    let (_, report) = materialize(open_path(&clean, None).unwrap().as_ref()).unwrap();
+    assert!(!report.messages.iter().any(|m| m.contains("aren't dates") || m.contains("isn't a date")), "{report:?}");
+}
+
 /// An export into an existing GeoPackage adds a table beside the others, refuses one whose name
 /// is taken, and replaces a feature or attribute table (its spatial index too) when asked; the
 /// other tables, an attribute table among them, are as they were.
@@ -2846,6 +3668,10 @@ fn geopackage_export_adds_and_replaces_tables_and_keeps_the_others() {
     // A second table in that system reuses its entry.
     let more = write_path_to(&fewer, &path, Crs::WebMercator, &to(GpkgMode::AddTable, Some("permits_2027"))).unwrap();
     assert_eq!(more.1, Some(GpkgWritten { table: "permits_2027".into(), replaced: false, dependents: vec![] }));
+    // Its spatial index triggers mention `permits` within their own table's name, but don't use
+    // it, so replacing `permits` again names only the view.
+    let again = write_path_to(&fewer, &path, Crs::WebMercator, &to(GpkgMode::ReplaceTable, Some("permits"))).unwrap();
+    assert_eq!(again.1, Some(GpkgWritten { table: "permits".into(), replaced: true, dependents: vec!["recent_permits".into()] }));
     // Replacing a table not there (a misspelt name) is refused rather than adding one.
     let e = write_path_to(&fewer, &path, Crs::LonLat, &to(GpkgMode::ReplaceTable, Some("permit"))).unwrap_err().to_string();
     assert!(e.contains("no table permit to replace"), "{e}");
@@ -2978,4 +3804,48 @@ fn geopackage_export_into_a_file_refuses_what_it_cannot_replace() {
     std::fs::write(&text, b"not a database").unwrap();
     assert!(write_path_to(&ds, &text, Crs::LonLat, &replace("permits")).is_err());
     assert_eq!(std::fs::read(&text).unwrap(), b"not a database");
+}
+
+#[test]
+fn geojson_latitude_past_the_poles_is_said_once_with_a_count_by_every_path() {
+    let point = |x: f64, y: f64| format!(r#"{{"type":"Feature","properties":{{}},"geometry":{{"type":"Point","coordinates":[{x},{y}]}}}}"#);
+    let line = r#"{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[1,2],[3,-95]]}}"#;
+    let fc = |features: &[String]| format!(r#"{{"type":"FeatureCollection","features":[{}]}}"#, features.join(","));
+    // One feature with a swapped position, then two (a line counts once, not by position).
+    let (ds, messages, _) = geojson_paths("lat95.geojson", &fc(&[point(10.0, 60.0), point(60.0, 95.0)]));
+    assert_eq!(ds.features.len(), 2, "the data stays as read");
+    assert_eq!(messages, ["1 feature has a latitude past ±90°: longitude and latitude may be swapped"]);
+    let (_, messages, _) = geojson_paths("lat95b.geojson", &fc(&[point(60.0, 95.0), point(1.0, -91.0), point(2.0, 3.0), line.to_string()]));
+    assert_eq!(messages, ["3 features have a latitude past ±90°: longitude and latitude may be swapped"]);
+    // A swapped position is said even when another position of the feature is far east.
+    let multi = r#"{"type":"Feature","properties":{},"geometry":{"type":"MultiPoint","coordinates":[[60,95],[200,10]]}}"#;
+    let (_, messages, _) = geojson_paths("lat95c.geojson", &fc(&[multi.to_string()]));
+    assert_eq!(messages, ["1 feature has a latitude past ±90°: longitude and latitude may be swapped"]);
+    // Clean files, even at the poles and the antimeridian, give nothing; a lone Feature as well.
+    let (_, messages, _) = geojson_paths("clean.geojson", &fc(&[point(10.0, 60.0), point(180.0, -90.0), point(-180.0, 90.0)]));
+    assert!(messages.is_empty(), "{messages:?}");
+    // Within the readers' ±90.5° tolerance is still not past the poles.
+    let (_, messages, _) =
+        geojson_paths("tolerance.geojson", &fc(&[point(1.0, 90.2), point(1.0, -90.2), point(180.5, 90.5), point(-180.5, -90.5)]));
+    assert!(messages.is_empty(), "{messages:?}");
+    let (_, report) = crate::io::read_geojson(&point(60.0, 95.0), "x").unwrap();
+    assert_eq!(report.messages.len(), 1, "{:?}", report.messages);
+    let (_, report) = crate::io::read_geojson(&point(10.0, 60.0), "x").unwrap();
+    assert!(report.messages.is_empty());
+    // Eastings and northings (x past 180 as well) are not longitude/latitude swapped.
+    let (_, messages, _) = geojson_paths("rd-not-swapped.geojson", &fc(&[point(188000.0, 445000.0)]));
+    assert!(messages.is_empty(), "{messages:?}");
+}
+
+#[test]
+fn geojson_in_a_declared_projected_system_is_not_taken_for_swapped() {
+    // Northings far past 90 are what RD New coordinates are: they convert, so nothing is said.
+    let (ds, messages, _) = geojson_paths("rd-quiet.geojson", &rd_geojson(Some(&named("EPSG:28992"))));
+    assert!(in_arnhem(&ds.extent()));
+    assert!(messages.is_empty(), "{messages:?}");
+    // Web Mercator metres that would look like a latitude past the poles if read as degrees.
+    let point = r#"{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[10,100]}}"#;
+    let (ds, messages, _) = geojson_paths("merc-quiet.geojson", &merc_collection(&[point]));
+    assert_eq!(ds.features.len(), 1);
+    assert!(messages.is_empty(), "{messages:?}");
 }

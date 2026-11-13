@@ -9,7 +9,8 @@
 //!
 //! A process plugin (`"runtime": "process"`, see [`process`]) is instead a program on the
 //! user's computer, not sandboxed, for the desktop and the command line: it speaks the same
-//! requests over its standard input and output, and the user is told it isn't sandboxed.
+//! requests over its standard input and output, and the user is told it isn't sandboxed. With
+//! `"session": true` its program is kept running between commands (see [`session`]).
 //!
 //! Loaded plugins live for the whole process (like the geoprocessing tools they add), in a
 //! list shared by every session. See `docs/plugins.md` for the format and the ABI.
@@ -25,6 +26,8 @@ pub mod pyenv;
 pub mod registry;
 pub mod runtime;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod session;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -37,10 +40,16 @@ use std::sync::{Arc, RwLock};
 
 use serde_json::{Value, json};
 
-pub use manifest::{CommandDecl, Entry, GroupDecl, ItemDecl, Layout, Manifest, MenuDecl, Permission, Runtime, TabDecl, ToolDecl};
+pub use manifest::{
+    CommandDecl, Entry, GroupDecl, ItemDecl, Layout, Manifest, MenuDecl, ParamDecl, Permission, Runtime, TabDecl, ToolDecl, form_number,
+    form_number_value,
+};
 pub use package::Package;
-pub use panel::{PanelDecl, PanelItemDecl, PanelState, TreeNode};
+pub use panel::{Dropped, FormField, PanelDecl, PanelItemDecl, PanelState, TreeNode};
 pub use runtime::{Host, NoHost};
+
+/// The error a command or tool stopped at its time limit ends with.
+pub const RAN_TOO_LONG: &str = "it ran too long and was stopped";
 
 /// Plugin command and tool ids start with this: `plugin:<plugin>/<command>`.
 pub const PREFIX: &str = "plugin:";
@@ -111,6 +120,7 @@ impl Plugin {
             "panel": m.panel.as_ref().map(|p| p.title.clone()),
             "skills": m.skills.iter().map(|s| format!("{}:{s}", m.id)).collect::<Vec<_>>(),
             "runtime": match m.runtime { Runtime::Wasm => "wasm", Runtime::Process => "process", Runtime::Skills => "skills" },
+            "session": m.session,
             "enabled": self.enabled, "source": self.source, "sha256": self.sha256,
         })
     }
@@ -178,6 +188,17 @@ pub fn get(id: &str) -> Option<Arc<Plugin>> {
     PLUGINS.read().ok()?.iter().find(|p| p.manifest.id == id).cloned()
 }
 
+/// Whether this exact load is still enabled and not withdrawn. Reloading, toggling or
+/// removing a plugin invalidates old handles even if its id and package bytes are unchanged.
+/// An unavailable plugin or blocklist lock refuses the handle.
+pub fn is_current(plugin: &Arc<Plugin>) -> bool {
+    plugin.enabled
+        && PLUGINS.read().is_ok_and(|v| v.iter().any(|p| p.enabled && Arc::ptr_eq(p, plugin)))
+        && [&BLOCKED, &BLOCKED_EXTRA]
+            .iter()
+            .all(|list| list.read().is_ok_and(|v| registry::blocked(&v, &plugin.manifest.id, &plugin.sha256).is_none()))
+}
+
 /// `plugin:<plugin>/<item>`.
 pub fn command_id(plugin: &str, item: &str) -> String {
     format!("{PREFIX}{plugin}/{item}")
@@ -221,6 +242,7 @@ fn process_code(pkg: &Package) -> Result<Code, String> {
     let argv =
         pkg.manifest.run.as_ref().and_then(|r| r.for_this_platform()).ok_or_else(|| format!("{name} doesn't run on this platform"))?;
     let mut spec = process::Spec::new(argv, dir)?;
+    spec.session = pkg.manifest.session;
     // With a Python environment, `python` is that environment's interpreter.
     if let Some(check) = pyenv::EnvCheck::of(&pkg.manifest, &spec.dir).map_err(|e| format!("{name}: {e}"))? {
         if matches!(spec.program.as_str(), "python" | "python3" | "python.exe") {
@@ -240,6 +262,8 @@ fn process_code(pkg: &Package) -> Result<Code, String> {
 /// was enabled).
 pub fn register(mut plugin: Plugin) -> Arc<Plugin> {
     plugin.enabled = get(&plugin.manifest.id).is_none_or(|p| p.enabled);
+    // The program running is the version being replaced.
+    stop_session(&plugin.manifest.id);
     let plugin = Arc::new(plugin);
     if let Ok(mut v) = PLUGINS.write() {
         v.retain(|p| p.manifest.id != plugin.manifest.id);
@@ -252,6 +276,7 @@ pub fn register(mut plugin: Plugin) -> Arc<Plugin> {
 
 /// Removes a loaded plugin; returns whether there was one.
 pub fn unload(id: &str) -> bool {
+    stop_session(id);
     let removed = PLUGINS.write().map(|mut v| {
         let n = v.len();
         v.retain(|p| p.manifest.id != id);
@@ -282,8 +307,17 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<(), String> {
         changed(&v);
     }
     drop(v);
+    if !enabled {
+        stop_session(id);
+    }
     tools::reload();
     Ok(())
+}
+
+/// Stops a session plugin's program, if it's running.
+fn stop_session(_id: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    session::stop(_id);
 }
 
 /// Replaces the blocklist; loaded plugins it names are unloaded. Returns their names.
@@ -379,16 +413,80 @@ pub fn run_command_with_panel(cmd: &PluginCommand, host: &mut dyn Host, params: 
     if let (Some(panel), Some(o)) = (panel, request.as_object_mut()) {
         o.insert("panel".into(), panel);
     }
-    call(&cmd.plugin, host, &request, false).map_err(|e| format!("{}: {e}", cmd.decl.label))
+    let timeout = cmd.decl.timeout.map(std::time::Duration::from_secs);
+    call_with_timeout(&cmd.plugin, host, &request, false, timeout).map_err(|e| format!("{}: {e}", cmd.decl.label))
 }
 
 /// Calls a plugin directly (tools, tests): a command's limits, or a tool's.
 pub(crate) fn call(plugin: &Plugin, host: &mut dyn Host, request: &Value, tool: bool) -> Result<Value, String> {
+    call_with_timeout(plugin, host, request, tool, None)
+}
+
+fn call_with_timeout(
+    plugin: &Plugin,
+    host: &mut dyn Host,
+    request: &Value,
+    tool: bool,
+    timeout: Option<std::time::Duration>,
+) -> Result<Value, String> {
     match &plugin.code {
-        Code::Wasm(module) => runtime::call(module, host, request, if tool { runtime::TOOL_FUEL } else { runtime::COMMAND_FUEL }),
+        Code::Wasm(module) => match timeout.filter(|_| !tool) {
+            Some(limit) => call_wasm_limited(module, host, request, limit),
+            None => runtime::call(module, host, request, if tool { runtime::TOOL_FUEL } else { runtime::COMMAND_FUEL }),
+        },
         #[cfg(not(target_arch = "wasm32"))]
-        Code::Process(spec) => process::call(spec, host, request, (!tool).then_some(process::COMMAND_TIMEOUT)),
+        Code::Process(spec) if spec.session && !tool => {
+            session::command(&plugin.manifest.id, spec, host, request, timeout.unwrap_or(process::COMMAND_TIMEOUT))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        Code::Process(spec) => process::call(spec, host, request, (!tool).then_some(timeout.unwrap_or(process::COMMAND_TIMEOUT))),
         Code::None => Err(format!("{} has only skills, nothing to run", plugin.manifest.name)),
+    }
+}
+
+/// Calls a WebAssembly command that has a time limit. Once the limit has passed, host requests
+/// are refused, and a reply that arrives after it is an error. A host request already running
+/// runs to its end (the module's fuel bounds the rest).
+#[cfg(not(target_arch = "wasm32"))]
+fn call_wasm_limited(module: &wasmi::Module, host: &mut dyn Host, request: &Value, limit: std::time::Duration) -> Result<Value, String> {
+    let deadline = std::time::Instant::now() + limit;
+    let mut timed = Timed { host, deadline };
+    let out = runtime::call(module, &mut timed, request, runtime::COMMAND_FUEL)?;
+    if std::time::Instant::now() >= deadline {
+        return Err(RAN_TOO_LONG.into());
+    }
+    Ok(out)
+}
+
+/// The browser has no clock for this: its commands run within their fuel alone.
+#[cfg(target_arch = "wasm32")]
+fn call_wasm_limited(module: &wasmi::Module, host: &mut dyn Host, request: &Value, _limit: std::time::Duration) -> Result<Value, String> {
+    runtime::call(module, host, request, runtime::COMMAND_FUEL)
+}
+
+/// The host as a WebAssembly command sees it under its time limit (see [`call_wasm_limited`]).
+#[cfg(not(target_arch = "wasm32"))]
+struct Timed<'a> {
+    host: &'a mut dyn Host,
+    deadline: std::time::Instant,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Host for Timed<'_> {
+    fn call(&mut self, op: &str, params: &Value) -> Result<Value, String> {
+        if std::time::Instant::now() >= self.deadline {
+            return Err(RAN_TOO_LONG.into());
+        }
+        self.host.call(op, params)
+    }
+    fn log(&mut self, text: &str) {
+        self.host.log(text);
+    }
+    fn progress(&mut self, text: &str) {
+        self.host.progress(text);
+    }
+    fn cancelled(&self) -> bool {
+        self.host.cancelled()
     }
 }
 

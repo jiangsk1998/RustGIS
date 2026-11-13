@@ -96,7 +96,8 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
   and closes it when it is. **Pane Sets** keep the tabs open.
 - **Status bar**: the scale (type one, or pick from the list), the zoom level, bearing and pitch
   (click them to face north and look straight down again), the pointer's coordinates (click them
-  to switch between decimal degrees and DMS), the coordinate system (click it to change the
+  to step through decimal degrees, DMS, UTM and MGRS; see [Coordinate readouts](maps.md#coordinate-readouts)),
+  the coordinate system (click it to change the
   projection), the selection count (with a button to clear it), the latest notice (click to open
   **Diagnostics**), a **Diagnostics** button, the last draw time, the frame rate and a **GPU**/**CPU**
   renderer switch. While agents control the desktop app, it also shows the MCP relay or file bridge.
@@ -117,8 +118,8 @@ ribbon, arrows at its ends scroll it.
 
 ### Diagnostics
 
-Open **View › Windows › Diagnostics**, click the status-bar notice or **Diagnostics** button,
-or search for **Diagnostics** in Command Search (`ui.pane.diagnosticLog`). This troubleshooting
+Open **View › Windows › Messages**, click the status-bar notice or **Messages** button,
+or search for **Messages** in Command Search (`ui.pane.diagnosticLog`). This troubleshooting
 history is separate from **Help › Diagnostic Monitor**, which still shows performance metrics.
 
 Messages are collected even while the pane is closed. The newest entries appear first, with
@@ -158,14 +159,49 @@ Review copied diagnostics for private layer names or file paths before sharing t
 | **Style** | For the layer selected in Layers. A feature layer: Visibility Range, Effects, Drawing, Drawing Effects, Extrusion for polygons (with Faces and Light and Shadow once on) and Layer. A raster layer: Visibility Range, Effects, Compare, Raster Effects, Rendering, Enhancement and Layer. Both: Styles |
 | **Labeling** | For the feature layer selected in Layers: Labels (Label, Properties), Label Class (Class, Field), Text Symbol (Size, Color, Bold, Halo), Label Placement and Label Range. Whatever is selected: Map Labeling (Lock, Pause, View Unplaced, Convert) |
 | **Edit** | Manage Edits (Edit, Save, Undo, Redo, Status, Save to PostGIS and Discard PostGIS Edits on the desktop while a [PostGIS layer is loaded for editing](data.md#editing-postgis-tables), Settings, Templates, Topology), Snapping, Features (Create, Delete, Edit Vertices, Modify), Tools, Elevation, Corrections, Graphics, Graphics and Text, Clipboard |
-| **Analyze** | Geoprocessing (History, Tools, Model Builder, Script, SQL, Environments), Tasks (the Tasks pane; Task: Record Task, New Task From History, Import Task, run a task), AI (AI Assistant), Portal (Feature Analysis, Raster Analysis), Workflows, Raster (Raster Functions, Function Editor), Tools (the tool gallery), Selection, Notebook, the imagery groups (Ortho Mapping, Reality Mapping, Alignment, Image Analysis, Image Classification, Imagery Sharing, Mensuration, Imagery Tools) |
+| **Analyze** | Geoprocessing (History, Tools, Model Builder, Script, SQL, Environments), Tasks (the Tasks pane; Task: Record Task, New Task From History, Import Task, run a task), AI (AI Assistant), Portal (Feature Analysis, Raster Analysis), Workflows, Raster (Raster Functions, Function Editor), Tools (the tool gallery), Selection, Notebook |
 | **View** | Display (Graticule, GPU Rendering), View (Globe, Projection, Global; Local on the desktop), Effects, Scene, Windows, Navigation, Link, Workspace, Animation, Time (Time Slider), Profile (Profile; Time Series on the desktop) |
 | **Publish** | While a layout is open, its groups first (Page, Map Frames, Map Surrounds, Shapes, Text, Export); then Report, Presentation, Output (Export Map, Export Features, Print Map, Capture To Clipboard, Report, Presentation, Export To 3D), Package, Share As, Layout, Save As, Thumbnail |
-| **Plugins** | Plugins (Plugin Manager, Install From File, Browse Plugins), plus a group for each enabled [plugin](../plugins.md) with commands or tools; a plugin with its own tab adds that tab instead |
+| **Plugins** | Plugins (Plugin Manager, Install From File, Browse Plugins), Extensions (the [Extensions](#extensions) window), plus a group for each enabled [plugin](../plugins.md) with commands or tools; a plugin with its own tab adds that tab instead |
 | **Settings** | Theme (the theme list, Follow the System, Interface Scale), Customize (Ribbon, Quick Access), Language (interface language and worldview), Start-up (Start With, Projection, Extent), Autosave on the desktop |
 | **Help** | Performance (Diagnostic Monitor), Learn (Learning Resources), Help (About, Check for Updates on the desktop, Command Search, Shortcuts) |
+| **Imagery** | The [Imagery extension](#extensions)'s tab, after Help, while it is on (it is off until you turn it on): Ortho Mapping, Reality Mapping, Alignment, Image Analysis, Image Classification, Imagery Sharing, Mensuration, Imagery Tools |
 
 The tabs stay the same whatever is selected: Style, Labeling and Data act on the layer selected in Layers.
+
+### Extensions
+
+Extensions are optional parts of RustGIS that you turn on or off. Unlike a
+[plugin](../plugins.md), an extension ships with RustGIS: there is nothing to download or install.
+**Plugins › Extensions** opens the Extensions window, which lists each extension with a switch,
+what it adds and where it shows. An extension with a tab of its own adds that tab after Help
+(before plugins' own tabs) while it is on; one without a tab adds a group to the Plugins tab.
+
+| Extension | Default | Adds |
+| --- | --- | --- |
+| **Imagery** (`imagery`) | Off | The Imagery tab: Ortho Mapping, Reality Mapping, Alignment (Georeference), Image Analysis, Image Classification (with Deep Learning Tools), Imagery Sharing, Mensuration and Imagery Tools, and their commands (`imagery.*`, `dl.*`, and the `raster.*` commands those groups run) |
+
+While an extension is off, its tab, its buttons, its Workflows pane sections and its commands in
+Command Search and the AI Assistant's command search are hidden. Its commands are refused with a
+message naming the extension, whoever runs them: a script, a model, the command line, Python or
+the assistant. Hiding the extension's tab in Settings › Customize › Ribbon only hides the tab; the
+commands still run.
+
+The desktop and web apps start each extension at its default and remember your choices (the
+`extensions` setting). A setting saved by a newer RustGIS that names extensions this version
+doesn't have keeps them unchanged, and so do entries that can't be read (each kind is reported
+in Messages). A setting that can't be read at all is reported, leaves every extension at its
+default and is never written over. The command line and Python start with every extension
+on, so scripts that use its commands keep working; models and scripts run in the apps follow the
+apps' choices. Turn one off or on in a run with:
+
+```bash
+rustgis-cli run --sample --cmd extension.list \
+  --cmd 'extension.disable={"id":"imagery"}' \
+  --cmd 'extension.enable={"id":"imagery","enabled":true}'
+```
+
+`extension.enable` takes `"enabled": true` or `false` (default `true`) and refuses other values.
 
 Menus with checkboxes stay open while you change options: stack or show web basemaps, combine
 Visual and Camera Effects, or customize Ribbon tabs and Quick Access buttons. Click outside
@@ -215,6 +251,8 @@ table is retained when available. Repair keeps the layer's identity and configur
 the project unsaved and can be undone or redone. A raster drawn with its own color table
 requires a replacement with a color table; incompatible rasters are rejected without changing
 the saved style.
+Vector repair also refuses a table containing only a different geometry family; for example,
+a Lines layer cannot be repaired to a points-only DuckDB table.
 If a tile archive is removed or reordered out of its captured slot while the dialog is open,
 the dialog closes rather than applying the replacement to another archive.
 It does not change embedded data, databases or web links. The web app cannot link to files
@@ -224,6 +262,139 @@ CLI and Python use the same commands: `layer.repairSource` with
 `{"layer":"Cities","path":"/data/towns.fgb"}` (and optional `"table"`), or `map.repairTiles`
 with `{"index":0,"path":"/data/tiles.pmtiles"}`. Tile archives can also be selected by
 `"name"` or catalog `"id"`.
+
+### Reload Data
+
+On the desktop, right-click a linked layer and choose **Reload Data**, beside **Repair Data
+Source…**. For the active layer, use **Data › Data Source › Reload Data**, or **Reload Data**
+in Command Search. Reload rereads the same local source, table or raster subdataset without
+adding other tables from its container. It retains the layer's name, identity, drawing order,
+group, visibility, opacity, styling, labels, filters and map camera. Local PMTiles and MBTiles
+tile archives have their own **Reload Data** on their Layers row; see
+[Maps › Reloading a local tile archive](maps.md).
+
+Supported targets are linked vectors, rasters (including time-following Zarr variables),
+GDAL/DuckDB file-backed layers and editable local GeoPackage tables. GDAL-linked File
+Geodatabases and Zarr folders can be reloaded manually. Folder sources are not monitored
+(**Folder source — changes are not monitored. Use Reload Data.** in the Layers row's tooltip): use
+Reload Data even when the folder's timestamp has not changed.
+
+**Changed on disk (desktop).** While the app is open, RustGIS looks at the files its linked
+layers and local tile archives read every 5 seconds and when its window regains focus, in every
+map of the project. It reads only metadata (size, modification time and the file's identity: on
+Linux and macOS its status-change time too, on Windows its creation time), never the data: a Shapefile's `.dbf`, `.shx`, `.prj` and `.cpg` count with its
+`.shp`, a MapInfo file's `.mid` with its `.mif`, a GeoPackage, MBTiles or `.sqlite` file's `-wal`
+and `-journal` with it, and a DuckDB database's `.wal` with it (a `.db` file gets both). Other
+sidecars (a raster's `.aux.xml` or `.prj`) aren't watched. A change is reported once two looks in a row agree:
+a stability check, not proof the writer has finished (one that pauses for longer may be reported
+mid-write, and again when it's done). The Layers pane marks the row **(changed on disk)**, **(missing on
+disk)** or **(can't be checked)**, and a notification lists each affected file with **Reload Data**
+for each layer or archive reading it (**Repair Data Source…** when a linked file is missing) and
+**Not Now**. RustGIS doesn't reload anything until you choose, though a layer read in place
+(streamed) reads its file as you pan and zoom, so it may already show some of the new data; Reload
+Data reloads only that layer, opening its map
+first, and asks before discarding GeoPackage edits (see below). **Not Now** hides the notification
+for that version of the file; the row stays marked, and a later change notifies again. A reload
+clears the mark for what it read; a change that came while it read stays marked. Saving edits, or
+exporting into a watched file, from RustGIS's menus, ribbon and Command Search isn't reported as an
+outside change, except for other layers reading the table that was written, or the file an export
+replaced (a GeoJSON, a Shapefile): they still show the old rows and stay marked. (A layer read in
+place from a GeoPackage table RustGIS wrote reads it again, so it isn't marked.) Watching for
+changes, the marks and Not Now don't change the project or add undo steps.
+
+Limits: a write that keeps the size, modification time and identity of every watched file isn't
+seen; nor is one made while the layer is being opened, before its first look, which RustGIS takes
+as what the layer read. Reload Data stays available whether or not a change was reported. A
+reload, a GeoPackage save or an export run from a script, a model, the AI Assistant pane, the file
+bridge or the command line doesn't clear the mark or count as RustGIS's own write (an archive
+reload from an attached MCP client does clear it). Another program writing the same GeoPackage
+while RustGIS saves or exports into it isn't told apart from RustGIS's own write. A file that
+doesn't answer (a network drive gone away) pauses the checks of every file until it does; a
+notice says so. When one map shows the same tile archive twice, removing or reordering those
+two can move a mark from one to the other.
+
+Saved GDAL/DuckDB links reread their original selected table when restoring a disposable
+converted copy, including compatible empty tables. If the original cannot be read, RustGIS
+does not borrow another session's temporary conversion. A durable saved conversion outside the
+current cache can still open as a fallback, with one notice naming the original and its read
+error (or the layer count and first failure when several layers fall back). Losses found while
+converting a link again as a project opens (dropped Z or M values, clamped attributes) are
+reported once per kind, with a layer count. Counts are summed only when every layer's count is
+known and comparable; otherwise the notice identifies the first layer's count as its own, or
+reports an unknown total. Temporary reload folders left by a crash are cleaned up later, only
+when their lock file carries RustGIS's ownership marker and is unlocked after a 60-second grace
+period; folders RustGIS did not create are never removed, even in a shared cache folder.
+Reloading an existing DuckDB branch that has lost all its rows installs an empty layer of the
+same geometry family, even when rows of another family remain; the omitted rows are reported.
+
+Reload does not turn snapshots into live links. Embedded uploads, generated layers, ordinary
+imports without linked provenance, arbitrary SQL results and layers detached by **Load All
+Features** must be added again. A source name in a snapshot's history is not a live link.
+Server databases and remote URLs use their separate discard/refresh actions. The web app
+cannot reread a local file; add the file again with **Add Data**.
+
+For an editable GeoPackage with pending inserts, updates or deletions, reload first shows
+their counts. **Cancel** keeps the edits; **Discard Edits and Reload** explicitly abandons
+them and rereads the selected table, without writing to the file. A successful reload updates
+the baseline used to detect conflicts when subsequently saving edits.
+Close an already-open dialog before opening the discard confirmation; Reload Data does not
+discard another dialog's unfinished input.
+
+The desktop UI prepares the read or conversion in the background, with running status and
+Cancel in the status bar. Cancel installs nothing. If the source is repaired or the target is
+replaced, or GeoPackage edits change after confirmation while a reload is waiting or running,
+the reload is refused; review the current state and confirm again.
+
+Reload checks a fresh candidate before replacing the layer. Incompatible geometry, missing
+fields, incompatible numeric fields used by presentation settings, invalidated configured
+expressions, missing tables/subdatasets and insufficient raster bands or palettes are rejected.
+Saved labeling configuration is checked even when labels are disabled. A time-following Zarr
+replacement whose dates cannot be reached by any step of the current slider is rejected: adjust
+the slider and retry; reload does not silently change the shared slider for other layers.
+An unreadable or missing source leaves the existing configuration and retained in-memory data
+in place; correct the file and retry, or use **Repair Data Source…** if it moved.
+For streamed sources these opening and compatibility checks are not a full-file integrity scan.
+A streamed source may itself already be affected by an external overwrite: its retained handle
+is not a complete last-good copy.
+
+Replacing vector features resets selections and saved feature-specific label moves because
+feature IDs may now identify different data. It also clears map-wide label locks and line
+anchors: keeping a partial lock could hide the replacement's labels. Notices count reset saved
+moves, locked placements and anchors, including placements belonging to other layers, and
+report loader losses. Successful reload is one undo step; failure adds none.
+Undo restores in-memory edits and configuration, including saved label moves and locks, but
+cannot recover overwritten files or promise historical streamed features or pixels.
+
+CLI, Python, MCP and the Assistant use `layer.reloadData` with
+`{"layer":"Cities","discardEdits":false}`. Both parameters are optional: the active layer is
+the default and discarding edits defaults to false. Only an explicit
+`"discardEdits":true` permits losing pending GeoPackage edits. Success returns, for example,
+`{"layer":42,"path":"/data/cities.fgb","table":null}`; `table` is a string for a selected table
+or raster subdataset.
+
+### Source file state
+
+A layer read whole from a Shapefile or a `.geojson` file keeps its features in the project, so
+edits change the project, not the file. It also keeps a record of what was read: each part of
+the file's size and SHA-256 hash, and a hash of the layer's rows. `source.syncState` compares
+the layer with the rows read, and the file with the parts read, and answers `inSync`, `edited`
+(the layer has edits since it was read), `sourceChanged` (the file changed since it was read)
+or `both`, with the names of the parts that changed. It doesn't compare the layer with the file
+as it is now: the same edit made to both shows as `both`. Only the bytes count: writing the
+same bytes again isn't a change, while a copy that puts back the file's size and time with other
+bytes is one.
+Undoing every edit makes the layer match its record again, so it reads `inSync` if the file
+hasn't changed either. A number that isn't finite (NaN, infinity), which a
+project saves as empty, shows the layer as `edited` once its project is opened again. On the desktop the file and the rows are hashed
+in the background, with progress and Cancel in the status bar.
+
+The record is made just before the file is read, so a file written to while it was being read
+shows as changed, unless the write was undone before RustGIS looked again. A layer read in
+place and a `.json` file have no record. The record is saved with the project; the web app
+can't check it.
+
+On the desktop, make the layer active and choose **Source File State** in Command Search; what it
+found shows in the status bar. CLI and Python: `source.syncState` with `{"layer":"parcels"}`.
 
 ## Keyboard shortcuts
 

@@ -12,7 +12,9 @@
 //!
 //! Fields are bare names, `"quoted"` or `!quoted!`; text uses single quotes (`''` is a quote).
 //! Text matching (`=`, `LIKE`, `IN`) is case-insensitive; two values that read as numbers compare
-//! as numbers. Logic is SQL's three-valued: a comparison with a null is unknown. One exception,
+//! as numbers. A date or date-time compares with another, or with text that reads as one
+//! (`issued >= '2026-01-01'`, a date-time at midnight); text that isn't a full date compares as
+//! text. Logic is SQL's three-valued: a comparison with a null is unknown. One exception,
 //! kept from the WHERE language this replaced so saved clauses keep their rows: a NULL in an `IN`
 //! list matches nothing, so `2 NOT IN (1, NULL)` is true where SQL makes it unknown. A `LIKE`
 //! too costly to match ([`MAX_LIKE_STEPS`]) is unknown, as is any that would take an expression's
@@ -21,7 +23,7 @@
 
 use crate::{Dataset, Measure, Value};
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 
 #[cfg(test)]
 mod legacy;
@@ -164,6 +166,65 @@ pub enum Func {
     Area,
     Perimeter,
     LineLength,
+}
+
+/// Whether `t` is a whole date in a form other than ISO 8601: digits only, five or more
+/// (`20260101`), or year, month and day as three numbers in either order joined by one `-`, `/`
+/// or `.` (`2026/03/05`, `2026-1-1`, `05.03.2026`), alone or before a time (`2026/03/05 14:30`),
+/// that doesn't read as an ISO date. Other text (`2026-03-05 revision 2`) isn't a date.
+fn other_date_form(t: &str) -> bool {
+    if t.len() >= 5 && t.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    if crate::DateTime::parse(t).is_some() {
+        return false;
+    }
+    // The date: up to a space or `T` that starts a time.
+    let (date, time) = match t.find([' ', 'T', 't']) {
+        Some(i) => (t.get(..i).unwrap_or(t), t.get(i + 1..)),
+        None => (t, None),
+    };
+    // A time is a clock and an optional zone, and nothing else: `14:30`, `14:30:00.5 +02:00`, `14:30Z`.
+    let clock = |time: &str| {
+        time.starts_with(|c: char| c.is_ascii_digit())
+            && time.contains(':')
+            && time.chars().all(|c| c.is_ascii_digit() || matches!(c, ':' | '.' | '+' | '-' | ' ' | 'Z' | 'z'))
+    };
+    if time.is_some_and(|time| !clock(time)) {
+        return false;
+    }
+    let Some(sep) = date.chars().find(|c| !c.is_ascii_digit()) else { return false };
+    if !['-', '/', '.'].contains(&sep) {
+        return false;
+    }
+    let parts: Vec<&str> = date.split(sep).collect();
+    let digits = |p: &&str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    let lens: Vec<usize> = parts.iter().map(|p| p.len()).collect();
+    parts.iter().all(digits) && matches!(lens.as_slice(), [4, 1..=2, 1..=2] | [1..=2, 1..=2, 4])
+}
+
+/// Whether `f` works on numbers, so it gives null for a date.
+fn number_func(f: Func) -> bool {
+    matches!(
+        f,
+        Func::Abs
+            | Func::Round
+            | Func::Floor
+            | Func::Ceil
+            | Func::Sqrt
+            | Func::Exp
+            | Func::Ln
+            | Func::Log10
+            | Func::Min
+            | Func::Max
+            | Func::Clamp
+            | Func::ScaleLinear
+            | Func::ScaleExp
+            | Func::ToInt
+            | Func::ToReal
+            | Func::ColorRgb
+            | Func::ColorRgba
+    )
 }
 
 /// Functions by name, with their fewest and most arguments.
@@ -361,6 +422,8 @@ struct Parser<'a> {
     pos: usize,
     ds: &'a Dataset,
     depth: usize,
+    area_check: OnceCell<Option<String>>,
+    validate_areas: bool,
 }
 
 impl Parser<'_> {
@@ -476,6 +539,9 @@ impl Parser<'_> {
                     other => return Err(format!("expected ',' or ')', found {}", show(other.as_ref()))),
                 }
             }
+            for e in &list {
+                self.date_against_number(&l, e)?;
+            }
             return Ok(match l {
                 Expr::Field(field) if list.iter().all(|e| matches!(e, Expr::Lit(_))) => {
                     let values = list.into_iter().filter_map(|e| if let Expr::Lit(v) = e { Some(v) } else { None }).collect();
@@ -490,6 +556,8 @@ impl Parser<'_> {
                 return Err("expected AND after BETWEEN …".into());
             }
             let hi = self.concat()?;
+            self.date_against_number(&l, &lo)?;
+            self.date_against_number(&l, &hi)?;
             return Ok(Expr::Between { e: Box::new(l), lo: Box::new(lo), hi: Box::new(hi), negate });
         }
         if negate {
@@ -509,6 +577,7 @@ impl Parser<'_> {
         };
         self.pos += 1;
         let r = self.concat()?;
+        self.date_against_number(&l, &r)?;
         Ok(match (l, r) {
             (Expr::Field(field), Expr::Lit(lit)) => Expr::Cmp { field, op, lit },
             (l, r) => Expr::Compare(op, Box::new(l), Box::new(r)),
@@ -558,7 +627,75 @@ impl Parser<'_> {
             }
             rest.push((a, term(self)?));
         }
-        Ok(if rest.is_empty() { first } else { Expr::Chain(Box::new(first), rest) })
+        if rest.is_empty() { Ok(first) } else { self.arithmetic(first, rest) }
+    }
+    /// `first op term …`, unless a term can be a date: date arithmetic (`issued + 30`,
+    /// `coalesce(issued) + 1`) is an error until the language has it, rather than a column of
+    /// nulls.
+    fn arithmetic(&self, first: Expr, rest: Vec<(Arith, Expr)>) -> Result<Expr, String> {
+        for e in std::iter::once(&first).chain(rest.iter().map(|(_, e)| e)) {
+            if let Some(f) = self.date_field(e) {
+                return Err(format!("'{}' holds dates, and arithmetic on dates isn't supported yet", f.name));
+            }
+        }
+        Ok(Expr::Chain(Box::new(first), rest))
+    }
+    /// An error when one side is a date and the other a number (`issued >= 20260101`,
+    /// `issued > year`), which would compare the date's text with the number's digits and match
+    /// the wrong rows.
+    fn date_against_number(&self, a: &Expr, b: &Expr) -> Result<(), String> {
+        // Each way round: either side can be the date, whatever the other is.
+        let date_against = |d: &Expr, other: &Expr| if self.text_or_date(other) { None } else { self.date_field(d) };
+        let date = date_against(a, b).or_else(|| date_against(b, a));
+        if let Some(f) = date {
+            return Err(format!("'{}' holds dates, so it compares with a date in quotes ('2026-01-01') or text, not a number", f.name));
+        }
+        // A whole date written another way ('20260101', '2026/03/05', '2026-1-1', '05/03/2026')
+        // is text that no date reads as, so it would compare with the date's text and match the
+        // wrong rows. A partial date ('2026', '2026-03') still compares as text, in order.
+        let compact = |e: &Expr| match e {
+            Expr::Lit(Value::Text(t)) if other_date_form(t.trim()) => Some(t.trim().to_string()),
+            _ => None,
+        };
+        let date =
+            compact(b).and_then(|t| Some((self.date_field(a)?, t))).or_else(|| compact(a).and_then(|t| Some((self.date_field(b)?, t))));
+        match date {
+            Some((f, t)) => Err(format!("'{}' holds dates: write the date as YYYY-MM-DD ('2026-01-01'), not '{t}'", f.name)),
+            None => Ok(()),
+        }
+    }
+    /// Whether `e` can only give text or a date, which a date compares with: a text or date literal
+    /// or field, null, `||`, a function that gives text, or `if`, `coalesce`, `nullif` or `CASE`
+    /// whose every branch is one of these. Anything else can give a number or yes/no, arithmetic
+    /// included (`+` reads text that is a number as one: `'12' + 1` is 13).
+    fn text_or_date(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Lit(v) => !matches!(v, Value::Int(_) | Value::Float(_) | Value::Bool(_)),
+            Expr::Field(i) => self.ds.fields.get(*i).is_some_and(|f| matches!(f.ty, crate::FieldType::Text) || f.ty.is_temporal()),
+            Expr::Concat(_) => true,
+            Expr::Call(Func::If, args) => args.iter().skip(1).all(|a| self.text_or_date(a)),
+            Expr::Call(Func::Coalesce, args) => args.iter().all(|a| self.text_or_date(a)),
+            Expr::Call(Func::NullIf, args) => args.first().is_some_and(|a| self.text_or_date(a)),
+            Expr::Case { arms, otherwise, .. } => {
+                arms.iter().map(|(_, then)| then).chain(otherwise.as_deref()).all(|a| self.text_or_date(a))
+            }
+            Expr::Call(f, _) => !number_func(*f) && !matches!(f, Func::Length | Func::Pi | Func::Area | Func::Perimeter | Func::LineLength),
+            _ => false,
+        }
+    }
+    /// The date field `e` can give a value of: the field itself, or one passed through `if`,
+    /// `coalesce`, `nullif` or `CASE`. Other functions give numbers or text.
+    fn date_field(&self, e: &Expr) -> Option<&crate::Field> {
+        match e {
+            Expr::Field(i) => self.ds.fields.get(*i).filter(|f| f.ty.is_temporal()),
+            Expr::Call(Func::If, args) => args.iter().skip(1).find_map(|a| self.date_field(a)),
+            Expr::Call(Func::Coalesce, args) => args.iter().find_map(|a| self.date_field(a)),
+            Expr::Call(Func::NullIf, args) => args.first().and_then(|a| self.date_field(a)),
+            Expr::Case { arms, otherwise, .. } => {
+                arms.iter().map(|(_, then)| then).chain(otherwise.as_deref()).find_map(|a| self.date_field(a))
+            }
+            _ => None,
+        }
     }
     fn sum(&mut self) -> Result<Expr, String> {
         self.chain(&[Arith::Add, Arith::Sub], Self::product)
@@ -587,7 +724,7 @@ impl Parser<'_> {
             // A negative number stays a literal, so `pop > -5` keeps the fast comparison.
             (_, Expr::Lit(Value::Int(i))) => Expr::Lit(i.checked_neg().map(Value::Int).unwrap_or(Value::Float(-(i as f64)))),
             (_, Expr::Lit(Value::Float(f))) => Expr::Lit(Value::Float(-f)),
-            (_, e) => Expr::Chain(Box::new(Expr::Lit(Value::Int(0))), vec![(Arith::Sub, e)]),
+            (_, e) => self.arithmetic(Expr::Lit(Value::Int(0)), vec![(Arith::Sub, e)])?,
         })
     }
     fn power(&mut self) -> Result<Expr, String> {
@@ -598,7 +735,7 @@ impl Parser<'_> {
         self.deeper()?;
         let exp = self.unary()?;
         self.depth -= 1;
-        Ok(Expr::Chain(Box::new(base), vec![(Arith::Pow, exp)]))
+        self.arithmetic(base, vec![(Arith::Pow, exp)])
     }
     /// Whether the token at `i` starts the operator of a comparison.
     fn comparison_at(&self, i: usize) -> bool {
@@ -613,6 +750,13 @@ impl Parser<'_> {
         if self.ds.geometry_type != want {
             let hint = if m == Measure::Length { " (use perimeter on polygons)" } else { "" };
             return Err(format!("'{name}' measures {} layers{hint}", want.label().to_ascii_lowercase()));
+        }
+        if self.validate_areas
+            && m == Measure::Area
+            && let Some(message) =
+                self.area_check.get_or_init(|| crate::ambiguous_area_message(self.ds.features.iter().filter_map(|f| f.geometry.as_ref())))
+        {
+            return Err(format!("{}: {message}", self.ds.name));
         }
         Ok(Expr::Var(Var::Measure(m, size)))
     }
@@ -691,6 +835,19 @@ impl Parser<'_> {
             };
             return Err(format!("{fname} takes {n} argument{}", if n == "1" { "" } else { "s" }));
         }
+        // A number's functions would give null for every date, so a date there is an error, as
+        // date arithmetic is.
+        if number_func(f)
+            && let Some(d) = args.iter().find_map(|a| self.date_field(a))
+        {
+            return Err(format!("'{}' holds dates, and {fname} on dates isn't supported yet", d.name));
+        }
+        // `nullif(a, b)` compares its two arguments, as `a = b` would.
+        if f == Func::NullIf
+            && let [a, b] = args.as_slice()
+        {
+            self.date_against_number(a, b)?;
+        }
         let m = match f {
             Func::Area => Measure::Area,
             Func::Perimeter => Measure::Perimeter,
@@ -721,6 +878,10 @@ impl Parser<'_> {
                 return Err("the expression has too many terms".into());
             }
             let when = self.or()?;
+            // `CASE subject WHEN value` compares the two, as `subject = value` would.
+            if let Some(s) = &subject {
+                self.date_against_number(s, &when)?;
+            }
             if !self.eat_kw("THEN") {
                 return Err(format!("expected THEN, found {}", show(self.toks.get(self.pos))));
             }
@@ -767,11 +928,46 @@ fn show(t: Option<&Tok>) -> String {
 
 /// Parses an expression (a clause, or a value) against a dataset's schema.
 pub fn parse(text: &str, ds: &Dataset) -> Result<Expr, String> {
+    parse_expression(text, ds, true)
+}
+
+/// Whether `e` reads field `field` (by its index in the dataset it was parsed against) anywhere.
+pub fn reads_field(e: &Expr, field: usize) -> bool {
+    let any = |es: &[Expr]| es.iter().any(|e| reads_field(e, field));
+    match e {
+        Expr::Field(f)
+        | Expr::Cmp { field: f, .. }
+        | Expr::Like { field: f, .. }
+        | Expr::IsNull { field: f, .. }
+        | Expr::In { field: f, .. } => *f == field,
+        Expr::Lit(_) | Expr::Var(_) => false,
+        Expr::And(es) | Expr::Or(es) | Expr::Concat(es) | Expr::Call(_, es) => any(es),
+        Expr::Not(e) | Expr::IsNullExpr { e, .. } => reads_field(e, field),
+        Expr::Compare(_, a, b) | Expr::LikeExpr { e: a, pattern: b, .. } => reads_field(a, field) || reads_field(b, field),
+        Expr::InExpr { e, list, .. } => reads_field(e, field) || any(list),
+        Expr::Between { e, lo, hi, .. } => reads_field(e, field) || reads_field(lo, field) || reads_field(hi, field),
+        Expr::Chain(first, rest) => reads_field(first, field) || rest.iter().any(|(_, e)| reads_field(e, field)),
+        Expr::Case { subject, arms, otherwise } => {
+            subject.as_deref().is_some_and(|e| reads_field(e, field))
+                || arms.iter().any(|(w, t)| reads_field(w, field) || reads_field(t, field))
+                || otherwise.as_deref().is_some_and(|e| reads_field(e, field))
+        }
+    }
+}
+
+/// Parse retained expressions against fields and geometry type, without checking current areas.
+/// Drawing and stale-field checks use this path and report unavailable areas separately; new
+/// user calculations and filters use [`parse`] so ambiguous measurements are refused.
+pub fn parse_fields(text: &str, ds: &Dataset) -> Result<Expr, String> {
+    parse_expression(text, ds, false)
+}
+
+fn parse_expression(text: &str, ds: &Dataset, validate_areas: bool) -> Result<Expr, String> {
     let toks = lex(text)?;
     if toks.is_empty() {
         return Err("the expression is empty".into());
     }
-    let mut p = Parser { toks, pos: 0, ds, depth: 0 };
+    let mut p = Parser { toks, pos: 0, ds, depth: 0, area_check: OnceCell::new(), validate_areas };
     let e = p.or()?;
     if p.pos < p.toks.len() {
         return Err(format!("unexpected {}", show(p.toks.get(p.pos))));
@@ -779,7 +975,12 @@ pub fn parse(text: &str, ds: &Dataset) -> Result<Expr, String> {
     Ok(e)
 }
 
+/// SQL `=`: dates by instant (against dates or date text), numbers as numbers, otherwise text
+/// ignoring case.
 fn eq(a: &Value, b: &Value) -> bool {
+    if let Some((x, y)) = a.temporal_keys(b) {
+        return x == y;
+    }
     match (a.as_f64(), b.as_f64()) {
         (Some(x), Some(y)) if !matches!(a, Value::Text(_)) || !matches!(b, Value::Text(_)) => x == y,
         _ => a.to_string().eq_ignore_ascii_case(&b.to_string()),
@@ -872,6 +1073,29 @@ fn like_steps(text: &str, pat: &str, left: &mut usize) -> Option<bool> {
     Some(p.get(pi..).is_some_and(|rest| rest.iter().all(|c| *c == '%')))
 }
 
+/// Whether any branch can read polygon area, including unit-converted area functions.
+/// Source workers use this after parsing against metadata, before evaluating actual chunks.
+pub fn uses_area(e: &Expr) -> bool {
+    let any = |es: &[Expr]| es.iter().any(uses_area);
+    match e {
+        Expr::Var(Var::Measure(Measure::Area, _)) => true,
+        Expr::And(es) | Expr::Or(es) | Expr::Concat(es) | Expr::Call(_, es) => any(es),
+        Expr::Not(e) | Expr::IsNullExpr { e, .. } => uses_area(e),
+        Expr::Compare(_, a, b) | Expr::LikeExpr { e: a, pattern: b, .. } => uses_area(a) || uses_area(b),
+        Expr::InExpr { e, list, .. } => uses_area(e) || any(list),
+        Expr::Between { e, lo, hi, .. } => uses_area(e) || uses_area(lo) || uses_area(hi),
+        Expr::Chain(first, rest) => uses_area(first) || rest.iter().any(|(_, e)| uses_area(e)),
+        Expr::Case { subject, arms, otherwise } => {
+            subject.as_deref().is_some_and(uses_area)
+                || arms.iter().any(|(w, t)| uses_area(w) || uses_area(t))
+                || otherwise.as_deref().is_some_and(uses_area)
+        }
+        Expr::Cmp { .. } | Expr::Like { .. } | Expr::IsNull { .. } | Expr::In { .. } | Expr::Lit(_) | Expr::Field(_) | Expr::Var(_) => {
+            false
+        }
+    }
+}
+
 /// Evaluates for one row: whether the row matches.
 pub fn eval(e: &Expr, ds: &Dataset, row: usize) -> bool {
     matches(e, ds, row, &Env::default())
@@ -896,6 +1120,7 @@ fn truth(v: &Value) -> Option<bool> {
         Value::Float(f) => (!f.is_nan()).then_some(*f != 0.0),
         Value::Text(s) => Some(!s.is_empty()),
         Value::Image(_) => None,
+        Value::Date(_) | Value::DateTime(_) => Some(true),
     }
 }
 
@@ -922,8 +1147,11 @@ fn whole(f: f64) -> Value {
     if f.is_finite() && f.abs() < 9e15 { Value::Int(f as i64) } else { real(f) }
 }
 
+/// `a op b`: null with a null or a date, exact on whole numbers where it can be, `+` joining text.
 fn arith(op: Arith, a: &Value, b: &Value) -> Value {
-    if a.is_null() || b.is_null() {
+    // Arithmetic on dates, which the parser refuses on a date field, is null from anything else
+    // that gives a date (`coalesce(issued, closed) + 1`).
+    if a.is_null() || b.is_null() || a.temporal_key().is_some() || b.temporal_key().is_some() {
         return Value::Null;
     }
     let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) else {

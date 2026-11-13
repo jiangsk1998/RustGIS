@@ -46,6 +46,8 @@ pub const NOT_THIS_SESSION: &str = "This request's login does not belong to this
 pub const CHOOSE_CONNECTION: &str = "Several saved connections match this address. Choose a connection explicitly.";
 /// A `connection` that is not a saved web-service connection's id.
 pub const NO_SUCH_CONNECTION: &str = "No saved web-service connection with this id.";
+/// A request's `connection` that isn't text.
+pub const CONNECTION_TEXT: &str = "connection must be a saved web-service connection id (text)";
 /// The commands that add layers from a service, and so may record the connection they came from
 /// (their `connection` parameter, or the connection whose login their address is read with).
 pub const ADD_COMMANDS: &[&str] = &[
@@ -93,6 +95,58 @@ pub fn check_login_secret(c: &Connection, secret: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A form test owns its login independently of every saved connection and session.
+/// Keep this guard alive until the fetch (including its asynchronous callback) has finished.
+/// It is deliberately neither cloneable nor printable, and exposes no credential or binding.
+#[must_use = "keep the temporary login alive until the service test fetch has finished"]
+pub struct TemporaryProbe {
+    binding: String,
+}
+
+impl Drop for TemporaryProbe {
+    fn drop(&mut self) {
+        // The networking registry also clears authenticated caches on revocation. Cache reads
+        // and responses arriving after this drop recheck the binding and cannot reuse it.
+        logins::deactivate(&self.binding);
+    }
+}
+
+/// Binds an anonymous form-test probe to the login just typed in that form. This never reads
+/// saved logins, selects a connection, or retains the typed credential in a session.
+///
+/// `url` is the address returned by the existing anonymous `connection.test` probe. Only a
+/// plain, credential-free address at the cleaned definition's exact origin may carry it.
+pub fn temporary_probe(c: &Connection, secret: &str, insecure: bool, url: &str) -> Result<(String, TemporaryProbe), String> {
+    const BAD_DEFINITION: &str = "The service test requires a valid web-service connection and login.";
+    const BAD_ADDRESS: &str = "The service test requires a credential-free HTTP or HTTPS address at the connection's origin.";
+    if !c.id.is_empty() || !is_service(c) {
+        return Err(BAD_DEFINITION.into());
+    }
+    let (c, stripped) = crate::connections::clean(c.clone()).map_err(|_| BAD_DEFINITION.to_string())?;
+    if stripped || crate::sources::redact(url) != url {
+        return Err(BAD_ADDRESS.into());
+    }
+    let origin = login_origin(&c).ok_or(BAD_ADDRESS)?;
+    if rustgis_data::login_address::is_wrapper(url) || logins::origin(url).as_deref() != Some(origin.as_str()) {
+        return Err(BAD_ADDRESS.into());
+    }
+    if c.auth.is_empty() {
+        return Err(BAD_DEFINITION.into());
+    }
+    if secret.is_empty() {
+        return Err(REQUIRED.into());
+    }
+    check_login_secret(&c, secret)?;
+    if origin.starts_with("http://") && !insecure {
+        return Err(INSECURE.into());
+    }
+    let (method, value) = method(&c, secret).ok_or(BAD_DEFINITION)?;
+    let guard = TemporaryProbe { binding: logins::activate(&origin, "temporary-probe", method, &value, insecure).map_err(str::to_string)? };
+    // Construct the guard before binding: even a too-long URL cannot leak a live login.
+    let bound = logins::bind(&guard.binding, url).map_err(|_| BAD_ADDRESS.to_string())?;
+    Ok((bound, guard))
+}
+
 /// An active login belongs to one connection in one session; the token is not a secret, but
 /// saved projects must never treat it as authority to use another session's login.
 struct ActiveLogin {
@@ -134,6 +188,16 @@ impl SessionLogins {
     /// Whether [`SessionLogins::anonymous`] reads are running: nothing may pick a login for them.
     pub(crate) fn is_anonymous(&self) -> bool {
         self.anonymous
+    }
+
+    /// The immutable runtime owner used by the networking crate's private account snapshot.
+    pub(crate) fn session_id(&self) -> u64 {
+        self.session
+    }
+
+    /// Sorted connection ids only; bearer bindings never enter the policy's JSON projection.
+    pub(crate) fn active_ids(&self) -> Vec<&str> {
+        self.active.keys().map(String::as_str).collect()
     }
 
     fn owner(&self, id: &str) -> String {
@@ -270,8 +334,12 @@ pub(crate) fn bind_logged_in(s: &Session, connection: &str, url: &str) -> Result
         return Ok(url.to_string());
     }
     let Some(active) = s.web_logins.active.get(&c.id) else { return Ok(url.to_string()) };
-    logins::bind(&active.binding, url)
-        .map_err(|_| format!("{url}: this address can't carry the connection's login (it has a space, a control character or a backslash)"))
+    logins::bind(&active.binding, url).map_err(|_| {
+        crate::sources::message_with_address(
+            url,
+            "this address can't carry the connection's login (it has a space, a control character or a backslash)",
+        )
+    })
 }
 
 pub fn known_secret(s: &Session, c: &Connection) -> Result<Secret, String> {
@@ -309,8 +377,10 @@ pub fn request(s: &mut Session, connection: Option<&str>, url: &str) -> Result<S
             return Ok(plain.to_string());
         }
         Some(c.clone())
-    } else if let Some(id) = s.database_logins.selection(WEB, &origin) {
-        candidates.iter().find(|c| c.id == id).map(|c| (*c).clone())
+    // A choice naming a connection no longer here (or no longer at this origin) is no choice:
+    // the sole connection left still lends its login.
+    } else if let Some(c) = s.database_logins.selection(WEB, &origin).and_then(|id| candidates.iter().find(|c| c.id == id)) {
+        Some((*c).clone())
     } else if candidates.len() == 1 {
         candidates.first().map(|c| (*c).clone())
     } else {
@@ -354,7 +424,7 @@ pub fn request_params<'a>(s: &mut Session, p: &'a Value) -> Result<std::borrow::
         None | Some(Value::Null) => None,
         Some(Value::String(id)) if id.trim().is_empty() => None,
         Some(Value::String(id)) => Some(id.as_str()),
-        Some(_) => return Err("connection is a saved web-service connection id.".into()),
+        Some(_) => return Err(CONNECTION_TEXT.into()),
     };
     if id.is_none() && (s.web_logins.anonymous || p.get("anonymous").and_then(Value::as_bool) == Some(true)) {
         // An address bound to a login is no authority for it here either.
@@ -416,6 +486,7 @@ fn layer_address(l: &rustgis_map::Layer) -> Option<&str> {
 fn rebind_connection(s: &mut Session, c: &Connection) -> usize {
     let binding = s.web_logins.active.get(&c.id).map(|a| a.binding.as_str());
     let origin = login_origin(c);
+    let wait = s.in_place_wait;
     let mut failed = 0usize;
     let mut rewrite = |address: &mut String| {
         let (prefix, raw) = crate::sources::template_archive(address).unwrap_or(("", address.as_str()));
@@ -477,8 +548,10 @@ fn rebind_connection(s: &mut Session, c: &Connection) -> usize {
                 && let Some(path) = raster.path.as_mut()
                 && rewrite(path)
             {
-                // Reload keeps the style and publishes any failure through raster.error.
-                let _ = raster.reload();
+                // Reload keeps the style and publishes any failure through raster.error. A layer
+                // read in place lands as the map draws where the session doesn't wait for reads
+                // in place (the desktop), so a login made again doesn't hold the window.
+                let _ = if raster.in_place && !wait { raster.begin_reload() } else { raster.reload() };
             }
             if let Some(path) = &mut l.dataset.source {
                 rewrite(path);
@@ -788,16 +861,10 @@ fn named(s: &Session, params: &Value) -> Result<Option<Connection>, String> {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(id)) if id.trim().is_empty() => Ok(None),
         Some(Value::String(id)) => {
-            let c = s
-                .connections
-                .connections
-                .iter()
-                .find(|c| &c.id == id)
-                .filter(|c| is_service(c))
-                .ok_or("connection is the id of a saved web-service connection (connection.list)")?;
+            let c = s.connections.connections.iter().find(|c| &c.id == id).filter(|c| is_service(c)).ok_or(NO_SUCH_CONNECTION)?;
             Ok(Some(c.clone()))
         }
-        Some(_) => Err("connection is the id of a saved web-service connection (connection.list)".into()),
+        Some(_) => Err(CONNECTION_TEXT.into()),
     }
 }
 

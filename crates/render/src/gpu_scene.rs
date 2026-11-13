@@ -57,6 +57,12 @@ pub struct GpuScene {
     pub data_pending: bool,
     /// Tile layers that couldn't be drawn, and why.
     pub tile_errors: Vec<String>,
+    /// Raster layers read in place drawn from less than the view needs (a coarser level, tiles
+    /// they couldn't read), by id, their errors among `tile_errors`: an export refuses them.
+    pub partial: Vec<u32>,
+    /// Raster layers read in place whose tiles are still on their way, by id: drawn again as
+    /// they land; an export that can't wait refuses them.
+    pub pending_in_place: Vec<u32>,
     /// A turned or tilted scene: the camera it was drawn for, which the vertex shader's full
     /// perspective takes, and a tilted one's sky and fog. `None` for a flat, north-up scene.
     pub tilt: Option<SceneTilt>,
@@ -113,7 +119,8 @@ pub enum DrawCmd {
     /// One raster tile layer the GPU map places again for every frame it shows, from the tile
     /// cache, for the camera of that frame (see [`crate::tiles::live`]): the scene holds only
     /// which layer, so panning and zooming never draw the scene again for its tiles (#635).
-    LiveTiles { spec: rustgis_tiles::Spec, opacity: f32 },
+    /// The archive revision binds later live tile acquisition to this scene's credits.
+    LiveTiles { name: String, spec: rustgis_tiles::Spec, opacity: f32, archive_revision: u64 },
     /// One vector tile layer's tiles as meshes (see `tile_mesh`): the GPU keeps each mesh's
     /// buffers across frames, shows the layers of its runs that show at the camera's zoom and
     /// clips each tile to its square, as MapLibre draws its tiles.

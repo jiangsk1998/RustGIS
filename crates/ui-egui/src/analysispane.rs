@@ -24,6 +24,8 @@ pub struct Workflow {
     pub field: String,
     pub number: String,
     pub number2: String,
+    /// The viewshed reads the ground between cells (bilinear heights), not the nearest cell.
+    pub bilinear: bool,
     pub text: String,
     pub function: String,
     pub chain: Vec<String>,
@@ -35,8 +37,40 @@ pub struct Workflow {
     pub script_out: Vec<(String, bool)>,
     /// The Script pane's last run, shown above its results.
     pub script_last: Option<ScriptRun>,
+    /// The last run's Details window is open.
+    pub script_details: bool,
+    /// When each Script pane run under way or waiting started (seconds since 1970, and the
+    /// instant), and the project it was asked in ([`rustgis_engine::Session::opened`]), in the
+    /// order asked, for [`script_ran`] to tell as each lands.
+    script_started: std::collections::VecDeque<(u64, web_time::Instant, u64)>,
+    /// When the last Script pane run landed: one waiting behind it started then, not when asked.
+    script_landed: Option<web_time::Instant>,
+    /// The project the Script pane's script, results and count are for
+    /// ([`rustgis_engine::Session::opened`]); `None` until the pane first shows.
+    script_project: Option<u64>,
     pub trend: TrendForm,
+    /// The Spectral Analysis section's profile: the points read and charted.
+    pub spectral: crate::spectralui::Spectral,
     pub selected_only: Option<bool>,
+    /// The projected coordinate system the Geostatistical Wizard's surface is made in; empty: the
+    /// environment's, else the projected one the layer was read in, else degrees.
+    pub crs: String,
+    /// The system the Wizard's surface was last to be made in (its own, else the environment's):
+    /// when it changes, the cell size typed for it is cleared.
+    pub wizard_system: String,
+    /// The system the Wizard's layer was read in, and the one its surface is made in from it
+    /// ([`rustgis_engine::analysis::layer_raster_crs`]), kept so it is worked out once.
+    pub layer_system: Option<(rustgis_engine::data::raster::Crs, Option<rustgis_engine::data::raster::Crs>)>,
+    /// The coordinate system typed for a new ortho or reality workspace; empty: the images'
+    /// projected system, else degrees.
+    pub workspace_crs: String,
+    /// The projected system that text last read as (`None`: none, or degrees), so a cell size
+    /// typed for one system is cleared when another is typed, not at each keystroke.
+    pub workspace_system: Option<rustgis_engine::data::raster::Crs>,
+    /// The projected coordinate system typed for the environment's Set Coordinate System.
+    pub env_crs: String,
+    /// The cell size typed for the environment, apart from the Wizard's, which is the run's own.
+    pub env_cell: String,
     pub zonal_stats: ZonalStatsForm,
     /// A workflow running on a thread of its own: its progress and Cancel show, and what it made
     /// lands through [`land_job`].
@@ -70,13 +104,26 @@ pub struct ZonalStatsForm {
     pub output: String,
 }
 
-/// A Script pane run, as the line above its results tells it: its number this session (so a run
-/// made again by mistake shows), how long it took and when it started (seconds since 1970; 0 for
-/// a clock that can't tell).
+/// A Script pane run, as the line above its results tells it: its number since the project opened
+/// (so a run made again by mistake shows), how long it took and when it started (seconds since
+/// 1970; 0 for a clock that can't tell). Its lines' whole results, or why it didn't run, for its
+/// Details window.
+#[derive(Default)]
 pub struct ScriptRun {
     pub n: u32,
     pub secs: f64,
     pub at: u64,
+    pub ran: Vec<ScriptLine>,
+    pub error: Option<String>,
+}
+
+/// A line a Script pane run ran, with its whole result. `text`, the result laid out to read a
+/// line of text a row, is made the first time its Details section opens, not as the run lands.
+pub struct ScriptLine {
+    pub line: u64,
+    pub command: String,
+    pub result: Value,
+    pub text: Vec<String>,
 }
 
 /// The Trend Analysis section's inputs (#579), and a run under way.
@@ -174,6 +221,21 @@ pub fn run_elsewhere(app: &mut RustGisApp, section: &str, id: &str, p: Value) {
 fn run_now(app: &mut RustGisApp, id: &str, p: Value) {
     let r = app.run(id, p);
     show(app, r);
+}
+
+/// Shows how a model's run from the Models section went, or why it didn't run, while that
+/// section is open: in another, its result isn't that section's (a failure is said in the
+/// status bar either way).
+#[cfg(not(target_arch = "wasm32"))]
+fn model_ran(app: &mut RustGisApp, landed: crate::Landed) {
+    if app.workflow.section != "models" {
+        app.map.invalidate();
+        return;
+    }
+    match landed {
+        crate::Landed::Ran(r) => show(app, r),
+        crate::Landed::NotRun(why) => show(app, Err(why)),
+    }
 }
 
 /// Shows how a workflow's command went, and redraws the map it may have changed.
@@ -290,15 +352,15 @@ pub fn land_job(app: &mut RustGisApp) -> bool {
     match job.kind {
         JobKind::Tool { id, slot } => {
             let Some(done) = take(&slot) else { return false };
-            let r = gp::tool_complete(&mut app.session, id, done).and_then(|_| app.run("gp.finish", json!({"id": id})));
+            let r = gp::tool_complete(&mut app.session, id, done).and_then(|_| app.finish_gp(id));
             show(app, r);
         }
-        JobKind::Raster { id, command, mut params, slot } => match take(&slot) {
+        JobKind::Raster { id, command, params, slot } => match take(&slot) {
             // Added by its command, as if it had run here.
             Some(Ok(made)) => match workflows::raster_land(&mut app.session, id, made) {
                 Ok(true) => {
-                    params["ran"] = json!(id);
-                    run_now(app, command, params);
+                    let result = app.finish_raster(command, id, &params);
+                    show(app, result);
                 }
                 Ok(false) => dropped(app, job.name),
                 Err(e) => show(app, Err(e)),
@@ -358,6 +420,25 @@ fn num(s: &str, d: f64) -> f64 {
     s.trim().parse().unwrap_or(d)
 }
 
+/// The viewshed's parameters from the pane, seen from `at`: an empty radius field leaves the
+/// radius out, so the command takes the whole DEM.
+fn viewshed_params(w: &Workflow, at: rustgis_engine::geom::Coord) -> Value {
+    let mut params = json!({"layer": w.layer, "lon": at.x, "lat": at.y});
+    // A number is the height or radius; other text goes as it is, for the command to refuse,
+    // naming it (`inf`, `NaN` and `1e400` parse, but aren't numbers JSON holds: they'd be null).
+    // Empty: the command's own (1.7 m up; the whole raster).
+    for (key, text) in [("height", &w.number), ("radius", &w.number2)] {
+        match text.trim() {
+            "" => {}
+            t => params[key] = t.parse::<f64>().ok().filter(|v| v.is_finite()).map_or_else(|| json!(t), |v| json!(v)),
+        }
+    }
+    if w.bilinear {
+        params["heights"] = json!("bilinear");
+    }
+    params
+}
+
 /// The sections of the Workflows pane: (id, title).
 pub const SECTIONS: &[(&str, &str)] = &[
     ("rasterFunctions", "Raster Functions"),
@@ -392,6 +473,32 @@ pub const SECTIONS: &[(&str, &str)] = &[
     ("reality", "Reality Mapping"),
 ];
 
+/// The extension (#1752) that owns Workflows section `section`: it is hidden while that
+/// extension is off.
+pub fn section_extension(section: &str) -> Option<&'static str> {
+    match section {
+        "georeference" | "change" | "spectral" | "classify" | "supervised" | "deepLearning" | "hosted" | "indices" | "process"
+        | "pixels" | "mensuration" | "ortho" | "reality" => Some(rustgis_engine::extensions::IMAGERY.id),
+        _ => None,
+    }
+}
+
+/// Whether Workflows section `section` shows: its extension, if it has one, is on.
+pub fn section_shown(session: &rustgis_engine::Session, section: &str) -> bool {
+    section_extension(section).is_none_or(|e| session.extensions().is_on(e))
+}
+
+/// Why Workflows section `section` can't open: its extension is off. `None` when it can.
+pub fn section_blocked(session: &rustgis_engine::Session, section: &str) -> Option<String> {
+    let e = section_extension(section).and_then(rustgis_engine::extensions::get)?;
+    (!session.extensions().is_on(e.id)).then(|| {
+        crate::i18n::fmt(
+            "{section} is part of the {name} extension, which is off; turn it on in Plugins › Extensions",
+            &[("section", tl_raw!(SECTIONS.iter().find(|s| s.0 == section).map_or(section, |s| s.1))), ("name", tl_raw!(e.name))],
+        )
+    })
+}
+
 /// Starts picking `needed` map points for a workflow.
 fn pick_button(app: &mut RustGisApp, ui: &mut Ui, purpose: &'static str, needed: usize, label: &str) {
     let active = app.workflow.pick.as_ref().is_some_and(|p| p.purpose == purpose);
@@ -407,14 +514,19 @@ fn picked(app: &mut RustGisApp, purpose: &str) -> Option<Vec<rustgis_engine::geo
 }
 
 pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
-    if app.workflow.section.is_empty() {
+    // A section whose extension was turned off while it was open: back to the first.
+    if app.workflow.section.is_empty() || !section_shown(&app.session, app.workflow.section) {
+        // Its map pick ends with it (a pick started elsewhere, with no section open, stays).
+        if !app.workflow.section.is_empty() {
+            app.workflow.pick = None;
+        }
         app.workflow.section = "rasterFunctions";
     }
     egui::ComboBox::from_id_salt("wf_section")
         .selected_text(tl!(SECTIONS.iter().find(|s| s.0 == app.workflow.section).map_or("", |s| s.1)))
         .width(ui.available_width() - 8.0)
         .show_ui(ui, |ui| {
-            for (id, title) in SECTIONS {
+            for (id, title) in SECTIONS.iter().filter(|s| section_shown(&app.session, s.0)) {
                 if ui.selectable_label(app.workflow.section == *id, tl!(*title)).clicked() {
                     app.workflow.section = id;
                     app.workflow.result = None;
@@ -617,12 +729,25 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 ui.add(egui::TextEdit::singleline(&mut app.workflow.number).hint_text(tl!("observer height m")).desired_width(110.0));
                 ui.add(egui::TextEdit::singleline(&mut app.workflow.number2).hint_text(tl!("radius m")).desired_width(80.0));
             });
+            // How the ground along each ray is read.
+            ui.horizontal(|ui| {
+                ui.label(tl!("Ground heights"));
+                let (nearest, between) = (tl!("Nearest cell"), tl!("Between cells (bilinear)"));
+                egui::ComboBox::from_id_salt("wf_v_heights")
+                    .selected_text(if app.workflow.bilinear { between } else { nearest })
+                    .width(170.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut app.workflow.bilinear, false, nearest);
+                        ui.selectable_value(&mut app.workflow.bilinear, true, between);
+                    })
+                    .response
+                    .on_hover_text(tl!(
+                        "How the ground between the observer and a cell is read: the cell each point falls in, or between the cells' centres. Between cells is an estimate too, but closer on ground that bulges, a hill seen from its top, where the nearest cell can hide cells just inside the horizon."
+                    ));
+            });
             pick_button(app, ui, "viewshed", 1, "Click the observer on the map");
             if let Some(p) = picked(app, "viewshed").and_then(|v| v.first().copied()) {
-                let mut params = json!({"layer": app.workflow.layer, "lon": p.x, "lat": p.y, "height": num(&app.workflow.number, 1.7)});
-                if let Ok(r) = app.workflow.number2.trim().parse::<f64>() {
-                    params["radius"] = json!(r);
-                }
+                let params = viewshed_params(&app.workflow, p);
                 run(app, "analysis.viewshed", params);
             }
         }
@@ -640,14 +765,51 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             heading(ui, "Interpolate a surface from points (IDW)");
             combo(ui, "wf_i", "Layer", &mut app.workflow.layer, &points);
             combo(ui, "wf_if", "Field", &mut app.workflow.field, &numeric);
+            // Empty: the environment's system, else the projected one the layer was read in, else
+            // degrees; the hint shows which.
+            let read_in = app.session.map().layer_by_name(&app.workflow.layer).and_then(|l| l.dataset.crs);
+            // The run's choice; kept for the layer's system, so a projection isn't built every frame.
+            let layer_crs = match (read_in, app.workflow.layer_system) {
+                (Some(c), Some((seen, chosen))) if seen == c => chosen,
+                (Some(c), _) => {
+                    let chosen = rustgis_engine::analysis::layer_raster_crs(Some(c)).and_then(Result::ok);
+                    app.workflow.layer_system = Some((c, chosen));
+                    chosen
+                }
+                (None, _) => None,
+            };
+            let empty_crs = app.session.project.gp_env.projected.map(|g| g.crs).or(layer_crs);
+            let degrees = app.workflow.crs.trim().is_empty() && empty_crs.is_none();
+            ui.add(
+                egui::TextEdit::singleline(&mut app.workflow.crs)
+                    .hint_text(match empty_crs {
+                        Some(c) => c.label(),
+                        None => tl!("projected system (EPSG:32616), or degrees").to_string(),
+                    })
+                    .desired_width(f32::INFINITY),
+            );
+            // A cell size typed for one system means nothing in another: when the system the surface
+            // will be made in changes (typed here, or the environment's), the size is cleared.
+            let system = match app.workflow.crs.trim() {
+                "" => empty_crs.map(|c| c.code()).unwrap_or_default(),
+                typed => typed.to_string(),
+            };
+            if system != app.workflow.wizard_system {
+                app.workflow.number.clear();
+                app.workflow.wizard_system = system;
+            }
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut app.workflow.number).hint_text(tl!("cell size °")).desired_width(80.0));
+                let hint = if degrees { tl!("cell size °") } else { tl!("cell size") };
+                ui.add(egui::TextEdit::singleline(&mut app.workflow.number).hint_text(hint).desired_width(80.0));
                 ui.add(egui::TextEdit::singleline(&mut app.workflow.number2).hint_text(tl!("power 2")).desired_width(60.0));
             });
             if ui.button(tl!("Run")).clicked() {
                 let mut p = json!({"layer": app.workflow.layer, "field": app.workflow.field, "power": num(&app.workflow.number2, 2.0)});
                 if let Ok(c) = app.workflow.number.trim().parse::<f64>() {
                     p["cellSize"] = json!(c);
+                }
+                if !app.workflow.crs.trim().is_empty() {
+                    p["crs"] = json!(app.workflow.crs.trim());
                 }
                 run(app, "analysis.interpolate", p);
             }
@@ -755,11 +917,50 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     }
                 }
             });
+            let system =
+                env.projected.map(|g| g.crs.label()).unwrap_or_else(|| tl!("the layer's projected system, else degrees").to_string());
+            let cells = env.cell_in(env.projected.map_or(rustgis_engine::data::raster::Crs::LonLat, |g| g.crs));
+            // A size in degrees is used only for a surface in degrees: said so, also beside a system
+            // with no size of its own.
+            let degrees = |c: f64| crate::i18n::fmt("{c}° (in degrees only)", &[("c", &c.to_string())]);
+            let cells = match (cells, env.projected) {
+                (Some(c), Some(_)) => c.to_string(),
+                (Some(c), None) => degrees(c),
+                (None, _) => match env.cell_size {
+                    Some(d) => crate::i18n::fmt("the tool's own; {d}", &[("d", &degrees(d))]),
+                    None => tl!("the tool's own").to_string(),
+                },
+            };
+            ui.label(
+                egui::RichText::new(crate::i18n::fmt("Rasters: {system}, cell size {cells}", &[("system", &system), ("cells", &cells)]))
+                    .small(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut app.workflow.env_crs).hint_text("EPSG:32616").desired_width(110.0));
+                // An empty box sets nothing; clearing the system is its own button, so a click never
+                // clears it and its cell size by accident. Cleared, a run takes the layer's system.
+                let typed = app.workflow.env_crs.trim().to_string();
+                if ui.add_enabled(!typed.is_empty(), egui::Button::new(tl!("Set Coordinate System"))).clicked() {
+                    run(app, "gp.env", json!({"crs": typed}));
+                }
+                if ui.add_enabled(env.projected.is_some(), egui::Button::new(tl!("Clear Coordinate System"))).clicked() {
+                    run(app, "gp.env", json!({"crs": null}));
+                }
+            });
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut app.workflow.number).hint_text(tl!("cell size °")).desired_width(80.0));
+                let hint = if env.projected.is_some() { tl!("cell size") } else { tl!("cell size °") };
+                ui.add(egui::TextEdit::singleline(&mut app.workflow.env_cell).hint_text(hint).desired_width(80.0));
                 if ui.button(tl!("Set Cell Size")).clicked() {
-                    let v = app.workflow.number.trim().parse::<f64>().ok();
-                    run(app, "gp.env", json!({"cellSize": v}));
+                    // Empty clears the size; text that isn't a number is refused, not taken as empty.
+                    let typed = app.workflow.env_cell.trim().to_string();
+                    match typed.parse::<f64>() {
+                        // `inf` and `NaN` parse, but aren't sizes (and go out as null, which clears).
+                        Ok(v) if v.is_finite() => run(app, "gp.env", json!({"cellSize": v})),
+                        Err(_) if typed.is_empty() => run(app, "gp.env", json!({"cellSize": null})),
+                        _ => {
+                            app.workflow.error = Some(crate::i18n::fmt("'{size}' isn't a cell size: give a number", &[("size", &typed)]));
+                        }
+                    }
                 }
             });
         }
@@ -829,14 +1030,7 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             }
         }
         "trend" => trend(app, ui, &rasters),
-        "spectral" => {
-            heading(ui, "Band values at a point");
-            combo(ui, "wf_sp", "Layer", &mut app.workflow.layer, &rasters);
-            pick_button(app, ui, "spectral", 1, "Click a pixel on the map");
-            if let Some(p) = picked(app, "spectral").and_then(|v| v.first().copied()) {
-                run(app, "raster.spectral", json!({"layer": app.workflow.layer, "lon": p.x, "lat": p.y}));
-            }
-        }
+        "spectral" => crate::spectralui::section(app, ui, t),
         "classify" => {
             heading(ui, "Unsupervised classes (k-means)");
             combo(ui, "wf_k", "Layer", &mut app.workflow.layer, &rasters);
@@ -868,12 +1062,14 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut app.workflow.number).hint_text(tl!("epochs")).desired_width(60.0));
                 if ui.button(tl!("Train And Classify")).clicked() {
-                    let epochs = app.workflow.number.trim().parse::<f64>().unwrap_or(60.0);
-                    run(
-                        app,
-                        "dl.classify",
-                        json!({"layer": app.workflow.layer, "training": app.workflow.layer2, "classField": app.workflow.field, "epochs": epochs}),
-                    );
+                    // A blank box is the default; what is typed goes as it is, for the command to
+                    // read or refuse (a fraction or text isn't cut or replaced without a word).
+                    let mut p = json!({"layer": app.workflow.layer, "training": app.workflow.layer2, "classField": app.workflow.field});
+                    let typed = app.workflow.number.trim();
+                    if !typed.is_empty() {
+                        p["epochs"] = json!(typed);
+                    }
+                    run(app, "dl.classify", p);
                 }
             });
             let models: Vec<(String, f64)> = app.session.project.dl_models.iter().map(|m| (m.name.clone(), m.accuracy)).collect();
@@ -1057,18 +1253,60 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     }
                 });
             }
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut app.workflow.number).hint_text(tl!("cell size °")).desired_width(80.0));
-                if ui.button(tl!("New Workspace From Visible Rasters")).clicked() {
-                    let images: Vec<String> =
-                        app.session.map().layers.iter().filter(|l| l.is_raster() && l.visible).map(|l| l.name.clone()).collect();
-                    let mut p = json!({"kind": kind, "images": images});
-                    if let Ok(c) = app.workflow.number.trim().parse::<f64>() {
-                        p["cellSize"] = json!(c);
-                    }
-                    run(app, "imagery.workspace", p);
+            // The hints say the grid the workspace gets: without a system, a cell size is in
+            // degrees and keeps the mosaic in degrees, as in older projects.
+            // Read once as it's typed (below), not each frame.
+            let degrees = app.workflow.workspace_system.is_none();
+            let crs_hint = if app.workflow.number.trim().is_empty() {
+                tl!("the images' projected system, else degrees")
+            } else {
+                tl!("degrees, as the cell size is in degrees")
+            };
+            let system_label = ui.label(tl!("Coordinate system"));
+            let system = ui
+                .add(egui::TextEdit::singleline(&mut app.workflow.workspace_crs).hint_text(crs_hint).desired_width(f32::INFINITY))
+                .labelled_by(system_label.id)
+                .on_hover_text(tl!("A projected system such as EPSG:32616, or EPSG:4326 for degrees"));
+            // A cell size typed for another system isn't sent in this one's units: it is cleared
+            // once the text reads as another system, and kept while it reads as none yet.
+            if system.changed() {
+                let typed = app.workflow.workspace_crs.trim();
+                let now = if typed.is_empty() {
+                    Some(None)
+                } else {
+                    rustgis_engine::data::raster::Crs::parse(typed)
+                        .ok()
+                        .map(|c| Some(c).filter(|c| *c != rustgis_engine::data::raster::Crs::LonLat))
+                };
+                if let Some(now) = now
+                    && now != app.workflow.workspace_system
+                {
+                    app.workflow.workspace_system = now;
+                    app.workflow.number.clear();
                 }
+            }
+            ui.horizontal(|ui| {
+                let hint = if degrees { tl!("cell size °") } else { tl!("cell size") };
+                let size_label = ui.label(tl!("Cell size"));
+                ui.add(egui::TextEdit::singleline(&mut app.workflow.number).hint_text(hint).desired_width(80.0))
+                    .labelled_by(size_label.id)
+                    .on_hover_text(tl!("In the coordinate system's units, or degrees without one"));
             });
+            // On a line of its own: beside the cell size, its label ran past the pane's edge.
+            if ui.button(tl!("New Workspace From Visible Rasters")).clicked() {
+                let images: Vec<String> =
+                    app.session.map().layers.iter().filter(|l| l.is_raster() && l.visible).map(|l| l.name.clone()).collect();
+                let mut p = json!({"kind": kind, "images": images});
+                if !app.workflow.workspace_crs.trim().is_empty() {
+                    p["crs"] = json!(app.workflow.workspace_crs.trim());
+                }
+                // Text that isn't a number goes as it is, for the command to say why.
+                let size = app.workflow.number.trim();
+                if !size.is_empty() {
+                    p["cellSize"] = size.parse::<f64>().ok().filter(|c| c.is_finite()).map_or_else(|| json!(size), |c| json!(c));
+                }
+                run(app, "imagery.workspace", p);
+            }
             if kind == "reality" {
                 combo(ui, "wf_mesh", "Layer", &mut app.workflow.layer, &rasters);
                 if ui.button(tl!("Export Mesh (OBJ)…")).clicked() {
@@ -1105,8 +1343,14 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     if ui.small_button(tl!("Open")).on_hover_text(tl!("Open in ModelBuilder")).clicked() {
                         let _ = app.run("ui.modelBuilder", json!({"name": n}));
                     }
+                    // On the desktop its tools run on a thread of their own, the status bar
+                    // showing it and Cancel; its result shows here once it lands.
                     if ui.small_button(tl!("Run")).clicked() {
-                        run(app, "model.run", json!({"name": n}));
+                        (app.workflow.result, app.workflow.error) = (None, None);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let _ = crate::readjob::run_then(app, "model.run", json!({"name": n}), Some(model_ran));
+                        #[cfg(target_arch = "wasm32")]
+                        run_now(app, "model.run", json!({"name": n}));
                     }
                     if ui.small_button("×").clicked() {
                         run(app, "model.remove", json!({"name": n}));
@@ -1128,7 +1372,8 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             }
         }
     }
-    if let Some(p) = &app.workflow.pick {
+    // The spectral profile picks on until turned off: its button shows it, with no count.
+    if let Some(p) = app.workflow.pick.as_ref().filter(|p| p.purpose != crate::spectralui::PURPOSE) {
         ui.label(
             egui::RichText::new(crate::i18n::fmt(
                 "Click the map: {n} of {total}",
@@ -1502,6 +1747,7 @@ const SCRIPT_OUT_ROWS: f32 = 6.0;
 /// inside, so Run and a run's results stay in view, and its height doesn't follow a scroll of the
 /// pane. Only a pane too short for the box's first lines and the buttons scrolls as a whole.
 pub fn script_pane(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    start_over_in_another_project(app);
     egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
         // The hint above the box (two lines, in a narrow pane), the box's first lines, the rest.
         let hint = (ui.text_style_height(&egui::TextStyle::Small) + ui.spacing().item_spacing.y) * 2.0;
@@ -1512,6 +1758,74 @@ pub fn script_pane(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| script(app, ui, t, false));
         }
     });
+}
+
+/// Another project replaced the Script pane's, however it came (the interface, a script, the
+/// assistant, an agent): the pane starts blank, as the project does (#1511). Its script, results
+/// and count were for what was closed. A run still to land from it is left by the read jobs, and
+/// [`script_ran`] keeps it out of the pane; its notice stays among the session's.
+fn start_over_in_another_project(app: &mut RustGisApp) {
+    let opened = app.session.opened;
+    if app.workflow.script_project.is_some_and(|p| p != opened) {
+        clear_script(app);
+    }
+    app.workflow.script_project = Some(opened);
+}
+
+/// The Clear button: [`clear_script`], with the script first kept as an undo step of the box and
+/// the focus given to the box, so Ctrl+Z brings the script back. The box records undo steps only
+/// while focused, so the step is added here, as `scriptcomplete::accept` does.
+fn clear_keeping_undo(app: &mut RustGisApp, ui: &Ui, box_id: egui::Id) {
+    keep_for_undo(app, ui.ctx(), box_id);
+    clear_script(app);
+    ui.memory_mut(|m| m.request_focus(box_id));
+}
+
+/// The Script box's script kept as an undo step of the box, its cursor at the start, before
+/// something else replaces it (Clear, Open in Script Pane).
+fn keep_for_undo(app: &RustGisApp, ctx: &egui::Context, box_id: egui::Id) {
+    use egui::text::{CCursor, CCursorRange};
+    let mut state = egui::widgets::text_edit::TextEditState::load(ctx, box_id).unwrap_or_default();
+    let mut undoer = state.undoer();
+    let end = CCursorRange::one(CCursor::new(app.workflow.script.chars().count()));
+    undoer.add_undo(&(state.cursor.char_range().unwrap_or(end), app.workflow.script.clone()));
+    state.set_undoer(undoer);
+    state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(0))));
+    state.store(ctx, box_id);
+}
+
+/// Whether a Script pane run is under way or waiting: what lands from it would land in a script
+/// replaced meanwhile.
+pub(crate) fn script_running(app: &RustGisApp) -> bool {
+    !app.workflow.script_started.is_empty()
+}
+
+/// Opens `script` in the Script pane (the session log's Open in Script Pane), in place of the
+/// pane's script and results, as Clear empties them: the script that was there comes back with
+/// Ctrl+Z, even one left from a project since replaced (kept first, then the pane started over,
+/// so that doesn't empty it when it next shows). Nothing while a run is under way
+/// ([`script_running`]).
+pub(crate) fn open_script(app: &mut RustGisApp, ctx: &egui::Context, script: String) {
+    if script_running(app) {
+        return;
+    }
+    let box_id = egui::Id::unique("script_text");
+    keep_for_undo(app, ctx, box_id);
+    start_over_in_another_project(app);
+    clear_script(app);
+    app.workflow.script = script;
+    app.ui.open_right(crate::RightPane::Script);
+    ctx.memory_mut(|m| m.request_focus(box_id));
+}
+
+/// The Script pane emptied: its script, results and count, so the next run is `Run #1`, and the
+/// Details window with the run it showed. Clear does it, and another project opening.
+fn clear_script(app: &mut RustGisApp) {
+    let w = &mut app.workflow;
+    w.script.clear();
+    w.script_out.clear();
+    w.script_last = None;
+    w.script_details = false;
 }
 
 /// The height of the Script box's first lines.
@@ -1527,6 +1841,78 @@ fn script_below(app: &RustGisApp, ui: &Ui) -> f32 {
     let last = if app.workflow.script_last.is_none() { 0.0 } else { ui.spacing().interact_size.y + gap };
     let results = if app.workflow.script_out.is_empty() { 0.0 } else { script_out_height(ui) + gap };
     ui.spacing().interact_size.y + gap * 3.0 + last + results
+}
+
+/// Runs the Script pane's `script`: on the desktop its tools on a thread of their own first, the
+/// status bar showing it and Cancel, the results saying so until it lands ([`script_ran`]).
+fn start_script(app: &mut RustGisApp, script: String) {
+    // When it started and how long it took: a tool run outside the app in the browser
+    // (`gp.finish`) ends later.
+    let at = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    app.workflow.script_started.push_back((at, web_time::Instant::now(), app.session.opened));
+    app.workflow.script_out = vec![(tl!("Running…").to_string(), false)];
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = crate::readjob::run_then(app, "script.run", json!({"script": script}), Some(script_ran));
+    #[cfg(target_arch = "wasm32")]
+    {
+        let r = app.run("script.run", json!({"script": script}));
+        script_ran(app, crate::Landed::Ran(r));
+    }
+}
+
+/// A Script pane run as it lands, in the pane: its number, how long it took, and each line's
+/// result, or why it didn't run.
+fn script_ran(app: &mut RustGisApp, landed: crate::Landed) {
+    let now = web_time::Instant::now();
+    let opened = app.session.opened;
+    let (asked_at, asked, asked_in) = app.workflow.script_started.pop_front().unwrap_or((0, now, opened));
+    // Asked in a project since replaced and not run (left as another opened, or cancelled): the
+    // pane started blank for the new one, and its notice is the session's.
+    if asked_in != opened && !matches!(landed, crate::Landed::Ran(_)) {
+        app.workflow.script_landed = Some(now);
+        return;
+    }
+    // One that waited for the run before it started as that one landed.
+    let started = app.workflow.script_landed.filter(|&l| l > asked).unwrap_or(asked);
+    let at = if asked_at == 0 { 0 } else { asked_at.saturating_add(started.duration_since(asked).as_secs()) };
+    app.workflow.script_landed = Some(now);
+    // A script that opened a project itself is kept with its results, in the project it opened,
+    // as its first run there.
+    let n = match app.workflow.script_last.as_ref() {
+        Some(r) if asked_in == opened => r.n.saturating_add(1),
+        _ => 1,
+    };
+    app.workflow.script_project = Some(opened);
+    // A run that stops is undone whole (`Session::guarded` restores the project), so its error
+    // is all it has to tell.
+    let (ran, error) = match landed {
+        crate::Landed::Ran(Ok(mut v)) => match v.get_mut("ran").map(Value::take) {
+            Some(Value::Array(a)) => (a, None),
+            _ => (Vec::new(), None),
+        },
+        crate::Landed::Ran(Err(e)) | crate::Landed::NotRun(e) => (Vec::new(), Some(e)),
+    };
+    app.workflow.script_out = match &error {
+        None => ran.iter().map(|r| (format!("{} → {}", r["command"].as_str().unwrap_or(""), preview(&r["result"])), false)).collect(),
+        Some(e) => vec![(e.clone(), true)],
+    };
+    let ran = ran
+        .into_iter()
+        .map(|mut r| ScriptLine {
+            line: r["line"].as_u64().unwrap_or(0),
+            command: r["command"].as_str().unwrap_or("").to_string(),
+            result: r.get_mut("result").map(Value::take).unwrap_or_default(),
+            text: Vec::new(),
+        })
+        .collect();
+    app.workflow.script_last = Some(ScriptRun { n, secs: now.duration_since(started).as_secs_f64(), at, ran, error });
+    // Another still to land: the results say so first, above this one's, where their scroll
+    // starts, however many lines it ran. One asked in a project this run replaced is left, not
+    // run, so it isn't told.
+    if app.workflow.script_started.iter().any(|&(_, _, asked_in)| asked_in == opened) {
+        app.workflow.script_out.insert(0, (tl!("Running…").to_string(), false));
+    }
+    app.map.invalidate();
 }
 
 /// The most height a run's results take.
@@ -1598,58 +1984,605 @@ fn script(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, fit: bool) {
     }
     ui.horizontal(|ui| {
         // As egui reads the keys: ⌘ on a Mac, the browser's too (from its user agent).
-        let shortcut = if ui.ctx().os().is_mac() { "⌘+Enter" } else { "Ctrl+Enter" };
+        let mac = ui.ctx().os().is_mac();
+        let shortcut = if mac { "⌘+Enter" } else { "Ctrl+Enter" };
         let run = ui.button(tl!("Run")).on_hover_text(crate::i18n::fmt("Run the script ({keys})", &[("keys", shortcut)])).clicked();
         if run || ctrl_enter {
             let script = app.workflow.script.clone();
-            // When it started and how long it took: a tool run outside the app in the browser
-            // (`gp.finish`) ends later.
-            let at = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            let started = web_time::Instant::now();
-            let out = app.run("script.run", json!({"script": script}));
-            let n = app.workflow.script_last.as_ref().map_or(1, |r| r.n.saturating_add(1));
-            app.workflow.script_last = Some(ScriptRun { n, secs: started.elapsed().as_secs_f64(), at });
-            app.workflow.script_out = match out {
-                Ok(v) => v["ran"]
-                    .as_array()
-                    .map(|a| a.iter().map(|r| (format!("{} → {}", r["command"].as_str().unwrap_or(""), r["result"]), false)).collect())
-                    .unwrap_or_default(),
-                Err(e) => vec![(e, true)],
-            };
-            app.map.invalidate();
+            start_script(app, script);
         }
         if ui.button(tl!("Commands…")).on_hover_text(tl!("Search every command and its parameters")).clicked() {
             let _ = app.run("ui.commandSearch", Value::Null);
+        }
+        // Not while a run is under way: its results would land in the emptied pane.
+        let w = &app.workflow;
+        let running = !w.script_started.is_empty();
+        let anything = !w.script.is_empty() || !w.script_out.is_empty() || w.script_last.is_some();
+        let undo = if mac { "⌘+Z" } else { "Ctrl+Z" };
+        let mut clear = ui
+            .add_enabled(anything && !running, egui::Button::new(tl!("Clear")))
+            .on_hover_text(crate::i18n::fmt("Empty the script and its results ({keys} brings the script back)", &[("keys", undo)]));
+        if running {
+            clear = clear.on_disabled_hover_text(tl!("Wait for the run to finish"));
+        }
+        if clear.clicked() {
+            clear_keeping_undo(app, ui, box_id);
         }
     });
     // Above the results' scroll, so it stays in view: its number and how long it took, and on
     // the right when it started, as the Geoprocessing History tells it (UTC: the app has no time
     // zone).
+    let mut details = false;
     if let Some(r) = &app.workflow.script_last {
         ui.horizontal(|ui| {
-            let text = crate::i18n::fmt("Run #{n} ({secs} s)", &[("n", &r.n.to_string()), ("secs", &format!("{:.2}", r.secs))]);
-            ui.label(egui::RichText::new(text).small().strong());
-            if r.at > 0 {
-                let (_, time) = rustgis_engine::map::graphics::civil(r.at);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(crate::i18n::fmt("{time} UTC", &[("time", &time)])).small().weak())
-                });
-            }
+            ui.label(egui::RichText::new(run_line(r)).small().strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                details = ui.small_button(tl!("Details…")).on_hover_text(tl!("Each line's whole result, to read or copy")).clicked();
+                if let Some(time) = run_time(r) {
+                    ui.label(egui::RichText::new(time).small().weak());
+                }
+            });
         });
     }
-    // In a scroll of their own, so a long error (it wraps) can't push them out of the pane.
+    app.workflow.script_details |= details;
+    // In a scroll of their own, so a long error (it wraps) can't push them out of the pane. A
+    // result is cut here; Details… shows it whole.
     egui::ScrollArea::vertical().id_salt("script_out").max_height(out_h).auto_shrink([false, true]).show(ui, |ui| {
         for (line, err) in &app.workflow.script_out {
-            let c = if *err { egui::Color32::from_rgb(0xC0, 0x30, 0x30) } else { ui.visuals().text_color() };
-            ui.label(egui::RichText::new(line.chars().take(400).collect::<String>()).monospace().small().color(c));
+            let c = if *err { SCRIPT_ERROR } else { ui.visuals().text_color() };
+            ui.label(egui::RichText::new(line.chars().take(SCRIPT_PREVIEW).collect::<String>()).monospace().small().color(c));
         }
     });
+}
+
+/// The colour of a Script pane run's error.
+const SCRIPT_ERROR: egui::Color32 = egui::Color32::from_rgb(0xC0, 0x30, 0x30);
+
+/// A run's number and how long it took: `Run #2 (0.84 s)`.
+fn run_line(r: &ScriptRun) -> String {
+    crate::i18n::fmt("Run #{n} ({secs} s)", &[("n", &r.n.to_string()), ("secs", &format!("{:.2}", r.secs))])
+}
+
+/// When a run started, in UTC (the app has no time zone), if the clock could tell.
+fn run_time(r: &ScriptRun) -> Option<String> {
+    (r.at > 0).then(|| crate::i18n::fmt("{time} UTC", &[("time", &rustgis_engine::map::graphics::civil(r.at).1)]))
+}
+
+/// The most rows a result shows at once in the Details window; a longer one scrolls.
+const SCRIPT_DETAILS_ROWS: f32 = 24.0;
+
+/// The most characters of a result, or of an error, the pane shows: a line of the results.
+const SCRIPT_PREVIEW: usize = 400;
+
+/// The most characters in a row of the Details window: a longer line is split into rows.
+const SCRIPT_ROW_CHARS: usize = 200;
+
+/// A result laid out to read: indented JSON, a key a line.
+fn pretty(v: &Value) -> String {
+    serde_json::to_string_pretty(v).unwrap_or_default()
+}
+
+/// A result as the pane shows it: its JSON on one line, written no further than the pane shows
+/// (SCRIPT_PREVIEW characters), so a long one (an export's text) isn't written out whole only to
+/// be cut.
+fn preview(v: &Value) -> String {
+    /// Takes bytes until it holds enough for SCRIPT_PREVIEW characters (at most 4 bytes each),
+    /// then refuses the rest, which stops the writing.
+    struct Capped(Vec<u8>);
+    impl std::io::Write for Capped {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let room = (SCRIPT_PREVIEW * 4).saturating_sub(self.0.len());
+            if room == 0 {
+                return Err(std::io::ErrorKind::WriteZero.into());
+            }
+            let taken = bytes.get(..bytes.len().min(room)).unwrap_or_default();
+            self.0.extend_from_slice(taken);
+            Ok(taken.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut out = Capped(Vec::new());
+    // Stopped by Capped once it's full: what was written is the preview.
+    let _ = serde_json::to_writer(&mut out, v);
+    // A character cut at the end lies past the SCRIPT_PREVIEW kept.
+    String::from_utf8_lossy(&out.0).chars().take(SCRIPT_PREVIEW).collect()
+}
+
+/// A result's text as the Details window's rows: a line of the indented JSON a row, and a line
+/// longer than SCRIPT_ROW_CHARS (a long string, such as an export's text, which JSON keeps on one
+/// line) split into rows of that many characters, so no row in view is long to lay out.
+fn rows(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut chars = line.chars().peekable();
+        if chars.peek().is_none() {
+            out.push(String::new());
+        }
+        while chars.peek().is_some() {
+            out.push(chars.by_ref().take(SCRIPT_ROW_CHARS).collect());
+        }
+    }
+    out
+}
+
+/// A run's line as the Details window heads it: `line 3: raster.gcpFit`.
+fn line_head(l: &ScriptLine) -> String {
+    crate::i18n::fmt("line {n}: {command}", &[("n", &l.line.to_string()), ("command", &l.command)])
+}
+
+/// The whole of a run as Copy All gives it: its line, then each line's head and result, then why
+/// it stopped.
+fn run_text(r: &ScriptRun) -> String {
+    let mut out = run_line(r);
+    if let Some(time) = run_time(r) {
+        out.push(' ');
+        out.push_str(&time);
+    }
+    for l in &r.ran {
+        out.push_str("\n\n");
+        out.push_str(&line_head(l));
+        out.push('\n');
+        out.push_str(&pretty(&l.result));
+    }
+    if let Some(e) = &r.error {
+        out.push_str("\n\n");
+        out.push_str(e);
+    }
+    out
+}
+
+/// The Script pane's last run in a window of its own (Details…), as View Details in ArcGIS Pro's
+/// Geoprocessing History: each line's whole result laid out to read, to copy one or all, where
+/// the pane cuts each to a line.
+pub fn script_details(app: &mut RustGisApp, ctx: &egui::Context) {
+    // Shown with the Script pane hidden too: another project's run isn't this one's.
+    start_over_in_another_project(app);
+    if !app.workflow.script_details {
+        return;
+    }
+    let Some(r) = app.workflow.script_last.as_mut() else {
+        app.workflow.script_details = false;
+        return;
+    };
+    let mut open = true;
+    egui::Window::new(tl!("Script Results"))
+        .id(egui::Id::unique("script_details"))
+        .open(&mut open)
+        .resizable(true)
+        .default_size(vec2(560.0, 420.0))
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(run_line(r)).strong());
+                if let Some(time) = run_time(r) {
+                    ui.label(egui::RichText::new(time).weak());
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(tl!("Copy All")).clicked() {
+                        ui.ctx().copy_text(run_text(r));
+                    }
+                });
+            });
+            ui.separator();
+            let n = r.n;
+            let row = ui.text_style_height(&egui::TextStyle::Monospace);
+            egui::ScrollArea::vertical().id_salt("script_details_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                for (i, l) in r.ran.iter_mut().enumerate() {
+                    // Folded, one line each, a click opening one; a run of its own each time, so
+                    // what was opened in the last one folds again.
+                    egui::CollapsingHeader::new(egui::RichText::new(line_head(l)).monospace())
+                        .id_salt(("script_details_line", n, i))
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            if l.text.is_empty() {
+                                l.text = rows(&pretty(&l.result));
+                            }
+                            // The result as it is, not its rows: a long line isn't split.
+                            if ui.small_button(tl!("Copy")).clicked() {
+                                ui.ctx().copy_text(pretty(&l.result));
+                            }
+                            // Only the rows in view are laid out, each short, however long the
+                            // result: in a scroll of its own, at most SCRIPT_DETAILS_ROWS rows tall.
+                            egui::ScrollArea::both()
+                                .id_salt(("script_details_result", n, i))
+                                .max_height(row * SCRIPT_DETAILS_ROWS)
+                                .auto_shrink([false, true])
+                                .show_rows(ui, row, l.text.len(), |ui, rows| {
+                                    for text in l.text.get(rows).unwrap_or_default() {
+                                        ui.add(egui::Label::new(egui::RichText::new(text).monospace()).extend());
+                                    }
+                                });
+                        });
+                }
+                if let Some(e) = &r.error {
+                    ui.label(egui::RichText::new(e).monospace().color(SCRIPT_ERROR));
+                } else if r.ran.is_empty() {
+                    // A script of comments or blank lines only.
+                    ui.label(egui::RichText::new(tl!("Nothing ran: the script has no commands.")).weak());
+                }
+            });
+        });
+    if !open {
+        app.workflow.script_details = false;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;
+
+    /// An empty radius field (or one of spaces) runs the viewshed over the whole DEM, about
+    /// 630 km long: one whose radius square, the DEM's diagonal each way, holds far more cells
+    /// than the DEM.
+    #[test]
+    fn a_viewshed_with_an_empty_radius_field_sees_the_whole_dem() {
+        use base64::Engine;
+        use rustgis_engine::geom::Coord;
+        let mut app = RustGisApp::with_sample();
+        use rustgis_engine::data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+        // A strip 4,000 cells long and 2 high, 0.002° (about 160 m) a cell: about 630 km. The
+        // DEM's diagonal each way spans 8,001 × 8,001 cells, 64 million, of which 8,000 are the
+        // DEM's.
+        let (w, h) = (4_000u32, 2u32);
+        let gt = GeoTransform { origin_x: 10.0, origin_y: 45.004, pixel_width: 0.002, pixel_height: -0.002 };
+        let dem =
+            Raster::new("strip", w, h, vec![vec![200.0; (w * h) as usize]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(geotiff::write(&dem, 0).unwrap());
+        app.session.run("layer.addDataBytes", &json!({"fileName": "strip.tif", "data": data})).unwrap();
+        let layer = app.session.map().layers.iter().rev().find(|l| l.is_raster()).unwrap().name.clone();
+        // Cells of a viewshed worked out (not left no-data), and whether the strip's far end is.
+        let worked = |app: &RustGisApp, name: &str| {
+            let r = app.session.map().layer_by_name(name).and_then(|l| l.raster.as_ref()?.data.clone()).unwrap();
+            let n = (0..h as i64)
+                .flat_map(|row| (0..w as i64).map(move |col| (col, row)))
+                .filter(|&(c, rr)| r.value(0, c, rr).is_some())
+                .count();
+            (n, r.value(0, i64::from(w) - 1, 0).is_some())
+        };
+        let at = Coord::new(10.001, 45.001);
+        // A radius given short of the far end leaves it out; one past the DEM's diagonal works
+        // out every cell, as an empty field does.
+        app.session
+            .run("analysis.viewshed", &json!({"layer": layer, "lon": at.x, "lat": at.y, "height": 2.0, "radius": 100_000, "name": "short"}))
+            .unwrap();
+        assert!(!worked(&app, "short").1);
+        app.session
+            .run("analysis.viewshed", &json!({"layer": layer, "lon": at.x, "lat": at.y, "height": 2.0, "radius": 1e9, "name": "given"}))
+            .unwrap();
+        assert_eq!(worked(&app, "given"), ((w * h) as usize, true));
+        for (i, radius) in ["", "   "].into_iter().enumerate() {
+            let workflow = Workflow { layer: layer.clone(), number: "2".into(), number2: radius.into(), ..Default::default() };
+            let mut p = viewshed_params(&workflow, at);
+            assert!(p.get("radius").is_none(), "radius {radius:?}: {p}");
+            let name = format!("empty{i}");
+            p["name"] = json!(name);
+            app.session.run("analysis.viewshed", &p).unwrap_or_else(|e| panic!("radius {radius:?}: {e}"));
+            assert_eq!(worked(&app, &name), ((w * h) as usize, true), "radius {radius:?}: every cell worked out");
+        }
+        // A number in the field is the radius; other text is refused, not taken as no radius.
+        let workflow = Workflow { layer: layer.clone(), number2: " 5000 ".into(), ..Default::default() };
+        assert_eq!(viewshed_params(&workflow, Coord::new(10.0005, 45.0005))["radius"], json!(5000.0));
+        // So is the height, and an empty one is the command's 1.7 m.
+        for (text, e) in [("abc", r#"not "abc""#), ("1,7", r#"not "1,7""#), ("-3", "not -3.0")] {
+            let workflow = Workflow { layer: layer.clone(), number: text.into(), ..Default::default() };
+            let got = app.session.run("analysis.viewshed", &viewshed_params(&workflow, at)).unwrap_err();
+            assert!(got.starts_with("height must be a number of metres from 0 to 10,000") && got.ends_with(e), "{got}");
+        }
+        assert!(viewshed_params(&Workflow { layer: layer.clone(), ..Default::default() }, at).get("height").is_none());
+        for text in ["500km", "inf", "NaN", "1e400", "-infinity"] {
+            let workflow = Workflow { layer: layer.clone(), number2: text.into(), ..Default::default() };
+            let e = app.session.run("analysis.viewshed", &viewshed_params(&workflow, at)).unwrap_err();
+            assert_eq!(e, format!(r#"radius must be a number of metres above 0, not "{text}""#));
+        }
+    }
+
+    /// A Script pane run works its tools out on a thread of its own: the results say Running…
+    /// until it lands, runs land in the order asked, and one cancelled or left says so.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_scripts_tools_run_on_a_thread_and_land_in_the_pane() {
+        let mut app = RustGisApp::with_sample();
+        app.reads_off_frame = true;
+        let layers = app.session.map().layers.len();
+        let script = r#"gp.run {"tool": "buffer", "params": {"input": "Cities", "distance": 100}}"#.to_string();
+        let landed = |app: &mut RustGisApp| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while crate::readjob::land(app) {
+                assert!(std::time::Instant::now() < end, "the script never landed");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        // The results say Running… until it lands, then each line's result, as Run #1.
+        start_script(&mut app, script.clone());
+        assert_eq!(app.workflow.script_out, vec![("Running…".to_string(), false)]);
+        assert_eq!(app.session.map().layers.len(), layers, "nothing added before it lands");
+        landed(&mut app);
+        assert_eq!(app.session.map().layers.len(), layers + 1);
+        assert!(
+            app.workflow.script_out.first().is_some_and(|(l, err)| !err && l.starts_with("gp.run → ")),
+            "{:?}",
+            app.workflow.script_out
+        );
+        assert_eq!(app.workflow.script_last.as_ref().map(|r| r.n), Some(1));
+        // Run twice: the second waits for the first, and each lands as its own run.
+        start_script(&mut app, script.clone());
+        start_script(&mut app, script.clone());
+        landed(&mut app);
+        assert_eq!(app.session.map().layers.len(), layers + 3);
+        assert_eq!(app.workflow.script_last.as_ref().map(|r| r.n), Some(3));
+        assert!(app.workflow.script_started.is_empty());
+        // Cancelled: nothing added, and the results say so.
+        start_script(&mut app, script.clone());
+        app.reads.cancel_for_tests();
+        landed(&mut app);
+        assert_eq!(app.session.map().layers.len(), layers + 3);
+        assert_eq!(app.workflow.script_out, vec![("Run Script was cancelled".to_string(), true)]);
+        // Another project opened meanwhile: it is left, and the notice names it as a script; the
+        // pane starts blank for the new project (#1511).
+        start_script(&mut app, script);
+        app.session.run("project.new", &Value::Null).unwrap();
+        landed(&mut app);
+        start_over_in_another_project(&mut app);
+        assert!(app.workflow.script_out.is_empty() && app.workflow.script_last.is_none());
+        assert!(app.session.notices.iter().any(|n| n.text == "Run Script was left: another project was opened"));
+    }
+
+    /// Another project opening starts the Script pane blank, whoever opened it (#1511): the
+    /// script, written or run, its results and the count, at once, a run still to land or not. A
+    /// script that opened a project itself stays, with its results, as its first run there.
+    #[test]
+    fn another_project_starts_the_script_pane_blank() {
+        let mut app = RustGisApp::with_sample();
+        let blank =
+            |app: &RustGisApp| app.workflow.script.is_empty() && app.workflow.script_out.is_empty() && app.workflow.script_last.is_none();
+        let ran = |line: &str| crate::Landed::Ran(Ok(json!({"ran": [{"line": 1, "command": line, "result": null}]})));
+        let ask = |app: &mut RustGisApp| app.workflow.script_started.push_back((0, web_time::Instant::now(), app.session.opened));
+        // Shown first: its own project's results stay, and the count goes on.
+        start_over_in_another_project(&mut app);
+        app.workflow.script = "select.all".to_string();
+        for _ in 0..3 {
+            ask(&mut app);
+            script_ran(&mut app, ran("select.all"));
+        }
+        start_over_in_another_project(&mut app);
+        assert_eq!(app.workflow.script_out.len(), 1, "kept in its own project");
+        assert_eq!(app.workflow.script_last.as_ref().map(|r| r.n), Some(3));
+        // A script that opened the project itself, after Run #3: it stays, with its results, as
+        // Run #1 of the project it opened.
+        app.workflow.script = "project.sample".to_string();
+        ask(&mut app);
+        app.session.run("project.sample", &Value::Null).unwrap();
+        script_ran(&mut app, ran("project.sample"));
+        start_over_in_another_project(&mut app);
+        assert_eq!(app.workflow.script, "project.sample");
+        assert_eq!(app.workflow.script_out.len(), 1);
+        assert_eq!(app.workflow.script_last.as_ref().map(|r| r.n), Some(1));
+        // The same with another run of the old project waiting behind it: that one is left, so
+        // the results don't say Running… for it, and it adds nothing when it lands.
+        ask(&mut app);
+        ask(&mut app);
+        app.session.run("project.sample", &Value::Null).unwrap();
+        script_ran(&mut app, ran("project.sample"));
+        assert_eq!(app.workflow.script_out.len(), 1, "no Running… for a run that will be left: {:?}", app.workflow.script_out);
+        script_ran(&mut app, crate::Landed::NotRun("Run Script was left: another project was opened".into()));
+        assert_eq!(app.workflow.script_out.len(), 1);
+        assert_eq!(app.workflow.script_last.as_ref().map(|r| r.n), Some(1));
+        assert!(app.workflow.script_started.is_empty());
+        // Opened by a command (an agent, the assistant), the pane hidden and Details open:
+        // everything goes, the window too.
+        app.workflow.script_details = true;
+        app.session.run("project.new", &Value::Null).unwrap();
+        script_details(&mut app, &egui::Context::default());
+        assert!(blank(&app) && !app.workflow.script_details);
+        // A script written and never run goes too.
+        app.workflow.script = "map.zoomFull".to_string();
+        app.session.run("project.sample", &Value::Null).unwrap();
+        start_over_in_another_project(&mut app);
+        assert!(blank(&app));
+        // A run under way when another project opens: the pane goes at once, so its script can't
+        // be run again in the new project, and the run, left, adds nothing when it lands.
+        app.workflow.script = "select.all".to_string();
+        ask(&mut app);
+        app.session.run("project.new", &Value::Null).unwrap();
+        start_over_in_another_project(&mut app);
+        assert!(blank(&app));
+        // A script written meanwhile in the new project, and run: the old one lands first, left,
+        // then the new one, as Run #1.
+        app.workflow.script = "map.zoomFull".to_string();
+        ask(&mut app);
+        script_ran(&mut app, crate::Landed::NotRun("Run Script was left: another project was opened".into()));
+        assert!(app.workflow.script_last.is_none(), "the left run adds nothing");
+        script_ran(&mut app, ran("map.zoomFull"));
+        start_over_in_another_project(&mut app);
+        assert_eq!(app.workflow.script, "map.zoomFull");
+        assert_eq!(app.workflow.script_last.as_ref().map(|r| r.n), Some(1));
+        assert_eq!(app.workflow.script_out.len(), 1);
+    }
+
+    /// A Script pane run that waited for the one before it is timed from when that one landed,
+    /// and the results say Running… while another is still to land.
+    #[test]
+    fn a_queued_script_run_is_timed_from_its_start() {
+        let mut app = RustGisApp::with_sample();
+        let asked = web_time::Instant::now() - std::time::Duration::from_secs(10);
+        app.workflow.script_started.extend([(1_000, asked, app.session.opened), (1_000, asked, app.session.opened)]);
+        let ran: Vec<Value> = (1..=8).map(|n| json!({"line": n, "command": "select.all", "result": null})).collect();
+        script_ran(&mut app, crate::Landed::Ran(Ok(json!({"ran": ran}))));
+        let first = app.workflow.script_last.as_ref().map(|r| (r.secs, r.at)).unwrap();
+        assert!(first.0 >= 10.0 && first.1 == 1_000, "{first:?}");
+        // First, where the results' scroll starts, above its eight lines.
+        assert_eq!(app.workflow.script_out.len(), 9);
+        assert_eq!(app.workflow.script_out[0], ("Running…".to_string(), false));
+        script_ran(&mut app, crate::Landed::NotRun("cancelled".into()));
+        let second = app.workflow.script_last.as_ref().map(|r| (r.secs, r.at)).unwrap();
+        assert!(second.0 < 5.0 && second.1 >= 1_010, "{second:?}");
+        assert_eq!(app.workflow.script_out, vec![("cancelled".to_string(), true)]);
+    }
+
+    /// Clear empties the Script pane as another project opening does (#1511): the script, its
+    /// results and count, and Details. The box keeps the focus, so Ctrl+Z brings the script back.
+    /// With nothing to clear, or a run under way, the button is off.
+    #[test]
+    fn clear_empties_the_script_pane_and_undo_brings_the_script_back() {
+        use egui_kittest::kittest::NodeT;
+        let mut app = RustGisApp::with_sample();
+        app.workflow.script = "map.zoomFull".to_string();
+        script_ran(&mut app, crate::Landed::Ran(Ok(json!({"ran": [{"line": 1, "command": "map.zoomFull", "result": null}]}))));
+        // Details open (its window isn't drawn here: it would sit over the button the pointer clicks).
+        app.workflow.script_details = true;
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(900.0, 800.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                script_pane(app, ui, &Tokens::light());
+            },
+            app,
+        );
+        h.run();
+        let on = |h: &egui_kittest::Harness<'_, RustGisApp>| !h.get_by_label("Clear").accesskit_node().is_disabled();
+        assert!(on(&h));
+        h.get_by_label("Clear").click();
+        h.run();
+        let w = &h.state().workflow;
+        assert!(w.script.is_empty() && w.script_out.is_empty() && w.script_last.is_none(), "script, results and count");
+        assert!(!w.script_details, "Details closes with the run it showed");
+        assert!(h.get_by_role(egui::accesskit::Role::MultilineTextInput).is_focused(), "the box keeps the focus");
+        assert!(!on(&h), "nothing left to clear");
+        // The box's own undo brings the script back, with nothing clicked first.
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run();
+        assert_eq!(h.state().workflow.script, "map.zoomFull");
+        assert!(h.state().workflow.script_last.is_none(), "the results stay gone");
+        // A run under way: off, as its results would land in the emptied pane.
+        h.state_mut().workflow.script_started.push_back((0, web_time::Instant::now(), 0));
+        h.run();
+        assert!(!on(&h));
+    }
+
+    /// Details… opens the last run in a window of its own, each line folded: a result the pane cuts
+    /// shows whole there, laid out to read, Copy copies it and Copy All the run; a run that stopped
+    /// shows why.
+    #[test]
+    fn script_details_show_a_runs_whole_results() {
+        let mut app = RustGisApp::with_sample();
+        let long: serde_json::Map<String, Value> = (0..60).map(|i| (format!("k{i:02}"), json!("xxxxxxxxxx"))).collect();
+        let ran = json!([{"line": 1, "command": "raster.gcpFit", "result": long}, {"line": 3, "command": "map.zoomFull", "result": null}]);
+        script_ran(&mut app, crate::Landed::Ran(Ok(json!({"ran": ran}))));
+        assert!(!app.workflow.script_out[0].0.chars().take(400).collect::<String>().contains("k59"), "the pane cuts it");
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(900.0, 800.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                // The app's fonts, for the results' arrow.
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                script_pane(app, ui, &Tokens::light());
+                script_details(app, ui.ctx());
+            },
+            app,
+        );
+        h.run();
+        assert!(h.query_by_label("Copy All").is_none(), "closed until asked");
+        h.get_by_label("Details…").click();
+        h.run();
+        assert!(h.state().workflow.script_details);
+        // Each line folded, its result shown when it's opened.
+        assert!(h.query_by_label("line 3: map.zoomFull").is_some());
+        assert!(h.query_by_label_contains("\"k59\"").is_none(), "folded");
+        h.get_by_label("line 1: raster.gcpFit").click();
+        h.run();
+        // A key a row, only the rows in view laid out; its Copy has them all.
+        assert!(h.query_by_label_contains("\"k00\": \"xxxxxxxxxx\"").is_some(), "laid out to read, one key a row");
+        assert!(h.query_by_label_contains("\"k59\"").is_none(), "a row out of view isn't laid out");
+        let copied = |h: &egui_kittest::Harness<'_, RustGisApp>| {
+            h.output().platform_output.commands.iter().find_map(|c| match c {
+                egui::OutputCommand::CopyText(t) => Some(t.clone()),
+                _ => None,
+            })
+        };
+        h.get_by_label("Copy").click();
+        h.step();
+        let one = copied(&h).expect("Copy copies");
+        assert!(one.starts_with("{\n  \"k00\"") && one.contains("\"k59\": \"xxxxxxxxxx\"\n}"), "{one}");
+        h.get_by_label("Copy All").click();
+        h.step();
+        let all = copied(&h).expect("Copy All copies");
+        assert!(
+            all.starts_with("Run #1 (") && all.contains("line 1: raster.gcpFit\n{") && all.contains("line 3: map.zoomFull\nnull"),
+            "{all}"
+        );
+        // A run that stopped: the window, still open, shows why.
+        script_ran(h.state_mut(), crate::Landed::Ran(Err("line 2: raster.gcpFit: needs 3 points".into())));
+        h.run();
+        assert_eq!(h.query_all_by_label("line 2: raster.gcpFit: needs 3 points").count(), 2, "in the pane and the window");
+        assert!(h.query_by_label_contains("\"k59\"").is_none(), "the last run only");
+        // A script of comments only: the window says nothing ran rather than staying blank.
+        script_ran(h.state_mut(), crate::Landed::Ran(Ok(json!({"ran": []}))));
+        h.run();
+        assert!(h.query_by_label("Nothing ran: the script has no commands.").is_some());
+        // Its ✕ closes it, until Details… again.
+        h.get_by_label("Close window").click();
+        h.run();
+        assert!(!h.state().workflow.script_details);
+        assert!(h.query_by_label("Copy All").is_none());
+    }
+
+    /// A long result is cut as the pane writes it, not after; and in Details a long line (an
+    /// export's text, one JSON string) is split into short rows, while Copy keeps it whole.
+    #[test]
+    fn long_results_are_bounded_where_they_show() {
+        let long = json!({"text": "a".repeat(100_000)});
+        let shown = preview(&long);
+        assert_eq!(shown.chars().count(), SCRIPT_PREVIEW);
+        assert!(shown.starts_with("{\"text\":\"aaa"), "{shown}");
+        assert_eq!(preview(&json!({"a": 1})), "{\"a\":1}", "a short one whole, as before");
+        let wide = preview(&json!("é".repeat(1_000)));
+        assert!(wide.chars().count() == SCRIPT_PREVIEW && !wide.contains('\u{FFFD}'), "cut between characters");
+        // In rows of at most SCRIPT_ROW_CHARS characters, nothing lost or added.
+        let text = pretty(&long);
+        let split = rows(&text);
+        assert!(split.len() > 500 && split.iter().all(|r| r.chars().count() <= SCRIPT_ROW_CHARS));
+        assert_eq!(split.concat(), text.lines().collect::<String>());
+        let counts: Vec<usize> = rows(&"é".repeat(450)).iter().map(|r| r.chars().count()).collect();
+        assert_eq!(counts, vec![200, 200, 50]);
+        assert_eq!(rows("{\n\n}"), vec!["{", "", "}"], "a blank line stays a row");
+        // In the window: the long line's rows, and Copy with the whole text.
+        let mut app = RustGisApp::with_sample();
+        script_ran(&mut app, crate::Landed::Ran(Ok(json!({"ran": [{"line": 1, "command": "data.convert", "result": long}]}))));
+        app.workflow.script_details = true;
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(900.0, 800.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                script_details(app, ui.ctx());
+            },
+            app,
+        );
+        h.run();
+        h.get_by_label("line 1: data.convert").click();
+        h.run();
+        let made = h.state().workflow.script_last.as_ref().map_or(0, |r| r.ran.iter().map(|l| l.text.len()).sum());
+        assert!(made > 500, "laid out in rows: {made}");
+        h.get_by_label("Copy").click();
+        h.step();
+        let copied = h.output().platform_output.commands.iter().find_map(|c| match c {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        });
+        assert_eq!(copied, Some(pretty(&long)), "Copy keeps the long line whole");
+    }
 
     /// Interpolate runs on a thread of its own from the pane (#1291 step 3): the pane goes on while
     /// it works, a second run waits for the first, and its layer lands through its command, which

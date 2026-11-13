@@ -9,16 +9,16 @@ use super::{C, CmdResult, MAX_GROUP_BYTES, Session, capabilities, ps, service_js
 
 pub fn commands() -> Vec<C> {
     vec![
-        C::new("service.import", "Import Service", "Home › Add", import).params(
+        C::new("service.import", "Import Service", "Home › Add", import).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).params(
             r#"{"url": "an OGC API landing page or collections address", "type"?, "name"?: "group name (default My OGC Layer)", "text"?, "documents"?: "as service.layers", "responses"?: [{"url": "features URL", "text": "downloaded GeoJSON"}], "connection"?: "as service.add", "anonymous"?: bool (internal: preserve plugin-selected service provenance)} ("group" and "layer" are rejected: use service.refresh)"#,
         ),
-        C::new("service.refresh", "Refresh", "Layers", refresh).params(
+        C::new("service.refresh", "Refresh", "Layers", refresh).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).params(
             r#"{"group"?: id, "layer"?: "one child layer id or name", "text"?, "documents"?, "responses"?: "as service.import", "connection"?: "as service.add (default: the one its layers record)", "anonymous"?: bool (internal: do not borrow a saved login)}"#,
         ),
-        C::new("service.groupPlan", "Service Import Requests", "Layers", plan).view().params(
+        C::new("service.groupPlan", "Service Import Requests", "Layers", plan).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).view().params(
             r#"{"url"?, "type"?, "name"?, "group"?: id, "layer"?: "one child layer", "sourceOnly"?: "return the connection without fetching", "text"?, "documents"?, "connection"?: "as service.add", "anonymous"?: bool (internal: preserve plugin-selected service provenance)} → request, layers, and next while discovery is incomplete"#,
         ),
-        C::new("service.group", "Service Group", "Layers", set_group).params(
+        C::new("service.group", "Service Group", "Layers", set_group).roles(&[]).effects(crate::policy::Effects::NONE).params(
             r#"{"group"?: id, "layer"?: "a child identifying its group", "name"?: text, "expanded"?: bool, "visible"?: "set all children", "remove"?: "remove the group and its children"}"#,
         ),
     ]
@@ -81,8 +81,8 @@ fn valid_connection(s: &Session, id: &str, url: &str) -> bool {
         })
 }
 
-fn record_connection(s: &mut Session, layer: u32, request: &Value) {
-    if request.get("anonymous").and_then(Value::as_bool) == Some(true) {
+fn record_connection(s: &mut Session, layer: u32, request: &Value, anonymous: bool) {
+    if anonymous || request.get("anonymous").and_then(Value::as_bool) == Some(true) {
         if let Some(layer) = s.map_mut().layer_mut(layer) {
             layer.anonymous = true;
             layer.connection.clear();
@@ -107,7 +107,8 @@ fn plan(s: &mut Session, p: &Value) -> CmdResult {
 
 fn listing(s: &mut Session, p: &Value) -> CmdResult {
     let q = request(s, p)?;
-    let mut found = capabilities(&q)?;
+    let mut found = capabilities(s, &q)?;
+    super::notify_withheld(s, found.service.withheld_addresses);
     if let Some(error) = found.error {
         return Err(error);
     }
@@ -119,17 +120,27 @@ fn listing(s: &mut Session, p: &Value) -> CmdResult {
     }
     if found.incomplete {
         return Err(
-            "the service lists collections RustGIS cannot read (more than 2000, or unreadable addresses); the group was not changed".into(),
+            "the service lists collections RustGIS cannot read (more than 2000, an address too long to read them all, or unreadable addresses); the group was not changed".into(),
         );
     }
-    let child = target(s, p)?.and_then(|(g, id)| id.and_then(|id| g.children.into_iter().find(|c| c.layer == id)));
+    let previous = target(s, p)?;
+    let child = previous.as_ref().and_then(|(g, id)| id.and_then(|id| g.children.iter().find(|c| c.layer == id).cloned()));
+    let anonymous: std::collections::HashSet<&str> = previous
+        .as_ref()
+        .into_iter()
+        .flat_map(|(g, _)| &g.children)
+        .filter(|c| s.map().layer(c.layer).is_some_and(|l| l.anonymous))
+        .map(|c| c.collection.as_str())
+        .collect();
     let mut identities = std::collections::HashSet::new();
     let mut offered = Vec::new();
     for (layer, source) in found.service.layers.into_iter().zip(found.sources) {
+        let mut source = source;
         if !matches!(layer.offer, Offer::Features { .. }) {
             continue;
         }
-        if !identities.insert((source.clone(), layer.name.clone())) {
+        source.crossed_origin |= anonymous.contains(layer.name.as_str());
+        if !identities.insert((source.address.clone(), layer.name.clone())) {
             return Err("the service advertises duplicate collection identifiers".into());
         }
         offered.push((layer, source));
@@ -140,7 +151,7 @@ fn listing(s: &mut Session, p: &Value) -> CmdResult {
     // One child: its collection at its saved source, or else the one collection with its id (a
     // rotated query or a moved collections document keeps the child's identity).
     if let Some(c) = &child {
-        let exact = offered.iter().position(|(l, src)| l.name == c.collection && super::same_address(src, &c.source_url));
+        let exact = offered.iter().position(|(l, src)| l.name == c.collection && super::same_address(&src.address, &c.source_url));
         let pos = match exact {
             Some(i) => Some(i),
             None => {
@@ -162,7 +173,7 @@ fn listing(s: &mut Session, p: &Value) -> CmdResult {
     let mut out = service_json(&found.service);
     if let Some(layers) = out.get_mut("layers").and_then(Value::as_array_mut) {
         for (layer, source) in layers.iter_mut().zip(sources) {
-            layer["source_url"] = json!(source);
+            super::layer_source(layer, source);
         }
     }
     if let Some(next) = found.next {
@@ -187,7 +198,7 @@ fn download(_: &mut Session, _: &str, _: &str, _: usize) -> Result<Vec<u8>, Stri
     Err("the browser must supply downloaded feature responses".into())
 }
 
-fn read(s: &mut Session, p: &Value) -> Result<(Value, Vec<(ServiceChild, Dataset)>), String> {
+fn read(s: &mut Session, p: &Value) -> Result<(Value, Vec<(ServiceChild, Dataset, bool)>), String> {
     let listing = listing(s, p)?;
     if listing.get("next").is_some() {
         return Err("complete service discovery before importing or refreshing".into());
@@ -240,6 +251,7 @@ fn read(s: &mut Session, p: &Value) -> Result<(Value, Vec<(ServiceChild, Dataset
                 source_url: ps(layer, "source_url").unwrap_or_default().to_string(),
             },
             dataset,
+            layer.get("anonymous").and_then(Value::as_bool) == Some(true),
         ));
     }
     Ok((listing, reads))
@@ -266,10 +278,10 @@ fn import(s: &mut Session, p: &Value) -> CmdResult {
     }
     let mut children = Vec::new();
     let mut extent = rustgis_geom::Extent::EMPTY;
-    for (mut child, dataset) in reads {
+    for (mut child, dataset, anonymous) in reads {
         child.layer = crate::cmd::layer::add_dataset(s, dataset);
         if let Some(request) = listing.get("request") {
-            record_connection(s, child.layer, request);
+            record_connection(s, child.layer, request, anonymous);
         }
         if let Some(layer) = s.map().layer(child.layer) {
             extent = extent.union(&layer.extent());
@@ -305,7 +317,7 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
     if !s.map().service_groups.iter().any(|g| g.id == old.id) {
         return Err("the group was removed".into());
     }
-    let read_count = |name: &str| reads.iter().filter(|(c, _)| c.collection == name).count();
+    let read_count = |name: &str| reads.iter().filter(|(c, _, _)| c.collection == name).count();
     let old_count = |name: &str| old.children.iter().filter(|c| c.collection == name).count();
     // A child refresh updates that child. A group refresh keeps a child whose collection is at the
     // same source, or else whose collection id is unique on both sides (the source address may
@@ -314,7 +326,7 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
         Some(id) => reads.iter().map(|_| Some(id)).collect(),
         None => reads
             .iter()
-            .map(|(child, _)| {
+            .map(|(child, _, _)| {
                 old.children
                     .iter()
                     .find(|c| c.collection == child.collection && super::same_address(&c.source_url, &child.source_url))
@@ -331,8 +343,9 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
     // whose classes no longer read, drawn with a single symbol.
     let mut notes = Vec::new();
     let mut singled = Vec::new();
+    let mut area_notes = Vec::new();
     let mut moved = 0;
-    for ((mut child, mut dataset), existing) in reads.into_iter().zip(matches) {
+    for ((mut child, mut dataset, anonymous), existing) in reads.into_iter().zip(matches) {
         let existing = existing.and_then(|id| s.map_mut().layer_mut(id));
         if let Some(layer) = existing {
             if dataset.geometry_type == rustgis_data::GeometryType::None {
@@ -347,7 +360,7 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
             layer.labels.classes.iter_mut().for_each(|class| class.moved.clear());
             let invalid_renderer = match &layer.renderer {
                 rustgis_map::Renderer::Single(_) => false,
-                rustgis_map::Renderer::Unique { expression: Some(e), .. } => rustgis_data::query::parse(e, &layer.dataset).is_err(),
+                rustgis_map::Renderer::Unique { expression: Some(e), .. } => rustgis_data::query::parse_fields(e, &layer.dataset).is_err(),
                 rustgis_map::Renderer::Unique { field, .. } => layer.dataset.field_index(field).is_none(),
                 rustgis_map::Renderer::Graduated { field, .. } | rustgis_map::Renderer::Proportional { field, .. } => {
                     layer.dataset.field_index(field).and_then(|i| layer.dataset.fields.get(i)).is_none_or(|f| !f.ty.is_numeric())
@@ -360,8 +373,9 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
                 }
             }
             // (Labels by a text expression that still reads need no field.)
-            let reads =
-                |t: &Option<String>, ds: &rustgis_data::Dataset| t.as_deref().is_some_and(|t| rustgis_data::query::parse(t, ds).is_ok());
+            let reads = |t: &Option<String>, ds: &rustgis_data::Dataset| {
+                t.as_deref().is_some_and(|t| rustgis_data::query::parse_fields(t, ds).is_ok())
+            };
             let by_text = |c: &rustgis_map::LabelClass, ds: &rustgis_data::Dataset| reads(&c.by.text, ds);
             if layer.dataset.field_index(&layer.labels.default.field).is_none() {
                 // A field the service dropped isn't kept, even under a text expression (a web style
@@ -392,10 +406,11 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
                 notes.push((layer.name.clone(), lost));
             }
             layer.labels.repoint_missing_fields(&layer.dataset);
-            if layer.definition_query.as_deref().is_some_and(|q| rustgis_data::query::parse(q, &layer.dataset).is_err()) {
+            if layer.definition_query.as_deref().is_some_and(|q| rustgis_data::query::parse_fields(q, &layer.dataset).is_err()) {
                 layer.definition_query = None;
             }
-            layer.display_filters.retain(|f| rustgis_data::query::parse(&f.where_, &layer.dataset).is_ok());
+            layer.display_filters.retain(|f| rustgis_data::query::parse_fields(&f.where_, &layer.dataset).is_ok());
+            area_notes.push(layer.id);
             layer.touch_geometry();
             child.layer = layer.id;
             // Locked labels name the old features by id, and the new ones are numbered afresh.
@@ -403,12 +418,12 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
                 lock.retain(|((id, _, _, _), _)| *id != child.layer);
             }
             if let Some(request) = listing.get("request") {
-                record_connection(s, child.layer, request);
+                record_connection(s, child.layer, request, anonymous);
             }
         } else {
             child.layer = crate::cmd::layer::add_dataset(s, dataset);
             if let Some(request) = listing.get("request") {
-                record_connection(s, child.layer, request);
+                record_connection(s, child.layer, request, anonymous);
             }
             if hidden && let Some(layer) = s.map_mut().layer_mut(child.layer) {
                 layer.visible = false;
@@ -418,6 +433,9 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
     }
     if moved > 0 {
         s.notify(format!("{moved} saved label move(s) reset in refreshed service layers"), false);
+    }
+    if let Some(note) = crate::cmd::design::display_area_messages(area_notes.into_iter().filter_map(|id| s.map().layer(id))) {
+        s.notify(note, false);
     }
     if !notes.is_empty() {
         let lost: usize = notes.iter().map(|(_, n)| n).sum();

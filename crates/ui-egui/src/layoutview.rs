@@ -6,10 +6,11 @@
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use rustgis_engine::map::layout::{
-    Arrange, ArrowStyle, CoordFormat, ElementKind, Grid, GridKind, GridStyle, Layout, LineHead, MAX_COLORBAR_TICKS, MAX_FRAME_SCALE,
-    MAX_GRID_WIDTH, MAX_SCALE_DIVISIONS, MAX_TICK_MM, MIN_FRAME_SCALE, Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TickSide,
-    frame_camera, line_angle, line_length,
+    Arrange, ArrowStyle, CoordFormat, Element, ElementKind, Grid, GridKind, GridStyle, Layout, LineHead, MAX_COLORBAR_TICKS,
+    MAX_FRAME_SCALE, MAX_GRID_WIDTH, MAX_LEGEND_COLUMNS, MAX_SCALE_DIVISIONS, MAX_TICK_MM, MIN_FRAME_SCALE, Orientation, PT_PER_MM,
+    ScaleBarStyle, ScaleUnits, TickSide, frame_camera, line_angle, line_length,
 };
+use rustgis_engine::map::symbology::Dash;
 use serde_json::{Value, json};
 
 use crate::RustGisApp;
@@ -49,14 +50,77 @@ const SNAP_COLOR: Color32 = Color32::from_rgb(0xE0, 0x3E, 0x8C);
 /// An element's box: x, y, width, height (mm).
 type Box4 = (f64, f64, f64, f64);
 
+/// Seconds at least between two drawings of the page while what its map frames show lands: each
+/// tile or read landing would draw the whole page again. Anything landing counts, the page's or
+/// another map's: telling them apart would mean working out what each frame asks for, and the
+/// wait ends once the page is whole.
+const FRAMES_REDRAW_S: f64 = 0.25;
+
+/// Says, once each, why frames drawn for a page or a preview drew layers without their cast
+/// shadows (see [`rustgis_engine::render::shadows_said`]), as the map view says them.
+pub(crate) fn say_frame_shadows(app: &mut RustGisApp, said: &rustgis_engine::render::ShadowsSaid) {
+    for e in &said.notices {
+        if app.map.tile_errors.insert(e.clone()) {
+            app.session.warn(e.clone());
+        }
+    }
+}
+
+/// The key a preview drawn for `base` is kept under: with the tile cache's generation read before
+/// it was drawn (`drawn_at`) when its frames drew without cast shadows still being worked out (on
+/// the interface's thread, which doesn't wait for them), so it is drawn again as they land, even
+/// while it was drawn (see [`preview_current`]).
+pub(crate) fn preview_key(base: &str, said: &rustgis_engine::render::ShadowsSaid, drawn_at: u64) -> String {
+    if said.to_come { format!("{base}#shadows@{drawn_at}") } else { base.to_string() }
+}
+
+/// Whether a preview kept under `kept` (see [`preview_key`]) is still the one `base` asks for:
+/// a preview waiting for cast shadows is drawn again once anything lands.
+pub(crate) fn preview_current(kept: &str, base: &str) -> bool {
+    kept == base || kept == format!("{base}#shadows@{}", rustgis_engine::render::rustgis_tiles::cache::generation())
+}
+
+/// Whether a preview kept under `kept` waits for cast shadows: the frame is asked again shortly.
+pub(crate) fn preview_waits(kept: &str) -> bool {
+    kept.contains("#shadows@")
+}
+
+/// What has landed so far: the tile cache's generation (tiles, styles, legend pictures, a raster's
+/// parts read in place) and the background reads' (a streamed layer's features, a source or
+/// raster opened by its address). Each goes up as something lands.
+fn landings() -> (u64, u64) {
+    (rustgis_engine::render::rustgis_tiles::cache::generation(), rustgis_engine::map::source::generation())
+}
+
+/// A page drawn in the browser while something it shows was still on its way: a map frame's tiles
+/// or streamed reads, or a legend's pictures (WMS, WMTS).
+#[derive(Clone, Copy)]
+struct PageWait {
+    /// [`landings`] when it was drawn: anything landing since changes it.
+    landed: (u64, u64),
+    /// Whether a frame's tiles or reads were among what was missing: the page is drawn again as
+    /// they land, at most every [`FRAMES_REDRAW_S`]. Legend pictures alone draw it again only once
+    /// they all have, not on every fetch (the map's own tiles land too).
+    frames: bool,
+    /// When it was drawn (egui's time, seconds).
+    drawn: f64,
+}
+
+/// Whether a page drawn while `w` was missing is due to be drawn again: something has landed since
+/// (it is now at `landed`), and either a frame was drawn short and the last drawing is at least
+/// [`FRAMES_REDRAW_S`] old at `now`, or only legend pictures were missing and none is still on its
+/// way (`legends_pending`, asked only then).
+fn redraw_due(w: PageWait, landed: (u64, u64), now: f64, legends_pending: impl FnOnce() -> bool) -> bool {
+    w.landed != landed && if w.frames { now - w.drawn >= FRAMES_REDRAW_S } else { !legends_pending() }
+}
+
 #[derive(Default)]
 pub struct LayoutView {
     texture: Option<egui::TextureHandle>,
     key: Option<(u64, usize, [usize; 2], i64, i64, i64)>,
-    /// The tile cache's generation the page was drawn at while a legend picture it shows was
-    /// still on its way (in the browser, which doesn't wait for them): drawn again once a fetch
+    /// What the page was drawn without (in the browser, which doesn't wait): drawn again once it
     /// lands.
-    legends_wait: Option<u64>,
+    page_wait: Option<PageWait>,
     /// Page zoom (0 or 1 = fit) and pan, in screen points, of the layout `viewed` names.
     zoom: f32,
     pan: egui::Vec2,
@@ -243,17 +307,20 @@ const HANDLE_PICK: f32 = 11.0;
 /// The selected element's resize handle at a screen point: the element and the handle (0..8
 /// clockwise from top-left), the nearest within reach. On a small element the reach shrinks, so
 /// its inside still moves it; outside, it keeps a floor, so a thin element's handles can still be
-/// picked up. Navigating, a map frame under the pointer pans instead: no handle. A locked
+/// picked up. Navigating, a map frame under the pointer pans instead: no handle, but a text's,
+/// which often sits on a map (a credit, a turned source line) and sticks out over it. A locked
 /// element has none.
 fn handle_at(app: &RustGisApp, layout: &Layout, page: Rect, s: f32, pos: Pos2) -> Option<(u32, usize)> {
-    if nav_frame(app, layout, page, s, pos).is_some() {
+    let e = app.layout.selected.and_then(|id| layout.element(id)).filter(|e| !e.locked)?;
+    if !matches!(e.kind, ElementKind::Text { .. }) && nav_frame(app, layout, page, s, pos).is_some() {
         return None;
     }
-    let e = app.layout.selected.and_then(|id| layout.element(id)).filter(|e| !e.locked)?;
     let r = Rect::from_min_max(to_screen(page, s, (e.x, e.y)), to_screen(page, s, (e.x + e.w, e.y + e.h)));
     let third = r.width().min(r.height()) / 3.0;
-    let reach = HANDLE_PICK.min(if r.contains(pos) { third } else { third.max(5.0) });
+    // A turned text's handles are on its turned box.
+    let reach = HANDLE_PICK.min(if r.contains(screen_turn(pos, r.center(), -e.rotation())) { third } else { third.max(5.0) });
     handles(r)
+        .map(|h| screen_turn(h, r.center(), e.rotation()))
         .iter()
         .enumerate()
         .map(|(i, h)| (i, (h.x - pos.x).abs().max((h.y - pos.y).abs())))
@@ -307,8 +374,27 @@ fn turned(start: f64, from: f64, to: f64, steps: bool) -> f64 {
     (a + 180.0).rem_euclid(360.0) - 180.0
 }
 
-/// The cursor for dragging handle `h`.
-fn handle_cursor(h: usize) -> CursorIcon {
+/// `p` turned `degrees` clockwise about `c`, on screen.
+fn screen_turn(p: Pos2, c: Pos2, degrees: f64) -> Pos2 {
+    if degrees == 0.0 {
+        return p;
+    }
+    let (sin, cos) = degrees.to_radians().sin_cos();
+    let (sin, cos, d) = (sin as f32, cos as f32, p - c);
+    pos2(c.x + d.x * cos - d.y * sin, c.y + d.x * sin + d.y * cos)
+}
+
+/// The corners of the box `r` (mm) turned `degrees` clockwise about its centre, on screen, from
+/// the top left round.
+fn turned_corners(page: Rect, s: f32, (x, y, w, h): Box4, degrees: f64) -> [Pos2; 4] {
+    let r = Rect::from_min_max(to_screen(page, s, (x, y)), to_screen(page, s, (x + w, y + h)));
+    [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()].map(|p| screen_turn(p, r.center(), degrees))
+}
+
+/// The cursor for dragging handle `h` of an element turned `degrees`: the handle's own, an
+/// eighth of a turn on for every 45°.
+fn handle_cursor(h: usize, degrees: f64) -> CursorIcon {
+    let h = (h as i64 + (degrees / 45.0).round() as i64).rem_euclid(8);
     match h {
         0 | 4 => CursorIcon::ResizeNwSe,
         2 | 6 => CursorIcon::ResizeNeSw,
@@ -359,8 +445,10 @@ fn snap_lines(l: &Layout, moving: u32) -> (Vec<f64>, Vec<f64>) {
     xs.extend(&l.guides.x);
     ys.extend(&l.guides.y);
     for e in l.elements.iter().filter(|e| e.id != moving && e.visible) {
-        xs.extend([e.x, e.x + e.w / 2.0, e.x + e.w]);
-        ys.extend([e.y, e.y + e.h / 2.0, e.y + e.h]);
+        // A turned text by the rectangle it takes up.
+        let (x, y, w, h) = e.bounds();
+        xs.extend([x, x + w / 2.0, x + w]);
+        ys.extend([y, y + h / 2.0, y + h]);
     }
     (xs, ys)
 }
@@ -429,11 +517,29 @@ fn drag_landing(lv: &LayoutView, ui: &Ui, layout: &Layout, s: f32, at: (f64, f64
         _ => return None,
     };
     let e = layout.element(id)?;
+    let d = (at.0 - start.0, at.1 - start.1);
+    if let (Some(hd), true) = (handle, e.rotation() != 0.0) {
+        return Some((id, turned_resize(e, hd, d), None, None));
+    }
     let free = lv.no_snap || ui.input(|i| i.modifiers.alt);
     let lines = (!free).then(|| snap_lines(layout, id));
     let tol = f64::from(SNAP_PT / s.max(1e-3));
-    let (r, sx, sy) = landing((e.x, e.y, e.w, e.h), handle, (at.0 - start.0, at.1 - start.1), lines.as_ref().map(|l| (l, tol)));
+    // A turned text moves snapping the rectangle it takes up.
+    let b = e.bounds();
+    let (r, sx, sy) = landing(b, handle, d, lines.as_ref().map(|l| (l, tol)));
+    let r = if handle.is_none() { (e.x + r.0 - b.0, e.y + r.1 - b.1, e.w, e.h) } else { r };
     Some((id, r, sx, sy))
+}
+
+/// The box of a turned element after dragging its handle `h` by (dx, dy) mm on the page: resized
+/// in its own turned frame (unsnapped), then moved so the side the handle doesn't move stays where
+/// it was on the page, though the centre it turns about moved.
+fn turned_resize(e: &Element, h: usize, (dx, dy): (f64, f64)) -> Box4 {
+    let (sin, cos) = e.rotation().to_radians().sin_cos();
+    let local = (dx * cos + dy * sin, -dx * sin + dy * cos);
+    let (x, y, w, nh) = resized((e.x, e.y, e.w, e.h), h, local.0, local.1);
+    let (mx, my) = (x + w / 2.0 - (e.x + e.w / 2.0), y + nh / 2.0 - (e.y + e.h / 2.0));
+    (x + mx * cos - my * sin - mx, y + mx * sin + my * cos - my, w, nh)
 }
 
 /// The guide under a screen point: vertical or not, and its index.
@@ -613,27 +719,36 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
     let dpi = (px_per_mm as f64 * 25.4).min(max_side / layout.width.max(layout.height) * 25.4).clamp(20.0, 300.0);
     let size = [(page.width() * ppp) as usize, (page.height() * ppp) as usize];
     let key = (app.session.revision, li, size, (dpi * 10.0) as i64, layout.width as i64, layout.height as i64);
-    // Only once the pictures have: any other fetch landing (the map's tiles) bumps the generation.
-    let landed = app.layout.legends_wait.is_some_and(|g| g != rustgis_engine::render::rustgis_tiles::cache::generation())
-        && !rustgis_engine::render::layout::legends_pending(&layout, &app.session.project.maps);
-    if (app.layout.key != Some(key) || landed) && size[0] > 2 && size[1] > 2 {
+    // Read before drawing: something landing while it draws is a reason to draw again.
+    let landed = landings();
+    let now = ui.input(|i| i.time);
+    let due = app.layout.page_wait.is_some_and(|w| {
+        redraw_due(w, landed, now, || rustgis_engine::render::layout::legends_pending(&layout, &app.session.project.maps))
+    });
+    if (app.layout.key != Some(key) || due) && size[0] > 2 && size[1] > 2 {
         let info = page_info(app, li);
-        // Before drawing: a fetch landing while it draws is a reason to draw again.
-        let generation = rustgis_engine::render::rustgis_tiles::cache::generation();
-        if let Some(pm) = rustgis_engine::render::layout::render(&layout, &mut app.session.project.maps, dpi, &info) {
+        let (drawn, said) = rustgis_engine::render::shadows_said(|| {
+            rustgis_engine::render::layout::render_pending(&layout, &mut app.session.project.maps, dpi, &info)
+        });
+        if let Ok((pm, frames_pending)) = drawn {
             let img = egui::ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
             match &mut app.layout.texture {
                 Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
                 None => app.layout.texture = Some(ui.ctx().load_texture("layout", img, egui::TextureOptions::LINEAR)),
             }
             app.layout.key = Some(key);
-            // Natively the page waited for them already: drawn again, it would wait again.
-            app.layout.legends_wait = (cfg!(target_arch = "wasm32")
-                && rustgis_engine::render::layout::legends_pending(&layout, &app.session.project.maps))
-            .then_some(generation);
+            // Natively the page waited for them already: drawn again, it would wait again. Cast
+            // shadows still being worked out weren't waited for: drawn again as they land.
+            let web = cfg!(target_arch = "wasm32");
+            let frames = (web && frames_pending) || said.to_come;
+            say_frame_shadows(app, &said);
+            // Waiting for the frames draws it again anyway: the legends are asked about once
+            // they are whole.
+            let legends = web && !frames && rustgis_engine::render::layout::legends_pending(&layout, &app.session.project.maps);
+            app.layout.page_wait = (legends || frames).then_some(PageWait { landed, frames, drawn: now });
         }
     }
-    if app.layout.legends_wait.is_some() {
+    if app.layout.page_wait.is_some() {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
     }
     // A pan's preview is drawn as the pan starts, and let go when it ends.
@@ -715,7 +830,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
     }
     // The dragged element's outline where it will land, and the lines it snapped to.
     if let Some(p) = pointer
-        && let Some((_, r, sx, sy)) = drag_landing(&app.layout, ui, &layout, s, to_mm(page, s, p))
+        && let Some((dragged, r, sx, sy)) = drag_landing(&app.layout, ui, &layout, s, to_mm(page, s, p))
     {
         if let Some(x) = sx {
             vline(to_screen(page, s, (x, 0.0)).x, SNAP_COLOR);
@@ -723,17 +838,15 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
         if let Some(y) = sy {
             hline(to_screen(page, s, (0.0, y)).y, SNAP_COLOR);
         }
-        let rr = Rect::from_min_max(to_screen(page, s, (r.0, r.1)), to_screen(page, s, (r.0 + r.2, r.1 + r.3)));
-        painter.rect_stroke(rr, 0.0, Stroke::new(1.5, accent), egui::StrokeKind::Middle);
+        // Turned as the element being dragged is.
+        let rot = layout.element(dragged).map_or(0.0, |e| e.rotation());
+        painter.add(egui::Shape::closed_line(turned_corners(page, s, r, rot).to_vec(), Stroke::new(1.5, accent)));
     }
     if let Some(e) = app.layout.selected.and_then(|id| layout.element(id)) {
         let r = Rect::from_min_max(to_screen(page, s, (e.x, e.y)), to_screen(page, s, (e.x + e.w, e.y + e.h)));
-        painter.extend(egui::Shape::dashed_line(
-            &[r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()],
-            Stroke::new(1.2, accent),
-            5.0,
-            3.0,
-        ));
+        // A turned text's box turned with it.
+        let [lt, rt, rb, lb] = turned_corners(page, s, (e.x, e.y, e.w, e.h), e.rotation());
+        painter.extend(egui::Shape::dashed_line(&[lt, rt, rb, lb, lt], Stroke::new(1.2, accent), 5.0, 3.0));
         // The handle under the pointer, or being dragged, is filled.
         let active = match app.layout.drag {
             Some(Drag::Resize(id, h, _)) if id == e.id => Some(h),
@@ -742,9 +855,9 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
         };
         if e.locked {
             // No handles: a lock at the top-right corner says why.
-            crate::icons::paint(&painter, Rect::from_center_size(r.right_top(), vec2(16.0, 16.0)), "lock", accent, accent);
+            crate::icons::paint(&painter, Rect::from_center_size(rt, vec2(16.0, 16.0)), "lock", accent, accent);
         } else {
-            for (i, h) in handles(r).into_iter().enumerate() {
+            for (i, h) in handles(r).map(|h| screen_turn(h, r.center(), e.rotation())).into_iter().enumerate() {
                 let hr = Rect::from_center_size(h, vec2(HANDLE, HANDLE));
                 painter.rect_filled(hr, 2.0, if active == Some(i) { accent } else { Color32::WHITE });
                 painter.rect_stroke(hr, 2.0, Stroke::new(1.5, accent), egui::StrokeKind::Middle);
@@ -758,7 +871,9 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
                 painter.circle(knob, HANDLE * 0.6, if on { accent } else { Color32::WHITE }, Stroke::new(1.5, accent));
             }
         }
-        painter.text(r.left_top() + vec2(0.0, -4.0), Align2::LEFT_BOTTOM, &e.name, regular(11.0), accent);
+        // The name over the turned box's topmost corner.
+        let top = [rt, rb, lb].into_iter().fold(lt, |a, p| if p.y < a.y - 0.5 { p } else { a });
+        painter.text(top + vec2(0.0, -4.0), Align2::LEFT_BOTTOM, &e.name, regular(11.0), accent);
     }
     // A line being turned: where it will point, and its angle.
     if let (Some(Drag::Rotate(id, a0, from)), Some(p)) = (app.layout.drag, pointer)
@@ -964,7 +1079,9 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, layout: &L
             Some(_) => None,
             None => ruler_at(&app.layout, resp.rect, p).or_else(|| guide_at(layout, page, s, p).map(|g| g.0)),
         };
-        let navigating = app.layout.drag.is_none() && nav_frame(app, layout, page, s, p).is_some();
+        // A text's handle over the frame comes first (`handle_at`).
+        let navigating =
+            app.layout.drag.is_none() && nav_frame(app, layout, page, s, p).is_some() && handle_at(app, layout, page, s, p).is_none();
         let handle = match app.layout.drag {
             Some(Drag::Resize(_, h, _)) => Some(h),
             None if !navigating => handle_at(app, layout, page, s, p).map(|(_, h)| h),
@@ -975,7 +1092,10 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, layout: &L
         match (vertical, handle) {
             _ if rotating => ui.ctx().set_cursor_icon(CursorIcon::Grabbing),
             _ if knob => ui.ctx().set_cursor_icon(CursorIcon::Grab),
-            (_, Some(h)) => ui.ctx().set_cursor_icon(handle_cursor(h)),
+            (_, Some(h)) => {
+                let rot = app.layout.selected.and_then(|id| layout.element(id)).map_or(0.0, |e| e.rotation());
+                ui.ctx().set_cursor_icon(handle_cursor(h, rot))
+            }
             (Some(true), _) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
             (Some(false), _) => ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical),
             _ if matches!(app.layout.drag, Some(Drag::PanFrame(..))) => ui.ctx().set_cursor_icon(CursorIcon::Grabbing),
@@ -1361,17 +1481,33 @@ fn grid_properties(app: &mut RustGisApp, ui: &mut Ui, grid: Option<&Grid>, id: u
             return;
         }
         if measured {
-            let input_label = ui.label(tl!("Short labels"));
-            let mut short = g.short;
+            let input_label = ui.label(tl!("MGRS labels"));
+            let mut mgrs = g.mgrs;
             if ui
-                .checkbox(&mut short, "")
+                .checkbox(&mut mgrs, "")
                 .labelled_by(input_label.id)
-                .on_hover_text(tl!("The kilometres' last two digits, as topographic maps print them: 43 for 543000."))
+                .on_hover_text(tl!(
+                    "Each 100 km square named with its grid zone designation (32T MT), and the lines by their kilometres' last two digits. The grid is in a WGS 84 UTM zone: the one given, else the map's, else the one at the frame's centre."
+                ))
                 .changed()
             {
-                set(app, json!({"short": short}));
+                set(app, json!({"mgrs": mgrs}));
             }
             ui.end_row();
+            // (MGRS labels are short already.)
+            if !g.mgrs {
+                let input_label = ui.label(tl!("Short labels"));
+                let mut short = g.short;
+                if ui
+                    .checkbox(&mut short, "")
+                    .labelled_by(input_label.id)
+                    .on_hover_text(tl!("The kilometres' last two digits, as topographic maps print them: 43 for 543000."))
+                    .changed()
+                {
+                    set(app, json!({"short": short}));
+                }
+                ui.end_row();
+            }
         } else {
             // Degrees: decimal or degrees, minutes and seconds, with hemisphere letters or signs.
             ui.label(tl!("Format"));
@@ -1435,10 +1571,21 @@ fn crs_row(app: &mut RustGisApp, ui: &mut Ui, g: &Grid, id: u32, set: &dyn Fn(&m
     let key = egui::Id::unique(("grid_crs", id));
     let current = g.crs.clone().unwrap_or_default();
     let mut buf = ui.data(|d| d.get_temp::<String>(key)).unwrap_or_else(|| current.clone());
-    let r = ui
-        .add(egui::TextEdit::singleline(&mut buf).hint_text(tl!("The map's, else its UTM zone")).desired_width(150.0))
-        .labelled_by(input_label.id)
-        .on_hover_text(tl!("EPSG:25832, WKT or a PROJ string; empty: the map's when projected, else the UTM zone at the frame's centre."));
+    let (hint, help) = if g.mgrs {
+        (
+            tl!("The map's UTM zone, else the frame's"),
+            tl!(
+                "A WGS 84 UTM zone for MGRS labels, by its EPSG code (32632); empty: the map's when it is one, else the zone at the frame's centre."
+            ),
+        )
+    } else {
+        (
+            tl!("The map's, else its UTM zone"),
+            tl!("EPSG:25832, WKT or a PROJ string; empty: the map's when projected, else the UTM zone at the frame's centre."),
+        )
+    };
+    let r =
+        ui.add(egui::TextEdit::singleline(&mut buf).hint_text(hint).desired_width(150.0)).labelled_by(input_label.id).on_hover_text(help);
     if r.has_focus() {
         ui.data_mut(|d| d.insert_temp(key, buf));
     } else {
@@ -1522,9 +1669,36 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 }
                 ui.end_row();
                 match &e.kind {
-                    // Its text, size, colour and boldness: the shared form, below the grid.
-                    ElementKind::Text { .. } => {}
-                    ElementKind::Legend { title, all_classes, hide_other, .. } => {
+                    ElementKind::Text { rotation, .. } => {
+                        // Its text, size, colour and boldness are the shared form, below the grid.
+                        // Its turn is clockwise about its centre, as a frame's bearing: 90 reads top
+                        // to bottom, -90 bottom to top.
+                        let input_label = ui.label(tl!("Rotation"));
+                        ui.horizontal(|ui| {
+                            let mut a = *rotation;
+                            let drag = Dragged::lend(ui, drag_key("rotation"), &mut a);
+                            let r = ui
+                                .add(
+                                    egui::DragValue::new(&mut a)
+                                        .update_while_editing(false)
+                                        .range(-180.0..=180.0)
+                                        .speed(1.0)
+                                        .max_decimals(1)
+                                        .suffix("°"),
+                                )
+                                .labelled_by(input_label.id);
+                            if drag.settled(ui, &r, &mut a) && (a - rotation).abs() > 1e-6 {
+                                update(app, json!({"rotation": a}));
+                            }
+                            for quick in [0.0, 90.0, -90.0] {
+                                if ui.selectable_label(*rotation == quick, format!("{quick:.0}°")).clicked() && *rotation != quick {
+                                    update(app, json!({"rotation": quick}));
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    ElementKind::Legend { title, all_classes, hide_other, columns, .. } => {
                         let input_label = ui.label(tl!("Title"));
                         if let Some(tt) = text_field(app, ui, (li, id, "title"), title, false, input_label.id) {
                             update(app, json!({"title": tt}));
@@ -1541,6 +1715,16 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         let mut hide = *hide_other;
                         if ui.checkbox(&mut hide, "").labelled_by(input_label.id).changed() {
                             update(app, json!({"hideOther": hide}));
+                        }
+                        ui.end_row();
+                        let input_label = ui.label(tl!("Columns"));
+                        let mut n = *columns as u64;
+                        let drag = Dragged::lend(ui, drag_key("columns"), &mut n);
+                        let r = ui
+                            .add(egui::DragValue::new(&mut n).update_while_editing(false).range(1..=MAX_LEGEND_COLUMNS as u64))
+                            .labelled_by(input_label.id);
+                        if drag.settled(ui, &r, &mut n) && n as usize != *columns {
+                            update(app, json!({"columns": n}));
                         }
                         ui.end_row();
                     }
@@ -1563,7 +1747,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                                 .unwrap_or_default(),
                             _ => Vec::new(),
                         };
-                        let top = tl!("Top visible raster");
+                        let top = tl!("Top raster with a colour scale, not drawn by classes");
                         egui::ComboBox::from_id_salt(("colorbar_layer", id))
                             .selected_text(layer.as_deref().unwrap_or(top))
                             .show_ui(ui, |ui| {
@@ -1760,7 +1944,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         }
                         ui.end_row();
                     }
-                    ElementKind::Rectangle { fill, outline, width, .. } | ElementKind::Ellipse { fill, outline, width } => {
+                    ElementKind::Rectangle { fill, outline, width, dash, .. } | ElementKind::Ellipse { fill, outline, width, dash } => {
                         // A fill with no opacity leaves only the outline; an outline 0 wide, only the fill.
                         for (label, key, current) in [("Fill", "fill", *fill), ("Outline", "outline", *outline)] {
                             ui.label(tl!(label));
@@ -1789,8 +1973,13 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                             update(app, json!({"width": wd}));
                         }
                         ui.end_row();
+                        let input_label = ui.label(tl!("Dash"));
+                        if let Some(d) = dash_picked(ui, ("layout_dash", id), *dash, *width, input_label.id) {
+                            update(app, json!({"dash": d}));
+                        }
+                        ui.end_row();
                     }
-                    ElementKind::Line { color, width, dir, head } => {
+                    ElementKind::Line { color, width, dir, head, dash } => {
                         ui.label(tl!("Color"));
                         let mut c = crate::theme::c32(*color);
                         let resp = crate::widgets::color_button(ui, &mut c);
@@ -1814,6 +2003,12 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                             .labelled_by(input_label.id);
                         if drag.settled(ui, &r, &mut wd) && (wd - width).abs() > 1e-6 {
                             update(app, json!({"width": wd}));
+                        }
+                        ui.end_row();
+                        // Only the shaft is dashed: arrowheads stay solid.
+                        let input_label = ui.label(tl!("Dash"));
+                        if let Some(d) = dash_picked(ui, ("layout_dash", id), *dash, *width, input_label.id) {
+                            update(app, json!({"dash": d}));
                         }
                         ui.end_row();
                         let input_label = ui.label(tl!("Arrowheads"));
@@ -1855,7 +2050,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
         );
     });
     // A layout's text: the form a text graphic has too (#516, #535), with the page's dynamic text.
-    if let ElementKind::Text { text, size, color, bold, italic, align, letter_spacing, font, font_name } = &e.kind {
+    if let ElementKind::Text { text, size, color, bold, italic, align, letter_spacing, font, font_name, .. } = &e.kind {
         let key = (li, id, "text");
         let mut buf = app.layout.typing.remove(&key).unwrap_or_else(|| text.clone());
         let (mut sz, mut c, mut bb) = (*size, crate::theme::c32(*color), *bold);
@@ -1909,9 +2104,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             update(app, font);
         }
     }
-    // The layers a legend lists: a checkbox for each vector layer of its frame's map and each
-    // WMS or WMTS layer with a legend, ticked when listed. Names gone from the map drop out of
-    // the list as it's written back.
+    // The layers a legend lists: a checkbox for each vector layer of its frame's map, each raster
+    // drawn by classes (#1679) and each WMS or WMTS layer with a legend, ticked when listed. Names
+    // gone from the map drop out of the list as it's written back.
     if let ElementKind::Legend { frame, exclude, .. } = &e.kind {
         let map = layout.element(*frame).and_then(|f| match &f.kind {
             ElementKind::MapFrame { map, .. } => app.session.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)),
@@ -1921,7 +2116,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             .map(|m| {
                 // Once each: layers may share a name, and the legend leaves names out.
                 let mut names: Vec<String> = Vec::new();
-                let listed = m.layers.iter().filter(|l| !l.graphics && !l.is_raster()).map(|l| &l.name);
+                let listed = m.layers.iter().filter(|l| rustgis_engine::render::layout::legend_lists(l)).map(|l| &l.name);
                 for name in listed.chain(m.tiles.iter().filter(|t| !t.legends.is_empty()).map(|t| &t.name)) {
                     if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
                         names.push(name.clone());
@@ -1930,7 +2125,8 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 names
             })
             .unwrap_or_default();
-        // The names left out that the map still has, those not listed here (a raster's) too.
+        // The names left out that the map still has, those not listed here (a raster's on a ramp)
+        // too.
         let kept: Vec<String> = exclude
             .iter()
             .filter(|x| {
@@ -2059,6 +2255,33 @@ fn element_actions(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize
     });
 }
 
+/// The dash pattern of a layout line or outline `width` points wide, picked from the Symbology
+/// pane's presets (#1763), scaled by the width as that pane scales them: the pattern
+/// `layout.update` takes (`[]` for solid) when one other than `dash` is picked. A pattern set by
+/// command that isn't a preset shows as its lengths.
+fn dash_picked(ui: &mut Ui, salt: (&str, u32), dash: Option<Dash>, width: f64, label: egui::Id) -> Option<Vec<f32>> {
+    let scale = (width as f32).max(1.0);
+    let preset = |steps: Option<&[f32]>| steps.and_then(|s| Dash::new(&s.iter().map(|v| v * scale).collect::<Vec<_>>()));
+    let shown = match crate::panes::DASH_PRESETS.iter().find(|(_, steps)| preset(*steps) == dash) {
+        Some((name, _)) => tl!(name).to_string(),
+        None => dash.map(|d| d.steps().iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ")).unwrap_or_default(),
+    };
+    let mut picked = None;
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            for (name, steps) in crate::panes::DASH_PRESETS {
+                let d = preset(steps);
+                if ui.selectable_label(d == dash, tl!(name)).clicked() && d != dash {
+                    picked = Some(d.map_or_else(Vec::new, |d| d.steps().to_vec()));
+                }
+            }
+        })
+        .response
+        .labelled_by(label);
+    picked
+}
+
 /// Why a locked element, or a frame with a locked surround, isn't deleted.
 pub(crate) fn locked_delete() -> &'static str {
     tl!("It is locked, or one of its surrounds is: unlock it first")
@@ -2066,11 +2289,43 @@ pub(crate) fn locked_delete() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{RULER, landing, page_rect, resized, rotate_handle, snap_to, to_screen, turned};
+    use super::{
+        FRAMES_REDRAW_S, PageWait, RULER, handle_at, landing, page_rect, redraw_due, resized, rotate_handle, snap_to, to_screen, turned,
+    };
     use crate::RustGisApp;
     use egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, vec2};
     use serde_json::json;
     use std::{cell::Cell, rc::Rc};
+
+    /// In the browser, a page drawn while its frames' tiles were on their way is drawn again as
+    /// they land, at most every `FRAMES_REDRAW_S`, without asking about legends.
+    #[test]
+    fn a_page_missing_tiles_is_drawn_again_as_they_land() {
+        let w = PageWait { landed: (7, 3), frames: true, drawn: 10.0 };
+        let legends = || panic!("the frames' wait doesn't ask about legends");
+        assert!(redraw_due(w, (8, 3), 10.0 + FRAMES_REDRAW_S, legends), "a tile landed, long enough since the last drawing");
+        assert!(!redraw_due(w, (8, 3), 10.0 + FRAMES_REDRAW_S / 2.0, legends), "a tile landed, but too soon after the last drawing");
+        assert!(!redraw_due(w, (7, 3), 60.0, legends), "nothing landed");
+    }
+
+    /// A streamed layer's read, or a source opened by its address, lands outside the tile cache:
+    /// a frame drawn short of it is drawn again too (#1534).
+    #[test]
+    fn a_page_missing_a_streamed_read_is_drawn_again_as_it_lands() {
+        let w = PageWait { landed: (7, 3), frames: true, drawn: 10.0 };
+        assert!(redraw_due(w, (7, 4), 10.0 + FRAMES_REDRAW_S, || false), "a read landed");
+        assert!(!redraw_due(w, (7, 4), 10.0 + FRAMES_REDRAW_S / 2.0, || false), "a read landed, but too soon");
+    }
+
+    /// A page waiting only for legend pictures is drawn again once they have all landed, not on
+    /// every fetch: the map's own tiles land too (#1177).
+    #[test]
+    fn a_page_missing_legend_pictures_is_drawn_again_once_they_land() {
+        let w = PageWait { landed: (7, 3), frames: false, drawn: 10.0 };
+        assert!(redraw_due(w, (8, 3), 10.0, || false), "the pictures landed");
+        assert!(!redraw_due(w, (8, 3), 60.0, || true), "a fetch landed, but a picture is still on its way");
+        assert!(!redraw_due(w, (7, 3), 60.0, || false), "nothing landed");
+    }
 
     #[test]
     fn turns_snap_to_level_upright_and_diagonal() {
@@ -2079,6 +2334,123 @@ mod tests {
         assert!((turned(10.0, 0.0, 20.0, false) - 30.0).abs() < 1e-9, "30° is left alone");
         assert_eq!(turned(0.0, 0.0, 20.0, true), 15.0, "Shift: 15° steps");
         assert!((turned(170.0, 0.0, 30.0, false) + 160.0).abs() < 1e-9, "200° is -160°");
+    }
+
+    /// A text turned 90° shows its handles on its turned box (#1763): its right-hand handle sits
+    /// at the bottom, and dragging it down lengthens the text, its top staying put.
+    #[test]
+    fn a_turned_text_resizes_by_its_turned_handles() {
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Turn", "template": "blank"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let p = json!({"layout": li, "kind": "text", "text": "Fonte: IBGE", "rotation": 90, "x": 60, "y": 100, "w": 80, "h": 10});
+        let id = app.run("layout.addElement", p).unwrap()["element"].as_u64().unwrap() as u32;
+        app.layout.selected = Some(id);
+        let area = Rc::new(Cell::new(Rect::NOTHING));
+        let shown = area.clone();
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1000.0, 760.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                shown.set(ui.available_rect_before_wrap());
+                super::show(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        let layout = h.state().session.project.layouts[li].clone();
+        let (page, s) = page_rect(&h.state().layout, area.get(), &layout);
+        // The box's right-hand end, 40 mm right of its centre (100, 105), turned to 40 mm below it.
+        let from = to_screen(page, s, (100.0, 145.0));
+        assert_eq!(handle_at(h.state(), &layout, page, s, from), Some((id, 3)), "the right-hand handle, turned");
+        let to = to_screen(page, s, (100.0, 165.0));
+        let button = |pos: Pos2, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(button(from, true));
+        h.step();
+        for i in 1..=6 {
+            h.event(Event::PointerMoved(from + (to - from) * i as f32 / 6.0));
+            h.step();
+        }
+        h.event(button(to, false));
+        h.step();
+        let e = h.state().session.project.layouts[li].element(id).unwrap();
+        assert!((e.w - 100.0).abs() < 1.0 && (e.h - 10.0).abs() < 1e-9, "20 mm longer: {} × {}", e.w, e.h);
+        let (bx, by, bw, bh) = e.bounds();
+        assert!((by - 65.0).abs() < 1e-6 && (bx - 95.0).abs() < 1e-6, "its top and side stay: {bx}, {by}");
+        assert!((bh - e.w).abs() < 1e-6 && (bw - 10.0).abs() < 1e-6);
+    }
+
+    /// Navigating map frames, a selected text on a map frame keeps its handles, where they stick
+    /// out over the map too: dragging one resizes the text and leaves the map be. Another
+    /// element's handle over the frame still pans the map (#1763).
+    #[test]
+    fn a_text_on_a_map_frame_keeps_its_handles_while_navigating() {
+        use rustgis_engine::map::layout::ElementKind;
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Nav"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let frame = app.session.project.layouts[li].first_frame().unwrap();
+        let f = app.session.project.layouts[li].element(frame).unwrap().clone();
+        let (x, y) = (f.x + 10.0, f.y + 10.0);
+        let p = json!({"layout": li, "kind": "text", "text": "Fonte: IBGE", "x": x, "y": y, "w": 40, "h": 8});
+        let text = app.run("layout.addElement", p).unwrap()["element"].as_u64().unwrap() as u32;
+        let p = json!({"layout": li, "kind": "rectangle", "x": x, "y": y + 20.0, "w": 40, "h": 20, "fill": "#00000000"});
+        let rect = app.run("layout.addElement", p).unwrap()["element"].as_u64().unwrap() as u32;
+        app.layout.navigate = true;
+        app.layout.selected = Some(text);
+        let area = Rc::new(Cell::new(Rect::NOTHING));
+        let shown = area.clone();
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1000.0, 760.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                shown.set(ui.available_rect_before_wrap());
+                super::show(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        let layout = h.state().session.project.layouts[li].clone();
+        let center = |l: &rustgis_engine::map::layout::Layout| match &l.element(frame).unwrap().kind {
+            ElementKind::MapFrame { center, .. } => *center,
+            k => panic!("{k:?}"),
+        };
+        let before = center(&layout);
+        let (page, s) = page_rect(&h.state().layout, area.get(), &layout);
+        // Just right of the text's right-hand handle: off the text, over the map.
+        let from = to_screen(page, s, (x + 40.0, y + 4.0)) + vec2(3.0, 0.0);
+        assert_eq!(layout.hit(x + 40.0 + f64::from(3.0 / s), y + 4.0), Some(frame), "the point is on the map frame");
+        assert_eq!(handle_at(h.state(), &layout, page, s, from), Some((text, 3)), "the text's handle comes first");
+        let to = to_screen(page, s, (x + 60.0, y + 4.0)) + vec2(3.0, 0.0);
+        let button = |pos: Pos2, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(button(from, true));
+        h.step();
+        for i in 1..=6 {
+            h.event(Event::PointerMoved(from + (to - from) * i as f32 / 6.0));
+            h.step();
+        }
+        h.event(button(to, false));
+        h.run_steps(2);
+        let after = h.state().session.project.layouts[li].clone();
+        let e = after.element(text).unwrap();
+        assert!((e.w - 60.0).abs() < 1.0 && (e.x - x).abs() < 1e-9, "20 mm wider: {} at {}", e.w, e.x);
+        assert_eq!(center(&after), before, "the map stayed put");
+        // A rectangle's handle there is the map's, as before.
+        h.state_mut().layout.selected = Some(rect);
+        let by = to_screen(page, s, (x + 40.0, y + 30.0)) + vec2(3.0, 0.0);
+        assert_eq!(handle_at(h.state(), &after, page, s, by), None, "the rectangle's handle gives way to panning");
     }
 
     /// Dragging an arrow's round handle from above its centre round to its right turns it a
@@ -2513,6 +2885,42 @@ mod tests {
         h.event(key(Key::ArrowUp, Modifiers::NONE, false));
         h.step();
         assert_eq!(at(&h), (0.0, 0.0));
+    }
+
+    /// A rectangle's outline is dashed from the Format pane's Dash list, the Symbology pane's
+    /// presets scaled by its width, and made solid again (#1763).
+    #[test]
+    fn the_format_pane_dashes_an_outline() {
+        use egui_kittest::kittest::Queryable;
+        use rustgis_engine::map::layout::ElementKind;
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Dashes", "template": "blank"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let p = json!({"layout": li, "kind": "rectangle", "x": 20, "y": 20, "w": 60, "h": 40, "width": 2});
+        let id = app.run("layout.addElement", p).unwrap()["element"].as_u64().unwrap() as u32;
+        app.layout.selected = Some(id);
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(420.0, 900.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                let layout = app.session.project.layouts[li].clone();
+                egui::ScrollArea::vertical().show(ui, |ui| super::properties(app, ui, &layout, li));
+            },
+            app,
+        );
+        h.run_steps(2);
+        let dash = |h: &egui_kittest::Harness<'_, RustGisApp>| match &h.state().session.project.layouts[li].element(id).unwrap().kind {
+            ElementKind::Rectangle { dash, .. } => dash.map(|d| d.steps().to_vec()),
+            k => panic!("{k:?}"),
+        };
+        h.get_by_label("Dash").click();
+        h.run_steps(2);
+        h.get_by_label("Dashed").click();
+        h.run_steps(2);
+        assert_eq!(dash(&h), Some(vec![8.0, 4.0]), "Dashed, [4, 2] at a 2-point width");
+        h.get_by_label("Dash").click();
+        h.run_steps(2);
+        h.get_by_label("Solid").click();
+        h.run_steps(2);
+        assert_eq!(dash(&h), None);
     }
 
     /// The selected element's Bring to Front and Send to Back buttons move it in the drawing
@@ -3040,7 +3448,7 @@ mod tests {
     }
 
     /// A frame's grid in the Format pane: a graticule's degree rows, or a measured grid's
-    /// coordinate system (typed, set once left) and short labels.
+    /// coordinate system (typed, set once left), short labels and MGRS labels.
     #[test]
     fn a_measured_grid_is_set_in_the_format_pane() {
         use egui::accesskit::Role;
@@ -3087,6 +3495,17 @@ mod tests {
         h.get_by_label("Short labels").click();
         h.run_steps(2);
         assert!(grid(&h).short);
+        // MGRS labels need a WGS 84 UTM zone: refused over LV95, nothing changed; with the map's
+        // or the frame's zone they're set, and short labels go, as MGRS's are short already.
+        h.get_by_label("MGRS labels").click();
+        h.run_steps(2);
+        assert!(!grid(&h).mgrs && grid(&h).crs.as_deref() == Some("EPSG:2056"));
+        h.state_mut().run("layout.update", json!({"element": frame, "grid": {"crs": ""}})).unwrap();
+        h.run_steps(2);
+        h.get_by_label("MGRS labels").click();
+        h.run_steps(3);
+        assert!(grid(&h).mgrs);
+        assert!(h.query_by_label("Short labels").is_none());
     }
 
     /// Selecting an element opens the Format pane, a tab like the others (#516). Closing it keeps

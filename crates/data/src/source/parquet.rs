@@ -43,7 +43,8 @@ pub struct ParquetSource {
     field_cols: Vec<usize>,
     /// Leaf column indices of the bbox covering's xmin, ymin, xmax, ymax.
     covering: Option<[usize; 4]>,
-    /// The metadata declares the covering, whose null boxes then imply null geometry.
+    /// The metadata declares the covering, whose null boxes then mean no geometry or an empty
+    /// one, neither of which meets an extent.
     declared_covering: bool,
     reproject: Reproject,
     /// The file, when it is read by its web address.
@@ -52,12 +53,23 @@ pub struct ParquetSource {
     exact: bool,
     /// The most rows read from one row group: `MAX_GROUP_ROWS`, lowered by tests.
     group_rows: usize,
+    /// Declared after `reader`: Windows must close its file before removing the workspace.
+    #[cfg(not(target_arch = "wasm32"))]
+    _workspace: Option<Arc<super::duckdb::ReloadWorkspace>>,
 }
 
 impl ParquetSource {
     pub fn open_path(path: &Path, name: &str) -> Result<Self> {
         let file = std::fs::File::open(path)?;
         Self::new(Arc::new(SerializedFileReader::new(file).map_err(err)?), name, None)
+    }
+
+    /// Opens a private conversion, keeping its files alive for every shared reader.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_owned_path(path: &Path, name: &str, workspace: Arc<super::duckdb::ReloadWorkspace>) -> Result<Self> {
+        let mut source = Self::open_path(path, name)?;
+        source._workspace = Some(workspace);
+        Ok(source)
     }
 
     pub fn open_bytes(bytes: Vec<u8>, name: &str) -> Result<Self> {
@@ -173,8 +185,15 @@ impl ParquetSource {
         let mut notes = Vec::new();
         let crs = col_meta.and_then(|c| c.get("crs"));
         let code = crs_code(crs);
-        // A coordinate system given without an EPSG code (and not OGC:CRS84) can't be converted.
-        if code.is_none() && crs.is_some_and(|c| !c.is_null() && !is_crs84(c)) {
+        // Another body's system is said, or refused when its coordinates aren't longitude/latitude.
+        let other_body = crs.filter(|_| code.is_none()).and_then(crate::raster::planetary::projjson);
+        if let Some(crate::raster::planetary::Declared::Refused(e)) = &other_body {
+            return Err(DataError::Format(format!("its coordinate system: {e}")));
+        }
+        if let Some(crate::raster::planetary::Declared::LonLat { note, .. }) = &other_body {
+            notes.push(format!("its coordinate system: {note}"));
+        } else if code.is_none() && crs.is_some_and(|c| !c.is_null() && !is_crs84(c)) {
+            // A coordinate system given without an EPSG code (and not OGC:CRS84) can't be converted.
             notes.push("its coordinate system has no EPSG code; read as longitude/latitude".into());
         }
         let reproject = Reproject::from_epsg(code, &mut notes);
@@ -284,6 +303,8 @@ impl ParquetSource {
             remote,
             exact: false,
             group_rows: MAX_GROUP_ROWS,
+            #[cfg(not(target_arch = "wasm32"))]
+            _workspace: None,
         };
         src.probe_and_drop_pictures();
         if untyped {
@@ -395,7 +416,7 @@ impl ParquetSource {
 
     /// Whether inferred bounds may omit or count rows that only their geometry can test.
     /// Unknown null counts require the same fallback as known nulls; declared coverings promise
-    /// that a box is present if and only if geometry is present.
+    /// that a box is present if and only if a non-empty geometry is present.
     fn needs_geometry_filter(&self, md: &ParquetMetaData, g: usize) -> bool {
         let Some(c) = self.covering else { return true };
         !self.declared_covering
@@ -569,7 +590,7 @@ impl FeatureSource for ParquetSource {
             }
         }
         let matched = (if late { sample.seen() } else { matched }).saturating_mul(thinned as u64);
-        Ok(Batch { matched, complete: sample.complete() && thinned == 1, skipped, features: sample.items })
+        Ok(Batch { matched, complete: sample.complete() && thinned == 1, skipped, features: sample.items, unread_dates: Vec::new() })
     }
 
     fn remote(&self) -> Option<Arc<Remote>> {
@@ -828,6 +849,70 @@ fn err(e: parquet::errors::ParquetError) -> DataError {
     DataError::Format(format!("GeoParquet: {e}"))
 }
 
+/// The reader of a row group's column, its pages checked by [`CheckedPages`].
+fn column_reader(rg: &dyn RowGroupReader, col: usize) -> Result<ColumnReader> {
+    let desc = rg.metadata().column(col).column_descr_ptr();
+    let bits = match desc.physical_type() {
+        Physical::BOOLEAN => 1,
+        Physical::INT32 | Physical::FLOAT | Physical::BYTE_ARRAY => 32,
+        Physical::INT64 | Physical::DOUBLE => 64,
+        Physical::INT96 => 96,
+        Physical::FIXED_LEN_BYTE_ARRAY => u64::try_from(desc.type_length()).unwrap_or(0).max(1) * 8,
+    };
+    let pages = CheckedPages { pages: rg.get_column_page_reader(col).map_err(err)?, bits };
+    Ok(parquet::column::reader::get_column_reader(desc, Box::new(pages)))
+}
+
+/// A column's pages, a dictionary page refused when it says it holds more values than its bytes
+/// can: the `parquet` crate makes room for the count it is told before decoding any (a few bytes
+/// of header can ask for tens of gigabytes).
+struct CheckedPages {
+    pages: Box<dyn parquet::column::page::PageReader>,
+    /// The fewest bits one value of the column takes in a dictionary page (plain encoded).
+    bits: u64,
+}
+
+impl Iterator for CheckedPages {
+    type Item = parquet::errors::Result<parquet::column::page::Page>;
+
+    /// The next page, checked as [`PageReader::get_next_page`](parquet::column::page::PageReader::get_next_page) checks it.
+    fn next(&mut self) -> Option<Self::Item> {
+        use parquet::column::page::PageReader;
+        self.get_next_page().transpose()
+    }
+}
+
+impl parquet::column::page::PageReader for CheckedPages {
+    /// The next page, or an error for a dictionary page whose count its bytes can't hold.
+    fn get_next_page(&mut self) -> parquet::errors::Result<Option<parquet::column::page::Page>> {
+        let page = self.pages.get_next_page()?;
+        if let Some(parquet::column::page::Page::DictionaryPage { buf, num_values, .. }) = &page
+            && u64::from(*num_values).saturating_mul(self.bits) > (buf.len() as u64).saturating_mul(8)
+        {
+            return Err(parquet::errors::ParquetError::General(format!(
+                "a dictionary page says it holds {num_values} values, more than its {} bytes can",
+                buf.len()
+            )));
+        }
+        Ok(page)
+    }
+
+    /// The next page's header, unchecked: a peek decodes no values.
+    fn peek_next_page(&mut self) -> parquet::errors::Result<Option<parquet::column::page::PageMetadata>> {
+        self.pages.peek_next_page()
+    }
+
+    /// Skips the next page unchecked: a skipped page is never decoded.
+    fn skip_next_page(&mut self) -> parquet::errors::Result<()> {
+        self.pages.skip_next_page()
+    }
+
+    /// Whether the next page starts a record, as the column's own pages say.
+    fn at_record_boundary(&mut self) -> parquet::errors::Result<bool> {
+        self.pages.at_record_boundary()
+    }
+}
+
 fn geometry_type_name(t: &str) -> Option<GeometryType> {
     let t = t.trim_end_matches(" Z").trim_end_matches(" M").trim_end_matches(" ZM");
     match t {
@@ -1048,7 +1133,7 @@ fn read_values(rg: &dyn RowGroupReader, col: usize, take: &[bool], image: bool) 
         (Some(i), Some(f)) => Value::Float(i as f64 * f),
         (Some(i), None) => Value::Int(i),
     };
-    Ok(match rg.get_column_reader(col).map_err(err)? {
+    Ok(match column_reader(rg, col)? {
         ColumnReader::BoolColumnReader(mut r) => {
             read_column(&mut r, take, max_def)?.into_iter().map(|v| v.map(Value::Bool).unwrap_or_default()).collect()
         }
@@ -1082,7 +1167,7 @@ fn read_values(rg: &dyn RowGroupReader, col: usize, take: &[bool], image: bool) 
 /// Reads a binary column (the WKB geometry), for the rows `take` marks, in order.
 fn read_bytes(rg: &dyn RowGroupReader, col: usize, take: &[bool]) -> Result<Vec<Option<Vec<u8>>>> {
     let max_def = rg.metadata().column(col).column_descr().max_def_level();
-    match rg.get_column_reader(col).map_err(err)? {
+    match column_reader(rg, col)? {
         ColumnReader::ByteArrayColumnReader(mut r) => {
             Ok(read_column(&mut r, take, max_def)?.into_iter().map(|v| v.map(|b| b.data().to_vec())).collect())
         }
@@ -1094,7 +1179,7 @@ fn read_bytes(rg: &dyn RowGroupReader, col: usize, take: &[bool]) -> Result<Vec<
 fn read_f64(rg: &dyn RowGroupReader, col: usize, n: usize) -> Result<Vec<Option<f64>>> {
     let max_def = rg.metadata().column(col).column_descr().max_def_level();
     let all = vec![true; n];
-    match rg.get_column_reader(col).map_err(err)? {
+    match column_reader(rg, col)? {
         ColumnReader::FloatColumnReader(mut r) => Ok(read_column(&mut r, &all, max_def)?.into_iter().map(|v| v.map(f64::from)).collect()),
         ColumnReader::DoubleColumnReader(mut r) => read_column(&mut r, &all, max_def),
         _ => Ok(Vec::new()),
@@ -1248,7 +1333,7 @@ fn read_lists(rg: &dyn RowGroupReader, col: usize, take: &[bool]) -> Result<Vec<
             }
         }};
     }
-    match rg.get_column_reader(col).map_err(err)? {
+    match column_reader(rg, col)? {
         ColumnReader::FloatColumnReader(mut r) => lists!(r, |v: f32| v),
         ColumnReader::DoubleColumnReader(mut r) => lists!(r, |v: f64| v as f32),
         _ => return Err(DataError::Format("GeoParquet: the list column holds no numbers".into())),
@@ -1282,7 +1367,77 @@ fn wkb_type_name(g: &crate::Geometry) -> &'static str {
 /// `bbox` covering column so readers can skip rows and row groups by extent. A table without
 /// geometry is written as plain Parquet.
 pub fn write(ds: &crate::Dataset) -> Result<Vec<u8>> {
-    write_features(ds.geometry_type, &ds.fields, Vec::new(), &mut |add| add(&ds.features))
+    write_features(ds.geometry_type, &ds.fields, Vec::new(), &mut |add| add(&ds.features)).map(|(bytes, _)| bytes)
+}
+
+/// An Integer column's value, `None` for one it can't hold: a whole float fits; a fraction, a
+/// float out of range or text that isn't a whole number would lose its value.
+fn int_cell(value: &Value) -> Option<i64> {
+    match value {
+        Value::Int(x) => Some(*x),
+        Value::Bool(b) => Some(i64::from(*b)),
+        Value::Float(x) if x.fract() == 0.0 && x.abs() < 9.0e18 => Some(*x as i64),
+        Value::Text(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// A Boolean column's value, `None` for one it can't hold (text, a float).
+fn bool_cell(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(b) => Some(*b),
+        Value::Int(x) => Some(*x != 0),
+        _ => None,
+    }
+}
+
+/// Whether the GeoParquet writer writes `value` as null in a column of type `ty` although it
+/// isn't null (in a Double column: text that isn't a number, NaN or an infinity).
+fn unfit(ty: FieldType, value: &Value) -> bool {
+    !value.is_null()
+        && match ty {
+            FieldType::Integer => int_cell(value).is_none(),
+            FieldType::Double => value.as_f64().is_none(),
+            FieldType::Boolean => bool_cell(value).is_none(),
+            // Written as their text, as a Text column is.
+            FieldType::Text | FieldType::Date | FieldType::DateTime => false,
+            // Written as its bytes.
+            FieldType::Image => false,
+        }
+}
+
+/// The notice for values a GeoParquet export wrote as null because their column's type couldn't
+/// hold them, given the count per field (as `write_features` returns); `None` when there are
+/// none. Names the first five fields.
+pub fn unfit_note(fields: &[Field], counts: &[usize], target: &str) -> Option<String> {
+    let total = counts.iter().fold(0usize, |a, n| a.saturating_add(*n));
+    if total == 0 {
+        return None;
+    }
+    let named: Vec<&str> = fields.iter().zip(counts).filter(|(_, n)| **n > 0).map(|(f, _)| f.name.as_str()).collect();
+    // Names and the target flattened and bounded as the Shapefile notices' are, on one line.
+    let list: Vec<String> = named.iter().take(5).map(|n| format!("'{}'", crate::io::dbf_notice_name(n))).collect();
+    let more = if named.len() > 5 { format!(" and {} more", named.len() - 5) } else { String::new() };
+    let what = if total == 1 {
+        "1 value couldn't be written as its column's type and was".to_string()
+    } else {
+        format!("{total} values couldn't be written as their columns' types and were")
+    };
+    let target: String = target.chars().map(crate::io::dbf_notice_char).collect();
+    Some(format!("{target}: {what} written as null, in {}{more}", list.join(", ")))
+}
+
+/// [`unfit_note`] for writing the whole of `ds` as GeoParquet.
+pub fn values_note(ds: &crate::Dataset, target: &str) -> Option<String> {
+    let mut counts = vec![0usize; ds.fields.len()];
+    for row in &ds.features {
+        for ((field, value), n) in ds.fields.iter().zip(&row.attrs).zip(counts.iter_mut()) {
+            if unfit(field.ty, value) {
+                *n = n.saturating_add(1);
+            }
+        }
+    }
+    unfit_note(&ds.fields, &counts, target)
 }
 
 /// Writes GeoParquet to `out`: the features `feed` hands to the function it is given, a run at
@@ -1295,7 +1450,7 @@ pub(crate) fn write_features<W: std::io::Write + Send>(
     fields: &[Field],
     out: W,
     feed: &mut dyn FnMut(&mut dyn FnMut(&[Feature]) -> Result<()>) -> Result<()>,
-) -> Result<W> {
+) -> Result<(W, Vec<usize>)> {
     use parquet::basic::{Compression, Encoding, Repetition, ZstdLevel};
     use parquet::data_type::{BoolType, ByteArray, ByteArrayType, DoubleType, Int64Type};
     use parquet::file::metadata::KeyValue;
@@ -1326,6 +1481,8 @@ pub(crate) fn write_features<W: std::io::Write + Send>(
             FieldType::Double => prim(&f.name, Physical::DOUBLE, Repetition::OPTIONAL, None)?,
             FieldType::Boolean => prim(&f.name, Physical::BOOLEAN, Repetition::OPTIONAL, None)?,
             FieldType::Text => prim(&f.name, Physical::BYTE_ARRAY, Repetition::OPTIONAL, Some(LogicalType::String))?,
+            // Dates are ISO text until GeoParquet's own dates and timestamps are written.
+            FieldType::Date | FieldType::DateTime => prim(&f.name, Physical::BYTE_ARRAY, Repetition::OPTIONAL, Some(LogicalType::String))?,
             // Only the metadata reaches a dataset: an export filters image fields out first.
             FieldType::Image => prim(&f.name, Physical::BYTE_ARRAY, Repetition::OPTIONAL, None)?,
         });
@@ -1362,6 +1519,8 @@ pub(crate) fn write_features<W: std::io::Write + Send>(
     }
     let mut types: Vec<&'static str> = Vec::new();
     let mut extent = Extent::EMPTY;
+    // Per field, the values written as null because its type couldn't hold them.
+    let mut unfit_counts = vec![0usize; fields.len()];
     feed(&mut |features| {
         for rows in features.chunks(WRITE_GROUP_ROWS) {
             crate::progress::step(rows.len())?;
@@ -1397,17 +1556,14 @@ pub(crate) fn write_features<W: std::io::Write + Send>(
             }
             for (i, f) in fields.iter().enumerate() {
                 let attr = |r: &Feature| r.attrs.get(i).cloned().unwrap_or(Value::Null);
+                // A value the column's type can't hold is written as null, and counted.
+                if let Some(n) = unfit_counts.get_mut(i) {
+                    *n = n.saturating_add(rows.iter().filter(|r| r.attrs.get(i).is_some_and(|v| unfit(f.ty, v))).count());
+                }
                 let mut c = next_column(&mut rg)?;
                 match f.ty {
                     FieldType::Integer => {
-                        let (v, d) = levels(rows.iter().map(|r| match attr(r) {
-                            Value::Int(x) => Some(x),
-                            Value::Bool(b) => Some(i64::from(b)),
-                            // A whole float fits; anything else would lose its value.
-                            Value::Float(x) if x.fract() == 0.0 && x.abs() < 9.0e18 => Some(x as i64),
-                            Value::Text(s) => s.trim().parse().ok(),
-                            _ => None,
-                        }));
+                        let (v, d) = levels(rows.iter().map(|r| int_cell(&attr(r))));
                         c.typed::<Int64Type>().write_batch(&v, Some(&d), None).map_err(err)?;
                     }
                     FieldType::Double => {
@@ -1415,14 +1571,10 @@ pub(crate) fn write_features<W: std::io::Write + Send>(
                         c.typed::<DoubleType>().write_batch(&v, Some(&d), None).map_err(err)?;
                     }
                     FieldType::Boolean => {
-                        let (v, d) = levels(rows.iter().map(|r| match attr(r) {
-                            Value::Bool(b) => Some(b),
-                            Value::Int(x) => Some(x != 0),
-                            _ => None,
-                        }));
+                        let (v, d) = levels(rows.iter().map(|r| bool_cell(&attr(r))));
                         c.typed::<BoolType>().write_batch(&v, Some(&d), None).map_err(err)?;
                     }
-                    FieldType::Text => {
+                    FieldType::Text | FieldType::Date | FieldType::DateTime => {
                         let (v, d) = levels(rows.iter().map(|r| match attr(r) {
                             Value::Null => None,
                             v => Some(ByteArray::from(v.to_string().into_bytes())),
@@ -1460,5 +1612,5 @@ pub(crate) fn write_features<W: std::io::Write + Send>(
         let geo = serde_json::json!({"version": "1.1.0", "primary_column": geom_name, "columns": {geom_name.clone(): col}});
         w.append_key_value_metadata(KeyValue::new("geo".to_string(), geo.to_string()));
     }
-    w.into_inner().map_err(err)
+    Ok((w.into_inner().map_err(err)?, unfit_counts))
 }

@@ -40,6 +40,18 @@ pub fn derive(r: &Raster, name: &str, bands: Vec<Vec<f32>>) -> Result<Raster, St
         .map_err(|e| e.to_string())
 }
 
+/// [`derive`] for a [`hillshade`]'s pixels: one band of whole numbers 1–255 stored as bytes
+/// (`UInt8`), with 0 as no-data, so it is written as 8-bit samples, not 32-bit floats.
+pub fn derive_hillshade(r: &Raster, name: &str, mut shade: Vec<f32>) -> Result<Raster, String> {
+    r.require_coordinates()?;
+    for v in &mut shade {
+        if !v.is_finite() || *v < 1.0 {
+            *v = 0.0;
+        }
+    }
+    Raster::new(name, r.width, r.height, vec![shade], r.transform, r.crs, Some(0.0), ColorHint::Gray, "UInt8").map_err(|e| e.to_string())
+}
+
 fn band(r: &Raster, b: usize) -> Result<&[f32], String> {
     r.bands.get(b).map(|b| b.data.as_slice()).ok_or_else(|| format!("{} has no band {}", r.name, b + 1))
 }
@@ -196,7 +208,8 @@ pub fn aspect(r: &Raster, b: usize) -> Result<Vec<f32>, String> {
     terrain(r, d, 1.0, |gx, gy| if gx.abs() < 1e-12 && gy.abs() < 1e-12 { -1.0 } else { (-gx).atan2(-gy).to_degrees().rem_euclid(360.0) })
 }
 
-/// Hillshade (0–255) lit from `azimuth` and `altitude` degrees.
+/// Hillshade (1–255) lit from `azimuth` and `altitude` degrees: a cell in full shadow is 1, so
+/// that 0 is left for the no-data of the bytes [`derive_hillshade`] makes of it.
 pub fn hillshade(r: &Raster, b: usize, azimuth: f64, altitude: f64, zf: f64) -> Result<Vec<f32>, String> {
     let d = band(r, b)?;
     let (zen, az) = ((90.0 - altitude).to_radians(), azimuth.to_radians());
@@ -205,7 +218,7 @@ pub fn hillshade(r: &Raster, b: usize, azimuth: f64, altitude: f64, zf: f64) -> 
         let slope = gx.hypot(gy).atan();
         let aspect = (-gx).atan2(-gy);
         let v = cos_zen * slope.cos() + sin_zen * slope.sin() * (az - aspect).cos();
-        (v.max(0.0) * 255.0).round()
+        (v.max(0.0) * 255.0).round().max(1.0)
     })
 }
 
@@ -434,51 +447,194 @@ pub fn line_of_sight(
 const MAX_VIEWSHED_WORK: usize = 400_000_000;
 pub(crate) const MAX_IDW_WORK: usize = 400_000_000;
 
+/// How a viewshed reads the ground between the observer and a cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Heights {
+    /// The cell each point of the ray falls in, as the viewshed has read it (each point now exact on
+    /// a cell's centre line, which can change a cell at a tie). On ground that bulges
+    /// (a hill seen from its top), a cell nearer the observer than the point stands in for it and
+    /// can hide cells just inside the horizon.
+    #[default]
+    Nearest,
+    /// Between the cells' centres, in proportion to how near the point is to each (bilinear):
+    /// smoother, and closer on bulging ground, though still an estimate. Where one of those cells
+    /// has no data, the cell the point falls in, as [`Heights::Nearest`] reads it (counted:
+    /// [`Viewshed::read_nearest`]).
+    Bilinear,
+}
+
+impl Heights {
+    /// The one named `name` (`nearest`, `bilinear`, in any case); `None` for any other.
+    pub fn named(name: &str) -> Option<Heights> {
+        if name.eq_ignore_ascii_case("nearest") {
+            Some(Heights::Nearest)
+        } else if name.eq_ignore_ascii_case("bilinear") {
+            Some(Heights::Bilinear)
+        } else {
+            None
+        }
+    }
+
+    /// The ground at a point of a ray, `(col, row)` in cells (whole numbers at cell centres), and
+    /// whether it is the nearest cell's, read in place of cells between which a neighbour has
+    /// no data. `None` where the point's own cell has no data: between cells, a neighbour weighed
+    /// with no data falls back to that cell, so `None` there too only when it has none.
+    fn at(self, r: &Raster, b: usize, col: f64, row: f64) -> Option<(f64, bool)> {
+        let (nc, nr) = (col.round() as i64, row.round() as i64);
+        let nearest = |fell_back: bool| r.value(b, nc, nr).map(|v| (f64::from(v), fell_back));
+        if self == Heights::Nearest {
+            return nearest(false);
+        }
+        let (c0, r0) = (col.floor(), row.floor());
+        let (tx, ty) = (col - c0, row - r0);
+        let (c0, r0) = (c0 as i64, r0 as i64);
+        let mut sum = 0.0f64;
+        // A neighbour weighing nothing (the point on its row or column) isn't read, so a point
+        // on a cell's centre line needs only the two cells it lies between.
+        for (dc, dr, wgt) in [(0, 0, (1.0 - tx) * (1.0 - ty)), (1, 0, tx * (1.0 - ty)), (0, 1, (1.0 - tx) * ty), (1, 1, tx * ty)] {
+            if wgt == 0.0 {
+                continue;
+            }
+            match r.value(b, c0 + dc, r0 + dr) {
+                Some(v) => sum += wgt * f64::from(v),
+                None => return nearest(true),
+            }
+        }
+        Some((sum, false))
+    }
+}
+
+/// A viewshed: each cell visible (1) or not (0), no-data outside the radius, and how many cells'
+/// rays read the ground less than fully.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Viewshed {
+    pub cells: Vec<f32>,
+    /// Cells seen across ground with no data, taken as hiding nothing there.
+    pub through_gaps: usize,
+    /// Cells whose ray, read [`Heights::Bilinear`], took the nearest cell's height somewhere,
+    /// a cell it would read between having no data.
+    pub read_nearest: usize,
+}
+
+/// The ray steps a viewshed from `(oc, or)` takes over the window `cols` × `rows` (inclusive): for
+/// each cell no farther than `radius_m` (cell centres, `cx` × `cy` metres apart, as the viewshed
+/// measures them), its ray's steps, the larger of its column and row offsets. A row's cells within
+/// the radius are a run of columns, whose sum has a closed form, so the count is one step a row.
+/// It is the sum of the rays' full lengths, so the most steps the viewshed takes: a ray stops
+/// where the ground first hides its cell, and a cell with no data walks none (finding out which
+/// have none would read them all).
+fn ray_steps(observer: (i64, i64), cols: (i64, i64), rows: (i64, i64), cell: (f64, f64), radius_m: f64) -> u128 {
+    let ((oc, or), (left, right), (first, last), (cx, cy)) = (observer, cols, rows, cell);
+    // Σ max(x, a) for x in 0..=n.
+    let up_to = |n: i128, a: i128| -> i128 {
+        if n < 0 {
+            0
+        } else if n <= a {
+            (n + 1) * a
+        } else {
+            (a + 1) * a + (n * (n + 1) - a * (a + 1)) / 2
+        }
+    };
+    let within = |dc: i64, dr: i64| (dc as f64 * cx).hypot(dr as f64 * cy) <= radius_m;
+    let mut total: i128 = 0;
+    for row in first..=last {
+        let dr = row - or;
+        if !within(0, dr) {
+            continue;
+        }
+        // The farthest column offset within the radius on this row, at most the window's, worked
+        // out in cells (so a radius near f64's range doesn't overflow when squared) and put right
+        // at the edge: the corrections only undo rounding, and stay within the window's width.
+        let span = (oc - left).max(right - oc);
+        let (rc, yc) = (radius_m / cx, dr as f64 * cy / cx);
+        let reach = ((rc - yc) * (rc + yc)).max(0.0).sqrt().floor();
+        let mut k = reach.clamp(0.0, span as f64) as i64;
+        while k < span && within(k + 1, dr) {
+            k += 1;
+        }
+        while k > 0 && !within(k, dr) {
+            k -= 1;
+        }
+        // The run's offsets from the observer's column, within the window: the observer is in
+        // it, so the run takes in its column (offset 0, counted once).
+        let (west, east) = (i128::from(oc - (oc - k).max(left)), i128::from((oc + k).min(right) - oc));
+        let a = i128::from(dr.abs());
+        total += up_to(west, a) + up_to(east, a) - a;
+    }
+    // (Never negative; were it, the cap refuses the run rather than letting it through.)
+    u128::try_from(total).unwrap_or(u128::MAX)
+}
+
 /// Cells visible from an observer (1) or not (0) within `radius_m`; outside the radius no-data.
-/// The Earth curves as visible light sees it (`SIGHT_RADIUS_M`).
-pub fn viewshed(r: &Raster, b: usize, observer: Coord, height: f64, radius_m: f64) -> Result<Vec<f32>, String> {
-    viewshed_on(None, r, b, observer, height, radius_m)
+/// The Earth curves as visible light sees it (`SIGHT_RADIUS_M`). The ground along each ray is read
+/// as `heights` says; ground with no data hides nothing, and the visible cells whose rays crossed
+/// some are counted ([`Viewshed::through_gaps`]).
+pub fn viewshed(r: &Raster, b: usize, observer: Coord, height: f64, radius_m: f64, heights: Heights) -> Result<Viewshed, String> {
+    viewshed_on(None, r, b, observer, height, radius_m, heights)
 }
 
 /// [`viewshed`] on `threads` threads, or as many as its work calls for.
-fn viewshed_on(threads: Option<usize>, r: &Raster, b: usize, observer: Coord, height: f64, radius_m: f64) -> Result<Vec<f32>, String> {
+fn viewshed_on(
+    threads: Option<usize>,
+    r: &Raster,
+    b: usize,
+    observer: Coord,
+    height: f64,
+    radius_m: f64,
+    heights: Heights,
+) -> Result<Viewshed, String> {
     let (oc, or) = r.pixel_at(observer).ok_or("the observer is outside the raster")?;
     let z0 = r.value(b, oc, or).ok_or("the observer stands on no-data")? as f64 + height;
     let (cx, cy) = r.cell_size_m();
     if !(cx > 0.0 && cy > 0.0 && radius_m.is_finite() && radius_m > 0.0) {
         return Err("the raster's cells or the radius have no size".into());
     }
-    // A tiny declared cell size would make the window overflow: bound it before converting.
-    if radius_m / cx > 100_000.0 || radius_m / cy > 100_000.0 {
-        return Err("the radius covers too many cells; use a smaller radius".into());
-    }
+    // In cells (saturating: a radius of more cells than an i64 holds still reaches past the
+    // raster). Only the radius's cells within the raster are worked out, so a radius reaching
+    // past it (the whole DEM's diagonal, by default) costs no more than the raster, which is
+    // already in memory; the time is bounded by the ray steps below.
     let rad_c = (radius_m / cx).ceil() as i64;
     let rad_r = (radius_m / cy).ceil() as i64;
-    // Each cell walks a ray back to the observer: bound cells × ray length, not just cells.
-    let cells = (2 * rad_c + 1).saturating_mul(2 * rad_r + 1);
-    let ray_work = usize::try_from(cells.saturating_mul(rad_c.max(rad_r) / 2 + 1)).unwrap_or(usize::MAX);
-    if cells > 25_000_000 {
-        return Err("the radius covers too many cells; use a smaller radius".into());
-    }
+    let (first, last) = (or.saturating_sub(rad_r).max(0), or.saturating_add(rad_r).min(r.height as i64 - 1));
+    let (left, right) = (oc.saturating_sub(rad_c).max(0), oc.saturating_add(rad_c).min(r.width as i64 - 1));
+    // A ray steps a whole cell along its longer axis, so a bilinear point lies on a cell's
+    // centre line and reads the two cells it falls between ([`Heights::at`] skips a neighbour
+    // that weighs nothing; next to no data, the nearest cell too) where a nearest one reads one:
+    // weighed as two.
+    let per_step = if heights == Heights::Bilinear { 2 } else { 1 };
+    // Each cell within the radius walks a ray back to the observer, one step a cell along its
+    // longer axis: the steps counted exactly, a row at a time, not estimated.
+    let ray_work = usize::try_from(ray_steps((oc, or), (left, right), (first, last), (cx, cy), radius_m).saturating_mul(per_step as u128))
+        .unwrap_or(usize::MAX);
     // Each cell walks its own ray and writes only itself, so the rows within the radius are made
     // on several threads when the work is large (#1252), and may take as many times the work.
-    let (first, last) = ((or - rad_r).max(0), (or + rad_r).min(r.height as i64 - 1));
     let rows = usize::try_from(last - first + 1).unwrap_or(0);
     let threads = threads.unwrap_or_else(|| crate::parallel::threads_for_rows(rows, ray_work, 0));
     let cap = crate::parallel::work_cap(MAX_VIEWSHED_WORK, threads);
     if ray_work > cap {
+        // A radius reaching the raster's farthest corner covers all of it (as with no radius
+        // given, the raster's diagonal): said as the whole raster, not as a radius to shorten.
+        let corner = ((oc.max(r.width as i64 - 1 - oc)) as f64 * cx).hypot((or.max(r.height as i64 - 1 - or)) as f64 * cy);
+        let (what, fix) = if radius_m >= corner {
+            ("the whole raster", "give a radius to cover only part of it")
+        } else {
+            ("the radius", "use a smaller radius")
+        };
         return Err(format!(
-            "the radius takes {ray_work} ray steps, more than the {cap} this computer takes on {threads} thread(s); use a smaller radius{}",
+            "{what} takes up to {ray_work} ray steps{}, more than the {cap} this computer takes on {threads} thread(s); {fix}{}",
+            if per_step > 1 { " (a step between cells counted as two)" } else { "" },
             crate::parallel::UNCAPPED_HINT
         ));
     }
     let w = r.width as usize;
     let mut out = new_band(w, r.height as usize, NODATA)?;
     let window = out.chunks_mut(w).skip(usize::try_from(first).unwrap_or(0)).take(rows);
+    // Summed across threads: the same counts on any number.
+    let (through_gaps, read_nearest) = (std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicUsize::new(0));
     crate::control::begin(rows);
     crate::parallel::for_each_row(window, threads, crate::control::Pace::default, |pace, i, line: &mut [f32]| {
         let row = first + i as i64;
-        for col in (oc - rad_c).max(0)..=(oc + rad_c).min(r.width as i64 - 1) {
+        for col in left..=right {
             let (dx, dy) = ((col - oc) as f64 * cx, (row - or) as f64 * cy);
             let dist = dx.hypot(dy);
             if dist > radius_m {
@@ -499,50 +655,79 @@ fn viewshed_on(threads: Option<usize>, r: &Raster, b: usize, observer: Coord, he
                 return;
             }
             let mut visible = true;
+            let (mut gap, mut nearest) = (false, false);
+            // Along the longer axis the ray steps a whole cell at a time; along the other it falls
+            // between cells. Both are one division of whole numbers, so exact wherever the point
+            // lies on a cell's centre line (and no neighbour is weighed by a rounding error).
+            let (dc, dr) = (col - oc, row - or);
+            let along = |o: i64, d: i64, s: usize| o as f64 + (d * s as i64) as f64 / steps as f64;
             for s in 1..steps {
                 let t = s as f64 / steps as f64;
-                let (c, rr) = ((oc as f64 + (col - oc) as f64 * t).round() as i64, (or as f64 + (row - or) as f64 * t).round() as i64);
-                let Some(zi) = r.value(b, c, rr) else { continue };
+                let (c, rr) = (along(oc, dc, s), along(or, dr, s));
+                let Some((zi, fell_back)) = heights.at(r, b, c, rr) else {
+                    gap = true;
+                    continue;
+                };
+                nearest |= fell_back;
                 let di = dist * t;
-                if (zi as f64 - di * di / (2.0 * SIGHT_RADIUS_M) - z0) / di > target {
+                if (zi - di * di / (2.0 * SIGHT_RADIUS_M) - z0) / di > target {
                     visible = false;
                     break;
                 }
+            }
+            // A hidden cell stays hidden whatever the missing ground is: only those seen count.
+            if gap && visible {
+                through_gaps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if nearest {
+                read_nearest.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             if let Some(o) = line.get_mut(col as usize) {
                 *o = if visible { 1.0 } else { 0.0 };
             }
         }
     })?;
-    Ok(out)
+    Ok(Viewshed { cells: out, through_gaps: through_gaps.into_inner(), read_nearest: read_nearest.into_inner() })
 }
 
-/// Inverse distance weighted interpolation of point values onto a longitude/latitude grid, from
-/// each cell's `neighbours` nearest points, or from every point (as QGIS does) when it is 0.
-pub fn idw(points: &[(Coord, f64)], extent: &Extent, cell_deg: f64, power: f64, neighbours: usize, name: &str) -> Result<Raster, String> {
-    idw_on(None, points, extent, cell_deg, power, neighbours, name)
+/// Inverse distance weighted interpolation of point values onto a grid in `crs`, from each cell's
+/// `neighbours` nearest points, or from every point (as QGIS does) when it is 0. The points,
+/// extent and cell size are in `crs`: degrees for longitude/latitude, where east-west distances
+/// shrink with latitude, or the projected system's units, where they are measured as they are.
+pub fn idw(
+    points: &[(Coord, f64)],
+    extent: &Extent,
+    cell: f64,
+    power: f64,
+    neighbours: usize,
+    name: &str,
+    crs: Crs,
+) -> Result<Raster, String> {
+    idw_on(None, points, extent, cell, power, neighbours, name, crs)
 }
 
 /// [`idw`] on `threads` threads, or as many as its work calls for.
+#[allow(clippy::too_many_arguments)]
 fn idw_on(
     threads: Option<usize>,
     points: &[(Coord, f64)],
     extent: &Extent,
-    cell_deg: f64,
+    cell: f64,
     power: f64,
     neighbours: usize,
     name: &str,
+    crs: Crs,
 ) -> Result<Raster, String> {
     if points.len() < 2 {
         return Err("interpolation needs at least two points with values".into());
     }
-    if !(cell_deg.is_finite() && cell_deg > 0.0) {
+    if !(cell.is_finite() && cell > 0.0) {
         return Err("the cell size must be positive".into());
     }
     if extent.is_empty() {
         return Err("the area to interpolate over is empty".into());
     }
-    let (w, h) = ((extent.width() / cell_deg).ceil().max(1.0) as usize, (extent.height() / cell_deg).ceil().max(1.0) as usize);
+    let (w, h) = ((extent.width() / cell).ceil().max(1.0) as usize, (extent.height() / cell).ceil().max(1.0) as usize);
     if w.saturating_mul(h) > max_pixels() / 4 {
         return Err(format!("{w} × {h} cells is too many, more than this computer's {}; use a larger cell size", max_pixels() / 4));
     }
@@ -550,6 +735,12 @@ fn idw_on(
         return Err("the distance coefficient must be zero or more".into());
     }
     let k = if neighbours == 0 { points.len() } else { neighbours.clamp(1, points.len()) };
+    // At a power of 2 (the default) the weights are ratios of squared distances: no square root
+    // or power per cell and point, as GDAL's IDW does it. Squaring keeps the distances' order, so
+    // the nearest points are the same.
+    let squared = power == 2.0;
+    let geographic = crs.is_geographic();
+    let exact = if squared { 1e-24 } else { 1e-12 };
     // Each row on its own, on several threads when the work is large (#1252); a thread's
     // distances go into its own buffer.
     let scratch_bytes = points.len().saturating_mul(std::mem::size_of::<(f64, f64)>());
@@ -571,32 +762,39 @@ fn idw_on(
         threads,
         || (Vec::with_capacity(points.len()), crate::control::Pace::default()),
         |(near, pace): &mut (Vec<(f64, f64)>, crate::control::Pace), row, out: &mut [f32]| {
-            // East-west degrees shrink with latitude, which only changes by row.
-            let kx = (extent.max_y - (row as f64 + 0.5) * cell_deg).to_radians().cos();
+            // East-west degrees shrink with latitude, which only changes by row; a projected
+            // system's units don't.
+            let kx = if geographic { (extent.max_y - (row as f64 + 0.5) * cell).to_radians().cos() } else { 1.0 };
             for (col, o) in out.iter_mut().enumerate() {
                 // Each cell weighs every point, so a wide row of many points takes long without a
                 // cap: Cancel is looked at within it.
                 if pace.stop(points.len()) {
                     return;
                 }
-                let c = Coord::new(extent.min_x + (col as f64 + 0.5) * cell_deg, extent.max_y - (row as f64 + 0.5) * cell_deg);
+                let c = Coord::new(extent.min_x + (col as f64 + 0.5) * cell, extent.max_y - (row as f64 + 0.5) * cell);
                 near.clear();
-                near.extend(points.iter().map(|(p, v)| {
+                let d2 = |p: &Coord| {
                     let dx = (p.x - c.x) * kx;
-                    ((dx * dx + (p.y - c.y).powi(2)).sqrt(), *v)
-                }));
+                    dx * dx + (p.y - c.y).powi(2)
+                };
+                // One loop or the other, each kept tight.
+                if squared {
+                    near.extend(points.iter().map(|(p, v)| (d2(p), *v)));
+                } else {
+                    near.extend(points.iter().map(|(p, v)| (d2(p).sqrt(), *v)));
+                }
                 if k < near.len() {
                     near.select_nth_unstable_by(k - 1, |a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                     near.truncate(k);
                 }
-                let v = if let Some(exact) = near.iter().find(|(d, _)| *d < 1e-12) {
-                    exact.1
+                let v = if let Some(on) = near.iter().find(|(d, _)| *d < exact) {
+                    on.1
                 } else {
                     // Weights relative to the nearest point's: the same ratios as 1/dᵖ, without
                     // overflowing for a high power.
                     let nearest = near.iter().map(|(d, _)| *d).fold(f64::INFINITY, f64::min);
                     let (num, den) = near.iter().fold((0.0, 0.0), |(n, d), (dist, v)| {
-                        let wgt = (nearest / dist).powf(power);
+                        let wgt = if squared { nearest / dist } else { (nearest / dist).powf(power) };
                         (n + wgt * v, d + wgt)
                     });
                     num / den
@@ -605,9 +803,8 @@ fn idw_on(
             }
         },
     )?;
-    let gt = GeoTransform { origin_x: extent.min_x, origin_y: extent.max_y, pixel_width: cell_deg, pixel_height: -cell_deg };
-    Raster::new(name, w as u32, h as u32, vec![data], gt, Crs::LonLat, Some(NODATA as f64), ColorHint::Gray, "Float32")
-        .map_err(|e| e.to_string())
+    let gt = GeoTransform { origin_x: extent.min_x, origin_y: extent.max_y, pixel_width: cell, pixel_height: -cell };
+    Raster::new(name, w as u32, h as u32, vec![data], gt, crs, Some(NODATA as f64), ColorHint::Gray, "Float32").map_err(|e| e.to_string())
 }
 
 /// Unsupervised k-means classes (1..=k) of the pixels over the given bands.
@@ -739,35 +936,48 @@ pub fn classify_min_distance(r: &Raster, bands: &[usize], means: &[(f32, Vec<f64
     )
 }
 
-/// The mean of each band over the pixels whose centres fall in a polygon (lon/lat rings).
-pub fn zonal_means(r: &Raster, bands: &[usize], rings: &[Vec<Coord>]) -> Option<(Vec<f64>, usize)> {
-    means_under(r, bands, rings, || Ok(())).unwrap_or(None)
+/// The mean of each band over the pixels whose centres fall in a polygon (lon/lat rings). Its rows
+/// count toward the run's progress, and a run cancelled under a control stops between rows
+/// (#1562); without one it runs to the end. The rows are summed in order on one thread, so the
+/// means are the same on every machine.
+pub fn zonal_means(r: &Raster, bands: &[usize], rings: &[Vec<Coord>]) -> Result<Option<(Vec<f64>, usize)>, crate::control::Cancelled> {
+    crate::control::begin(r.height as usize);
+    means_under(r, bands, rings, |rows| {
+        crate::control::check()?;
+        crate::control::advance(rows);
+        Ok(())
+    })
 }
 
-/// [`zonal_means`], `each_row()` asked before each of the raster's rows: an error stops it.
+/// [`zonal_means`], `each_rows(n)` asked as the raster's rows go by, `n` at a time (each row
+/// once, all of them): an error stops it.
+///
+/// A cell counts when its centre, in longitude/latitude, lies in the zone (inside the outer ring
+/// and in no hole). Only the cells in the zone's window are tested ([`zone_window`]), not every
+/// cell of the raster, in the same row-major order, so the sums are those of testing them all.
 fn means_under(
     r: &Raster,
     bands: &[usize],
     rings: &[Vec<Coord>],
-    mut each_row: impl FnMut() -> Result<(), crate::control::Cancelled>,
+    mut each_rows: impl FnMut(usize) -> Result<(), crate::control::Cancelled>,
 ) -> Result<Option<(Vec<f64>, usize)>, crate::control::Cancelled> {
     let mut e = Extent::EMPTY;
-    for ring in rings {
-        for c in ring {
-            e.expand(*c);
-        }
+    for c in rings.iter().flatten() {
+        e.expand(*c);
     }
     let mut sums = vec![0.0; bands.len()];
     let mut n = 0usize;
-    for row in 0..r.height as i64 {
-        each_row()?;
-        for col in 0..r.width as i64 {
-            let w = r.transform.to_world(col as f64 + 0.5, row as f64 + 0.5);
+    let (cols, rows) = zone_window(r, &e);
+    each_rows((r.height - (rows.end - rows.start)) as usize)?;
+    for row in rows {
+        each_rows(1)?;
+        for col in cols.clone() {
+            let w = r.transform.to_world(f64::from(col) + 0.5, f64::from(row) + 0.5);
             let Some(ll) = r.transformer().to_lonlat(w) else { continue };
             if !e.contains(ll) || !rustgis_data::geometry::polygon_contains(rings, ll) {
                 continue;
             }
-            let vals: Option<Vec<f64>> = bands.iter().map(|b| r.value(*b, col, row).map(f64::from)).collect();
+            let vals: Option<Vec<f64>> = bands.iter().map(|b| r.value(*b, i64::from(col), i64::from(row)).map(f64::from)).collect();
             if let Some(v) = vals {
                 sums.iter_mut().zip(&v).for_each(|(s, x)| *s += x);
                 n += 1;
@@ -775,6 +985,69 @@ fn means_under(
         }
     }
     Ok((n > 0).then(|| (sums.into_iter().map(|s| s / n as f64).collect(), n)))
+}
+
+/// The columns and rows of `r` whose cell centres can fall in the longitude/latitude extent `e`:
+/// its outline placed on the raster's grid, with two cells to spare. Each side is sampled, and
+/// each stretch between samples near the raster is halved until its ends are at most a cell
+/// apart, so a side that curves on the grid (a parallel on a polar raster) bows only a fraction
+/// of a cell between them, whatever the zone's size. A stretch whose ends are farther from the
+/// raster than the distance between them isn't halved: that takes the side not to fold back
+/// within one stretch (a sixty-fourth of the side at first), which a projection's smooth image of
+/// a parallel or meridian doesn't. The whole raster when a point can't be placed; none when `e` is
+/// empty.
+fn zone_window(r: &Raster, e: &Extent) -> (Range<u32>, Range<u32>) {
+    if e.is_empty() {
+        return (0..0, 0..0);
+    }
+    const SAMPLES: u32 = 64;
+    // Halvings of a stretch: past 2^-40 of a side it is far below a cell.
+    const DEPTH: u32 = 40;
+    let whole = (0..r.width, 0..r.height);
+    let (w, h) = (f64::from(r.width), f64::from(r.height));
+    let place = |ll: Coord| {
+        let (col, row) = r.transform.to_pixel(r.transformer().from_lonlat(ll)?);
+        (col.is_finite() && row.is_finite()).then_some((col, row))
+    };
+    let sides: [(Coord, Coord); 4] = [
+        (Coord::new(e.min_x, e.min_y), Coord::new(e.max_x, e.min_y)),
+        (Coord::new(e.max_x, e.min_y), Coord::new(e.max_x, e.max_y)),
+        (Coord::new(e.max_x, e.max_y), Coord::new(e.min_x, e.max_y)),
+        (Coord::new(e.min_x, e.max_y), Coord::new(e.min_x, e.min_y)),
+    ];
+    let (mut c0, mut r0, mut c1, mut r1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let mut stretches = Vec::new();
+    for (a, b) in sides {
+        let at = |t: f64| Coord::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+        let mut last = None;
+        for i in 0..=SAMPLES {
+            let t = f64::from(i) / f64::from(SAMPLES);
+            let Some(p) = place(at(t)) else { return whole };
+            if let Some((t0, p0)) = last {
+                stretches.push((t0, p0, t, p, 0));
+            }
+            last = Some((t, p));
+        }
+        while let Some((t0, p0, t1, p1, depth)) = stretches.pop() {
+            for (col, row) in [p0, p1] {
+                (c0, r0, c1, r1) = (c0.min(col), r0.min(row), c1.max(col), r1.max(row));
+            }
+            let len = (p1.0 - p0.0).hypot(p1.1 - p0.1);
+            let far = p0.0.max(p1.0) + len < 0.0 || p0.0.min(p1.0) - len > w || p0.1.max(p1.1) + len < 0.0 || p0.1.min(p1.1) - len > h;
+            if len <= 1.0 || depth >= DEPTH || far {
+                continue;
+            }
+            let tm = (t0 + t1) / 2.0;
+            let Some(pm) = place(at(tm)) else { return whole };
+            stretches.push((t0, p0, tm, pm, depth + 1));
+            stretches.push((tm, pm, t1, p1, depth + 1));
+        }
+    }
+    let clamp = |v: f64, n: u32| v.clamp(0.0, f64::from(n)) as u32;
+    (
+        (clamp(c0.floor() - 2.0, r.width)..clamp(c1.ceil() + 2.0, r.width)),
+        (clamp(r0.floor() - 2.0, r.height)..clamp(r1.ceil() + 2.0, r.height)),
+    )
 }
 
 /// Each class's mean of `bands` over the pixels under its training polygons (lon/lat rings, each
@@ -785,9 +1058,9 @@ pub fn class_means(r: &Raster, bands: &[usize], polygons: &[(String, Vec<Vec<Coo
     crate::control::begin(polygons.len().saturating_mul(r.height as usize));
     let mut classes: Vec<(String, Vec<f64>, usize)> = Vec::new();
     for (key, rings) in polygons {
-        let counted = || {
+        let counted = |rows: usize| {
             crate::control::check()?;
-            crate::control::advance(1);
+            crate::control::advance(rows);
             Ok(())
         };
         let Some((m, n)) = means_under(r, bands, rings, counted)? else { continue };
@@ -803,8 +1076,8 @@ pub fn class_means(r: &Raster, bands: &[usize], polygons: &[(String, Vec<Vec<Coo
     Ok(classes)
 }
 
-/// `bands` bands of `images` laid onto a north-up longitude/latitude grid of `cols` × `rows` cells
-/// of `cell` degrees from `extent`'s north-west corner: a cell takes the first image's value under
+/// `bands` bands of `images` laid onto a north-up grid in `crs` of `cols` × `rows` cells of `cell`
+/// (in its units) from `extent`'s north-west corner: a cell takes the first image's value under
 /// its centre, or with `mean` the mean of all of theirs; no-data where none has one. Rows go on
 /// several threads and count toward the run's progress, and a cancelled run stops (#1291).
 pub fn mosaic(
@@ -814,11 +1087,20 @@ pub fn mosaic(
     (cols, rows): (usize, usize),
     bands: usize,
     mean: bool,
+    crs: Crs,
 ) -> Result<Vec<Vec<f32>>, String> {
     let mut out = (0..bands).map(|_| new_band(cols, rows, NODATA)).collect::<Result<Vec<_>, _>>()?;
     if cols == 0 {
         return Ok(out);
     }
+    // A cell of a projected grid is found in an image in the same system by its coordinates, and
+    // in any other through longitude/latitude.
+    let to = if crs == Crs::LonLat { None } else { Some(crs.transformer()?) };
+    let own = |r: &Raster, c: Coord| {
+        let (cc, rr) = r.transform.to_pixel(c);
+        let (cc, rr) = (r.wrap_col(cc).floor(), rr.floor());
+        (cc >= 0.0 && rr >= 0.0 && cc < f64::from(r.width) && rr < f64::from(r.height)).then_some((cc as i64, rr as i64))
+    };
     // Each row as a slice of every band, for one thread to fill.
     let mut by_band: Vec<_> = out.iter_mut().map(|b| b.chunks_mut(cols)).collect();
     let lines: Vec<Vec<&mut [f32]>> = (0..rows).map(|_| by_band.iter_mut().filter_map(Iterator::next).collect()).collect();
@@ -833,9 +1115,17 @@ pub fn mosaic(
         |at: &mut Vec<Option<(i64, i64)>>, row, mut line: Vec<&mut [f32]>| {
             for col in 0..cols {
                 let c = Coord::new(extent.min_x + (col as f64 + 0.5) * cell, extent.max_y - (row as f64 + 0.5) * cell);
+                // The cell's longitude/latitude, worked out only for an image in another system.
+                let mut lonlat: Option<Option<Coord>> = None;
                 // Where the cell falls in each image, once for all bands.
                 at.clear();
-                at.extend(images.iter().map(|r| r.pixel_at(c)));
+                for r in images {
+                    at.push(match &to {
+                        Some(_) if r.crs == crs => own(r, c),
+                        Some(t) => (*lonlat.get_or_insert_with(|| t.to_lonlat(c))).and_then(|ll| r.pixel_at(ll)),
+                        None => r.pixel_at(c),
+                    });
+                }
                 for (bi, band) in line.iter_mut().enumerate() {
                     let vals = images.iter().zip(at.iter()).filter_map(|(r, a)| a.and_then(|(cc, rr)| r.value(bi, cc, rr)));
                     let v = if mean {
@@ -1477,8 +1767,116 @@ mod tests {
         assert!(grid::<f64>(4, 5).is_ok_and(|g| g.is_empty() && g.capacity() >= 20));
     }
 
+    /// A radius reaching far past the raster (the whole DEM's diagonal, as the command takes by
+    /// default) counts only the raster's cells: a strip 6,000 cells long, seen from one end, is
+    /// worked out, though the square the radius spans holds 144 million cells. So is a radius of
+    /// more cells than an `i64` holds.
+    #[test]
+    fn a_viewshed_radius_past_the_raster_counts_only_its_cells() {
+        let transform = GeoTransform { origin_x: 0.0, origin_y: 0.001, pixel_width: 0.001, pixel_height: -0.001 };
+        let strip = Raster::new("strip", 6_000, 1, vec![vec![100.0; 6_000]], transform, Crs::LonLat, None, ColorHint::Gray, "Float32")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let (cx, _) = strip.cell_size_m();
+        let vs = viewshed(&strip, 0, Coord::new(0.0005, 0.0005), 2.0, cx * 6_000.0, Heights::Nearest).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(vs.cells.len(), 6_000);
+        // Every cell worked out (none left no-data): seen up to the horizon, hidden past it.
+        assert!(vs.cells.iter().all(|v| *v == 1.0 || *v == 0.0), "every cell worked out");
+        assert!(vs.cells.contains(&1.0) && vs.cells.contains(&0.0), "seen and hidden");
+        // A radius of more cells than an i64 holds, on cells declared a millimetre wide.
+        let tiny = GeoTransform { pixel_width: 1e-8, pixel_height: -1e-8, ..transform };
+        let strip = Raster::new("strip", 50, 1, vec![vec![100.0; 50]], tiny, Crs::LonLat, None, ColorHint::Gray, "Float32")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let vs = viewshed(&strip, 0, Coord::new(5e-9, 0.001 - 5e-9), 2.0, 1e300, Heights::Nearest).unwrap_or_else(|e| panic!("{e}"));
+        assert!(vs.cells.iter().all(|v| *v == 1.0), "{:?}", vs.cells);
+    }
+
+    /// A bilinear ray step is weighed as two in the work cap (it reads the two cells it falls
+    /// between), and a refusal says so: 1,000 × 1,000 cells from the middle on one thread take
+    /// 333,333,500 nearest steps, under the cap, and twice that weighed bilinear, over it. A
+    /// radius reaching every cell is refused as the whole raster; one short of the corners, as a
+    /// radius, with the steps of the cells within it.
+    #[test]
+    fn a_bilinear_viewshed_step_is_weighed_as_two_in_the_work_cap() {
+        let w = 1_000u32;
+        let transform = GeoTransform { origin_x: 0.0, origin_y: 45.0, pixel_width: 0.0003, pixel_height: -0.0003 };
+        let dem = Raster::new("dem", w, w, vec![vec![0.0; (w * w) as usize]], transform, Crs::LonLat, None, ColorHint::Gray, "Float32")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let middle = Coord::new(500.5 * 0.0003, 45.0 - 500.5 * 0.0003);
+        let e = viewshed_on(Some(1), &dem, 0, middle, 2.0, 1e9, Heights::Bilinear).unwrap_err();
+        assert!(
+            e.starts_with(&format!(
+                "the whole raster takes up to 666667000 ray steps (a step between cells counted as two), more than the {MAX_VIEWSHED_WORK} this computer takes on 1 thread(s); give a radius to cover only part of it"
+            )),
+            "{e}"
+        );
+        // 600 of the longer cell side: past every edge (500 cells away), short of the corners
+        // (about 707 cells of the side's mean away; the cells are longer north–south at 45°).
+        let (cx, cy) = dem.cell_size_m();
+        assert!(600.0 * cx.max(cy) < (500.0 * cx).hypot(500.0 * cy));
+        let radius = 600.0 * cx.max(cy);
+        let e = viewshed_on(Some(1), &dem, 0, middle, 2.0, radius, Heights::Bilinear).unwrap_err();
+        let steps = 2 * brute_ray_steps((500, 500), (0, 999), (0, 999), (cx, cy), radius);
+        assert!(
+            steps < 666_667_000
+                && e.starts_with(&format!("the radius takes up to {steps} ray steps"))
+                && e.contains("; use a smaller radius"),
+            "{e}"
+        );
+    }
+
+    /// Each cell's ray steps within the radius, one at a time.
+    fn brute_ray_steps(observer: (i64, i64), cols: (i64, i64), rows: (i64, i64), cell: (f64, f64), radius_m: f64) -> u128 {
+        let mut n = 0u128;
+        for row in rows.0..=rows.1 {
+            for col in cols.0..=cols.1 {
+                let (dc, dr) = (col - observer.0, row - observer.1);
+                if (dc as f64 * cell.0).hypot(dr as f64 * cell.1) <= radius_m {
+                    n += u128::from(dc.unsigned_abs().max(dr.unsigned_abs()));
+                }
+            }
+        }
+        n
+    }
+
+    /// The ray steps counted a row at a time are each cell's, counted one by one: an observer in
+    /// the middle, at a corner, on an edge and outside the window's middle row; square and
+    /// oblong cells; a radius inside the window, cutting its corners, past it, and on a cell's
+    /// centre exactly. Cells and radii so large that the squared radius is past f64's range are
+    /// counted as the rest (they once walked a column at a time towards the radius).
+    #[test]
+    fn viewshed_ray_steps_are_counted_exactly() {
+        let window = ((0, 39), (0, 24));
+        for observer in [(20, 12), (0, 0), (39, 7), (5, 24)] {
+            for cell in [(10.0, 10.0), (7.0, 13.0), (30.0, 2.5)] {
+                for radius in [0.5, 10.0, 35.0, 120.0, 260.0, 1e9, 1e300] {
+                    assert_eq!(
+                        ray_steps(observer, window.0, window.1, cell, radius),
+                        brute_ray_steps(observer, window.0, window.1, cell, radius),
+                        "{observer:?} {cell:?} {radius}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            ray_steps((0, 0), (0, 49), (0, 0), (1e150, 1e150), 1e155),
+            brute_ray_steps((0, 0), (0, 49), (0, 0), (1e150, 1e150), 1e155)
+        );
+        assert_eq!(
+            ray_steps((0, 0), (0, 49), (0, 9), (1e182, 1e182), 1e200),
+            brute_ray_steps((0, 0), (0, 49), (0, 9), (1e182, 1e182), 1e200)
+        );
+        for radius in [1.5e151, 1.5e154] {
+            let (observer, cell) = ((25, 5), (1e150, 1e150));
+            assert_eq!(
+                ray_steps(observer, (0, 49), (0, 9), cell, radius),
+                brute_ray_steps(observer, (0, 49), (0, 9), cell, radius),
+                "{radius}"
+            );
+        }
+    }
+
     /// Viewshed rows made on several threads see what one thread sees (#1252), with the radius
-    /// inside the raster and reaching past its edges.
+    /// inside the raster and reaching past its edges, with nearest and bilinear heights.
     #[test]
     fn viewshed_on_several_threads_is_viewshed_on_one() {
         let (w, h) = (90u32, 70u32);
@@ -1496,12 +1894,24 @@ mod tests {
         for (at, radius, expected) in
             [(Coord::new(0.012, 44.990), 500.0, [207, 775, 5318]), (Coord::new(0.003, 44.985), 5_000.0, [185, 6050, 65])]
         {
-            let one = viewshed_on(Some(1), &dem, 0, at, 2.0, radius).unwrap_or_else(|e| panic!("{e}"));
+            let one_run = viewshed_on(Some(1), &dem, 0, at, 2.0, radius, Heights::Nearest).unwrap_or_else(|e| panic!("{e}"));
+            // Cells seen across the DEM's no-data cells are counted; nearest heights read no
+            // neighbours, so none falls back.
+            assert!(one_run.through_gaps > 0 && one_run.read_nearest == 0, "radius {radius}: {}", one_run.through_gaps);
+            let one = &one_run.cells;
             let counts = [1.0, 0.0, NODATA].map(|k| one.iter().filter(|v| v.to_bits() == k.to_bits()).count());
             assert_eq!(counts, expected, "radius {radius}");
+            // Bilinear heights read next to the no-data cells, so some cells take a nearest height.
+            let bilinear = viewshed_on(Some(1), &dem, 0, at, 2.0, radius, Heights::Bilinear).unwrap_or_else(|e| panic!("{e}"));
+            assert!(bilinear.through_gaps > 0 && bilinear.read_nearest > 0, "radius {radius}: {}", bilinear.read_nearest);
             for threads in [2, 7, 16] {
-                let many = viewshed_on(Some(threads), &dem, 0, at, 2.0, radius).unwrap_or_else(|e| panic!("{e}"));
-                assert!(one.iter().map(|v| v.to_bits()).eq(many.iter().map(|v| v.to_bits())), "{threads} threads, radius {radius}");
+                for (heights, one_run) in [(Heights::Nearest, &one_run), (Heights::Bilinear, &bilinear)] {
+                    let many = viewshed_on(Some(threads), &dem, 0, at, 2.0, radius, heights).unwrap_or_else(|e| panic!("{e}"));
+                    let what = format!("{heights:?}, {threads} threads, radius {radius}");
+                    assert_eq!((many.through_gaps, many.read_nearest), (one_run.through_gaps, one_run.read_nearest), "{what}");
+                    let bits = |c: &[f32]| c.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+                    assert_eq!(bits(&one_run.cells), bits(&many.cells), "{what}");
+                }
             }
         }
     }
@@ -1527,6 +1937,82 @@ mod tests {
         assert_eq!(kmeans_on(Some(4), &r, &[0, 1, 2], 7, 10).unwrap_err(), crate::control::CANCELLED);
     }
 
+    /// Zonal means test only the cells in their zone's window (#1252), and give what testing
+    /// every cell gives, to the bit: on a longitude/latitude raster and a projected one, with a
+    /// hole cut out (and one reaching past its outer ring, which counts nowhere), slanted edges,
+    /// and edges through cell centres.
+    #[test]
+    fn zonal_means_are_those_of_testing_every_cell() {
+        // Every cell tested, its centre in longitude/latitude, as zonal means did.
+        let every_cell = |r: &Raster, rings: &[Vec<Coord>]| {
+            let (mut sums, mut n) = ([0.0f64; 2], 0usize);
+            for row in 0..r.height {
+                for col in 0..r.width {
+                    let Some(ll) = r.transformer().to_lonlat(r.transform.to_world(f64::from(col) + 0.5, f64::from(row) + 0.5)) else {
+                        continue;
+                    };
+                    if rustgis_data::geometry::polygon_contains(rings, ll) {
+                        for (b, s) in sums.iter_mut().enumerate() {
+                            *s += f64::from(r.value(b, i64::from(col), i64::from(row)).unwrap());
+                        }
+                        n += 1;
+                    }
+                }
+            }
+            (n > 0).then(|| (sums.iter().map(|s| (s / n as f64).to_bits()).collect::<Vec<_>>(), n))
+        };
+        let ring = |pts: &[(f64, f64)]| pts.iter().map(|&(x, y)| Coord::new(x, y)).collect::<Vec<_>>();
+        let (w, h) = (400u32, 300u32);
+        let band = |k: u32| (0..w * h).map(|i| ((i * (3 + k) + i / w * 7) % 251) as f32 + 0.25 * k as f32).collect::<Vec<f32>>();
+        let lonlat = GeoTransform { origin_x: 7.0, origin_y: 47.0, pixel_width: 0.0037, pixel_height: -0.0029 };
+        let merc = GeoTransform { origin_x: 780_000.0, origin_y: 5_950_000.0, pixel_width: 410.0, pixel_height: -390.0 };
+        let rasters = [
+            Raster::new("lonlat", w, h, vec![band(0), band(1)], lonlat, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap(),
+            Raster::new("merc", w, h, vec![band(0), band(1)], merc, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap(),
+        ];
+        let zones = [
+            vec![
+                ring(&[(7.11, 46.31), (7.93, 46.45), (8.21, 46.88), (7.37, 46.97), (7.05, 46.62)]),
+                ring(&[(7.51, 46.61), (7.77, 46.63), (7.71, 46.79), (7.49, 46.74)]),
+            ],
+            // A hole reaching past its outer ring.
+            vec![ring(&[(7.2, 46.3), (7.8, 46.3), (7.8, 46.8), (7.2, 46.8)]), ring(&[(7.6, 46.6), (8.0, 46.6), (8.0, 46.9), (7.6, 46.9)])],
+            // Edges through rows' and columns' centres (on the longitude/latitude grid).
+            vec![ring(&[
+                (7.0 + 0.0037 * 20.5, 47.0 - 0.0029 * 30.5),
+                (7.0 + 0.0037 * 90.5, 47.0 - 0.0029 * 30.5),
+                (7.0 + 0.0037 * 90.5, 47.0 - 0.0029 * 80.5),
+                (7.0 + 0.0037 * 20.5, 47.0 - 0.0029 * 80.5),
+            ])],
+        ];
+        for r in &rasters {
+            for (z, rings) in zones.iter().enumerate() {
+                let got = zonal_means(r, &[0, 1], rings).unwrap().map(|(m, n)| (m.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), n));
+                let want = every_cell(r, rings);
+                assert!(want.as_ref().is_some_and(|(_, n)| *n > 100), "{} zone {z}: {want:?}", r.name);
+                assert_eq!(got, want, "{} zone {z}", r.name);
+            }
+        }
+        // A wide zone on a polar raster (EPSG:3031): its outer side, the parallel at 60° S, is
+        // a circle on the grid, and the raster's 100 m cells straddle it where it reaches
+        // furthest, between two of the side's first samples.
+        let polar = Crs::Epsg(3031);
+        let top = polar.transformer().unwrap().from_lonlat(Coord::new(-0.06, -60.0)).unwrap();
+        let gt = GeoTransform { origin_x: top.x - 20_000.0, origin_y: top.y + 15_000.0, pixel_width: 100.0, pixel_height: -100.0 };
+        let r = Raster::new("polar", w, h, vec![band(0), band(1)], gt, polar, None, ColorHint::Gray, "Float32").unwrap();
+        let wide = vec![ring(&[(-61.0, -70.0), (59.0, -70.0), (59.0, -60.0), (-61.0, -60.0)])];
+        let got = zonal_means(&r, &[0, 1], &wide).unwrap().map(|(m, n)| (m.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), n));
+        let want = every_cell(&r, &wide);
+        assert!(want.as_ref().is_some_and(|(_, n)| *n > 1000 && *n < (w * h) as usize), "{want:?}");
+        assert_eq!(got, want, "polar");
+        // A zone off the raster has none.
+        assert!(zonal_means(&rasters[0], &[0, 1], &[ring(&[(20.0, 10.0), (21.0, 10.0), (21.0, 11.0)])]).unwrap().is_none());
+        // Under a control cancelled once it starts, a zone stops between rows (#1562).
+        let control = crate::control::Control::cancelled_once_started();
+        let res = crate::run_under("Zone", &control, || zonal_means(&rasters[0], &[0, 1], &zones[0]).map_err(String::from));
+        assert!(res.is_err() && control.looked() > 0, "{res:?}, looked {}", control.looked());
+    }
+
     /// The single passes the Analysis pane runs on a thread stop when their run is cancelled
     /// (#1291 step 3), and count their progress otherwise.
     #[test]
@@ -1545,7 +2031,7 @@ mod tests {
                 weighted_overlay(&[(r.bands[0].data.clone(), 1.0)]).map(|v| v.len()),
                 classify_min_distance(r, &[0, 1], &means).map(|v| v.len()),
                 class_means(r, &[0, 1], &polygons).map(|c| c.len()),
-                mosaic(&[r], &r.extent(), 0.001, (w as usize, h as usize), 2, true).map(|b| b.len()),
+                mosaic(&[r], &r.extent(), 0.001, (w as usize, h as usize), 2, true, Crs::LonLat).map(|b| b.len()),
             ]
         };
         let run = crate::control::Control::new();
@@ -1565,7 +2051,7 @@ mod tests {
         // The class means equal the zonal means they are made of.
         let _none = crate::control::install(None);
         let c = class_means(&r, &[0, 1], &polygons[..1]).unwrap();
-        assert_eq!(Some((c[0].1.clone(), c[0].2)), zonal_means(&r, &[0, 1], &polygons[0].1));
+        assert_eq!(Some((c[0].1.clone(), c[0].2)), zonal_means(&r, &[0, 1], &polygons[0].1).unwrap());
     }
 
     /// Band math and per-cell rows made on several threads give the same cells, bit for bit, as
@@ -1613,7 +2099,7 @@ mod tests {
         let eye = Coord::new(0.0005, 0.0);
         // √(2 · 7/6 · 6,371 km · 10 m), written out so that the test pins the radius.
         let horizon = 12_192.0;
-        let vs = viewshed(&flat, 0, eye, 10.0, 20_000.0).unwrap_or_else(|e| panic!("{e}"));
+        let vs = viewshed(&flat, 0, eye, 10.0, 20_000.0, Heights::Nearest).unwrap_or_else(|e| panic!("{e}")).cells;
         let row = &vs[w as usize..2 * w as usize];
         let last = row.iter().rposition(|v| *v == 1.0).unwrap_or(0);
         let (cx, _) = flat.cell_size_m();
@@ -1625,13 +2111,134 @@ mod tests {
         assert_eq!(seen(0.1155), Some(false));
     }
 
+    /// Viewsheds on DEMs whose answer is known from their geometry: flat ground (the horizon at
+    /// √(2·R′·h)), a bowl (every cell seen), a dome (seen up to where the line from the eye
+    /// touches it, at √(h / k′)), and a wall lower than the eye (the cells in its shadow hidden,
+    /// those beyond it seen again). The Earth's
+    /// curvature for visible light (`SIGHT_RADIUS_M`) is part of each answer. Cells within a cell
+    /// and a half of a boundary, where a grid can't say which side a cell is on, aren't counted.
+    /// Bilinear heights get every cell counted right on all four; nearest heights hide some of the
+    /// dome just inside its horizon, and are right on the other three.
+    #[test]
+    fn viewsheds_give_the_known_answers_of_flat_ground_a_bowl_a_dome_and_a_wall() {
+        // 201 × 201 cells of 0.00027° (about 30 m) on the equator, the observer at the centre.
+        let (n, half, step) = (201u32, 100i64, 0.00027);
+        let transform = GeoTransform { origin_x: 0.0, origin_y: step * f64::from(n) / 2.0, pixel_width: step, pixel_height: -step };
+        let blank = Raster::new("dem", n, n, vec![vec![0.0; (n * n) as usize]], transform, Crs::LonLat, None, ColorHint::Gray, "Float32")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let (cx, cy) = blank.cell_size_m();
+        let at = |col: i64, row: i64| ((col - half) as f64 * cx, (row - half) as f64 * cy);
+        let dem = |z: &dyn Fn(f64, f64) -> f64| {
+            let mut r = blank.clone();
+            if let Some(b) = r.bands.get_mut(0) {
+                for (i, v) in b.data.iter_mut().enumerate() {
+                    let (x, y) = at(i as i64 % i64::from(n), i as i64 / i64::from(n));
+                    *v = z(x, y) as f32;
+                }
+            }
+            r
+        };
+        let eye = Coord::new(step * (half as f64 + 0.5), step * (f64::from(n) / 2.0 - half as f64 - 0.5));
+        let radius = 3_000.0;
+        let band = 1.5 * cx.max(cy);
+        let drop = |d: f64| d * d / (2.0 * SIGHT_RADIUS_M);
+        // Cells seen wrongly, and those counted, for `expected` (None: on a boundary, or outside).
+        let wrong = |r: &Raster, h: f64, heights: Heights, expected: &dyn Fn(i64, i64, f64) -> Option<bool>| {
+            let vs = viewshed(r, 0, eye, h, radius, heights).unwrap_or_else(|e| panic!("{e}")).cells;
+            let (mut bad, mut counted) = (0usize, 0usize);
+            for row in 0..i64::from(n) {
+                for col in 0..i64::from(n) {
+                    let (x, y) = at(col, row);
+                    let d = x.hypot(y);
+                    let Some(want) = (d > 0.0 && d <= radius).then(|| expected(col, row, d)).flatten() else { continue };
+                    let got = vs.get((row * i64::from(n) + col) as usize).copied();
+                    counted += 1;
+                    bad += usize::from(got != Some(if want { 1.0 } else { 0.0 }));
+                }
+            }
+            (bad, counted)
+        };
+        let before = |d: f64, edge: f64| if (d - edge).abs() <= band { None } else { Some(d < edge) };
+
+        // Flat ground, an eye 0.5 m up: the horizon at √(2·R′·h), about 2.7 km.
+        let flat = dem(&|_, _| 0.0);
+        let horizon = (2.0 * SIGHT_RADIUS_M * 0.5).sqrt();
+        for heights in [Heights::Nearest, Heights::Bilinear] {
+            let (bad, counted) = wrong(&flat, 0.5, heights, &|_, _, d| before(d, horizon));
+            assert!(bad == 0 && counted > 20_000, "flat, {heights:?}: {bad} of {counted} wrong");
+        }
+
+        // A bowl rising 4 m a kilometre squared (z = k·d², far steeper than the Earth curves
+        // away): every cell is seen.
+        let bowl = dem(&|x, y| 4e-6 * (x * x + y * y));
+        for heights in [Heights::Nearest, Heights::Bilinear] {
+            let (bad, counted) = wrong(&bowl, 2.0, heights, &|_, _, _| Some(true));
+            assert!(bad == 0 && counted > 20_000, "bowl, {heights:?}: {bad} of {counted} wrong");
+        }
+
+        // A dome falling 10 m a kilometre squared from its top, the eye 10 m up there: with the
+        // Earth's curve, the ground falls k′ = k + 1/(2R′) a metre squared, and the line from the
+        // eye touches it at √(h / k′), about 1 km; beyond, the dome hides the ground.
+        let k = 1e-5;
+        let dome = dem(&|x, y| 500.0 - k * (x * x + y * y));
+        let edge = (10.0 / (k + 1.0 / (2.0 * SIGHT_RADIUS_M))).sqrt();
+        let (bad, counted) = wrong(&dome, 10.0, Heights::Bilinear, &|_, _, d| before(d, edge));
+        assert!(bad == 0 && counted > 20_000, "dome, bilinear: {bad} of {counted} wrong");
+        let (bad_nearest, _) = wrong(&dome, 10.0, Heights::Nearest, &|_, _, d| before(d, edge));
+        assert!(bad_nearest > 0, "nearest heights hide some of the dome just inside its horizon");
+
+        // A wall 1 m high, a column of cells 20 cells (about 600 m) east of an eye 2 m up: beyond it,
+        // a cell is hidden while the line from the eye over the wall's top passes above it, and
+        // seen again once the line has come down below the ground (at about 1.2 km on a flat
+        // Earth, a little farther with its curve). Rays mostly east or west,
+        // which cross the wall at a cell's centre line, are counted; others cross it between
+        // columns, where it stands depends on how the ground is read.
+        let wall_col = half + 20;
+        let wall = dem(&|x, _| if (x - 20.0 * cx).abs() < cx / 2.0 { 1.0 } else { 0.0 });
+        let z0 = 2.0;
+        // How far the line over the wall's top passes above the cell (negative: below it).
+        let over = |col: i64, d: f64| {
+            let dw = d * (20.0 / (col - half) as f64);
+            (1.0 - drop(dw) - z0) / dw * d - (-drop(d) - z0)
+        };
+        let shadow = |col: i64, row: i64, d: f64| -> Option<bool> {
+            let (dc, dr) = (col - half, row - half);
+            if col == wall_col || dr.abs() > dc.abs() {
+                return None;
+            }
+            if col < wall_col {
+                return Some(true);
+            }
+            let over = over(col, d);
+            if over.abs() < 0.05 { None } else { Some(over < 0.0) }
+        };
+        // Both sides of the shadow's edge are counted, not only the shadow.
+        let (mut hidden, mut seen_past) = (0usize, 0usize);
+        for row in 0..i64::from(n) {
+            for col in wall_col + 1..i64::from(n) {
+                let (x, y) = at(col, row);
+                let d = x.hypot(y);
+                match (d <= radius).then(|| shadow(col, row, d)).flatten() {
+                    Some(false) => hidden += 1,
+                    Some(true) => seen_past += 1,
+                    None => {}
+                }
+            }
+        }
+        assert!(hidden > 1_000 && seen_past > 1_000, "{hidden} hidden, {seen_past} seen past the wall");
+        for heights in [Heights::Nearest, Heights::Bilinear] {
+            let (bad, counted) = wrong(&wall, z0, heights, &shadow);
+            assert!(bad == 0 && counted > 10_000, "wall, {heights:?}: {bad} of {counted} wrong");
+        }
+    }
+
     /// A run past one thread's work, on one thread, is refused, naming the cap and the threads.
     #[test]
     fn idw_past_one_threads_work_is_refused_on_one_naming_the_cap() {
         // 1000 × 1000 cells from 500 points: 500 million pairs, past one thread's 400 million.
         let pts: Vec<(Coord, f64)> = (0..500).map(|i| (Coord::new((i % 25) as f64 / 2.5, (i / 25) as f64 / 2.0), i as f64)).collect();
         let extent = Extent::new(0.0, 0.0, 10.0, 10.0);
-        let e = idw_on(Some(1), &pts, &extent, 0.01, 2.0, 0, "idw").unwrap_err();
+        let e = idw_on(Some(1), &pts, &extent, 0.01, 2.0, 0, "idw", Crs::LonLat).unwrap_err();
         assert!(
             e.contains("too much work") && e.contains(&format!("{MAX_IDW_WORK} cell-point pairs")) && e.contains("on 1 thread(s)"),
             "{e}"
@@ -1640,7 +2247,7 @@ mod tests {
         let run = crate::control::Control::stoppable();
         run.cancel();
         let _installed = crate::control::install(Some(run));
-        assert_eq!(idw_on(Some(1), &pts, &extent, 0.01, 2.0, 0, "idw").unwrap_err(), crate::control::CANCELLED);
+        assert_eq!(idw_on(Some(1), &pts, &extent, 0.01, 2.0, 0, "idw", Crs::LonLat).unwrap_err(), crate::control::CANCELLED);
     }
 
     /// Rows made on several threads give the same surface, bit for bit, as one thread (#1252),
@@ -1654,13 +2261,77 @@ mod tests {
             })
             .collect();
         let extent = Extent::new(0.0, 40.0, 10.0, 50.0);
-        for neighbours in [0, 8] {
-            let one = idw_on(Some(1), &pts, &extent, 0.1, 2.0, neighbours, "idw").unwrap_or_else(|e| panic!("{e}"));
+        // At a power of 2 (squared distances) and another (the general path).
+        for (power, neighbours) in [(2.0, 0), (2.0, 8), (3.0, 0), (3.0, 8)] {
+            let one = idw_on(Some(1), &pts, &extent, 0.1, power, neighbours, "idw", Crs::LonLat).unwrap_or_else(|e| panic!("{e}"));
             for threads in [2, 7, 16] {
-                let many = idw_on(Some(threads), &pts, &extent, 0.1, 2.0, neighbours, "idw").unwrap_or_else(|e| panic!("{e}"));
+                let many =
+                    idw_on(Some(threads), &pts, &extent, 0.1, power, neighbours, "idw", Crs::LonLat).unwrap_or_else(|e| panic!("{e}"));
                 let bits = |r: &Raster| r.bands[0].data.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
-                assert_eq!(bits(&one), bits(&many), "{threads} threads, {neighbours} neighbours");
+                assert_eq!(bits(&one), bits(&many), "power {power}, {threads} threads, {neighbours} neighbours");
             }
+        }
+    }
+
+    /// At a power of 2 the weights come from squared distances, with no square root or power
+    /// (#1252): the surface is the general path's to within rounding, from every point and from
+    /// the nearest few, and a cell on a point still takes its value.
+    #[test]
+    fn idw_at_power_two_is_the_general_paths_surface() {
+        let pts: Vec<(Coord, f64)> = (0..400)
+            .map(|i| {
+                let (x, y) = ((i * 37 % 400) as f64 / 40.0, (i * 91 % 400) as f64 / 40.0);
+                (Coord::new(x, 40.0 + y), (x * 1.3).sin() * 100.0 + y * 7.0)
+            })
+            .chain([(Coord::new(0.05, 49.95), 1234.5)])
+            .collect();
+        let extent = Extent::new(0.0, 40.0, 10.0, 50.0);
+        for neighbours in [0, 8] {
+            let fast = idw_on(Some(1), &pts, &extent, 0.1, 2.0, neighbours, "idw", Crs::LonLat).unwrap_or_else(|e| panic!("{e}"));
+            // The general path can't be asked for at a power of 2, and one near 2 has other
+            // weights: the reference is made here, as the general path made it at 2.
+            let k = if neighbours == 0 { pts.len() } else { neighbours };
+            let (w, h) = (100usize, 100usize);
+            for row in 0..h {
+                let kx = (extent.max_y - (row as f64 + 0.5) * 0.1).to_radians().cos();
+                for col in 0..w {
+                    let c = Coord::new(extent.min_x + (col as f64 + 0.5) * 0.1, extent.max_y - (row as f64 + 0.5) * 0.1);
+                    let mut near: Vec<(f64, f64)> = pts.iter().map(|(p, v)| (((p.x - c.x) * kx).hypot(p.y - c.y), *v)).collect();
+                    near.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    // Points tied with the last one kept (as far as rounding goes): either may be
+                    // the one picked, so each is a right answer.
+                    let last = near[k - 1].0;
+                    let tied: Vec<(f64, f64)> = near[k - 1..].iter().copied().filter(|(d, _)| (d - last).abs() <= last * 1e-12).collect();
+                    let surface = |chosen: &[(f64, f64)]| {
+                        (match chosen.iter().find(|(d, _)| *d < 1e-12) {
+                            Some(on) => on.1,
+                            None => {
+                                let nearest = chosen.iter().map(|(d, _)| *d).fold(f64::INFINITY, f64::min);
+                                let (n, d) = chosen.iter().fold((0.0, 0.0), |(n, d), (dist, v)| {
+                                    let wgt = (nearest / dist).powf(2.0);
+                                    (n + wgt * v, d + wgt)
+                                });
+                                n / d
+                            }
+                        }) as f32
+                    };
+                    let got = fast.bands[0].data[row * w + col];
+                    let wants: Vec<f32> = tied
+                        .iter()
+                        .map(|t| {
+                            let mut chosen = near[..k - 1].to_vec();
+                            chosen.push(*t);
+                            surface(&chosen)
+                        })
+                        .collect();
+                    assert!(
+                        wants.iter().any(|want| (got - want).abs() <= want.abs() * 1e-6 + 1e-6),
+                        "({col}, {row}), {neighbours} neighbours: {got} vs {wants:?}"
+                    );
+                }
+            }
+            // The cell centred on the last point takes its value.
+            assert_eq!(fast.bands[0].data[0], 1234.5, "{neighbours} neighbours");
         }
     }
 
@@ -1742,6 +2413,24 @@ mod tests {
             hillshade(&r, 0, 315.0, 45.0, 1.5).unwrap_or_default(),
             [182.0, 184.0, 185.0, 183.0, 186.0, NODATA, 178.0, 175.0, 183.0, 178.0, 175.0, 174.0]
         );
+    }
+
+    /// A cell in full shadow is 1, not 0, so that the bytes made of a hillshade keep 0 for its
+    /// no-data cells.
+    #[test]
+    fn hillshade_keeps_zero_for_no_data() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 0.001, pixel_height: -0.001 };
+        let mut cells = vec![10.0; 25];
+        cells[12] = -9999.0;
+        let r = Raster::new("plane", 5, 5, vec![cells], gt, Crs::LonLat, Some(-9999.0), ColorHint::Gray, "Float32")
+            .unwrap_or_else(|e| panic!("{e}"));
+        // The sun on the horizon lights no flat ground.
+        let shade = hillshade(&r, 0, 315.0, 0.0, 1.0).unwrap_or_default();
+        assert_eq!((shade[0], shade[12]), (1.0, NODATA));
+        let out = derive_hillshade(&r, "shade", shade).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!((out.data_type.as_str(), out.nodata), ("UInt8", Some(0.0)));
+        assert_eq!((out.value(0, 0, 0), out.value(0, 2, 2), out.bands[0].data[12]), (Some(1.0), None, 0.0));
+        assert_eq!(out.bands[0].stats.count, 24);
     }
 
     #[test]
@@ -1912,25 +2601,41 @@ mod tests {
                 *v = if i % 20 == 10 { 500.0 } else { 0.0 };
             }
         }
-        let vs = viewshed(&wall, 0, Coord::new(0.0025, 0.0105), 2.0, 5_000.0).unwrap_or_default();
+        let vs = viewshed(&wall, 0, Coord::new(0.0025, 0.0105), 2.0, 5_000.0, Heights::Nearest).unwrap_or_default().cells;
         assert_eq!(vs[10 * 20 + 5], 1.0);
         assert_eq!(vs[10 * 20 + 15], 0.0);
         let (seen, prof) =
             line_of_sight(&wall, 0, Coord::new(0.0025, 0.0105), Coord::new(0.0175, 0.0105), 2.0, 0.0, 50).unwrap_or((true, vec![]));
         assert!(!seen && !prof.is_empty());
-        let g = idw(&[(Coord::new(0.0, 0.0), 0.0), (Coord::new(1.0, 0.0), 10.0)], &Extent::new(0.0, -0.5, 1.0, 0.5), 0.1, 2.0, 8, "idw")
-            .unwrap_or_else(|e| panic!("{e}"));
+        let g = idw(
+            &[(Coord::new(0.0, 0.0), 0.0), (Coord::new(1.0, 0.0), 10.0)],
+            &Extent::new(0.0, -0.5, 1.0, 0.5),
+            0.1,
+            2.0,
+            8,
+            "idw",
+            Crs::LonLat,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!((g.width, g.height), (10, 10));
         let row = &g.bands[0].data[50..60];
         assert!(row[0] < row[9] && row[0] > 0.0 && row[9] < 10.0, "{row:?}");
         // Every point (0), and a power high enough to overflow 1/dᵖ, still give finite values.
-        let all = idw(&[(Coord::new(0.0, 0.0), 0.0), (Coord::new(1.0, 0.0), 10.0)], &Extent::new(0.0, -0.5, 1.0, 0.5), 0.1, 99.0, 0, "idw")
-            .unwrap_or_else(|e| panic!("{e}"));
+        let all = idw(
+            &[(Coord::new(0.0, 0.0), 0.0), (Coord::new(1.0, 0.0), 10.0)],
+            &Extent::new(0.0, -0.5, 1.0, 0.5),
+            0.1,
+            99.0,
+            0,
+            "idw",
+            Crs::LonLat,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         let row = &all.bands[0].data[50..60];
         assert!(row.iter().all(|v| (0.0..=10.0).contains(v)) && row[0] < 1e-3 && row[9] > 10.0 - 1e-3, "{row:?}");
         // With every point, a far one still pulls each cell off the two near ones' value.
         let pts = [(Coord::new(0.0, 0.0), 0.0), (Coord::new(1.0, 0.0), 0.0), (Coord::new(5.0, 0.0), 100.0)];
-        let all = idw(&pts, &Extent::new(0.0, -0.5, 1.0, 0.5), 0.1, 1.0, 0, "idw").unwrap_or_else(|e| panic!("{e}"));
+        let all = idw(&pts, &Extent::new(0.0, -0.5, 1.0, 0.5), 0.1, 1.0, 0, "idw", Crs::LonLat).unwrap_or_else(|e| panic!("{e}"));
         assert!(all.bands[0].data.iter().all(|v| *v > 0.0 && *v < 100.0), "{:?}", all.bands[0].data);
         let p = profile(&r, 0, &[Coord::new(0.0005, 0.01), Coord::new(0.0195, 0.01)], 20);
         assert_eq!(p.len(), 20);

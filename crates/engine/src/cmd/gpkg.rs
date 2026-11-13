@@ -11,14 +11,14 @@ use serde_json::{Value, json};
 
 pub fn commands() -> Vec<C> {
     vec![
-        C::new("gpkg.addLayer", "Edit GeoPackage Table", "Home › Add › Add Data", add_layer).params(
+        C::new("gpkg.addLayer", "Edit GeoPackage Table", "Home › Add › Add Data", add_layer).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"path": "a GeoPackage file on this computer", "table"?: "its feature table (needed when it has several)", "limit"?: "the most rows (default and most: 100000)", "name"?: string}"#,
         ),
-        C::new("gpkg.pendingEdits", "GeoPackage Edits", "Edit › Manage Edits", pending_edits).view()
+        C::new("gpkg.pendingEdits", "GeoPackage Edits", "Edit › Manage Edits", pending_edits).roles(&[]).effects(crate::policy::Effects::NONE).view()
             .params(r#"{"layer"?: "a layer added with gpkg.addLayer (default: the active one)"}"#),
-        C::new("gpkg.saveEdits", "Save to GeoPackage", "Edit › Manage Edits", save_edits)
+        C::new("gpkg.saveEdits", "Save to GeoPackage", "Edit › Manage Edits", save_edits).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Reserved))
             .params(r#"{"layer"?: "a layer added with gpkg.addLayer (default: the active one)"}"#),
-        C::new("gpkg.discardEdits", "Discard GeoPackage Edits", "Edit › Manage Edits", discard_edits)
+        C::new("gpkg.discardEdits", "Discard GeoPackage Edits", "Edit › Manage Edits", discard_edits).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .params(r#"{"layer"?: "a layer added with gpkg.addLayer (default: the active one)"}"#),
     ]
 }
@@ -104,6 +104,9 @@ fn add_layer(s: &mut Session, p: &Value) -> CmdResult {
                 ),
                 false,
             );
+        }
+        if let Some(note) = rustgis_data::source::unread_dates_note(&info.fields, &editable.unread_dates) {
+            s.notify(format!("{name}: {note}; saving leaves them as they are unless they're edited"), false);
         }
         if !editable.writable {
             s.notify(format!("{name}: the file is read-only, so edits can't be saved to it"), false);
@@ -242,6 +245,7 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
             }
         };
         let saved = saved_rows.changes;
+        let utc_dates = saved_rows.utc_dates;
         let mut stored: std::collections::HashMap<_, _> = saved_rows.features.into_iter().map(|f| (f.id, f)).collect();
         let versions = saved.versions.iter().copied().collect();
         if let Some(l) = s.map_mut().layer_mut(id) {
@@ -304,9 +308,68 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
         if !saved.skipped_fields.is_empty() {
             s.notify(format!("{name}: {table} has no column for {}, so it wasn't saved", saved.skipped_fields.join(", ")), false);
         }
+        if let Some(note) = rustgis_data::io::utc_dates_note(&fields, &utc_dates, &format!("{name}: {table}")) {
+            s.notify(note, false);
+        }
         Ok(json!({"saved": true, "inserted": saved.inserted.len(), "updated": saved.updated, "deleted": saved.deleted,
             "unchanged": saved.unchanged, "keys": saved.inserted.iter().map(|(_, k)| k.cast_signed()).collect::<Vec<_>>(), "skippedFields": saved.skipped_fields}))
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) struct Candidate {
+    pub dataset: rustgis_data::Dataset,
+    pub edit: rustgis_map::source::GpkgEdit,
+    pub notes: Vec<String>,
+    pub matched: u64,
+}
+
+/// Read a fresh editable table and its save-concurrency baseline without touching the live layer.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn read_candidate(name: &str, edit: &rustgis_map::source::GpkgEdit) -> Result<Candidate, String> {
+    let src = EditTable::open(std::path::Path::new(&edit.path), &edit.table).map_err(|e| format!("{}: {e}", edit.path))?;
+    let editable = src.read_editable(if edit.limit == 0 { MAX_EDITABLE } else { edit.limit }).map_err(|e| format!("{}: {e}", edit.path))?;
+    if editable.features.is_empty() && editable.skipped > 0 {
+        return Err(format!("{}: no readable rows found in {} ({} rows could not be read)", edit.path, edit.table, editable.skipped));
+    }
+    let info = src.info();
+    let mut ds = rustgis_data::Dataset::new(name, info.geometry_type, info.fields.clone());
+    ds.crs = src.crs();
+    ds.source = Some(edit.path.clone());
+    ds.zm_dropped = info.zm_dropped;
+    ds.features = editable.features.into();
+    let read = editable.versions.iter().copied().collect();
+    let (geometry_type, z, m) = src.declaration();
+    let baseline = rustgis_map::source::GpkgEdit {
+        key: src.key().into(),
+        geometry: src.geometry_column().into(),
+        srs_id: src.srs_id(),
+        geometry_type: geometry_type.into(),
+        z,
+        m,
+        revision: editable.revision,
+        writable: editable.writable,
+        versions: versions_of(&ds.features, &Default::default(), &read),
+        ..edit.clone()
+    };
+    let mut notes = info.notes.clone();
+    if (ds.features.len() as u64) < editable.matched {
+        notes.push(format!(
+            "loaded {} of {} rows; the others aren't edited, and saving leaves them as they are",
+            ds.features.len(),
+            editable.matched
+        ));
+    }
+    if editable.skipped > 0 {
+        notes.push(format!("{} rows with a geometry RustGIS can't read weren't loaded; saving leaves them as they are", editable.skipped));
+    }
+    if let Some(note) = rustgis_data::source::unread_dates_note(&info.fields, &editable.unread_dates) {
+        notes.push(format!("{note}; saving leaves them as they are unless they're edited"));
+    }
+    if !editable.writable {
+        notes.push("the file is read-only, so edits can't be saved to it".into());
+    }
+    Ok(Candidate { dataset: ds, edit: baseline, notes, matched: editable.matched })
 }
 
 fn discard_edits(s: &mut Session, p: &Value) -> CmdResult {
@@ -318,36 +381,22 @@ fn discard_edits(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let (id, name, edit) = gpkg_layer(s, p)?;
-        let err = |e: rustgis_data::DataError| format!("{name}: {e}");
-        let src = EditTable::open(std::path::Path::new(&edit.path), &edit.table).map_err(err)?;
-        let editable = src.read_editable(if edit.limit == 0 { MAX_EDITABLE } else { edit.limit }).map_err(err)?;
-        let read = editable.versions.iter().copied().collect();
-        let n = editable.features.len();
+        let old = s.map().layer(id).ok_or("no such layer")?;
+        let Candidate { dataset, edit: baseline, notes, matched } = read_candidate(&old.dataset.name, &edit)?;
+        let n = dataset.features.len();
         let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
-        let geometry_type = src.info().geometry_type;
-        if l.dataset.geometry_type != geometry_type {
-            l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol::default_for(geometry_type, id));
+        if l.dataset.geometry_type != dataset.geometry_type {
+            l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol::default_for(dataset.geometry_type, id));
         }
-        l.dataset.geometry_type = geometry_type;
-        l.dataset.crs = src.crs();
-        l.dataset.fields = src.info().fields.clone();
-        l.dataset.features = editable.features.into();
+        l.dataset = dataset;
+        l.gpkg = Some(baseline);
         l.selection.clear();
         l.touch_geometry();
-        let baseline = versions_of(&l.dataset.features, &Default::default(), &read);
-        if let Some(g) = &mut l.gpkg {
-            g.versions = baseline;
-            g.writable = editable.writable;
-            g.key = src.key().to_string();
-            g.geometry = src.geometry_column().to_string();
-            g.srs_id = src.srs_id();
-            let (geometry_type, z, m) = src.declaration();
-            g.geometry_type = geometry_type.to_string();
-            g.z = z;
-            g.m = m;
-            g.revision = editable.revision;
+        l.touch_replacement();
+        for note in notes {
+            s.notify(format!("{name}: {note}"), false);
         }
         s.notify(format!("{name}: edits discarded; {n} rows loaded again from {}", edit.table), false);
-        Ok(json!({"features": n, "matched": editable.matched}))
+        Ok(json!({"features": n, "matched": matched}))
     }
 }

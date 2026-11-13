@@ -86,7 +86,13 @@ impl FeatureSource for Runs {
         &self.info
     }
     fn read(&self, _: &Request) -> Result<Batch> {
-        Ok(Batch { features: self.features.clone(), matched: self.features.len() as u64, complete: true, skipped: 0 })
+        Ok(Batch {
+            features: self.features.clone(),
+            matched: self.features.len() as u64,
+            complete: true,
+            skipped: 0,
+            unread_dates: Vec::new(),
+        })
     }
     fn visits_chunks(&self) -> bool {
         self.chunks
@@ -101,6 +107,40 @@ impl FeatureSource for Runs {
         }
         Ok(Batch { complete: true, matched: self.features.len() as u64, skipped: self.unreadable, ..Batch::default() })
     }
+}
+
+/// An export in Web Mercator written a chunk at a time counts the vertices beyond 85.05° it
+/// writes at 85.05°, as it writes them: from a source that declares no extent, whose features
+/// beyond aren't in its first chunk. In longitude/latitude, or within 85.05°, it counts none.
+#[test]
+fn a_streamed_web_mercator_export_counts_what_it_writes_at_85_degrees() {
+    let d = folder("merc");
+    let mut ds = Dataset::new("polar", GeometryType::Point, vec![]);
+    for (x, y) in [(0.0, 0.0), (1.0, 10.0), (2.0, 89.0), (3.0, -90.0), (4.0, 60.0), (5.0, 86.0)] {
+        ds.push_next(Some(Geometry::Point(Coord::new(x, y))), vec![]);
+    }
+    ds.push_next(None, vec![]);
+    let mut src = Runs::new(&ds, 2);
+    src.info.extent = rustgis_geom::Extent::EMPTY;
+    for ext in ["gpkg", "fgb"] {
+        for (crs, n) in [(Crs::WebMercator, 3), (Crs::LonLat, 0)] {
+            let path = d.join(format!("polar-{}.{ext}", crs.epsg()));
+            let e = write_chunks_in(&src, &ds, &path, crs, 1).unwrap();
+            assert_eq!(e.beyond_web_mercator, n, ".{ext} in {}", crs.label());
+            // As many as the file holds at 85.05°.
+            let mut at_edge = 0;
+            for g in read_back(&path).features.iter().filter_map(|f| f.geometry.as_ref()) {
+                g.for_each_coord(|c| at_edge += usize::from((c.y.abs() - rustgis_geom::MAX_LAT).abs() < 1e-6));
+            }
+            assert_eq!(at_edge, n, ".{ext} in {}", crs.label());
+        }
+    }
+    assert_eq!(
+        crate::web_mercator_moved_note("polar.gpkg", "polar", 3).as_deref(),
+        Some("polar.gpkg: 3 vertices of polar are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends")
+    );
+    assert_eq!(crate::web_mercator_moved_note("polar.gpkg", "polar", 0), None);
+    let _ = std::fs::remove_dir_all(d);
 }
 
 /// Every streamed format, from a source read in place a few features a chunk, holds what the
@@ -128,11 +168,54 @@ fn a_streamed_export_writes_what_a_whole_export_writes() {
                 let streamed = write_chunks_in(src.as_ref(), &layer, &a, crs, 2048).unwrap();
                 let left_out = crate::io::write_path_in(&whole, &b, crs).unwrap();
                 let what = format!("{format} to .{ext} in {}", crs.label());
-                assert_eq!(streamed, Exported { written: whole.features.len() - left_out, left_out, skipped: 0 }, "{what}");
+                let unfit = streamed.unfit.clone();
+                assert!(unfit.iter().all(|n| *n == 0), "{what}: {unfit:?}");
+                let utc_dates = streamed.utc_dates.clone();
+                assert!(utc_dates.iter().all(|n| *n == 0), "{what}: {utc_dates:?}");
+                let expected = Exported {
+                    written: whole.features.len() - left_out,
+                    left_out,
+                    skipped: 0,
+                    null_numbers: 0,
+                    unfit,
+                    beyond_web_mercator: 0,
+                    // Counted over the chunks as the whole layer counts it.
+                    csv: if ext == "csv" { crate::io::CsvLosses::of(&whole.features, whole.geometry_type) } else { Default::default() },
+                    unread_dates: Vec::new(),
+                    utc_dates,
+                };
+                assert_eq!(streamed, expected, "{what}");
                 let (a, b) = (read_back(&a), read_back(&b));
                 assert_eq!((&a.fields, a.geometry_type, a.crs), (&b.fields, b.geometry_type, b.crs), "{what}");
                 assert_eq!(a.features, b.features, "{what}");
                 assert!(!a.features.is_empty(), "{what}");
+            }
+        }
+    }
+}
+
+/// Every chunk contributes to the loss count; a finite export remains quiet.
+#[test]
+fn nonfinite_numbers_are_counted_across_export_chunks() {
+    let d = folder("nonfinite");
+    for ext in ["geojson", "gpkg"] {
+        for lossy in [false, true] {
+            let mut ds = squares();
+            if lossy {
+                ds.features[0].attrs[2] = Value::Float(f64::NAN);
+                ds.features[1].attrs[2] = Value::Float(f64::INFINITY);
+            }
+            let src = Runs::new(&ds, 1);
+            let out = d.join(format!("numbers-{lossy}.{ext}"));
+            let exported = write_chunks_in(&src, &ds, &out, Crs::LonLat, 2048).unwrap();
+            assert_eq!(exported.null_numbers, if lossy { 2 } else { 0 });
+            let read = read_back(&out);
+            let share = read.field_index("share").unwrap();
+            if lossy {
+                assert_eq!(read.features[0].attrs[share], Value::Null);
+                assert_eq!(read.features[1].attrs[share], Value::Null);
+            } else {
+                assert_eq!(read.features[0].attrs[share], ds.features[0].attrs[2]);
             }
         }
     }
@@ -212,7 +295,7 @@ fn a_layer_without_a_declared_type_takes_its_first_geometrys() {
     let layer = Dataset::new("points", GeometryType::None, points.fields.clone());
     write_chunks_in(&Runs::new(&points, 2), &layer, &d.join("points.csv"), Crs::LonLat, 1).unwrap();
     let text = std::fs::read_to_string(d.join("points.csv")).unwrap();
-    assert!(text.starts_with("n,longitude,latitude"), "{text}");
+    assert!(text.starts_with("longitude,latitude,n"), "{text}");
 }
 
 /// Rows a source couldn't read are counted, so an export can say how many it left out; a clean
@@ -325,4 +408,183 @@ fn a_streamed_export_into_an_existing_geopackage_starts_again_inside_its_transac
     (failing.fail_after, failing.fail_pass) = (Some(2), Some(1));
     assert!(write_chunks_to(&failing, &layer2, &county, Crs::LonLat, &add, 1).is_err());
     assert_eq!(std::fs::read(&county).unwrap(), before);
+}
+
+/// A GeoParquet export writes a value its column's type can't hold as null and counts it per
+/// field, streamed or whole, and one notice names the fields; clean values give none.
+#[test]
+fn geoparquet_counts_values_written_as_null() {
+    let d = folder("parquet-unfit");
+    let mut ds = squares();
+    // Two values the Integer column can't hold, one the Boolean column can't, one text cell
+    // (always kept) and a null (not a loss).
+    ds.features[1].attrs[1] = Value::Float(2.5);
+    ds.features[2].attrs[1] = Value::Text("many".into());
+    ds.features[3].attrs[3] = Value::Text("yes".into());
+    ds.features[4].attrs[0] = Value::Int(4);
+    ds.features[5].attrs[1] = Value::Null;
+    ds.features[6].attrs[2] = Value::Float(f64::NAN);
+    let layer = Dataset::new("squares", ds.geometry_type, ds.fields.clone());
+    let streamed = write_chunks_in(&Runs::new(&ds, 40), &layer, &d.join("lossy.parquet"), Crs::LonLat, 2048).unwrap();
+    assert_eq!(streamed.unfit, vec![0, 2, 1, 1]);
+    let note = crate::source::parquet::unfit_note(&layer.fields, &streamed.unfit, "lossy.parquet").unwrap();
+    assert_eq!(
+        note,
+        "lossy.parquet: 4 values couldn't be written as their columns' types and were written as null, in 'count', 'share', 'open'"
+    );
+    assert_eq!(crate::source::parquet::values_note(&ds, "lossy.parquet").as_deref(), Some(note.as_str()));
+    let back = read_back(&d.join("lossy.parquet"));
+    assert_eq!((&back.features[1].attrs[1], &back.features[3].attrs[3]), (&Value::Null, &Value::Null));
+
+    let clean = squares();
+    let streamed = write_chunks_in(&Runs::new(&clean, 40), &layer, &d.join("clean.parquet"), Crs::LonLat, 2048).unwrap();
+    assert_eq!(streamed.unfit, vec![0; 4]);
+    assert_eq!(crate::source::parquet::unfit_note(&layer.fields, &streamed.unfit, "clean.parquet"), None);
+    assert_eq!(crate::source::parquet::values_note(&clean, "clean.parquet"), None);
+    // Other formats count nothing.
+    let csv = write_chunks_in(&Runs::new(&ds, 40), &layer, &d.join("lossy.csv"), Crs::LonLat, 2048).unwrap();
+    assert!(csv.unfit.is_empty());
+    // Names and the target are flattened and bounded, so the notice stays one line in order.
+    let fields = vec![Field::new("a\u{202E}b\nc", FieldType::Integer), Field::new("x".repeat(60), FieldType::Integer)];
+    let note = crate::source::parquet::unfit_note(&fields, &[1, 1], "out\u{2028}.parquet").unwrap();
+    let want = "out .parquet: 2 values couldn't be written as their columns' types and were written as null, in 'a b c'";
+    assert_eq!(note, format!("{want}, '{}…'", "x".repeat(40)));
+    let _ = std::fs::remove_dir_all(d);
+}
+
+/// A streamed GeoPackage export of a layer holding another kind of geometry than its own writes
+/// every feature in a GEOMETRY column, as the export of the whole layer does, even when the
+/// other kind comes only in a late chunk (the export starts again for it): squares with points
+/// among them, a few features a chunk, give the same table.
+#[test]
+fn a_streamed_geopackage_of_a_mixed_layer_keeps_every_kind() {
+    let d = folder("mixed-kinds");
+    let mut mixed = squares();
+    mixed.name = "mixed".into();
+    for i in [0usize, 5, 6, 299] {
+        if let Some(f) = mixed.features.get_mut(i) {
+            f.geometry = Some(Geometry::Point(Coord::new(i as f64, 1.0)));
+        }
+    }
+    let layer = Dataset::new(mixed.name.clone(), mixed.geometry_type, mixed.fields.clone());
+    let (a, b) = (d.join("streamed.gpkg"), d.join("whole.gpkg"));
+    let streamed = write_chunks_in(&Runs::new(&mixed, 4), &layer, &a, Crs::LonLat, 1).unwrap();
+    assert_eq!((streamed.left_out, streamed.written), (0, 301));
+    assert_eq!(crate::io::write_path(&mixed, &b).unwrap(), 0);
+    let table = |p: &Path| {
+        let c = rusqlite::Connection::open(p).unwrap();
+        let kind = c.query_row("SELECT geometry_type_name FROM gpkg_geometry_columns", [], |r| r.get::<_, String>(0)).unwrap();
+        let blobs = c
+            .query_row("SELECT count(*) FROM mixed WHERE geom IS NOT NULL AND substr(hex(geom), 1, 4) = '4750'", [], |r| r.get::<_, i64>(0))
+            .unwrap();
+        (kind, blobs)
+    };
+    // Every geometry row is a GeoPackage blob: the 296 squares and the 4 points.
+    assert_eq!(table(&a), ("GEOMETRY".to_string(), 300));
+    assert_eq!(table(&b), ("GEOMETRY".to_string(), 300));
+    assert_eq!(read_back(&a).features, read_back(&b).features);
+    let points = read_back(&a).features.iter().filter(|f| matches!(f.geometry, Some(Geometry::Point(_)))).count();
+    assert_eq!(points, 4);
+    // A multipoint among them comes back a multipoint, with its members, streamed and whole.
+    let pair = Geometry::MultiPoint(vec![Coord::new(1.5, 2.5), Coord::new(3.5, 4.5)]);
+    if let Some(f) = mixed.features.get_mut(10) {
+        f.geometry = Some(pair.clone());
+    }
+    let (c, e) = (d.join("streamed-multi.gpkg"), d.join("whole-multi.gpkg"));
+    write_chunks_in(&Runs::new(&mixed, 4), &layer, &c, Crs::LonLat, 1).unwrap();
+    crate::io::write_path(&mixed, &e).unwrap();
+    for p in [&c, &e] {
+        let back = read_back(p);
+        let multis: Vec<_> =
+            back.features.iter().filter_map(|f| f.geometry.as_ref()).filter(|g| matches!(g, Geometry::MultiPoint(_))).collect();
+        assert_eq!(multis, [&pair], "{}", p.display());
+    }
+}
+
+/// A layer that declares no geometry type but carries geometry exports to the same GeoPackage
+/// streamed as whole: a table of its geometry's kind when it holds one, a GEOMETRY table when it
+/// holds several, nothing left out either way.
+#[test]
+fn a_typeless_layer_exports_the_same_geopackage_streamed_or_whole() {
+    let d = folder("typeless");
+    let mut ds = squares();
+    ds.name = "typeless".into();
+    ds.geometry_type = GeometryType::None;
+    let kind = |p: &Path| {
+        let c = rusqlite::Connection::open(p).unwrap();
+        c.query_row("SELECT geometry_type_name FROM gpkg_geometry_columns", [], |r| r.get::<_, String>(0)).unwrap()
+    };
+    let layer = Dataset::new(ds.name.clone(), ds.geometry_type, ds.fields.clone());
+    for (with_point, want) in [(false, "MULTIPOLYGON"), (true, "GEOMETRY")] {
+        if with_point && let Some(f) = ds.features.get_mut(3) {
+            f.geometry = Some(Geometry::Point(Coord::new(3.0, 1.0)));
+        }
+        let (a, b) = (d.join(format!("streamed-{with_point}.gpkg")), d.join(format!("whole-{with_point}.gpkg")));
+        assert_eq!(write_chunks_in(&Runs::new(&ds, 4), &layer, &a, Crs::LonLat, 1).unwrap().left_out, 0);
+        assert_eq!(crate::io::write_path(&ds, &b).unwrap(), 0);
+        assert_eq!((kind(&a), kind(&b)), (want.to_string(), want.to_string()));
+        assert_eq!(read_back(&a).features, read_back(&b).features);
+        // Every square and the feature without geometry, which a GeoPackage keeps.
+        assert_eq!(read_back(&a).features.len(), 301);
+    }
+}
+
+/// A projected streamed GeoPackage export of a mixed layer writes every feature, projected, in a
+/// GEOMETRY column, as the whole export does.
+#[test]
+fn a_projected_streamed_geopackage_of_a_mixed_layer_keeps_every_kind() {
+    let d = folder("mixed-projected");
+    let mut mixed = squares();
+    mixed.name = "mixed".into();
+    for i in [2usize, 7] {
+        if let Some(f) = mixed.features.get_mut(i) {
+            f.geometry = Some(Geometry::Point(Coord::new(3.0, 1.0)));
+        }
+    }
+    let utm = Crs::from_epsg(32631).unwrap();
+    let layer = Dataset::new(mixed.name.clone(), mixed.geometry_type, mixed.fields.clone());
+    let (a, b) = (d.join("streamed.gpkg"), d.join("whole.gpkg"));
+    let streamed = write_chunks_in(&Runs::new(&mixed, 4), &layer, &a, utm, 1).unwrap();
+    assert_eq!((streamed.left_out, streamed.written), (0, 301));
+    assert_eq!(crate::io::write_path_in(&mixed, &b, utm).unwrap(), 0);
+    assert_eq!(read_back(&a).features, read_back(&b).features);
+    // Every feature, the one without geometry included.
+    assert_eq!(read_back(&a).features.len(), 301);
+}
+
+/// A mixed layer added as a table to an existing GeoPackage, streamed or whole, gets a GEOMETRY
+/// column holding every feature, the file's other table left as it was.
+#[test]
+fn a_mixed_layer_added_to_a_geopackage_keeps_every_kind() {
+    let d = folder("mixed-added");
+    let mut mixed = squares();
+    mixed.name = "mixed".into();
+    for i in [1usize, 298] {
+        if let Some(f) = mixed.features.get_mut(i) {
+            f.geometry = Some(Geometry::Point(Coord::new(i as f64, 1.0)));
+        }
+    }
+    let layer = Dataset::new(mixed.name.clone(), mixed.geometry_type, mixed.fields.clone());
+    let add = GpkgTable { mode: crate::io::GpkgMode::AddTable, name: None };
+    let mut other = squares();
+    other.name = "other".into();
+    other.features.truncate(3);
+    for (i, streamed) in [false, true].into_iter().enumerate() {
+        let path = d.join(format!("county-{i}.gpkg"));
+        crate::io::write_path(&other, &path).unwrap();
+        if streamed {
+            let (e, _) = write_chunks_to(&Runs::new(&mixed, 4), &layer, &path, Crs::LonLat, &add, 1).unwrap();
+            assert_eq!((e.left_out, e.written), (0, 301));
+        } else {
+            assert_eq!(crate::io::write_path_to(&mixed, &path, Crs::LonLat, &add).unwrap().0, 0);
+        }
+        let c = rusqlite::Connection::open(&path).unwrap();
+        let kind = |t: &str| {
+            c.query_row("SELECT geometry_type_name FROM gpkg_geometry_columns WHERE table_name = ?1", [t], |r| r.get::<_, String>(0))
+                .unwrap()
+        };
+        assert_eq!((kind("mixed"), kind("other")), ("GEOMETRY".to_string(), "MULTIPOLYGON".to_string()));
+        let rows: i64 = c.query_row("SELECT count(*) FROM mixed WHERE geom IS NOT NULL", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 300);
+    }
 }

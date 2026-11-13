@@ -24,6 +24,7 @@ proj4rs = { workspace = true }
 crs-definitions = { workspace = true }
 miniz_oxide = { workspace = true }
 roxmltree = { workspace = true }
+quick-xml = { workspace = true }
 # zstd, the usual compression of GeoParquet, compiles to WebAssembly like the GeoTIFF one above.
 parquet = { workspace = true, features = ["zstd"] }
 url = { workspace = true }
@@ -57,6 +58,8 @@ tokio-util = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 # Native web clients verify servers with the system's trust (see `http`).
+# Hashes a source's files, to tell whether they changed since a layer was read (`sync`).
+sha2 = { workspace = true }
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "platform-verifier"] }
 # Private temporary workspaces for downloaded JPEG 2000 conversion through GDAL.
 tempfile = "3"

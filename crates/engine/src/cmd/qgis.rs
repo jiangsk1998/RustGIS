@@ -12,10 +12,10 @@ use crate::{CmdResult, CommandSpec as C, Session};
 
 pub fn commands() -> Vec<C> {
     vec![
-        C::new("project.importQgis", "Import QGIS Project", "Project › Import", import_project).params(
+        C::new("project.importQgis", "Import QGIS Project", "Project › Import", import_project).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Reserved).with(crate::policy::Effect::Files)).params(
             r#"{"path"?: "*.qgs|*.qgz", "text"?: "a .qgs file's text", "data"?: "a .qgs or .qgz file, base64", "dir"?: "the folder its relative paths start from (default: the file's)"} → the layers added and notes on what wasn't carried over"#,
         ),
-        C::new("style.importQgis", "Import QGIS Style", "Style › Styles", import_style).when(need_layer).params(
+        C::new("style.importQgis", "Import QGIS Style", "Style › Styles", import_style).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).when(need_layer).params(
             r#"{"layer"?, "path"?: "*.qml", "text"?: "a .qml file's text", "data"?: "a .qml file, base64"} → notes on what wasn't carried over"#,
         ),
     ]
@@ -95,16 +95,51 @@ fn import_project(s: &mut Session, p: &Value) -> CmdResult {
             Ok(_) => {}
         }
     }
-    // Bottom first, so each is added on top of the ones below it.
+    // Bottom first, so each is added on top of the ones below it; the main annotation layer
+    // over them all, as QGIS draws it.
     let mut added = Vec::new();
-    for layer in project.layers.iter().rev() {
-        match add_layer(s, layer, dir.is_some(), &mut report) {
-            Ok(Some(name)) => added.push(name),
+    let crs = project.crs.as_deref();
+    let mut pictures = Pictures::default();
+    // The coordinates the map draws in, where QGIS fits a picture whose aspect is locked (on its
+    // canvas): the map's projection as set above (Web Mercator where none was taken).
+    let canvas_def = match &s.map().projection {
+        rustgis_map::Projection::Custom(code) => rustgis_map::projection::lookup(code).ok().map(|(def, _)| def),
+        _ => Some("EPSG:3857".to_string()),
+    };
+    let canvas = canvas_def.and_then(|d| rustgis_data::raster::crs::Crs::parse(&d).and_then(|c| c.transformer()).ok());
+    // Each layer added, bottom first: whether it is drawn, and, for an annotation layer, its
+    // texts over all its other graphics and whether it has any such.
+    let mut drawn: Vec<(String, bool, Option<Drawn>)> = Vec::new();
+    // What each of the project's layers came in as, by its index in `project.layers`.
+    let mut came_in: Vec<CameIn> = Vec::new();
+    let tree_layers = project.layers.iter().enumerate().rev().map(|(i, l)| (Some(i), l));
+    for (index, layer) in tree_layers.chain(project.main_annotations.iter().map(|l| (None, l))) {
+        let before: std::collections::HashSet<u32> = s.map().layers.iter().map(|l| l.id).collect();
+        let tiles = s.map().tiles.len();
+        let result = if layer.kind == "annotation" {
+            add_annotations(s, layer, crs, canvas.as_ref(), dir.is_some(), &mut pictures, &mut report)
+                .map(|(name, d)| Some((name, Some(d))))
+        } else {
+            add_layer(s, layer, dir.is_some(), &mut report).map(|name| name.map(|name| (name, None)))
+        };
+        match result {
+            Ok(Some((name, d))) => {
+                drawn.push((layer.name.clone(), layer.visible, d));
+                added.push(name);
+                if let Some(index) = index {
+                    let ids = s.map().layers.iter().map(|l| l.id).filter(|id| !before.contains(id)).collect();
+                    came_in.push(CameIn { index, ids, tile: s.map().tiles.len() > tiles });
+                }
+            }
             Ok(None) => {}
             Err(e) => report.skipped(&layer.name, format!("the layer: {e}")),
         }
     }
+    note_texts_under_layers_above(&drawn, &mut report);
+    add_groups(s, &project, &came_in, &mut report);
+    add_relations(s, &project, &came_in, &mut report);
     go_to_view(s, &project, degrees);
+    add_bookmarks(s, &project, &mut report);
     let notes: Vec<Value> = report.notes.iter().map(note_json).collect();
     if !report.notes.is_empty() {
         let left = report.notes.iter().filter(|n| n.kind == NoteKind::Skipped).count();
@@ -112,13 +147,116 @@ fn import_project(s: &mut Session, p: &Value) -> CmdResult {
             format!(
                 "Imported {} of {} QGIS layers; {} things drawn differently, {left} left out (see the import's notes)",
                 added.len(),
-                project.layers.len(),
+                project.layers.len() + usize::from(project.main_annotations.is_some()),
                 report.notes.len() - left
             ),
             false,
         );
     }
     Ok(json!({"map": name, "layers": added, "notes": notes}))
+}
+
+/// What one of a project's layers came in as.
+struct CameIn {
+    /// Its index in [`qgis::Project::layers`].
+    index: usize,
+    /// The map layers added for it (a file of several layers adds them all).
+    ids: Vec<u32>,
+    /// A web tile layer was added for it.
+    tile: bool,
+}
+
+/// Makes the project's layer tree groups as layer groups, nested as in QGIS, and puts each layer
+/// added in its own (`came_in`), its box checked as its own is in QGIS (the groups' apply on
+/// top). A group is made even when none of its layers came in, as QGIS keeps empty groups. A
+/// web tile layer can't be in a group: one that was in a group is noted, added outside it (shown
+/// as the groups holding it showed it).
+fn add_groups(s: &mut Session, project: &qgis::Project, came_in: &[CameIn], report: &mut Report) {
+    if project.groups.is_empty() {
+        return;
+    }
+    let m = s.map_mut();
+    // Every group made first, empty (parents before the groups in them, so each finds its
+    // parent), then given its layers and gathered once: the layers came in in the tree's order,
+    // so gathering moves none of them. Giving a group its layers as it is made would gather them
+    // before its subgroups exist, moving a layer under a subgroup above that subgroup's layers.
+    let mut made: Vec<u32> = Vec::with_capacity(project.groups.len());
+    for g in &project.groups {
+        let mut group = rustgis_map::LayerGroup::new(g.name.as_str());
+        group.visible = g.checked;
+        group.expanded = g.expanded;
+        group.transparency = g.transparency.unwrap_or(0.0).clamp(0.0, 100.0);
+        group.min_scale = g.min_scale;
+        group.max_scale = g.max_scale;
+        group.parent = g.parent.and_then(|p| made.get(p).copied());
+        made.push(m.add_group(group));
+    }
+    for c in came_in {
+        let Some(id) = project.layers.get(c.index).and_then(|l| l.group).and_then(|g| made.get(g).copied()) else { continue };
+        if let Some(group) = m.groups.iter_mut().find(|g| g.id == id) {
+            group.children.extend(c.ids.iter().copied());
+        }
+    }
+    let mut outside = Vec::new();
+    for c in came_in {
+        let Some(layer) = project.layers.get(c.index) else { continue };
+        let Some(group) = layer.group.and_then(|g| project.groups.get(g)) else { continue };
+        if c.tile && c.ids.is_empty() {
+            // The opacity of a group drawn as one holding it, which the tile goes without.
+            let mut chain = layer.group;
+            let mut faded = false;
+            for _ in 0..project.groups.len() {
+                let Some(g) = chain.and_then(|g| project.groups.get(g)) else { break };
+                faded |= g.transparency.is_some();
+                chain = g.parent;
+            }
+            outside.push((layer.name.as_str(), group.name.as_str(), faded));
+        }
+        for id in &c.ids {
+            if let Some(l) = m.layer_mut(*id) {
+                l.visible = layer.checked;
+            }
+        }
+    }
+    // Parents come before the groups in them, so no link should be dropped; said if one is.
+    let dropped = m.tidy_groups();
+    if dropped > 0 {
+        report.approximated("", format!("groups whose place in another couldn't be kept ({dropped}), put at the top level"));
+    }
+    for (name, group, faded) in outside {
+        let opacity = if faded { " and the opacity of a group drawn as one holding it" } else { "" };
+        report.approximated(name, format!("its place in the group {group}{opacity}: a web tile layer, added outside the group"));
+    }
+}
+
+/// What an annotation layer draws, as placed (bottom first): the texts over all its other
+/// graphics, and whether it has any other graphics.
+struct Drawn {
+    texts_on_top: usize,
+    others: bool,
+}
+
+/// Notes the texts of each annotation layer (`drawn`: the layers added, bottom first, each with
+/// whether it is visible) that a visible layer above draws over in QGIS: RustGIS draws
+/// graphics layers' texts after all layers, so over it. Those already under a shape or picture
+/// of their own layer are noted with it, not again.
+fn note_texts_under_layers_above(drawn: &[(String, bool, Option<Drawn>)], report: &mut Report) {
+    let mut above = false;
+    for (name, visible, d) in drawn.iter().rev() {
+        // The layer noted hidden or not (shown later, it draws so); only one drawn covers it.
+        if let Some(d) = d
+            && above
+            && d.texts_on_top > 0
+        {
+            let what = if d.texts_on_top == 1 {
+                "an annotation text a layer above draws over in QGIS is drawn over that layer".to_string()
+            } else {
+                format!("{} annotation texts layers above draw over in QGIS are drawn over those layers", d.texts_on_top)
+            };
+            report.approximated(name, format!("{what}: RustGIS draws graphics layers' texts after all layers"));
+        }
+        above |= *visible && d.as_ref().is_none_or(|d| d.others);
+    }
 }
 
 /// Adds one QGIS layer to the active map with its style: `Ok(Some(name))` when added, `Ok(None)`
@@ -218,7 +356,317 @@ fn add_layer(s: &mut Session, layer: &qgis::ProjectLayer, has_dir: bool, report:
         }
     }
     check_fields(l, name, &layer.style.rules, layer.style.categories_by.as_ref(), &layer.style.bool_classes, report);
+    if layer.style.diagram.is_some() {
+        check_diagram(l, name, report);
+    }
+    bind_time(l, name, layer.style.time.as_deref(), report);
     Ok(Some(added_name))
+}
+
+/// Adds a QGIS annotation layer as a graphics layer: its annotations taken from its coordinate
+/// system (else the project's, `project_crs`) to longitude/latitude, its pictures read from their
+/// files (a relative one only with the project's folder, `has_dir`), its opacity, blending and
+/// scale range from its style. What can't be placed or read is noted.
+///
+/// On the thread that runs the import, as the import's other layers are: like opening a project,
+/// it adds layers to the session as it goes, and no part of it runs on its own yet. Its work is
+/// bounded: at most [`MAX_PICTURE_BYTES`] of pictures an import (each file at most what
+/// `graphics::picture` reads), each read once, and at most [`qgis::MAX_ANNOTATIONS`] items a layer
+/// placed. Running the whole import off the window, with Cancel and progress, is for the import
+/// as a whole, not this layer kind.
+fn add_annotations(
+    s: &mut Session,
+    layer: &qgis::ProjectLayer,
+    project_crs: Option<&str>,
+    canvas: Option<&rustgis_data::raster::crs::Transformer>,
+    has_dir: bool,
+    pictures: &mut Pictures,
+    report: &mut Report,
+) -> Result<(String, Drawn), String> {
+    let name = layer.name.as_str();
+    let crs = layer.crs.as_deref().or(project_crs);
+    let transformer = match crs.map(|c| rustgis_data::raster::crs::Crs::parse(c).and_then(|c| c.transformer())) {
+        Some(Ok(t)) => Some(t),
+        Some(Err(_)) if layer.annotations.is_empty() => None,
+        Some(Err(e)) => {
+            let what = if layer.annotations.len() == 1 {
+                "its annotation".to_string()
+            } else {
+                format!("its {} annotations", layer.annotations.len())
+            };
+            report.skipped(name, format!("{what}, in a coordinate system RustGIS can't read ({e})"));
+            None
+        }
+        None if layer.annotations.is_empty() => None,
+        None => {
+            let what = if layer.annotations.len() == 1 {
+                "its annotation".to_string()
+            } else {
+                format!("its {} annotations", layer.annotations.len())
+            };
+            report.skipped(name, format!("{what}, in a coordinate system neither the layer nor the project names"));
+            None
+        }
+    };
+    let added = s.run_part("graphics.newLayer", &json!({"name": name}))?;
+    let id = added.get("layer").and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok()).ok_or("the layer wasn't added")?;
+    let (mut unplaced, mut unread, mut first_error, mut over) = (0usize, 0usize, None::<String>, 0usize);
+    // Pictures whose locked aspect couldn't be kept on the map (its coordinates don't take the
+    // box), fitted in the layer's coordinates instead.
+    let mut fitted_in_layer = 0usize;
+    let mut graphics = Vec::new();
+    // A geometry taken to longitude/latitude; `None` where a point doesn't take.
+    let place = |geometry: &rustgis_data::Geometry| {
+        let t = transformer.as_ref()?;
+        let failed = std::cell::Cell::new(false);
+        let out = geometry.map_coords(&|c| {
+            t.to_lonlat(c).filter(|c| c.x.is_finite() && c.y.is_finite() && c.y.abs() <= 90.0).unwrap_or_else(|| {
+                failed.set(true);
+                c
+            })
+        });
+        (!failed.get()).then_some(out)
+    };
+    for a in layer.annotations.iter().filter(|_| transformer.is_some()) {
+        let mut g = a.graphic.clone();
+        // Placed first: a picture is read only for a graphic that is.
+        let Some(placed) = place(&g.geometry) else {
+            unplaced += 1;
+            continue;
+        };
+        g.geometry = placed;
+        if let Some(picture) = &a.picture {
+            let left = MAX_PICTURE_BYTES.saturating_sub(pictures.bytes);
+            let mut fresh = false;
+            // Each file read once while the budget has room, and kept only when it fits, so what
+            // is kept stays within the budget; every row keeps its own copy, counted against it.
+            let read = match pictures.read.get(picture) {
+                _ if pictures.over.contains(picture) => None,
+                Some(Ok(b64)) if b64.len() > left => None,
+                Some(read) => Some(read.clone()),
+                None => {
+                    // Its size first, from its text or its file's length (base64 is 4 bytes for 3):
+                    // one that can't fit isn't read.
+                    let size = match picture.strip_prefix("base64:") {
+                        Some(b64) => Some(b64.trim().len()),
+                        None => std::fs::metadata(picture)
+                            .ok()
+                            .map(|m| usize::try_from(m.len()).unwrap_or(usize::MAX).div_ceil(3).saturating_mul(4)),
+                    };
+                    let read = if !has_dir && picture.strip_prefix("base64:").is_none() && qgis::is_relative(picture) {
+                        Err(format!("{picture}, relative to the project's folder, which the import wasn't given (pass dir)"))
+                    } else if size.is_some_and(|size| size > left) {
+                        pictures.over.insert(picture.clone());
+                        over += 1;
+                        continue;
+                    } else if let Some(b64) = picture.strip_prefix("base64:") {
+                        super::graphics::picture(&json!({"image": b64}))
+                    } else {
+                        super::graphics::picture(&json!({"path": picture}))
+                    };
+                    if read.as_ref().is_ok_and(|b64| b64.len() > left) {
+                        pictures.over.insert(picture.clone());
+                        None
+                    } else {
+                        pictures.read.insert(picture.clone(), read.clone());
+                        fresh = true;
+                        Some(read)
+                    }
+                }
+            };
+            match read {
+                None => {
+                    over += 1;
+                    continue;
+                }
+                Some(Ok(b64)) => {
+                    if a.keep_aspect
+                        && let Some(size) = rustgis_render::picture_size(&b64)
+                    {
+                        // Fitted where QGIS fits it, on the map (`canvas`), then back to
+                        // longitude/latitude; else in the layer's coordinates (noted). Inside the
+                        // box placed above, so it takes too unless the transform is odd there
+                        // (then a picture just read isn't kept, as it is charged to nothing).
+                        let on_canvas = canvas.and_then(|c| {
+                            // The placed box's own corners on the canvas (a box across ±180° is
+                            // fitted in the layer's coordinates instead).
+                            let e = g.geometry.extent();
+                            if e.max_x - e.min_x > 180.0 {
+                                return None;
+                            }
+                            let failed = std::cell::Cell::new(false);
+                            let on = g.geometry.map_coords(&|p| {
+                                c.from_lonlat(p).filter(|p| p.x.is_finite() && p.y.is_finite()).unwrap_or_else(|| {
+                                    failed.set(true);
+                                    p
+                                })
+                            });
+                            if failed.get() {
+                                return None;
+                            }
+                            let fit = fitted(&on, size);
+                            failed.set(false);
+                            let back = fit.map_coords(&|p| {
+                                c.to_lonlat(p).filter(|p| p.x.is_finite() && p.y.is_finite() && p.y.abs() <= 90.0).unwrap_or_else(|| {
+                                    failed.set(true);
+                                    p
+                                })
+                            });
+                            (!failed.get()).then_some(back)
+                        });
+                        let fit = match on_canvas {
+                            Some(fit) => Some(fit),
+                            None => {
+                                fitted_in_layer += 1;
+                                place(&fitted(&a.graphic.geometry, size))
+                            }
+                        };
+                        let Some(fit) = fit else {
+                            if fresh {
+                                pictures.read.remove(picture);
+                            }
+                            unplaced += 1;
+                            continue;
+                        };
+                        g.geometry = fit;
+                    }
+                    pictures.bytes += b64.len();
+                    g.image = Some(b64);
+                }
+                Some(Err(e)) => {
+                    unread += 1;
+                    first_error.get_or_insert(e);
+                    continue;
+                }
+            }
+        }
+        graphics.push(g);
+    }
+    let n = |count: usize, one: &str, many: &str| if count == 1 { one.to_string() } else { format!("{count} {many}") };
+    if unplaced > 0 {
+        report.skipped(
+            name,
+            n(
+                unplaced,
+                "an annotation that doesn't take to longitude and latitude",
+                "annotations that don't take to longitude and latitude",
+            ),
+        );
+    }
+    if fitted_in_layer > 0 {
+        let what = n(fitted_in_layer, "a picture whose aspect is locked keeps it", "pictures whose aspect is locked keep it");
+        report
+            .approximated(name, format!("{what} in the layer's coordinates, not on the map as QGIS keeps it (the map's coordinates don't take its box, or it lies across ±180°)"));
+    }
+    // Texts over shapes or pictures drawn after them (RustGIS draws a layer's texts last), and
+    // those over all other graphics, which a layer above may cover: from what is placed.
+    let last_other = graphics.iter().rposition(|g| g.kind != "text");
+    let under = last_other.map_or(0, |i| graphics.iter().take(i).filter(|g| g.kind == "text").count());
+    let drawn = Drawn {
+        texts_on_top: graphics.iter().skip(last_other.map_or(0, |i| i + 1)).filter(|g| g.kind == "text").count(),
+        others: last_other.is_some(),
+    };
+    // Hidden or not: shown later, it draws so.
+    if under > 0 {
+        let what = n(
+            under,
+            "an annotation text QGIS draws under other annotations is drawn over them",
+            "annotation texts QGIS draws under other annotations are drawn over them",
+        );
+        report.approximated(name, format!("{what}: RustGIS draws a layer's texts after its shapes and pictures"));
+    }
+    if let Some(e) = first_error {
+        // Its background and frame are still drawn.
+        let what = n(unread, "a picture annotation's picture, which doesn't read", "picture annotations' pictures, which don't read");
+        report.skipped(name, format!("{what} (the first: {e})"));
+    }
+    if over > 0 {
+        let what = n(over, "a picture annotation's picture", "picture annotations' pictures");
+        report.skipped(name, format!("{what} past the {} of pictures an import takes", size_text(MAX_PICTURE_BYTES)));
+    }
+    let Some(l) = s.map_mut().layer_mut(id) else { return Err("the layer wasn't added".into()) };
+    for g in graphics {
+        rustgis_map::graphics::push(&mut l.dataset, g);
+    }
+    l.touch_geometry();
+    l.visible = layer.visible;
+    // Only what an annotation layer has: its opacity, blending and scale range (a renderer or
+    // labels in an odd file would restyle the graphics).
+    let st = &layer.style;
+    qgis::Style { transparency: st.transparency, blend: st.blend, min_scale: st.min_scale, max_scale: st.max_scale, ..Default::default() }
+        .apply(l);
+    Ok((l.name.clone(), drawn))
+}
+
+/// The most bytes of pictures (base64) one import adds to graphics layers (in tests, a few
+/// small pictures').
+const MAX_PICTURE_BYTES: usize = if cfg!(test) { 1 << 10 } else { 64 << 20 };
+
+/// `bytes` in MiB, or KiB below one.
+fn size_text(bytes: usize) -> String {
+    if bytes >= 1 << 20 { format!("{} MiB", bytes >> 20) } else { format!("{} KiB", bytes >> 10) }
+}
+
+/// The pictures an import has read, by file (or `base64:` text), and the bytes it has added to
+/// placed graphics.
+#[derive(Default)]
+struct Pictures {
+    /// Those read that fit the budget when read, and those that don't read.
+    read: std::collections::HashMap<String, Result<String, String>>,
+    /// Those read that didn't fit what was left of the budget, not kept.
+    over: std::collections::HashSet<String>,
+    bytes: usize,
+}
+
+/// The box `rect` (a rectangle's polygon) shrunk to a picture's aspect (`size`: its width and
+/// height in pixels), centred in it, as QGIS fits a picture whose aspect is locked.
+fn fitted(rect: &rustgis_data::Geometry, (w, h): (u32, u32)) -> rustgis_data::Geometry {
+    let e = rect.extent();
+    let (bw, bh) = (e.max_x - e.min_x, e.max_y - e.min_y);
+    if w == 0 || h == 0 || !(bw > 0.0 && bh > 0.0) {
+        return rect.clone();
+    }
+    let aspect = f64::from(w) / f64::from(h);
+    let (fw, fh) = if bw / bh > aspect { (bh * aspect, bh) } else { (bw, bw / aspect) };
+    let (cx, cy) = ((e.min_x + e.max_x) / 2.0, (e.min_y + e.max_y) / 2.0);
+    let (x0, x1, y0, y1) = (cx - fw / 2.0, cx + fw / 2.0, cy - fh / 2.0, cy + fh / 2.0);
+    rustgis_data::Geometry::Polygon(vec![vec![vec![
+        Coord::new(x0, y0),
+        Coord::new(x1, y0),
+        Coord::new(x1, y1),
+        Coord::new(x0, y1),
+        Coord::new(x0, y0),
+    ]]])
+}
+
+/// Checks the diagram a style set against the layer's fields: a category on a field the layer
+/// hasn't is left out, and a diagram left with none is removed, noted with the fields. On a
+/// graphics layer, which takes none, the style's is noted as left out.
+fn check_diagram(l: &mut rustgis_map::Layer, name: &str, report: &mut Report) {
+    // A graphics layer takes none (`Style::apply` leaves it out), and its own is left alone.
+    if l.graphics {
+        report.skipped(name, "its diagrams (a graphics layer draws none)");
+        return;
+    }
+    let Some(d) = l.diagram.as_mut() else { return };
+    let missing: Vec<String> = d.categories.iter().filter(|c| l.dataset.field_index(&c.field).is_none()).map(|c| c.field.clone()).collect();
+    if missing.is_empty() {
+        return;
+    }
+    d.categories.retain(|c| l.dataset.field_index(&c.field).is_some());
+    let none_left = d.categories.is_empty();
+    if none_left {
+        l.diagram = None;
+    }
+    let shown: Vec<&str> = missing.iter().take(8).map(String::as_str).collect();
+    let more = if missing.len() > shown.len() { ", …" } else { "" };
+    let what = if none_left { "its diagrams, whose fields the layer hasn't" } else { "its diagram categories on fields the layer hasn't" };
+    report.skipped(name, format!("{what} ({}{more})", shown.join(", ")));
+    // A pie sized between two values is sized by the sum of the categories left, not of all of
+    // those QGIS adds up.
+    if l.diagram.as_ref().is_some_and(|d| matches!(d.size, rustgis_map::DiagramSize::Scaled { .. })) {
+        report.approximated(name, "its diagrams sized by the sum of the categories left, without those on fields the layer hasn't");
+    }
 }
 
 /// An imported QGIS expression read on `ds`. QGIS measures `$area`, `$perimeter` and `$length`
@@ -555,6 +1003,289 @@ fn go_to_view(s: &mut Session, project: &qgis::Project, degrees: Option<Geograph
     if !target.is_empty() {
         s.zoom_to(&target);
     }
+    // QGIS turns the map clockwise; a bearing faces the top of the view east of north.
+    if project.rotation != 0.0 {
+        s.map_mut().camera.set_bearing(-project.rotation);
+    }
+}
+
+/// Binds `l` to the time slider on `field` (from a QGIS layer's time settings), when it has the
+/// field and its values read as dates; noted when not. A streamed layer's rows aren't read yet,
+/// so it is bound on the field alone, its dates read as its features are. Whether it was bound.
+fn bind_time(l: &mut rustgis_map::Layer, name: &str, field: Option<&str>, report: &mut Report) -> bool {
+    let Some(field) = field else { return false };
+    match l.dataset.field_index(field).and_then(|i| l.dataset.fields.get(i)) {
+        Some(f) if l.is_streamed() || rustgis_map::time::field_span(&l.dataset, &f.name).is_some() => {
+            if l.is_streamed() {
+                report.approximated(
+                    name,
+                    format!("its time settings, by the field {field}, bound before its features are read: one whose value isn't a date is hidden while the slider is on, or every one shows when none reads as one"),
+                );
+            }
+            l.time = Some(rustgis_map::time::TimeBinding::new(f.name.clone()));
+            true
+        }
+        Some(_) => {
+            report.skipped(name, format!("its time settings, by the field {field}, none of whose values read as dates"));
+            false
+        }
+        None => {
+            report.skipped(name, format!("its time settings, by the field {field}, which the layer hasn't"));
+            false
+        }
+    }
+}
+
+/// Adds the project's relations between layers that came in as RustGIS relationships (origin:
+/// the referenced, parent layer; destination: the referencing, child layer). A relation whose
+/// layers didn't come in, or haven't its fields, is noted; one whose name is taken is numbered.
+fn add_relations(s: &mut Session, project: &qgis::Project, came_in: &[CameIn], report: &mut Report) {
+    // The map layer a project layer came in as, with the field. A file of several layers (one
+    // QGIS names by `layerid`, which isn't read) adds them all: when more than one has the field,
+    // which the relation means isn't known (`Err`), rather than taking the first.
+    let find = |s: &Session, id: &str, field: &str| -> Option<Result<(String, String), ()>> {
+        let index = project.layers.iter().position(|l| l.id == id)?;
+        let c = came_in.iter().find(|c| c.index == index)?;
+        let mut with: Vec<(String, String)> = c
+            .ids
+            .iter()
+            .filter_map(|lid| {
+                let l = s.map().layer(*lid).filter(|l| !l.is_raster())?;
+                let f = l.dataset.field_index(field).and_then(|i| l.dataset.fields.get(i))?;
+                Some((l.name.clone(), f.name.clone()))
+            })
+            .collect();
+        match with.len() {
+            0 => None,
+            1 => with.pop().map(Ok),
+            _ => Some(Err(())),
+        }
+    };
+    let mut missing = Vec::new();
+    // Those between layers that came in as several, either of which could be meant.
+    let mut ambiguous = Vec::new();
+    let mut names = Names::new(s.map().editing.relationships.iter().map(|r| r.name.as_str()), MAX_RELATION_NAME);
+    for r in &project.relations {
+        let (origin, destination) = (find(s, &r.referenced, &r.referenced_field), find(s, &r.referencing, &r.referencing_field));
+        let (Some(Ok((origin, origin_key))), Some(Ok((destination, destination_key)))) = (&origin, &destination) else {
+            // (A layer that didn't come in, or hasn't the field, is the reason first.)
+            if origin.is_none() || destination.is_none() {
+                missing.push(r.name.as_str());
+            } else {
+                ambiguous.push(r.name.as_str());
+            }
+            continue;
+        };
+        let (origin, origin_key, destination, destination_key) =
+            (origin.clone(), origin_key.clone(), destination.clone(), destination_key.clone());
+        // A relationship names its layers: their names are unique (a layer added under a taken
+        // name, ignoring case, is numbered), so it relates the ones that came in.
+        let name = names.take(&r.name);
+        s.map_mut().editing.relationships.push(rustgis_map::design::Relationship {
+            name,
+            origin,
+            origin_key,
+            destination,
+            destination_key,
+        });
+    }
+    let listed = |names: &[&str]| {
+        let mut text = names.iter().take(8).copied().collect::<Vec<_>>().join(", ");
+        if names.len() > 8 {
+            text.push_str(", …");
+        }
+        format!("{}: {text}", names.len())
+    };
+    if !missing.is_empty() {
+        report.skipped("", format!("its relations between layers that didn't come in or haven't the fields ({})", listed(&missing)));
+    }
+    if !ambiguous.is_empty() {
+        report.skipped(
+            "",
+            format!(
+                "its relations to a layer that came in as several tables with the field, any of which it could mean ({})",
+                listed(&ambiguous)
+            ),
+        );
+    }
+    if names.cut > 0 {
+        report.approximated("", format!("relation names cut to {MAX_RELATION_NAME} characters ({})", names.cut));
+    }
+}
+
+/// The longest relationship name an import keeps.
+const MAX_RELATION_NAME: usize = 200;
+
+/// Names made unique as they are taken, ignoring case: a taken one numbered (`Name 2`, `Name 3`,
+/// …), kept to `max` characters. Each name's next number is remembered, so many alike don't
+/// count up from 2 every time.
+struct Names {
+    taken: std::collections::HashSet<String>,
+    next: std::collections::HashMap<String, u64>,
+    max: usize,
+    /// Names taken that were cut to `max`.
+    cut: usize,
+}
+
+impl Names {
+    fn new<'a>(taken: impl Iterator<Item = &'a str>, max: usize) -> Names {
+        Names { taken: taken.map(str::to_lowercase).collect(), next: std::collections::HashMap::new(), max, cut: 0 }
+    }
+
+    fn take(&mut self, base: &str) -> String {
+        let mut cut = base.chars().nth(self.max).is_some();
+        let base: String = base.chars().take(self.max).collect();
+        let key = base.to_lowercase();
+        let mut k = self.next.get(&key).copied().unwrap_or(1);
+        let name = loop {
+            let name = if k <= 1 {
+                base.clone()
+            } else {
+                let suffix = format!(" {k}");
+                let room = self.max.saturating_sub(suffix.len());
+                // (A name shortened to make room for its number is cut too.)
+                cut |= base.chars().nth(room).is_some();
+                base.chars().take(room).chain(suffix.chars()).collect()
+            };
+            if self.taken.insert(name.to_lowercase()) {
+                if cut {
+                    self.cut += 1;
+                }
+                break name;
+            }
+            k = k.saturating_add(1);
+        };
+        self.next.insert(key, k.saturating_add(1));
+        name
+    }
+}
+
+/// The most coordinate systems an import's bookmarks are read in: each is parsed, and a PROJ
+/// string stays in the run's table of systems.
+const MAX_BOOKMARK_CRS: usize = 100;
+
+/// Adds the project's bookmarks, each the place its extent shows (in its own coordinate system,
+/// else the project's), turned as QGIS turns it. One whose coordinate system doesn't read, or
+/// past the bookmarks a map keeps, is noted.
+///
+/// On the UI thread, with the rest of `project.importQgis`, which replaces the session's map: the
+/// work is bounded (at most 10,000 bookmarks, in at most [`MAX_BOOKMARK_CRS`] coordinate systems,
+/// each parsed once), well under a second.
+fn add_bookmarks(s: &mut Session, project: &qgis::Project, report: &mut Report) {
+    if project.bookmarks.is_empty() {
+        return;
+    }
+    let (w, h) = s.view_size;
+    let m = s.map_mut();
+    let view = m.camera;
+    // Names compare ignoring case, as a map's bookmarks do; a taken one is numbered.
+    let mut names = Names::new(m.bookmarks.iter().map(|b| b.name.as_str()), super::navigate::MAX_BOOKMARK_NAME);
+    // Those with no coordinate system, in one RustGIS can't read, and those whose place
+    // doesn't all lie in theirs.
+    let (mut none, mut unread, mut outside) = (Vec::new(), Vec::new(), Vec::new());
+    // Those the map's projection doesn't reach.
+    let mut beyond = Vec::new();
+    // Those in coordinate systems past the first `MAX_BOOKMARK_CRS`.
+    let mut many = Vec::new();
+    // Those read in the project's coordinate system, having none of their own.
+    let mut assumed = Vec::new();
+    // Those reaching past the latitudes a Web Mercator map shows (about 85°), fitted to the part
+    // it does.
+    let mut polar = Vec::new();
+    let mercator = matches!(m.flat(), rustgis_map::projection::Flat::Mercator);
+    let mut over = 0usize;
+    // One transformer per coordinate system.
+    let mut transformers: std::collections::HashMap<&str, Option<rustgis_data::raster::crs::Transformer>> =
+        std::collections::HashMap::new();
+    for b in &project.bookmarks {
+        let Some(crs) = b.crs.as_deref().or(project.crs.as_deref()) else {
+            none.push(b.name.as_str());
+            continue;
+        };
+        let own_crs = b.crs.is_some();
+        if !transformers.contains_key(crs) && transformers.len() >= MAX_BOOKMARK_CRS {
+            many.push(b.name.as_str());
+            continue;
+        }
+        let t = transformers.entry(crs).or_insert_with(|| rustgis_data::raster::crs::Crs::parse(crs).and_then(|c| c.transformer()).ok());
+        let Some(t) = t.as_ref() else {
+            unread.push(b.name.as_str());
+            continue;
+        };
+        let [x0, y0, x1, y1] = b.extent;
+        let corners: Vec<Coord> = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+            .into_iter()
+            .filter_map(|(x, y)| t.to_lonlat(Coord::new(x, y)))
+            .filter(|c| (-180.0..=180.0).contains(&c.x) && (-90.0..=90.0).contains(&c.y))
+            .collect();
+        let e = corners.iter().fold(Extent::EMPTY, |e, c| e.union(&Extent::new(c.x, c.y, c.x, c.y)));
+        if corners.len() < 4 || e.is_empty() {
+            outside.push(b.name.as_str());
+            continue;
+        }
+        if m.bookmarks.len() >= super::navigate::MAX_BOOKMARKS {
+            over += 1;
+            continue;
+        }
+        // QGIS's extent is the view's own rectangle, turned with it (measured: turning the map
+        // keeps its scale): fitted facing north, then turned.
+        m.camera.set_bearing(0.0);
+        // (Not one wholly past a Web Mercator map's 85°, nor one its projection doesn't reach.)
+        if !m.fit_lonlat(&e, w, h) {
+            beyond.push(b.name.as_str());
+            continue;
+        }
+        m.camera.set_bearing(-b.rotation);
+        if !own_crs {
+            assumed.push(b.name.as_str());
+        }
+        if mercator && (e.max_y > rustgis_geom::MAX_LAT || e.min_y < -rustgis_geom::MAX_LAT) {
+            polar.push(b.name.as_str());
+        }
+        let name = names.take(&b.name);
+        m.bookmarks.push(rustgis_map::Bookmark::new(name, m.camera));
+    }
+    m.camera = view;
+    let listed = |names: &[&str]| {
+        let mut text = names.iter().take(8).copied().collect::<Vec<_>>().join(", ");
+        if names.len() > 8 {
+            text.push_str(", …");
+        }
+        format!("{}: {text}", names.len())
+    };
+    if !none.is_empty() {
+        report.skipped("", format!("its bookmarks with no coordinate system, in a project without one ({})", listed(&none)));
+    }
+    if !unread.is_empty() {
+        report.skipped("", format!("its bookmarks in a coordinate system RustGIS can't read ({})", listed(&unread)));
+    }
+    if !assumed.is_empty() {
+        report.approximated(
+            "",
+            format!("its bookmarks with no coordinate system of their own, read in the project's ({})", listed(&assumed)),
+        );
+    }
+    if !polar.is_empty() {
+        report.approximated(
+            "",
+            format!("its bookmarks reaching past the 85° a Web Mercator map shows, fitted to the part it does ({})", listed(&polar)),
+        );
+    }
+    if !many.is_empty() {
+        report.skipped("", format!("its bookmarks in coordinate systems past the first {MAX_BOOKMARK_CRS} ({})", listed(&many)));
+    }
+    if !outside.is_empty() {
+        report.skipped("", format!("its bookmarks whose place lies outside their coordinate system's area ({})", listed(&outside)));
+    }
+    if !beyond.is_empty() {
+        report.skipped("", format!("its bookmarks whose place the map's projection doesn't reach ({})", listed(&beyond)));
+    }
+    if names.cut > 0 {
+        report.approximated("", format!("bookmark names cut to {} characters ({})", super::navigate::MAX_BOOKMARK_NAME, names.cut));
+    }
+    if over > 0 {
+        report.skipped("", format!("its bookmarks past those a map keeps ({over})"));
+    }
 }
 
 /// A coordinate system in degrees (EPSG:4326, ETRS89, NAD83, …), which QGIS draws as plate carrée.
@@ -627,8 +1358,22 @@ fn import_style(s: &mut Session, p: &Value) -> CmdResult {
         if style.raster.is_some() && style.renderer.is_none() {
             report.skipped(&name, "a raster's colouring, which a feature layer hasn't (only its opacity and scale range are taken)");
         }
+        // Its symbols' own fills are drawn, as with Apply Style; a style without symbols leaves
+        // No Fill on.
+        let no_fill_dropped = style.renderer.as_ref().and_then(|_| super::layer::end_no_fill_for_new_renderer(l));
         style.apply(l);
         check_fields(l, &name, &style.rules, style.categories_by.as_ref(), &style.bool_classes, &mut report);
+        if style.diagram.is_some() {
+            check_diagram(l, &name, &mut report);
+        }
+        // Bound: the layer shows the slider's window at once (nothing changes while it is off).
+        if bind_time(l, &name, style.time.as_deref(), &mut report) {
+            s.map_mut().apply_time();
+        }
+        // Last: `l` borrows `s`, so the notice waits until the layer's last use.
+        if let Some(notice) = no_fill_dropped {
+            s.notify(notice, false);
+        }
     }
     Ok(json!({"notes": report.notes.iter().map(note_json).collect::<Vec<_>>()}))
 }

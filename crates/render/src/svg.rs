@@ -17,8 +17,18 @@ use rustgis_map::layout::{ElementKind, FontFamily, Layout, LineHead, PT_PER_MM, 
 use crate::layout::{MAX_PIXELS, PageInfo, expand, page_geometry, record_element, render_element};
 
 /// Writes `layout` as an SVG document, pictures drawn at `dpi`, and the elements (id and name)
-/// drawn as pictures because their vectors would pass the budget; `None` when the page can't be drawn.
-pub fn layout_svg(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Option<(String, Vec<(u32, String)>)> {
+/// drawn as pictures because their vectors would pass the budget. Refuses a source changed during drawing.
+pub fn layout_svg(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Result<(String, Vec<(u32, String)>), String> {
+    let revisions = crate::layout::archive_revisions(layout, maps);
+    let result = layout_svg_inner(layout, maps, dpi, info);
+    revisions.finish_revision(
+        crate::layout::archive_revisions(layout, maps),
+        result,
+        "could not draw the page; check its map sources and export size",
+    )
+}
+
+fn layout_svg_inner(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Option<(String, Vec<(u32, String)>)> {
     let mut defs = vectors::Defs::default();
     let mut pictured = Vec::new();
     let mut body = elements(layout, maps, dpi, info, &mut defs, &mut pictured)?;
@@ -69,7 +79,7 @@ fn elements(
         let _ = writeln!(s, r#"<g id="element-{}" inkscape:label="{}" inkscape:groupmode="layer">"#, e.id, esc(&e.name));
         let (x, y, w, h) = (e.x, e.y, e.w, e.h);
         match &e.kind {
-            ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing, font, font_name } => {
+            ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing, font, font_name, rotation } => {
                 let first = layout.first_frame().and_then(|id| layout.element(id)).and_then(|f| match &f.kind {
                     ElementKind::MapFrame { map, center, scale, bearing, pitch, .. } => {
                         let m = maps.iter().find(|m| m.name.eq_ignore_ascii_case(map))?;
@@ -102,7 +112,7 @@ fn elements(
                 };
                 let _ = write!(
                     s,
-                    r#"<text x="{}" y="{}" font-family="{}" font-size="{}" font-weight="{}" font-style="{}" text-anchor="{anchor}" letter-spacing="{}"{} xml:space="preserve">"#,
+                    r#"<text x="{}" y="{}" font-family="{}" font-size="{}" font-weight="{}" font-style="{}" text-anchor="{anchor}" letter-spacing="{}"{} xml:space="preserve""#,
                     num(tx),
                     num(lines.first().map_or(y + em * 0.6, |l| l.0)),
                     esc(&family),
@@ -112,6 +122,12 @@ fn elements(
                     num(*letter_spacing * 1.33 / PT_PER_MM),
                     paint("fill", *color),
                 );
+                // Turned about the box's centre: clockwise, as SVG's `rotate` turns on a page whose
+                // y runs down.
+                if *rotation != 0.0 {
+                    let _ = write!(s, r#" transform="rotate({} {} {})""#, num(*rotation), num(x + w / 2.0), num(y + h / 2.0));
+                }
+                s.push('>');
                 match lines.as_slice() {
                     [(_, only)] => s.push_str(&esc(only)),
                     many => {
@@ -122,7 +138,7 @@ fn elements(
                 }
                 s.push_str("</text>\n");
             }
-            ElementKind::Rectangle { fill, outline, width, radius } => {
+            ElementKind::Rectangle { fill, outline, width, radius, dash } => {
                 let rx = radius.clamp(0.0, w.min(h) / 2.0);
                 let _ = writeln!(
                     s,
@@ -133,10 +149,10 @@ fn elements(
                     num(h),
                     num(rx),
                     paint("fill", *fill),
-                    stroke(*outline, *width)
+                    stroke(*outline, *width, dash.as_ref())
                 );
             }
-            ElementKind::Ellipse { fill, outline, width } => {
+            ElementKind::Ellipse { fill, outline, width, dash } => {
                 let _ = writeln!(
                     s,
                     r#"<ellipse cx="{}" cy="{}" rx="{}" ry="{}"{}{}/>"#,
@@ -145,10 +161,12 @@ fn elements(
                     num(w / 2.0),
                     num(h / 2.0),
                     paint("fill", *fill),
-                    stroke(*outline, *width)
+                    stroke(*outline, *width, dash.as_ref())
                 );
             }
-            ElementKind::Line { color, width, dir, head } => line(&mut s, dir.ends((x, y, w, h)), *color, *width, *head, ppp),
+            ElementKind::Line { color, width, dir, head, dash } => {
+                line(&mut s, dir.ends((x, y, w, h)), (*color, *width, dash.as_ref()), *head, ppp)
+            }
             _ => {
                 // Recorded at the export's dpi and written as vectors, placed by its pixel
                 // bounds; past the budget (its own, or the page's with the elements before it), a
@@ -229,7 +247,13 @@ fn picture_dpi(layout: &Layout, dpi: f64, drawn: impl Fn(&rustgis_map::layout::E
 }
 
 /// A line element as the page draws it: a shaft and a filled triangle for each head, in millimetres.
-fn line(s: &mut String, [(x0, y0), (x1, y1)]: [(f64, f64); 2], color: rustgis_map::Rgba, width: f64, head: LineHead, ppp: f64) {
+fn line(
+    s: &mut String,
+    [(x0, y0), (x1, y1)]: [(f64, f64); 2],
+    (color, width, dash): (rustgis_map::Rgba, f64, Option<&rustgis_map::symbology::Dash>),
+    head: LineHead,
+    ppp: f64,
+) {
     let w = (width / PT_PER_MM).max(0.5 / (ppp * PT_PER_MM));
     let (at_start, at_end) = (matches!(head, LineHead::Start | LineHead::Both), matches!(head, LineHead::End | LineHead::Both));
     let len = (x1 - x0).hypot(y1 - y0);
@@ -239,7 +263,8 @@ fn line(s: &mut String, [(x0, y0), (x1, y1)]: [(f64, f64); 2], color: rustgis_ma
     let inset = head_len * 0.8;
     let (sx, sy) = if at_start { (x0 + ux * inset, y0 + uy * inset) } else { (x0, y0) };
     let (ex, ey) = if at_end { (x1 - ux * inset, y1 - uy * inset) } else { (x1, y1) };
-    let _ = writeln!(s, r#"<path d="M{} {}L{} {}" fill="none"{}/>"#, num(sx), num(sy), num(ex), num(ey), stroke(color, w * PT_PER_MM));
+    let _ =
+        writeln!(s, r#"<path d="M{} {}L{} {}" fill="none"{}/>"#, num(sx), num(sy), num(ex), num(ey), stroke(color, w * PT_PER_MM, dash));
     let half = (head_len * 0.45).max(w);
     for ((tx, ty), (dx, dy)) in
         [(at_start, (x0, y0), (-ux, -uy)), (at_end, (x1, y1), (ux, uy))].into_iter().filter(|h| h.0).map(|h| (h.1, h.2))
@@ -259,10 +284,17 @@ fn line(s: &mut String, [(x0, y0), (x1, y1)]: [(f64, f64); 2], color: rustgis_ma
     }
 }
 
-/// ` stroke="…" stroke-width="…"` for an outline `width` points wide, or `stroke="none"`.
-fn stroke(color: rustgis_map::Rgba, width: f64) -> String {
+/// ` stroke="…" stroke-width="…"` for an outline `width` points wide, with its
+/// `stroke-dasharray` when `dash` gives one, or `stroke="none"`.
+fn stroke(color: rustgis_map::Rgba, width: f64, dash: Option<&rustgis_map::symbology::Dash>) -> String {
     if width > 0.0 {
-        format!(r#"{} stroke-width="{}""#, paint("stroke", color), num(width / PT_PER_MM))
+        let mut out = format!(r#"{} stroke-width="{}""#, paint("stroke", color), num(width / PT_PER_MM));
+        // The pattern in points, as the page's millimetres; SVG repeats an odd one as the page does.
+        if let Some(d) = dash {
+            let steps: Vec<String> = d.steps().iter().map(|v| num(f64::from(*v) / PT_PER_MM)).collect();
+            let _ = write!(out, r#" stroke-dasharray="{}""#, steps.join(" "));
+        }
+        out
     } else {
         r#" stroke="none""#.into()
     }
@@ -334,13 +366,68 @@ mod tests {
         layout
     }
 
+    /// A dashed line, rectangle and ellipse are written with `stroke-dasharray`, in the page's
+    /// millimetres; solid ones without it (#1763).
+    #[test]
+    fn dashes_are_written_as_a_dasharray() {
+        use rustgis_map::layout::LineDir;
+        use rustgis_map::symbology::Dash;
+        let black = rustgis_map::Rgba::rgb(0, 0, 0);
+        let svg = |dash: Option<Dash>| {
+            let mut layout = Layout::new("SVG", 100.0, 80.0);
+            layout.add(
+                "Line",
+                (10.0, 10.0, 60.0, 6.0),
+                ElementKind::Line { color: black, width: 1.0, dir: LineDir::Horizontal, head: LineHead::End, dash },
+            );
+            layout.add(
+                "Box",
+                (10.0, 30.0, 60.0, 30.0),
+                ElementKind::Rectangle { fill: black, outline: black, width: 1.0, radius: 0.0, dash },
+            );
+            layout.add("Oval", (10.0, 65.0, 20.0, 10.0), ElementKind::Ellipse { fill: black, outline: black, width: 1.0, dash });
+            layout_svg(&layout, &mut [], 96.0, &PageInfo::default()).unwrap().0
+        };
+        assert!(!svg(None).contains("stroke-dasharray"));
+        // 4 and 2 points are 1.058 and 0.529 mm, as the width is ([`PT_PER_MM`]).
+        let dashed = svg(Dash::new(&[4.0, 2.0]));
+        assert_eq!(dashed.matches(r#"stroke-dasharray="1.058 0.529""#).count(), 3, "{dashed}");
+        // The arrowhead is filled, not stroked: no dashes on it.
+        assert!(dashed.lines().filter(|l| l.contains("Z\"")).all(|l| !l.contains("dasharray")));
+    }
+
+    /// A turned text is written with SVG's `rotate` about its box's centre (#1763); an upright one
+    /// without it, as before.
+    #[test]
+    fn a_turned_text_is_written_rotated() {
+        let svg = |turn: f64| {
+            let mut layout = Layout::new("SVG", 100.0, 80.0);
+            let mut kind = ElementKind::text("Fonte: IBGE", 10.0, rustgis_map::Rgba::rgb(0, 0, 0), false);
+            if let ElementKind::Text { rotation, .. } = &mut kind {
+                *rotation = turn;
+            }
+            layout.add("Source", (10.0, 30.0, 60.0, 10.0), kind);
+            layout_svg(&layout, &mut [], 96.0, &PageInfo::default()).unwrap().0
+        };
+        assert!(!svg(0.0).contains("rotate("));
+        assert!(svg(-90.0).contains(r#"transform="rotate(-90 40 35)">Fonte: IBGE</text>"#), "{}", svg(-90.0));
+    }
+
     #[test]
     fn surrounds_on_a_frame_keep_the_picture_resolution() {
         let (mut layout, _, frame) = page();
         layout.add(
             "Legend",
             (10.0, 10.0, 40.0, 30.0),
-            ElementKind::Legend { frame, title: "Map legend".into(), all_classes: true, hide_other: false, exclude: vec![] },
+            ElementKind::Legend {
+                frame,
+                title: "Map legend".into(),
+                all_classes: true,
+                hide_other: false,
+                exclude: vec![],
+                columns: 1,
+                labels: Default::default(),
+            },
         );
         assert_eq!(picture_dpi(&layout, 600.0, |e| !written_as_svg(e)), 600.0);
         // A frame and an inset filling an A0 page that is already drawn at its pixel limit.
@@ -371,7 +458,15 @@ mod tests {
         let legend = layout.add(
             "Legend",
             (10.0, 10.0, 40.0, 30.0),
-            ElementKind::Legend { frame, title: "Map legend".into(), all_classes: true, hide_other: false, exclude: vec![] },
+            ElementKind::Legend {
+                frame,
+                title: "Map legend".into(),
+                all_classes: true,
+                hide_other: false,
+                exclude: vec![],
+                columns: 1,
+                labels: Default::default(),
+            },
         );
         let info = PageInfo::default();
         let (svg, pictured) = layout_svg(&layout, &mut maps, 72.0, &info).unwrap();
@@ -438,7 +533,7 @@ mod tests {
         assert!(svg.contains(&format!(r#"<g transform="translate({} {}) scale("#, num(x), num(y))), "{svg}");
         layout.element_mut(id).unwrap().x = 110.0;
         assert!(render_element(&layout, id, &mut maps, 36.0, &info).unwrap().is_none());
-        assert!(layout_svg(&layout, &mut maps, 36.0, &info).is_some(), "an off-page image is harmless");
+        assert!(layout_svg(&layout, &mut maps, 36.0, &info).is_ok(), "an off-page image is harmless");
     }
 
     #[test]
@@ -450,7 +545,7 @@ mod tests {
         let mut source = rustgis_map::source::SourceLayer::default();
         source.path = Some(dir.path().join("missing.shp").display().to_string());
         maps[0].layers[0].source = Some(source);
-        assert!(layout_svg(&layout, &mut maps, 72.0, &PageInfo::default()).is_none());
+        assert!(layout_svg(&layout, &mut maps, 72.0, &PageInfo::default()).is_err());
     }
 
     #[test]
@@ -492,6 +587,6 @@ mod tests {
         assert_eq!(esc("a & <b> \"c\" 'd'\u{1}"), "a &amp; &lt;b&gt; &quot;c&quot; &apos;d&apos;");
         assert_eq!(esc("valid\u{fffe}\u{ffff}\t🙂"), "valid\t🙂");
         assert_eq!(paint("fill", rustgis_map::Rgba::new(255, 0, 16, 128)), r##" fill="#ff0010" fill-opacity="0.502""##);
-        assert_eq!(stroke(rustgis_map::Rgba::rgb(0, 0, 0), 0.0), r#" stroke="none""#);
+        assert_eq!(stroke(rustgis_map::Rgba::rgb(0, 0, 0), 0.0, None), r#" stroke="none""#);
     }
 }

@@ -1,6 +1,8 @@
 """Tests for the rustgis Python package (run after `maturin develop`)."""
 
 import json
+import shutil
+import subprocess
 
 import pytest
 
@@ -278,6 +280,67 @@ def test_adding_data_returns_the_layer(sample, tmp_path):
     assert "Again" not in sample
 
 
+def test_adding_a_file_of_several_layers_returns_them_all(sample, tmp_path):
+    sites = sample.add_geojson(POINTS, name="Sites")
+    more = sample.add_geojson({"type": "FeatureCollection", "features": POINTS["features"][:1]}, name="More")
+    out = tmp_path / "two.gpkg"
+    sites.to_file(out)
+    more.to_file(out, mode="addTable", table_name="more_sites")
+    added = sample.add_data(out)
+    assert isinstance(added, list)
+    assert len(added) == 2
+    assert all(isinstance(layer, rustgis.Layer) for layer in added)
+    assert len({layer.id for layer in added}) == 2
+    assert sorted(layer.count for layer in added) == [1, 2]
+    # One table of it is a single layer.
+    one = sample.add_data(out, layer="more_sites")
+    assert isinstance(one, rustgis.Layer)
+    assert one.count == 1
+
+
+def test_layers_added_with_tables_are_all_returned(sample):
+    # Standalone tables read with the layers (or a count of tables left out) don't hide them.
+    ids = [layer["id"] for layer in sample.layers()][:2]
+    for tables in (["notes"], 40):
+        added = sample._outputs({"layer": ids[0], "layers": ids, "tables": tables})
+        assert [layer.id for layer in added] == ids
+    one = sample._outputs({"layers": ids[:1], "tables": []})
+    assert isinstance(one, rustgis.Layer)
+    assert one.id == ids[0]
+    assert sample._outputs({"tables": ["notes"]}) == {"tables": ["notes"]}
+    # Entries that aren't layer ids are left out before counting.
+    one = sample._outputs({"layers": [ids[0], "x", True, None]})
+    assert isinstance(one, rustgis.Layer)
+    assert one.id == ids[0]
+    one = sample._outputs({"layer": ids[1], "layers": ["x", True]})
+    assert isinstance(one, rustgis.Layer)
+    assert one.id == ids[1]
+
+
+def _gdal_reads(driver):
+    """Whether the GDAL programs the engine runs are on the PATH and read ``driver``."""
+    ogrinfo = shutil.which("ogrinfo")
+    if ogrinfo is None or shutil.which("ogr2ogr") is None:
+        return False
+    try:
+        formats = subprocess.run([ogrinfo, "--formats"], capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return any(line.strip().startswith(f"{driver} ") for line in formats.splitlines())
+
+
+@pytest.mark.skipif(not _gdal_reads("GeoJSONSeq"), reason="needs GDAL with GeoJSONSeq")
+def test_adding_a_gdal_file_of_several_layers_returns_them_all(sample, tmp_path):
+    # GeoJSON Sequence is read through GDAL; points and a line in one file are two layers.
+    line = {"type": "Feature", "geometry": {"type": "LineString", "coordinates": [[0, 0], [1, 1]]}, "properties": {}}
+    path = tmp_path / "mixed.geojsonl"
+    path.write_text("\n".join(json.dumps(f) for f in [*POINTS["features"], line]) + "\n")
+    added = sample.add_data(path)
+    assert isinstance(added, list)
+    assert len({layer.id for layer in added}) == 2
+    assert sorted(layer.count for layer in added) == [1, 2]
+
+
 def test_the_view(sample):
     sample.zoom_to(sample["Cities"])
     # Two layers that each reach past the other (Countries reaches the poles, past Web Mercator).
@@ -312,6 +375,33 @@ def test_a_layer_named_like_another_layers_id_reads_its_own_features(sample):
     assert True not in sample
 
 
+def test_a_layer_read_in_place_exports_its_whole_source(tmp_path):
+    session = rustgis.Session()
+    far = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-70.0, -30.0]}, "properties": {"name": "Far"}}
+    path = tmp_path / "streamed.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": POINTS["features"] + [far]}))
+    layer = session.add_data(path, stream=True)
+    # The view holds Hong Kong and Guangzhou, not Far.
+    session.zoom_to((113, 22, 115, 24))
+    session.to_png(width=64, height=64)
+    assert {f["properties"]["name"] for f in layer.to_geojson()["features"]} == {"Hong Kong", "Guangzhou", "Far"}
+    try:
+        import geopandas  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        assert len(layer.to_geopandas()) == 3
+    assert not any("couldn't be read" in text for text, _ in session.notices())
+    # A row that can't be read is left out and said.
+    bad = {"type": "Feature", "geometry": {"type": "Point", "coordinates": "x"}, "properties": {"name": "Bad"}}
+    path = tmp_path / "bad.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": POINTS["features"] + [bad]}))
+    layer = session.add_data(path, stream=True)
+    session.notices()
+    assert len(layer.to_geojson()["features"]) == 2
+    assert [text for text, _ in session.notices() if "1 row couldn't be read and was left out" in text]
+
+
 def test_a_layer_of_another_session_is_refused(sample):
     other = rustgis.Session(sample=True)
     stranger = other["Cities"]
@@ -319,3 +409,22 @@ def test_a_layer_of_another_session_is_refused(sample):
     with pytest.raises(rustgis.RustGISError, match="another session"):
         sample.remove_layer(stranger)
     assert "Cities" in sample
+
+
+def test_threads_set_the_count_for_the_process():
+    try:
+        s = rustgis.Session(threads=2)
+        t = s.run("gp.threads")
+        assert t["threads"] == 2
+        assert t["max"] == min(2, t["cores"])
+        # Every session of the process shares it.
+        assert rustgis.Session().run("gp.threads")["threads"] == 2
+        with pytest.raises(rustgis.RustGISError, match="1 to 1024"):
+            rustgis.Session(threads=0)
+        # A session that fails to start leaves the setting as it was.
+        with pytest.raises(rustgis.RustGISError):
+            rustgis.Session("/nonexistent/project.rgis", threads=3)
+        assert rustgis.Session().run("gp.threads")["threads"] == 2
+    finally:
+        rustgis.Session().run("gp.threads", threads=None)
+    assert rustgis.Session().run("gp.threads")["threads"] is None

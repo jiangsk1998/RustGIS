@@ -100,6 +100,21 @@ Rules shared by all of them:
 - **Comparing numbers and text.** A number and text that reads as a number compare as numbers
   (`'12' = 12` is true). Two texts compare as text, ignoring letter case, even when both read
   as numbers (`name = 'paris'` matches `Paris`; `'10' < '9'`; `LIKE` ignores case too).
+- **Comparing dates.** A date or date-time field compares with text that is a full ISO 8601
+  date (`issued >= '2026-01-01'`, `seen < '2026-03-05T08:00Z'`) as a date. A date is its
+  midnight, so `seen = '2026-03-05'` matches midnight only: use a range for the whole day.
+  Date-times with different offsets compare by instant, and one without a zone as if it were
+  UTC; a date is its UTC midnight, so `2026-03-05T01:00+02:00` (2026-03-04 at 23:00 UTC) falls
+  before `'2026-03-05'`. Converting that date-time into a date field keeps the day it shows,
+  2026-03-05. Text that isn't a full date (`'2026'`) compares as text, against the date's ISO text.
+  A date compares only with text or another date: against a number (`issued >= 20260101`,
+  `issued > year`, arithmetic) it's an error, so put the date in quotes, as `YYYY-MM-DD`. A
+  date written without dashes in quotes (`issued >= '20260101'`) is an error too; one that
+  comes from a function or a text field (`coalesce('20260101')`, a `YYYYMMDD` column) compares
+  as text, so write dates with dashes. Use `||` to join text.
+  Arithmetic on a date is an error for now, also on one reached through `coalesce`, `nullif`,
+  `if` or `CASE` (`coalesce(issued) + 1`), and so are the number functions (`abs`, `round`,
+  `min`, …) given a date.
 - **Arithmetic** reads text as a number when it is one (`'12' + 1` is 13). `+` joins text that
   isn't (`name + ' km'`); `-`, `*`, `/` on such text give null.
 - **Nulls.** Arithmetic with a null gives null. A comparison with a null is *unknown*: it
@@ -144,10 +159,24 @@ Rules shared by all of them:
 Areas and lengths are measured on the WGS 84 ellipsoid, as
 [Calculate Geometry](editing.md) in the attribute table measures them, whatever
 the layer's coordinate system (with the same
-[two exceptions](analysis.md#geoprocessing-tools), a ring with a full-turn edge and one
-winding around a pole). On a feature with no geometry, or coordinates that aren't
+[exception](analysis.md#geoprocessing-tools) for a ring winding around a pole; a ring with a
+full-turn edge, such as a globe-wide band, counts its whole parallels there too). On a feature with no geometry, or coordinates that aren't
 longitudes and latitudes, they are null. Measuring another kind of layer (`$area` on lines), or a
 unit that isn't one of those, is an error.
+An area expression is also refused if the layer contains a ring through both poles
+whose winding exceeds one whole surface. The error counts the affected rings and features;
+it does not store an impossible area or silently replace it with null. Perimeter expressions,
+ordinary polar caps and whole-world rectangles still work. Attribute rules check only the edited rows, so an unrelated ambiguous feature does not block a clean-row edit. Geometry edits that would invalidate a saved area filter, symbol or label expression are refused and rolled back.
+
+Saved display expressions are checked against the layer’s fields separately from current area values. When an opened project or refreshed layer contains an ambiguous area, the affected features’ area values are unavailable and a counted notice explains this; the expressions are retained and clean features still evaluate normally. Attribute-only edits can retain that existing geometry; new or changed geometry must pass the display check. Area constraints also guard archive restoration. An unrelated field deletion does not discard a valid area expression or rule, and source repair still checks its fields. Unique Values validates the rows kept by the definition query. Streamed display expressions report affected features once per installed window, with a count scoped to the decoded window. Interactive streamed area queries retain clean matches and report unavailable areas among decoded features, including rows their query omits. Full-resolution streamed exports still stop at the first ambiguous decoded chunk and state the scope of that count.
+
+Report filters are retained when a report is imported or fitted to another layer with the
+required fields. Building a report whose filter uses an ambiguous area returns a counted error
+instead of dropping the filter and listing every record.
+
+Live expression editors check fields and syntax while typing, so a retained area clause does
+not claim that clean features have lost their labels. **Check** and **Apply** still validate
+the data and report an ambiguous area.
 
 ## Limits
 

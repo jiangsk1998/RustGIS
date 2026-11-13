@@ -6,7 +6,7 @@
 //! ribbon's label groups edit and choose the same one (#858). The map-wide settings (Lock, Pause,
 //! View Unplaced) are on the ribbon only, and Convert on the ribbon and the layer's menu.
 
-use egui::{Align2, CornerRadius, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
+use egui::{CornerRadius, RichText, Ui, vec2};
 use rustgis_engine::map::symbology::{
     DEFAULT_LABEL_CLASS, HALO_WIDTH, LABEL_SIZE, LabelClass, Labeling, MAX_LABEL_CLASSES, label_class_name,
 };
@@ -16,8 +16,7 @@ use serde_json::{Value, json};
 
 use crate::RustGisApp;
 use crate::textform::LABEL_W;
-use crate::theme::{Tokens, c32, regular, rgba, semibold};
-use crate::widgets::text_w;
+use crate::theme::{Tokens, c32, rgba, semibold};
 
 /// The placements as they sit around a feature, row by row; Automatic sits apart, above them.
 const GRID: [[LabelPlacement; 3]; 3] = [
@@ -81,72 +80,18 @@ enum Topic {
 fn topic(ui: &mut Ui, t: &Tokens) -> Topic {
     let key = egui::Id::unique("label_pane_topic");
     let mut tab = ui.data(|d| d.get_temp::<Topic>(key)).unwrap_or(Topic::Content);
-    let tabs = [
-        ("Content", "unique", Topic::Content),
-        ("Symbol", "g_text", Topic::Symbol),
-        ("Position", "placement", Topic::Position),
-        ("Range", "scale_label", Topic::Range),
-    ];
-    let font = |on: bool| if on { semibold(12.5) } else { regular(12.5) };
-    let (pad, icon, gap, h) = (8.0, 16.0, 5.0, 30.0);
-    // Measured in the chosen tab's font, so the tabs don't move as another is chosen.
-    let text = tabs.map(|(label, _, _)| text_w(ui, tl!(label), semibold(12.5)));
-    let room = ui.available_width() - 2.0 * (tabs.len() as f32 - 1.0);
-    // A tab's room besides its name, with or without its icon.
-    let extra = |icons: bool| 2.0 * pad + if icons { icon + gap } else { 0.0 };
-    let fits = |icons: bool| text.iter().map(|w| w + extra(icons)).sum::<f32>() <= room;
-    let (icons, names) = if fits(true) {
-        (true, true)
-    } else if fits(false) {
-        (false, true)
-    } else {
-        (true, false)
-    };
-    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
-    let base = row.max.y - 0.5;
-    ui.painter().hline(row.x_range(), base, Stroke::new(1.0, t.border));
-    let mut x = row.min.x;
-    for ((label, name, it), w) in tabs.into_iter().zip(text) {
-        let shown = tl!(label);
-        let on = it == tab;
-        let w = if names { extra(icons) + w } else { 36.0 };
-        let r = Rect::from_min_size(pos2(x, row.min.y), vec2(w, h));
-        x = r.max.x + 2.0;
-        let mut resp = ui.interact(r, key.with(label), Sense::click());
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, shown));
-        let p = ui.painter();
-        let body = Rect::from_min_max(pos2(r.min.x, r.min.y + 3.0), r.max);
-        let round = CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 };
-        if on {
-            p.rect_filled(body, round, t.pane);
-            p.rect_stroke(body, round, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
-            // Open onto the pane: the line under the tabs stops at the chosen one.
-            p.rect_filled(Rect::from_min_max(pos2(r.min.x + 1.0, base - 1.0), pos2(r.max.x - 1.0, row.max.y + 1.0)), 0.0, t.pane);
-            p.rect_filled(
-                Rect::from_min_max(pos2(r.min.x + 8.0, r.max.y - 3.0), pos2(r.max.x - 8.0, r.max.y - 1.0)),
-                CornerRadius::same(1),
-                t.accent,
-            );
-        } else if resp.hovered() {
-            p.rect_filled(body.shrink2(vec2(1.0, 2.0)), CornerRadius::same(5), t.hover);
-        }
-        let cy = body.center().y - 1.0;
-        if !names {
-            crate::icons::paint(p, Rect::from_center_size(pos2(r.center().x, cy), vec2(icon, icon)), name, t.icon, t.accent);
-            resp = resp.on_hover_text(shown);
-        } else {
-            let mut tx = r.min.x + pad;
-            if icons {
-                crate::icons::paint(p, Rect::from_min_size(pos2(tx, cy - icon / 2.0), vec2(icon, icon)), name, t.icon, t.accent);
-                tx += icon + gap;
-            }
-            let ink = if on { t.text } else { t.text_dim };
-            p.text(pos2(tx, cy), Align2::LEFT_CENTER, shown, font(on), ink);
-        }
-        if resp.clicked() {
-            tab = it;
-        }
-    }
+    crate::widgets::tabs(
+        ui,
+        t,
+        key,
+        &mut tab,
+        &[
+            crate::widgets::Tab { label: "Content", icon: "unique", hover: None, value: Topic::Content },
+            crate::widgets::Tab { label: "Symbol", icon: "g_text", hover: None, value: Topic::Symbol },
+            crate::widgets::Tab { label: "Position", icon: "placement", hover: None, value: Topic::Position },
+            crate::widgets::Tab { label: "Range", icon: "scale_label", hover: None, value: Topic::Range },
+        ],
+    );
     ui.data_mut(|d| d.insert_temp(key, tab));
     ui.add_space(4.0);
     tab
@@ -940,6 +885,7 @@ fn position(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
         });
         if cur.along_line() {
             repeat(app, ui, l, c);
+            line_offset(app, ui, l, c);
             // One label a line: other places along it, tried when its own won't do (#1187). Each
             // repeat is already a place of its own.
             if c.it.repeat.is_none() {
@@ -998,7 +944,7 @@ fn crowding(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
                         .range(CALLOUT_REACH)
                         .speed(1.0)
                         .max_decimals(0)
-                        .prefix(tl!("at most "))
+                        .prefix(format!("{} ", tl!("at most")))
                         .suffix(" pt"),
                 )
                 .labelled_by(input_label.id)
@@ -1066,6 +1012,57 @@ fn repeat(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
                     run(app, "labels.placement", c.params(json!({"repeat": x})));
                 },
             );
+        });
+        ui.end_row();
+    });
+}
+
+/// Along a line, how far the label sits from it (points, to the text's nearest edge), above it as
+/// the text reads or below it (#1187); at 0, on the line, and which side waits for a distance.
+fn line_offset(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
+    use rustgis_engine::map::symbology::{LABEL_OFFSET, label_line_offset};
+    let id = l.id;
+    let cur = c.it.line_offset;
+    // The side is kept apart from the distance, so passing through 0 (dragged or typed) doesn't
+    // turn a label below its line into one above it.
+    let side_key = ui.make_persistent_id(("line_offset_below", id, c.name));
+    if cur != 0.0 {
+        ui.data_mut(|d| d.insert_temp(side_key, cur < 0.0));
+    }
+    let below = ui.data(|d| d.get_temp(side_key)).unwrap_or(false);
+    let side = |below: bool| if below { -1.0 } else { 1.0 };
+    grid(ui, "line_offset", |ui| {
+        let input_label = ui.label(tl!("Distance"));
+        ui.horizontal(|ui| {
+            let mut v = f64::from(cur.abs());
+            let r = ui
+                .add(egui::DragValue::new(&mut v).update_while_editing(false).range(0.0..=*LABEL_OFFSET.end()).speed(0.1).suffix(" pt"))
+                .labelled_by(input_label.id)
+                .on_hover_text(tl!("How far the label sits from the line, to the text's nearest edge; 0 is on the line."));
+            crate::ribbon::live_drag(
+                app,
+                ui,
+                &r,
+                f64::from(cur.abs()),
+                v,
+                |app, x| {
+                    if let Some(k) = app.session.map_mut().layer_mut(id).and_then(|l| class_mut(&mut l.labels, c.name)) {
+                        k.line_offset = label_line_offset(x * side(below));
+                    }
+                },
+                |app, x| {
+                    run(app, "labels.placement", c.params(json!({"lineOffset": x * side(below)})));
+                },
+            );
+            // Which side, once it is off the line.
+            ui.add_enabled_ui(cur != 0.0, |ui| {
+                let mut pick = below;
+                ui.radio_value(&mut pick, false, tl!("Above"));
+                ui.radio_value(&mut pick, true, tl!("Below"));
+                if pick != below {
+                    run(app, "labels.placement", c.params(json!({"lineOffset": -cur})));
+                }
+            });
         });
         ui.end_row();
     });
@@ -1461,6 +1458,47 @@ mod tests {
         assert!(h.query_by_role_and_label(Role::CheckBox, BOX).is_none(), "not for polygons");
     }
 
+    /// A line layer's labels sit a distance from the line (#1187): the row is there for a placement
+    /// along the line, the side waits for a distance, and Below puts the label under the line.
+    #[test]
+    fn a_distance_from_the_line_is_set_in_the_pane() {
+        use egui::accesskit::Role;
+        let mut h = harness(with_cities());
+        h.run();
+        let rivers = layer_id(h.state(), "Rivers");
+        h.state_mut().session.run("layer.select", &json!({"layer": rivers})).unwrap();
+        h.state_mut().session.run("labels.placement", &json!({"layer": rivers, "position": "center"})).unwrap();
+        h.run();
+        open_tab(&mut h, "Position");
+        let offset =
+            |h: &egui_kittest::Harness<'_, RustGisApp>| h.state().session.map().layer_by_name("Rivers").unwrap().labels.default.line_offset;
+        assert!(h.query_by_role_and_label(Role::SpinButton, "Distance").is_none(), "not off the line");
+        h.state_mut().session.run("labels.placement", &json!({"layer": rivers, "position": "parallel"})).unwrap();
+        h.run();
+        assert!(h.query_by_role_and_label(Role::SpinButton, "Distance").is_some());
+        assert!(h.get_by_role_and_label(Role::RadioButton, "Below").accesskit_node().is_disabled(), "on the line, no side");
+        h.state_mut().session.run("labels.placement", &json!({"layer": rivers, "lineOffset": 3})).unwrap();
+        h.run();
+        h.get_by_role_and_label(Role::RadioButton, "Below").click();
+        h.run();
+        assert_eq!(offset(&h), -3.0);
+        h.get_by_role_and_label(Role::RadioButton, "Above").click();
+        h.run();
+        assert_eq!(offset(&h), 3.0);
+        // Below, back on the line, then off it again: still below.
+        h.get_by_role_and_label(Role::RadioButton, "Below").click();
+        h.run();
+        h.state_mut().session.run("labels.placement", &json!({"layer": rivers, "lineOffset": 0})).unwrap();
+        h.run();
+        assert!(h.get_by_role_and_label(Role::RadioButton, "Below").accesskit_node().is_disabled(), "on the line");
+        h.get_by_role_and_label(Role::SpinButton, "Distance").focus();
+        h.run();
+        h.get_by_role_and_label(Role::SpinButton, "Distance").type_text("2");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(offset(&h), -2.0, "the side waits for a distance");
+    }
+
     /// A line layer's labels can try other places along the line (#1187): the box is there for a
     /// placement along the line without a repeat, and hiding it leaves what it was set to.
     #[test]
@@ -1817,6 +1855,35 @@ mod tests {
         let app = h.state_mut();
         app.run("edit.undo", json!(null)).unwrap();
         assert_eq!(clause(app).as_deref(), Some("pop_max > 5000000"), "undo brings the clause back");
+    }
+
+    #[test]
+    fn retained_area_clauses_do_not_claim_clean_features_are_unlabelled() {
+        use rustgis_engine::data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value};
+        let mut app = with_cities();
+        let id = app.session.active_layer.unwrap();
+        let c = Coord::new;
+        let mut data = Dataset::new("Area labels", GeometryType::Polygon, vec![Field::new("n", FieldType::Double)]);
+        for (n, ring) in [
+            (1.0, vec![c(0.0, 0.0), c(1.0, 0.0), c(1.0, 1.0), c(0.0, 0.0)]),
+            (2.0, vec![c(-180.0, 90.0), c(180.0, 90.0), c(-90.0, -90.0), c(90.0, -80.0)]),
+        ] {
+            data.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Value::Float(n)]);
+        }
+        let layer = app.session.map_mut().layer_mut(id).unwrap();
+        layer.dataset = data;
+        layer.labels.enabled = true;
+        layer.labels.default.field = "n".into();
+        layer.labels.default.where_ = Some("$area > 0".into());
+        layer.definition_query = Some("n = 1".into());
+        let mut h = harness(app);
+        h.run();
+        assert!(h.query_by_label_contains("This clause no longer reads").is_none());
+        assert_eq!(h.state().session.map().layer(id).unwrap().visible_rows(), [true, false]);
+        h.get_by_label("Check").click();
+        h.run();
+        assert!(h.query_by_label_contains("area is ambiguous").is_some());
+        assert_eq!(clause(h.state()).as_deref(), Some("$area > 0"));
     }
 
     /// A clause that doesn't read says why, and Apply leaves the layer as it was.

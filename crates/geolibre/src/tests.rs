@@ -134,6 +134,73 @@ fn inputs_of_several_layers_are_layer_lists() {
 }
 
 #[test]
+fn composite_bands_legacy_manifest_selects_and_stages_rasters_in_order() {
+    // The input/output subset of `geolibre manifests` in 1.8.0 and 1.8.1 (#1684).
+    // Unlike the generic list fixture above, the real input has no role or cardinality.
+    let manifest = json!({"id": "composite_bands", "params": [
+        {"name": "inputs", "data_kind": "string", "required": true, "schema": {"kind": "string"}},
+        {"name": "output", "io_role": "output", "data_kind": "raster", "schema": {"kind": "output"}}
+    ]});
+    let (spec, meta) = spec_of(&manifest).unwrap();
+    assert_eq!(spec.params[0].kind, ParamKind::RasterLayers);
+    let mut f = Fixture::new();
+    f.dem.bands[0].data.fill(14.3);
+    // An in-memory layer and an embedded file must both be staged, in the selected order.
+    for (names, values) in [
+        (json!("dem;embedded"), [14.3, 0.0]),
+        (json!("embedded;dem"), [0.0, 14.3]),
+        (json!(["dem", "embedded"]), [14.3, 0.0]),
+        (json!(["embedded", "dem"]), [0.0, 14.3]),
+    ] {
+        let params = rustgis_analysis::resolve_params(&spec, &json!({"inputs": names})).unwrap();
+        let job = prepare_with(&spec, &meta, &f, &params).unwrap();
+        assert_eq!(job.crs, f.dem.crs);
+        assert_eq!(job.files.len(), 2);
+        for ((name, bytes), value) in job.files.iter().zip(values) {
+            let raster = rustgis_data::raster::read_bytes(name, bytes).unwrap();
+            assert_eq!(raster.bands[0].data[0], value);
+        }
+        let staged = job.files.iter().map(|(name, _)| format!("/work/{name}")).collect::<Vec<_>>().join(";");
+        assert_eq!(job.argv("/work"), [format!("--inputs={staged}"), "--output=/work/output.tif".into()]);
+    }
+    // Refuse malformed arrays rather than silently dropping an entry or the entire input.
+    for invalid in [json!(["dem", 7]), json!([])] {
+        let error = prepare_with(&spec, &meta, &f, &json!({"inputs": invalid})).unwrap_err();
+        assert!(error.contains("input layer"), "{error}");
+    }
+    // Other tools' string options must not become raster inputs just because of their name.
+    let mut unrelated = manifest.clone();
+    unrelated["id"] = json!("other_tool");
+    assert_eq!(spec_of(&unrelated).unwrap().0.params[0].kind, ParamKind::Text);
+    // A newer runner's explicit metadata keeps its usual meaning.
+    let mut explicit = manifest;
+    explicit["params"][0] = json!({"name":"inputs", "io_role":"input", "data_kind":"vector", "schema":{"cardinality":"many"}});
+    assert_eq!(spec_of(&explicit).unwrap().0.params[0].kind, ParamKind::VectorLayers);
+}
+
+#[test]
+fn composite_bands_runner_preserves_selected_band_order() {
+    let Some(mut f) = setup() else { return };
+    f.dem.bands[0].data.fill(14.3);
+    for (names, values) in [
+        (json!("dem;embedded"), [14.3, 0.0]),
+        (json!("embedded;dem"), [0.0, 14.3]),
+        (json!(["dem", "embedded"]), [14.3, 0.0]),
+        (json!(["embedded", "dem"]), [0.0, 14.3]),
+    ] {
+        let result = rustgis_analysis::run("geolibre:composite_bands", &f, &json!({"inputs": names})).unwrap();
+        let Output::Layers(layers) = result.output else { panic!("layers") };
+        let Some(OutputLayer::Raster { bytes, file_name, .. }) = layers.first() else { panic!("a raster: {layers:?}") };
+        let raster = rustgis_data::raster::read_bytes(file_name, bytes).unwrap();
+        assert_eq!(raster.bands.len(), 2);
+        assert_eq!(raster.crs, f.dem.crs);
+        for (band, value) in raster.bands.iter().zip(values) {
+            assert!((band.data[0] - value).abs() < 1e-5, "{} != {value}", band.data[0]);
+        }
+    }
+}
+
+#[test]
 fn field_suggestions_keep_categorical_values_and_plural_lists() {
     let manifest = json!({"id": "field_forms", "params": [
         {"name": "input", "io_role": "input", "data_kind": "vector"},
@@ -372,4 +439,47 @@ fn a_local_geotiff_layer_is_staged_by_its_path() {
     assert_eq!(job.argv("/work"), [format!("--raster={}", path.display()), "--output=/work/output.tif".to_string()]);
     assert_eq!(job.crs, Crs::from_epsg(4527).unwrap());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A default that isn't text, on a field the form shows as text, comes back as its JSON text and
+/// is still the default (#1517: `topo_render`'s list went to the runner, which refused it).
+#[test]
+fn a_default_sent_back_as_text_is_left_to_the_runner() {
+    let f = Fixture::new();
+    let manifest = json!({
+        "id": "render", "display_name": "Render", "category": "Terrain", "summary": "",
+        "defaults": {"colour": [255, 255, 255, 255], "reverse": false, "ambient": 0.2, "palette": "[soft]"},
+        "params": [
+            {"name": "dem", "io_role": "input", "data_kind": "raster", "required": true, "schema": {"kind": "input"}},
+            {"name": "colour", "data_kind": "string", "required": false, "schema": {"kind": "string"}},
+            {"name": "reverse", "data_kind": "string", "required": false, "schema": {"kind": "string"}},
+            {"name": "ambient", "data_kind": "string", "required": false, "schema": {"kind": "string"}},
+            {"name": "palette", "data_kind": "string", "required": false, "schema": {"kind": "string"}},
+            {"name": "output", "io_role": "output", "data_kind": "raster", "required": false, "schema": {"kind": "output"}}
+        ]
+    });
+    let (spec, meta) = spec_of(&manifest).unwrap();
+    let argv = |params: Value| {
+        let params = rustgis_analysis::resolve_params(&spec, &params).unwrap();
+        prepare_with(&spec, &meta, &f, &params).unwrap().argv("/work")
+    };
+    let bare = ["--dem=/work/in0-embedded.tif", "--output=/work/output.tif"];
+    // The form's text, the same list spaced out, and the JSON a script or the MCP gives.
+    let text = json!({"dem": "embedded", "colour": "[255,255,255,255]", "reverse": "false", "ambient": "0.2", "palette": "[soft]"});
+    assert_eq!(argv(text), bare);
+    assert_eq!(argv(json!({"dem": "embedded", "colour": "[255, 255, 255, 255]"})), bare);
+    assert_eq!(argv(json!({"dem": "embedded", "colour": [255, 255, 255, 255], "reverse": false, "ambient": 0.2})), bare);
+    // Changed values go. Text is compared as text: quoted, it isn't the text default.
+    let changed = json!({"dem": "embedded", "colour": "[0,0,0,255]", "reverse": "true", "ambient": "0.5", "palette": "\"[soft]\""});
+    assert_eq!(
+        argv(changed),
+        [
+            "--dem=/work/in0-embedded.tif",
+            "--colour=[0,0,0,255]",
+            "--reverse=true",
+            "--ambient=0.5",
+            "--palette=\"[soft]\"",
+            "--output=/work/output.tif"
+        ]
+    );
 }

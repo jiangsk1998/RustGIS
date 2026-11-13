@@ -27,6 +27,11 @@ pub(crate) struct TileOutput {
     pub attribution: Vec<String>,
     pub pending: bool,
     pub errors: Vec<String>,
+    /// Raster layers read in place drawn from less than the view needs (a coarser level, tiles
+    /// they couldn't read), by id: shown, with the error among `errors`; an export refuses them.
+    pub partial: Vec<u32>,
+    /// Raster layers read in place whose tiles are still on their way, by id.
+    pub pending_in_place: Vec<u32>,
 }
 
 impl TileOutput {
@@ -276,6 +281,8 @@ pub struct Live {
     pub quads: Vec<TileQuad>,
     /// Tiles in view are still on their way.
     pub pending: bool,
+    /// What resolving or placing these tiles left out, reported just as for a full drawing.
+    pub error: Option<String>,
 }
 
 /// A live raster tile layer's tiles for `view` ([`DrawCmd::LiveTiles`]): over the view, fetching
@@ -284,6 +291,13 @@ pub struct Live {
 /// `None` when the layer draws anything but raster tiles (its style changed since the scene was
 /// drawn). Cheap: cache lookups.
 pub fn live(spec: &Spec, opacity: f32, view: &View) -> Option<Live> {
+    let archive = matches!(spec.kind, Kind::PmTiles | Kind::MbTiles).then_some(spec.url.as_str());
+    let revision = rustgis_tiles::cache::archive_revision(archive);
+    let output = live_inner(spec, opacity, view);
+    (revision == rustgis_tiles::cache::archive_revision(archive)).then_some(output).flatten()
+}
+
+fn live_inner(spec: &Spec, opacity: f32, view: &View) -> Option<Live> {
     let res = view.camera.res;
     let ppp = view.pixels_per_point as f32;
     let frame = Frame {
@@ -303,7 +317,7 @@ pub fn live(spec: &Spec, opacity: f32, view: &View) -> Option<Live> {
     let coarse = Frame { m_per_px: frame.m_per_px * 8.0, ..frame };
     let _ = rustgis_tiles::place_raster(spec, opacity, &coarse, &fetch, &fetch);
     let origin = [view.camera.center.x, view.camera.center.y];
-    Some(Live { quads: p.tiles.iter().map(|q| quad(q, origin)).collect(), pending: p.pending })
+    Some(Live { quads: p.tiles.iter().map(|q| quad(q, origin)).collect(), pending: p.pending, error: p.error })
 }
 
 /// Draws the map's visible tile layers at `which` (indices, top first), bottom first. With
@@ -383,7 +397,12 @@ pub(crate) fn draw(
                 && let Some(p) = rustgis_tiles::place_raster(&s, t.opacity, &frame, &fetch, &reach)
                 && crate::flush_acc(pm, g.cmds, g.dirty).is_some()
             {
-                g.cmds.push(DrawCmd::LiveTiles { spec: s, opacity: t.opacity });
+                let archive_revision = if matches!(s.kind, Kind::PmTiles | Kind::MbTiles) {
+                    rustgis_tiles::cache::archive_revision([s.url.as_str()])
+                } else {
+                    0
+                };
+                g.cmds.push(DrawCmd::LiveTiles { name: t.name.clone(), spec: s, opacity: t.opacity, archive_revision });
                 let d = rustgis_tiles::Drawn { labels: Vec::new(), attribution: p.attribution, pending: p.pending, error: p.error };
                 collect(d, t, &mut out);
                 continue;
@@ -859,11 +878,20 @@ pub(crate) mod tests {
     /// Fetches under `stuck.test/`, left unanswered until a test lets them go: another's fetch
     /// still under way.
     static STUCK: std::sync::Mutex<Vec<rustgis_tiles::cache::Done>> = std::sync::Mutex::new(Vec::new());
+    /// Fetches under `tiles.test/held/`, kept in [`HELD`] while `HOLD` is set (a layout page drawn
+    /// short of its frame's tiles), answered at once after.
+    static HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static HELD: std::sync::Mutex<Vec<rustgis_tiles::cache::Done>> = std::sync::Mutex::new(Vec::new());
+
+    pub(crate) static PRIVATE_SPRITE_REQUESTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     /// Serves tiles and documents for `https://tiles.test/…` without a network. Under `split/`,
     /// zoom 11 is red, zoom 13 blue, and zoom 12 never arrives.
     pub(crate) fn serve() {
         rustgis_tiles::cache::set_fetcher(|url, done| {
+            if url.starts_with("http://127.0.0.1/mesh-private-only") {
+                PRIVATE_SPRITE_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             let color = |r, g, b| {
                 let mut pm = tiny_skia::Pixmap::new(256, 256).unwrap();
                 pm.fill(tiny_skia::Color::from_rgba8(r, g, b, 255));
@@ -877,6 +905,12 @@ pub(crate) mod tests {
                 PARKED.lock().unwrap().push(done);
             } else if url.starts_with("https://stuck.test/") {
                 STUCK.lock().unwrap().push(done);
+            } else if url.starts_with("https://tiles.test/held/") {
+                if HOLD.load(std::sync::atomic::Ordering::SeqCst) {
+                    HELD.lock().unwrap().push(done);
+                } else {
+                    done(Ok(color(220, 20, 20)));
+                }
             } else if url.starts_with("https://wms.test/") || url.starts_with("https://wmts.test/") {
                 // A service drawing in a system of its own (#769): green, and what it was asked.
                 ASKED.lock().unwrap().push(url.clone());
@@ -892,6 +926,19 @@ pub(crate) mod tests {
             } else if url == "https://tiles.test/style.json" {
                 let style = r##"{"version": 8, "sources": {}, "layers": [{"id": "bg", "type": "background", "paint": {"background-color": "#2050e0"}}]}"##;
                 done(Ok(style.as_bytes().to_vec()));
+            } else if url == "https://tiles.test/missing-source-style.json" {
+                let style = serde_json::json!({"version": 8,
+                "sources": {
+                    "s": {"type": "raster", "tiles": ["https://tiles.test/red/{z}/{x}/{y}.png"]},
+                    "unsupported": {"type": "geojson", "data": {"type": "FeatureCollection", "features": []}}
+                },
+                "layers": [
+                    {"id": "valid", "type": "raster", "source": "s"},
+                    {"id": "no-source", "type": "raster"},
+                    {"id": "no-definition", "type": "raster", "source": "absent"},
+                    {"id": "no-reader", "type": "raster", "source": "unsupported"}
+                ]});
+                done(Ok(serde_json::to_vec(&style).unwrap()));
             } else {
                 done(Err("404".into()));
             }
@@ -1188,6 +1235,25 @@ pub(crate) mod tests {
         assert_eq!(r.tile_errors.len(), 1, "{:?}", r.tile_errors);
     }
 
+    /// Both full drawings and per-frame placement retain the counted missing-source notice.
+    #[test]
+    fn missing_source_diagnostics_reach_full_and_live_drawings() {
+        serve();
+        let mut map = Map::new("Map");
+        map.tiles.push(TileLayer::new("Broken style", TileKind::Style, "https://tiles.test/missing-source-style.json"));
+        let camera = Camera { center: lonlat_to_merc(Coord::new(10.0, 50.0)), res: 2000.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 200.0, height: 100.0, pixels_per_point: 1.0, camera, sky: false };
+        let full = crate::render_complete(&mut map, &view).unwrap();
+        let live = super::live(&super::spec(&map.tiles[0]), 1.0, &view).unwrap();
+        let note = live.error.unwrap();
+        assert!(note.contains("3 style layer(s) skipped"), "{note}");
+        for id in ["no-source", "no-definition", "no-reader"] {
+            assert!(note.contains(id), "{note}");
+        }
+        assert_eq!(full.tile_errors, [format!("Broken style: {note}")]);
+        assert!(!live.quads.is_empty(), "the valid raster layer still draws");
+    }
+
     /// A view across the antimeridian on the globe draws the tiles on both sides of it: the
     /// mosaic once ran from the westernmost point sampled east of 180° to the easternmost west
     /// of it, and left out the strip between 180° and the nearest sample (#223).
@@ -1385,5 +1451,63 @@ pub(crate) mod tests {
         m.projection = Projection::Globe;
         let p = pixel(&mut m);
         assert!(p[0] < 60 && p[1] < 40 && p[2] < 60, "{p:?}");
+    }
+
+    /// A layout page drawn while a map frame's tiles are still on their way says so, for the
+    /// browser's layout view to draw it again as they land (#1534); drawn once they have, it
+    /// doesn't. The browser doesn't wait for tiles: here the wait is cancelled, which skips it too.
+    #[test]
+    fn a_layout_page_drawn_short_of_its_frames_tiles_says_so() {
+        use rustgis_map::layout::{ElementKind, FrameShape, INDICATOR_COLOR, INDICATOR_WIDTH, Layout};
+        use std::sync::atomic::Ordering;
+        struct Cancelled;
+        impl rustgis_data::progress::Probe for Cancelled {
+            fn cancelled(&self) -> bool {
+                true
+            }
+            fn begin(&self, _: u64) {}
+            fn advance(&self, _: u64) {}
+        }
+        serve();
+        let mut m = Map::new("Map");
+        m.graticule = false;
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.tiles.push(TileLayer::new("Held", TileKind::Raster, "https://tiles.test/held/{z}/{x}/{y}.png"));
+        let mut page = Layout::new("page", 100.0, 80.0);
+        page.add(
+            "map",
+            (5.0, 5.0, 90.0, 70.0),
+            ElementKind::MapFrame {
+                map: "Map".into(),
+                center: Coord::new(4.6, 4.7),
+                scale: 500_000.0,
+                shape: FrameShape::Rectangle,
+                grid: None,
+                extent_of: None,
+                extent_color: INDICATOR_COLOR,
+                extent_width: INDICATOR_WIDTH,
+                bearing: 0.0,
+                pitch: 0.0,
+            },
+        );
+        let info = crate::layout::PageInfo::default();
+        let mut maps = [m];
+        HOLD.store(true, Ordering::SeqCst);
+        let short = {
+            let _wait = rustgis_data::progress::install(Some(std::sync::Arc::new(Cancelled)));
+            crate::layout::render_pending(&page, &mut maps, 72.0, &info).map(|(_, pending)| pending)
+        };
+        // Answered now, and those asked for later at once: the next drawing waits for them.
+        HOLD.store(false, Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        while HELD.lock().unwrap().is_empty() && start.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        for done in std::mem::take(&mut *HELD.lock().unwrap()) {
+            done(Ok(tiny_skia::Pixmap::new(256, 256).unwrap().encode_png().unwrap()));
+        }
+        assert_eq!(short, Ok(true), "drawn before its tiles landed");
+        let whole = crate::layout::render_pending(&page, &mut maps, 72.0, &info).map(|(_, pending)| pending);
+        assert_eq!(whole, Ok(false), "drawn once they have");
     }
 }

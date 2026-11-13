@@ -20,6 +20,8 @@ something on the roadmap (or not on it) interests you, propose it and open a pul
    - what you plan to build: the commands it adds, where it sits in the ribbon (following the
      [ribbon guidelines](docs/contributing.md#ribbon-guidelines)), which formats or tools are involved;
    - which crates it touches and whether it adds a dependency;
+   - for work that grows with the data, how it runs off the UI thread with progress and Cancel
+     (see [Never hold the window](AGENTS.md#never-hold-the-window));
    - how you will test it.
 
    Put it in an issue with the
@@ -49,9 +51,10 @@ something on the roadmap (or not on it) interests you, propose it and open a pul
 [Maintaining RustGIS](docs/maintaining.md) says who approves each of these and what happens when a
 proposal gets no reply.
 
-Roadmap themes are not releases or an order; an item moves to Done when it lands. A
-pull request that lands a roadmap item, or an item of [GEOLIBRE_PARITY.md](GEOLIBRE_PARITY.md),
-updates that file in the same change.
+Roadmap themes are not releases or an order. A pull request that lands a roadmap item removes it
+from the roadmap, or narrows it to what is left; one that lands an item of
+[GEOLIBRE_PARITY.md](GEOLIBRE_PARITY.md) updates that file. Either change goes in the same pull
+request.
 
 ## AI-assisted contributions
 

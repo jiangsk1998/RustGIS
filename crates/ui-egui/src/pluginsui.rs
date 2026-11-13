@@ -238,7 +238,10 @@ pub(crate) fn fetch(app: &RustGisApp, url: &str, limit: usize, ctx: Option<egui:
     // The same rule on every platform: HTTPS, or plain HTTP to this computer.
     if !rp::registry::allowed_url(url) {
         if let Ok(mut s) = slot.lock() {
-            *s = Some(Err(crate::i18n::fmt("{url}: only HTTPS addresses are allowed", &[("url", url)])));
+            *s = Some(Err(crate::i18n::fmt(
+                "{url}: only HTTPS addresses are allowed",
+                &[("url", &rustgis_engine::sources::address_in_message(url))],
+            )));
         }
         return slot;
     }
@@ -397,10 +400,14 @@ fn tell_unloaded(app: &mut RustGisApp) {
     }
     let text = match failed.as_slice() {
         [] => return,
-        [(id, reason)] => crate::i18n::fmt(
-            "The plugin {id} wasn't loaded. Open Plugins › Plugin Manager to see it. {reason}",
-            &[("id", id), ("reason", reason)],
-        ),
+        // The way to it first, so a long reason cut from the notice doesn't take it along.
+        [(id, reason)] => match reason.trim().trim_end_matches('.') {
+            "" => crate::i18n::fmt("The plugin {id} wasn't loaded. Open Plugins › Plugin Manager to see it.", &[("id", id)]),
+            reason => crate::i18n::fmt(
+                "The plugin {id} wasn't loaded (open Plugins › Plugin Manager to see it): {reason}.",
+                &[("id", id), ("reason", reason)],
+            ),
+        },
         _ => {
             let ids: Vec<&str> = failed.iter().map(|(id, _)| id.as_str()).collect();
             crate::i18n::fmt(
@@ -560,6 +567,11 @@ fn download(app: &mut RustGisApp, e: &Entry, ctx: &egui::Context) {
         app.plugins.message = Some((false, msg));
         return;
     }
+    if !e.available() {
+        let lang = crate::i18n::current().code();
+        app.plugins.message = Some((false, elsewhere(e, e.translate(lang, &e.name))));
+        return;
+    }
     let slot = fetch(app, &e.package, rp::package::MAX_PACKAGE, Some(ctx.clone()));
     app.plugins.message = None;
     app.plugins.jobs.push(Job::Download { entry: Box::new(e.clone()), slot });
@@ -605,7 +617,12 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
             Job::Registry { url, slot } => match take(&slot) {
                 None => waiting.push(Job::Registry { url, slot }),
                 Some(r) => {
-                    app.plugins.set_registry(Some(r.and_then(|b| rp::registry::parse(&String::from_utf8_lossy(&b), &url))));
+                    let read = r.and_then(|b| rp::registry::parse_with_notice(&String::from_utf8_lossy(&b), &url));
+                    // A platform's package the registry listed and RustGIS skipped is said.
+                    if let Ok((_, Some(skipped))) = &read {
+                        app.session.notify(skipped.clone(), false);
+                    }
+                    app.plugins.set_registry(Some(read.map(|(entries, _)| entries)));
                     let slot = fetch(app, &rp::registry::blocklist_url(&url), 4 << 20, Some(ctx.clone()));
                     waiting.push(Job::Blocklist { registry: url, slot });
                 }
@@ -613,11 +630,20 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
             Job::Blocklist { registry, slot } => match take(&slot) {
                 None => waiting.push(Job::Blocklist { registry, slot }),
                 Some(Ok(b)) => {
-                    let text = String::from_utf8_lossy(&b).to_string();
+                    // Not text is refused too: a replaced byte in an id would match nothing.
+                    let text = std::str::from_utf8(&b).map_err(|e| format!("it isn't text: {e}"));
                     #[cfg(not(target_arch = "wasm32"))]
-                    let pulled = rp::store::save_blocklist(&registry, &text).unwrap_or_default();
+                    let pulled = text.and_then(|t| rp::store::save_blocklist(&registry, t));
                     #[cfg(target_arch = "wasm32")]
-                    let pulled = rp::registry::parse_blocklist(&text).map(|l| rp::apply_blocklist(&registry, l)).unwrap_or_default();
+                    let pulled = text.and_then(rp::registry::parse_blocklist).map(|l| rp::apply_blocklist(&registry, l));
+                    // One that can't be read leaves the list in force as it was.
+                    let pulled = pulled.unwrap_or_else(|e| {
+                        app.session.warn(crate::i18n::fmt(
+                            "The plugin blocklist couldn't be read ({error}); the last one read, if any, stays in force.",
+                            &[("error", &e)],
+                        ));
+                        Vec::new()
+                    });
                     for name in pulled {
                         app.session.notify(
                             crate::i18n::fmt("{name} was withdrawn from the plugin registry and has been turned off.", &[("name", &name)]),
@@ -625,8 +651,16 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
                         );
                     }
                 }
-                // No blocklist: nothing is blocked.
-                Some(Err(_)) => {}
+                // Another registry may have no blocklist (it blocks nothing); the hosted one always
+                // has one, so the list in force may be out of date.
+                Some(Err(e)) => {
+                    if rp::registry::is_default(&registry) {
+                        app.session.warn(crate::i18n::fmt(
+                            "The plugin blocklist couldn't be downloaded ({error}); the last one read, if any, stays in force.",
+                            &[("error", &e)],
+                        ));
+                    }
+                }
             },
             Job::Download { entry, slot } => match take(&slot) {
                 None => waiting.push(Job::Download { entry, slot }),
@@ -657,6 +691,22 @@ fn chip(ui: &mut egui::Ui, t: &Tokens, text: &str, color: egui::Color32) -> egui
             ui.label(egui::RichText::new(text).size(10.5).color(if t.dark { color.gamma_multiply(1.3) } else { color }));
         })
         .response
+}
+
+/// This platform's name, as the Browse list shows it.
+fn here() -> String {
+    match rp::registry::this_platform() {
+        Some(key) => rp::registry::platform_name(key).to_string(),
+        None => tl!("the web app").to_string(),
+    }
+}
+
+/// Why `e` (shown as `name`) can't be installed here: its packages are for other platforms.
+fn elsewhere(e: &Entry, name: &str) -> String {
+    crate::i18n::fmt(
+        "{name} has no package for {platform}. It is available for: {platforms}.",
+        &[("name", name), ("platform", &here()), ("platforms", &e.platforms().join(", "))],
+    )
 }
 
 /// Whether a plugin that runs as `runtime` can be installed here: the browser can't start
@@ -916,6 +966,10 @@ fn browse_row(ui: &mut egui::Ui, t: &Tokens, e: &Entry, web: bool) -> bool {
                     "{name} runs as a program on your computer: it needs the desktop app or rustgis-cli.",
                     &[("name", e.translate(lang, &e.name))],
                 ));
+            } else if !e.available() {
+                // Listed for the same reason: its packages are for other platforms.
+                ui.label(egui::RichText::new(crate::i18n::fmt("Not available for {platform}", &[("platform", &here())])).color(t.text_dim))
+                    .on_hover_text(elsewhere(e, e.translate(lang, &e.name)));
             } else {
                 let label = if newer { tl!("Update") } else { tl!("Install") };
                 clicked = crate::widgets::primary_button(ui, label, true, vec2(84.0, 24.0)).clicked();
@@ -1249,8 +1303,8 @@ mod tests {
         let mut app = app_fetching(|_| Err("unreachable".into()));
         let told = start(&mut app, vec![record("demo", "0")]);
         assert_eq!(told.len(), 1, "{told:?}");
-        assert!(told[0].0.starts_with("The plugin demo wasn't loaded."), "{told:?}");
-        assert!(told[0].0.ends_with("unreachable"), "{told:?}");
+        assert!(told[0].0.starts_with("The plugin demo wasn't loaded (open Plugins › Plugin Manager to see it): "), "{told:?}");
+        assert!(told[0].0.ends_with("unreachable."), "{told:?}");
 
         // A download that isn't the one installed.
         let mut app = app_fetching(|_| Ok(b"x".to_vec()));
@@ -1263,7 +1317,7 @@ mod tests {
         let damaged = Saved { data: Some("!not base64!".into()), url: None, ..record("damaged", "0") };
         let told = start(&mut app, vec![damaged]);
         assert_eq!(told.len(), 1, "{told:?}");
-        assert!(told[0].0.starts_with("The plugin damaged wasn't loaded.") && told[0].0.contains("damaged:"), "{told:?}");
+        assert!(told[0].0.starts_with("The plugin damaged wasn't loaded (open Plugins") && told[0].0.contains("damaged:"), "{told:?}");
 
         // Loaded: nothing to tell, nothing listed.
         struct Cleanup(#[allow(dead_code)] tempfile::TempDir);
@@ -1303,7 +1357,8 @@ mod tests {
         let listed: Vec<&str> = app.plugins.unloaded.iter().map(|u| u.saved.id.as_str()).collect();
         assert_eq!(listed, ["damaged"]);
         let told: Vec<&str> = app.session.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
-        assert!(told.len() == 1 && told[0].starts_with("The plugin damaged wasn't loaded."), "{told:?}");
+        assert!(told.len() == 1 && told[0].starts_with("The plugin damaged wasn't loaded (open Plugins"), "{told:?}");
+        assert!(!told[0].contains(".."), "a reason's own full stop isn't doubled: {told:?}");
         assert!(rp::get("restore-new").is_some());
     }
 
@@ -1314,7 +1369,8 @@ mod tests {
         let mut app = app_fetching(|_| Err("still unreachable".into()));
         app.plugins.unloaded.push(Unloaded { saved: record("demo", "0"), reason: "unreachable".into() });
         let mut fonts = false;
-        let mut h = egui_kittest::Harness::builder().with_size(vec2(560.0, 600.0)).build_ui_state(
+        // A widget shown for the first time asks for one more pass to take its style.
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(560.0, 600.0)).with_max_steps(8).build_ui_state(
             move |ui, app: &mut RustGisApp| {
                 if !fonts {
                     crate::theme::install_fonts(ui.ctx(), &[], None);

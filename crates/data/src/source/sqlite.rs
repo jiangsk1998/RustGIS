@@ -282,7 +282,7 @@ impl SqliteSource {
             .fields
             .iter()
             .enumerate()
-            .map(|(i, f)| r.get_ref(i + at).map(|v| gpkg_value(v, f.ty)).unwrap_or(Value::Null))
+            .map(|(i, f)| r.get_ref(i + at).ok().and_then(|v| gpkg_value(v, f.ty)).unwrap_or(Value::Null))
             .collect();
         Ok(Row::Feature(Feature { id, geometry, attrs }))
     }

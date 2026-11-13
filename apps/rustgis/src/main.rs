@@ -2,6 +2,7 @@
 //!
 //! `rustgis [project.rgis | data.geojson|csv|shp …] [--sample] [--backend dx12|vulkan|gl|metal]`
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![cfg_attr(not(target_os = "macos"), forbid(unsafe_code))]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use eframe::wgpu;
@@ -12,10 +13,14 @@ use serde_json::json;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
+mod macos_documents;
+#[cfg(target_os = "macos")]
 mod menu;
+#[cfg(any(target_os = "macos", test))]
+mod open_documents;
 
 /// The app, and this run's marker (see [`running`]), cleared when eframe closes it.
-struct App(RustGisApp, running::Shared, Menus);
+struct App(RustGisApp, running::Shared, Menus, #[cfg(target_os = "macos")] open_documents::Inbox);
 
 /// macOS: the menu bar (built once the app runs), the ids of the items chosen from it, and
 /// the commands chosen and not run yet.
@@ -34,9 +39,13 @@ struct Menus {
 #[derive(Default)]
 struct Menus {}
 
-/// Preferences in `prefs.json` beside the platform's other app settings.
+/// Preferences in `prefs.json` beside the platform's other app settings. Settings that can't be
+/// read or saved are said in the window, not only logged: a setting that looks saved but isn't
+/// would be lost silently when RustGIS closes.
 mod prefs {
     use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use rustgis_ui_egui::Services;
     use serde_json::{Map, Value};
@@ -45,16 +54,92 @@ mod prefs {
         rustgis_engine::data::dirs::config_dir()
     }
 
+    /// A problem with the preferences file, waiting for the window to say it.
+    #[derive(Debug, PartialEq)]
+    pub enum Notice {
+        /// The file couldn't be read: the defaults are in use.
+        Unreadable(String),
+        /// A malformed file was moved here, and new settings started in its place.
+        SetAside(PathBuf),
+        /// A setting couldn't be saved.
+        NotSaved(String),
+    }
+
+    static NOTICES: Mutex<Vec<Notice>> = Mutex::new(Vec::new());
+    /// Repeated equivalent failures stay quiet; changed recovery details must reach the window.
+    static LAST_FAILURE: Mutex<Option<String>> = Mutex::new(None);
+
+    /// The waiting notices; a panic while one was added doesn't lose the others.
+    fn notices() -> std::sync::MutexGuard<'static, Vec<Notice>> {
+        NOTICES.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The saved preferences, or none when the file can't be read: said once a run.
     fn read() -> Map<String, Value> {
-        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static WARNED: AtomicBool = AtomicBool::new(false);
         rustgis_engine::prefs::read().unwrap_or_else(|error| {
-            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if !WARNED.swap(true, Ordering::Relaxed) {
                 log::warn!("{error}");
+                notices().push(Notice::Unreadable(error));
             }
             Map::new()
         })
     }
 
+    /// Keeps what a save came to for the window: a malformed file set aside (which also explains
+    /// an earlier read failure still waiting), or a failure whose outcome changed since last time.
+    pub fn saved(result: Result<Option<PathBuf>, String>) {
+        match result {
+            Ok(set_aside) => {
+                *LAST_FAILURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                if let Some(path) = set_aside {
+                    log::warn!("unreadable preferences set aside as {}", path.display());
+                    let mut notices = notices();
+                    notices.retain(|n| !matches!(n, Notice::Unreadable(_)));
+                    notices.push(Notice::SetAside(path));
+                }
+            }
+            Err(error) => {
+                log::warn!("{error}");
+                let mut last = LAST_FAILURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if last.as_deref() != Some(error.as_str()) {
+                    *last = Some(error.clone());
+                    notices().push(Notice::NotSaved(error));
+                }
+            }
+        }
+    }
+
+    /// The problems since the last call, oldest first.
+    pub fn take_notices() -> Vec<Notice> {
+        std::mem::take(&mut *notices())
+    }
+
+    /// A save during logic or UI may queue a notice after this frame's drain. Ensure another
+    /// frame delivers it even when the user stops interacting with the window.
+    pub fn repaint_if_pending(ctx: &egui::Context) {
+        if !notices().is_empty() {
+            ctx.request_repaint();
+        }
+    }
+
+    /// A notice's text in the current language.
+    pub fn text(notice: &Notice) -> String {
+        use rustgis_ui_egui::i18n::fmt;
+        match notice {
+            Notice::Unreadable(error) => {
+                fmt("Your settings couldn't be read ({error}), so RustGIS is using its defaults.", &[("error", error)])
+            }
+            Notice::SetAside(path) => fmt(
+                "Your settings couldn't be read, so RustGIS started new ones. The old settings file was kept as {path}.",
+                &[("path", &path.display().to_string())],
+            ),
+            Notice::NotSaved(error) => fmt("Settings could not be saved reliably ({error}).", &[("error", error)]),
+        }
+    }
+
+    /// The desktop's keychain and the preference hooks over `prefs.json`; saves report through
+    /// [`saved`].
     pub fn services() -> Services {
         let secrets: std::sync::Arc<dyn rustgis_engine::data::secrets::SecretStore> =
             std::sync::Arc::new(rustgis_keychain::Keychain::default());
@@ -62,11 +147,7 @@ mod prefs {
         rustgis_assistant::chatgpt::set_secret_store(Some(secrets.clone()));
         Services {
             load_pref: Some(Box::new(|key: &str| read().get(key).and_then(Value::as_str).map(str::to_string))),
-            save_pref: Some(Box::new(|key: &str, value: &str| {
-                if let Err(error) = rustgis_engine::prefs::write(key, value) {
-                    log::warn!("{error}");
-                }
-            })),
+            save_pref: Some(Box::new(|key: &str, value: &str| saved(rustgis_engine::prefs::write(key, value)))),
             secrets: Some(secrets),
             ..Services::default()
         }
@@ -263,6 +344,49 @@ mod running {
     }
 }
 
+/// Deliver native paths and counted notices in the app's selected language.
+/// A frame keeps its first project so a second clean project cannot silently replace it;
+/// other files still use the existing drop flow. This handoff only classifies path suffixes.
+#[cfg(any(target_os = "macos", test))]
+fn append_documents(app: &mut RustGisApp, inbox: &open_documents::Inbox, raw_input: &mut egui::RawInput) {
+    let (unreadable, excess) = inbox.append(raw_input);
+    let mut project_seen = false;
+    let mut additional_projects = 0usize;
+    raw_input.dropped_files.retain(|file| {
+        if !file.path().to_str().is_some_and(rustgis_engine::project::opens_as_project) {
+            return true;
+        }
+        if project_seen {
+            additional_projects += 1;
+            false
+        } else {
+            project_seen = true;
+            true
+        }
+    });
+    rustgis_ui_egui::i18n::set_current(app.chosen_lang());
+    for (n, message) in [
+        (unreadable, "macOS supplied {n} file references whose paths couldn't be read. Those files weren't opened."),
+        (
+            excess,
+            "{n} files requested by macOS weren't queued because too many requests are waiting. Open them again after the current files finish opening.",
+        ),
+    ] {
+        if n != 0 {
+            app.session.notify(rustgis_ui_egui::i18n::fmt(message, &[("n", &n.to_string())]), true);
+        }
+    }
+    if additional_projects != 0 {
+        app.session.notify(
+            rustgis_ui_egui::i18n::fmt(
+                "Additional project files not opened: {n}. Open projects one at a time.",
+                &[("n", &additional_projects.to_string())],
+            ),
+            false,
+        );
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // The GPU map backend draws inside egui's wgpu pass; hand over the render state.
@@ -276,15 +400,22 @@ impl eframe::App for App {
             }
             self.0.ui.titlebar = titlebar;
         }
+        // Settings that couldn't be read or saved, since the last frame.
+        for notice in prefs::take_notices() {
+            let text = prefs::text(&notice);
+            self.0.session.notify(text, true);
+        }
         self.0.logic(ctx);
         #[cfg(target_os = "macos")]
         self.menus(ctx);
         if self.0.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        prefs::repaint_if_pending(ctx);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.0.ui(ui);
+        prefs::repaint_if_pending(ui.ctx());
     }
     #[cfg(not(target_os = "macos"))]
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -296,6 +427,7 @@ impl eframe::App for App {
     #[cfg(target_os = "macos")]
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.0.drop_stale_clicks(raw_input);
+        append_documents(&mut self.0, &self.3, raw_input);
         let Some(bar) = &self.2.bar else { return };
         let capturing = self.0.capturing_shortcut();
         let press = |events: &mut Vec<egui::Event>, k: egui::KeyboardShortcut| {
@@ -342,6 +474,8 @@ impl eframe::App for App {
     fn on_exit(&mut self) {
         self.0.end_exports();
         self.0.end_autosave();
+        // Session plugins' programs end with the app, with what they started.
+        rustgis_engine::plugins::session::stop_all();
         // The installer starts before the marker goes, so a RustGIS started meanwhile finds this
         // one still running.
         #[cfg(windows)]
@@ -463,6 +597,7 @@ fn run_installer(app: &RustGisApp) {
     }
 }
 
+/// Run the desktop event loop, retaining native document callbacks and the crash marker until exit.
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
@@ -475,6 +610,10 @@ fn main() -> eframe::Result {
     // crashed, and reopening it on every launch would leave no way into Settings).
     let (marker, unclean) = running::start(prefs::dir().as_deref());
     crash::install(prefs::dir());
+    // Finder can supply documents before eframe creates the app. Keep the native target alive
+    // through run_native and attach its wakeup when the app's egui context becomes available.
+    #[cfg(target_os = "macos")]
+    let (_documents, document_inbox) = macos_documents::Registration::install().map_err(|e| eframe::Error::AppCreation(e.into()))?;
     let backend = flag(&args, "--backend");
     // Options and the value after `--backend` aren't files.
     let files: Vec<&String> = args
@@ -485,11 +624,16 @@ fn main() -> eframe::Result {
         .collect();
     // Installed plugins, before the first session lists commands and tools.
     let plugin_errors = rustgis_engine::cmd::plugins::load_installed();
-    let app = if args.iter().any(|a| a == "--sample") || files.is_empty() {
+    let mut app = if args.iter().any(|a| a == "--sample") || files.is_empty() {
         RustGisApp::with_sample()
     } else {
         RustGisApp::new(Session::new(Project::default()))
     };
+    // Commands run on the window's own thread: a raster read in place lands as the map draws
+    // rather than holding the window for a slow host.
+    app.session.in_place_wait = false;
+    // Nor may a plugin command hold it past the usual two minutes.
+    app.session.on_window_thread = true;
     let mut services = prefs::services();
     // Autosave, in a recovery folder only the copy holding the run marker uses: a second copy
     // running alongside would offer, or overwrite, the first one's unsaved work.
@@ -517,6 +661,8 @@ fn main() -> eframe::Result {
     let mut app = app.with_services(services);
     // Add Data and Load All read on a thread of their own, so a large file doesn't hold the window.
     app.reads_off_frame = true;
+    // Linked local files changed by another program are reported, with Reload Data (#1477).
+    app.watch_files = true;
     // Settings › Start-up; `--sample` still opens the sample.
     let blank = if args.iter().any(|a| a == "--sample") { Some(false) } else { (!files.is_empty()).then_some(true) };
     if let Err(e) = app.start(&rustgis_ui_egui::Start { blank, after_crash: unclean, ..Default::default() }) {
@@ -605,7 +751,15 @@ fn main() -> eframe::Result {
             // The menu's choices wake the app: egui draws only on events.
             #[cfg(target_os = "macos")]
             menu::listen(menus.chosen.clone(), _cc.egui_ctx.clone());
-            Ok(Box::new(App(app, held, menus)))
+            #[cfg(target_os = "macos")]
+            document_inbox.set_context(&_cc.egui_ctx);
+            Ok(Box::new(App(
+                app,
+                held,
+                menus,
+                #[cfg(target_os = "macos")]
+                document_inbox,
+            )))
         }),
     );
     running::close(&marker);
@@ -615,8 +769,70 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use super::{backends, crash, flag, running};
+    use super::{backends, crash, flag, prefs, running};
     use eframe::wgpu::Backends;
+
+    /// The UI handoff reports each loss kind once, with counts, and stays quiet for clean input.
+    #[test]
+    fn native_documents_say_what_was_lost_and_clean_input_is_quiet() {
+        let mut app = super::RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.ui.language = "en".into();
+        app.session.notices.clear();
+        let inbox = super::open_documents::Inbox::default();
+        inbox.receive(super::open_documents::Batch { paths: vec!["project.rgis".into()], unreadable: 2, excess: 7 });
+        let mut input = egui::RawInput::default();
+        super::append_documents(&mut app, &inbox, &mut input);
+        assert_eq!(input.dropped_files.len(), 1);
+        assert_eq!(app.session.notices.len(), 2);
+        assert!(app.session.notices.iter().all(|notice| notice.error));
+        assert!(app.session.notices[0].text.starts_with("macOS supplied 2 file references"));
+        assert!(app.session.notices[1].text.starts_with("7 files requested by macOS"));
+
+        app.session.notices.clear();
+        super::append_documents(&mut app, &inbox, &mut egui::RawInput::default());
+        assert!(app.session.notices.is_empty(), "the drained loss counts must not be repeated");
+        inbox.receive(super::open_documents::Batch { paths: vec!["clean.csv".into()], ..Default::default() });
+        let mut clean = egui::RawInput::default();
+        super::append_documents(&mut app, &inbox, &mut clean);
+        assert_eq!(clean.dropped_files.len(), 1);
+        assert!(app.session.notices.is_empty(), "accepted files must not report a loss");
+    }
+
+    /// One native frame must not open and immediately replace a clean project without warning.
+    #[test]
+    fn native_requests_keep_first_project_and_report_remaining() {
+        let dir = std::env::temp_dir().join(format!("rustgis-native-projects-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let _cleanup = TempDir(dir.clone());
+        let first = dir.join("first.rgis");
+        let second = dir.join("second.rgisx");
+        let mut source = rustgis_engine::Session::new(rustgis_engine::Project::default());
+        source.run("project.saveAs", &serde_json::json!({"path": first.display().to_string()})).unwrap();
+        std::fs::copy(&first, &second).unwrap();
+        let mut app = super::RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.ui.language = "en".into();
+        let inbox = super::open_documents::Inbox::default();
+        inbox.receive(super::open_documents::Batch { paths: vec![first.clone(), second.clone()], ..Default::default() });
+        let mut input = egui::RawInput::default();
+        super::append_documents(&mut app, &inbox, &mut input);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(input, |ui| app.logic(ui.ctx()));
+        output.textures_delta.clear();
+        assert_eq!(app.session.path.as_deref(), Some(first.as_path()), "the first project must remain visible");
+        let notices: Vec<_> = app.session.notices.iter().filter(|n| n.text.starts_with("Additional project files not opened:")).collect();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].text.contains(": 1."));
+
+        // A later, single-project request is a normal replacement and gives no omission notice.
+        app.session.notices.clear();
+        inbox.receive(super::open_documents::Batch { paths: vec![second.clone()], ..Default::default() });
+        let mut input = egui::RawInput::default();
+        super::append_documents(&mut app, &inbox, &mut input);
+        let mut output = ctx.run_ui(input, |ui| app.logic(ui.ctx()));
+        output.textures_delta.clear();
+        assert_eq!(app.session.path.as_deref(), Some(second.as_path()));
+        assert!(!app.session.notices.iter().any(|n| n.text.starts_with("Additional project files not opened:")));
+    }
 
     #[test]
     fn windows_starts_without_vulkan_unless_asked() {
@@ -704,6 +920,58 @@ mod tests {
         assert!(blocked.contains("recovery"), "{blocked}");
         assert!(super::recovery_store(None).err().unwrap().contains("app data"));
         assert!(super::recovery_store(Some(dir.join("fresh"))).is_ok());
+    }
+
+    #[test]
+    fn settings_that_cannot_be_saved_are_said_once_until_saving_works() {
+        use prefs::Notice;
+        // Clean saves say nothing.
+        prefs::saved(Ok(None));
+        assert_eq!(prefs::take_notices(), []);
+        // An idle window must get another frame when a save queues a notice late in a frame.
+        let ctx = egui::Context::default();
+        let frame = || {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| prefs::repaint_if_pending(ui.ctx()));
+            output.textures_delta.clear();
+        };
+        for _ in 0..4 {
+            frame();
+        }
+        assert!(!ctx.has_requested_repaint(), "clean preferences keep the window idle");
+        // A full disk: said once, not for every setting that follows.
+        prefs::saved(Err("could not save preferences: no space left".into()));
+        prefs::saved(Err("could not save preferences: no space left".into()));
+        frame();
+        assert!(ctx.has_requested_repaint(), "the pending failure requests its delivery frame");
+        assert_eq!(prefs::take_notices(), [Notice::NotSaved("could not save preferences: no space left".into())]);
+        for _ in 0..4 {
+            frame();
+        }
+        assert!(!ctx.has_requested_repaint(), "draining the notice lets the window settle");
+        // Recovery can advance during a failure episode: do not retain obsolete instructions.
+        let changed =
+            "preferences were replaced, but their durability could not be confirmed; malformed preferences were kept at prefs.json.bad";
+        prefs::saved(Err(changed.into()));
+        assert_eq!(prefs::take_notices(), [Notice::NotSaved(changed.into())]);
+        prefs::saved(Err(changed.into()));
+        assert!(prefs::take_notices().is_empty(), "equivalent recovery outcomes stay quiet");
+        // Once a save works, the next failure is news again.
+        prefs::saved(Ok(None));
+        prefs::saved(Err("could not save preferences: read-only".into()));
+        assert_eq!(prefs::take_notices(), [Notice::NotSaved("could not save preferences: read-only".into())]);
+        prefs::saved(Ok(None));
+        // A malformed file set aside says where it went.
+        let bad = std::path::PathBuf::from("prefs.json.bad");
+        prefs::saved(Ok(Some(bad.clone())));
+        assert_eq!(prefs::take_notices(), [Notice::SetAside(bad.clone())]);
+        let text = prefs::text(&Notice::SetAside(bad));
+        assert!(text.contains("prefs.json.bad"), "{text}");
+        // Both a failed replacement and an unconfirmed final flush give an accurate notice.
+        for error in ["could not save preferences: read-only", "preferences were replaced, but their durability could not be confirmed"] {
+            let text = prefs::text(&Notice::NotSaved(error.into()));
+            assert!(text.contains("Settings could not be saved reliably") && text.contains(error), "{text}");
+            assert!(!text.contains("changes last only until"), "{text}");
+        }
     }
 
     #[test]

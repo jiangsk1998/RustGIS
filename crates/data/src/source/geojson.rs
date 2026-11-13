@@ -12,7 +12,10 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use super::{Batch, FeatureSource, Reproject, Request, SourceInfo, clamp_limit, stride};
-use crate::io::{FeatureSink, Schema, declared_crs, geojson_attrs, geojson_geometry, geojson_has_z, geometry_to_lonlat};
+use crate::io::{
+    FeatureSink, Schema, declared_crs, geojson_attrs, geojson_geometry, geojson_has_z, geometry_to_lonlat, latitude_past_poles,
+    swapped_latitude_note,
+};
 use crate::{DataError, Feature, GeometryType, Result};
 use rustgis_geom::Extent;
 use serde_json::Value as Json;
@@ -59,6 +62,8 @@ struct Scan {
     /// Points, lines and polygons seen.
     kinds: [usize; 3],
     skipped: usize,
+    /// Features, as the file gives them, with a latitude past the poles.
+    swapped: usize,
     /// The places of features whose heights reading drops.
     zm: Vec<u32>,
 }
@@ -90,6 +95,7 @@ impl Scan {
                     self.zm.push(u32::try_from(self.places.len()).unwrap_or(u32::MAX));
                 }
                 let e = g.extent();
+                self.swapped += usize::from(latitude_past_poles(g));
                 self.extent = self.extent.union(&e);
                 if let Some(slot) = self.kinds.get_mut(kind_slot(g.kind())) {
                     *slot += 1;
@@ -163,7 +169,7 @@ impl GeoJsonSource {
         if scan.skipped > 0 {
             notes.push(format!("{} features had unreadable geometry", scan.skipped));
         }
-        let reproject = Reproject::known(declared_crs(&rest, &mut notes));
+        let reproject = Reproject::known(declared_crs(&rest, &mut notes)?);
         // The declaration may come after the features, so only now can each be tried: those the
         // declared system can't convert are found here (and left out of every read, the count,
         // the extent and the geometry type), as they are when the file is read whole.
@@ -183,6 +189,10 @@ impl GeoJsonSource {
                 ));
             }
             failed = pass.failed;
+        } else {
+            // Only coordinates read as they are can be longitude/latitude with the two swapped;
+            // a declared system's features were converted above, and those that don't fit left out.
+            notes.extend(swapped_latitude_note(scan.swapped));
         }
         // The kind most features have, as a layer read whole takes.
         let geometry_type = match scan.kinds.iter().enumerate().max_by_key(|(_, n)| **n) {
@@ -280,7 +290,7 @@ impl FeatureSource for GeoJsonSource {
             };
             features.push(Feature { id: u64::from(i) + 1, geometry, attrs: geojson_attrs(&json, &self.info.fields) });
         }
-        Ok(Batch { features, matched: matched as u64, complete: step == 1, skipped })
+        Ok(Batch { features, matched: matched as u64, complete: step == 1, skipped, unread_dates: Vec::new() })
     }
 }
 

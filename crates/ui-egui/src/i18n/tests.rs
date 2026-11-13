@@ -42,6 +42,19 @@ fn lookup_fallback_and_tags() {
     assert_eq!(lang_from_tag("xx-YY"), None);
     assert_eq!(first_supported(["xx", "fr-CA", "de"]).map(Lang::code), Some("fr"));
     assert_eq!(fmt("{n} of {total} selected", &[("n", "3"), ("total", "{n}")]), "3 of {n} selected");
+    assert_eq!(lang_from_tag("lo_LA.UTF-8").map(Lang::code), Some("lo"));
+    assert_eq!(lang_from_tag("lo-LA").map(Lang::code), Some("lo"));
+}
+
+/// `fmt_raw` fills a message in logical order, for `paragraph` to fit; `fmt` is the same
+/// message in display form.
+#[test]
+fn fmt_raw_keeps_logical_order() {
+    let args = [("reason", "سلام abc")];
+    assert_eq!(fmt_raw("{reason}", &args), "سلام abc");
+    assert_eq!(fmt("{reason}", &args), rtl::visual("سلام abc"));
+    assert_ne!(fmt("{reason}", &args), fmt_raw("{reason}", &args));
+    assert_eq!(fmt_raw("{reason} {", &args), "سلام abc {");
 }
 
 #[test]
@@ -252,6 +265,9 @@ fn registry_process_plugin_notes_are_in_every_catalog() {
         for key in [
             "Not sandboxed",
             "Desktop and command line only",
+            "Not available for {platform}",
+            "the web app",
+            "{name} has no package for {platform}. It is available for: {platforms}.",
             "{name} runs as a program on your computer: it needs the desktop app or rustgis-cli.",
             "Installing it downloads Python {version} and the packages it needs from the internet.",
         ] {
