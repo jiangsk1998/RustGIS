@@ -462,6 +462,17 @@ fn complete_here(app: &mut RustGisApp, asked: Asked, p: Value, done: Result<read
     answered(app, asked.then, r)
 }
 
+/// Whether the read under way has looked at its file yet (the observation its thread makes as
+/// the read starts, [`ReadJob::seen`]): a test changing the file waits for this, so what the
+/// read acknowledges is what the file held before the change.
+#[cfg(test)]
+pub(crate) fn looked_at_file(app: &RustGisApp) -> bool {
+    app.reads
+        .job
+        .as_ref()
+        .is_some_and(|j| j.seen.as_ref().is_some_and(|(_, slot)| slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some()))
+}
+
 /// Runs the command a read was for once it's done (or says why it wasn't), then starts the next
 /// waiting: called every frame. `true` while one is under way or waiting.
 pub fn land(app: &mut RustGisApp) -> bool {
