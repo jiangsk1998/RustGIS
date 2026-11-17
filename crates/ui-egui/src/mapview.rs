@@ -49,6 +49,8 @@ enum DragKind {
     SelectRadius,
     /// Moving or inserting a vertex with the Edit Vertices tool.
     Vertex,
+    BoxEdit,
+    CircleEdit,
     /// Moving the selected text graphic, grabbed by its text (#516): its layer id and row, and
     /// where the press was. Held by the drag itself, so it ends with it, however it ends.
     Text {
@@ -481,6 +483,17 @@ impl Default for MapView {
 }
 
 impl MapView {
+    pub(crate) fn cancel_rotated_box_drag(&mut self) {
+        if matches!(self.drag, Some((_, DragKind::BoxEdit))) {
+            self.drag = None;
+        }
+    }
+    pub(crate) fn cancel_circle_drag(&mut self) {
+        if matches!(self.drag, Some((_, DragKind::CircleEdit))) {
+            self.drag = None;
+        }
+    }
+
     /// Retire old drawings before any of them can report errors for a replacement project.
     fn follow_project(&mut self, opened: u64) {
         if self.project.is_some_and(|p| p != opened) {
@@ -643,12 +656,6 @@ fn now(ui: &Ui) -> f64 {
     ui.input(|i| i.time)
 }
 
-/// Puts a handler on the desktop device for the errors nothing else catches (#1777). wgpu's own
-/// closes the app on any of them, a graphics card running out of memory (2 GB at 2560 × 1440)
-/// too; this one logs them, and notes running out in `out_of_memory`, after which the map
-/// leaves the graphics card ([`leave_gpu_if_out_of_memory`]). In the browser none is put on:
-/// WebGPU already only logs what nothing catches, and wgpu would turn its rare internal errors
-/// into a crash once a handler is there.
 /// Puts [`handle_gpu_errors`] on the device once there is one, from the app's frame (the start
 /// page and backstage included, so egui's own uploads are covered from the first frame).
 pub(crate) fn handle_gpu_errors_once(app: &mut RustGisApp, ctx: &egui::Context) {
@@ -661,9 +668,16 @@ pub(crate) fn handle_gpu_errors_once(app: &mut RustGisApp, ctx: &egui::Context) 
     }
 }
 
+/// Puts a handler on the desktop device for the errors nothing else catches (#1777). wgpu's own
+/// closes the app on any of them, a graphics card running out of memory (2 GB at 2560 × 1440)
+/// too; this one logs them, and notes running out in `out_of_memory`, after which the map
+/// leaves the graphics card ([`leave_gpu_if_out_of_memory`]). In the browser none is put on:
+/// WebGPU already only logs what nothing catches, and wgpu would turn its rare internal errors
+/// into a crash once a handler is there.
+///
 /// A frame is asked of `ctx` for each error, so the map leaves the card even when nothing else
 /// would draw again (an error in the last frame before the window goes idle).
-#[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+#[cfg_attr(target_arch = "wasm32", expect(unused_variables, reason = "only native builds catch uncaptured GPU errors"))]
 pub(crate) fn handle_gpu_errors(device: &egui_wgpu::wgpu::Device, errors: std::sync::Arc<GpuErrors>, ctx: egui::Context) {
     #[cfg(not(target_arch = "wasm32"))]
     device.on_uncaptured_error(std::sync::Arc::new(move |e: egui_wgpu::wgpu::Error| {
@@ -689,7 +703,7 @@ const MAX_GPU_ERRORS_LOGGED: u32 = 20;
 
 impl GpuErrors {
     /// Notes `e`, and logs it while few have been: whether it was logged.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "only native builds catch uncaptured GPU errors"))]
     fn note(&self, e: &egui_wgpu::wgpu::Error) -> bool {
         use std::sync::atomic::Ordering;
         let oom = matches!(e, egui_wgpu::wgpu::Error::OutOfMemory { .. });
@@ -698,7 +712,7 @@ impl GpuErrors {
         if n < MAX_GPU_ERRORS_LOGGED {
             log::error!("graphics card error: {e}");
         }
-        if n + 1 == MAX_GPU_ERRORS_LOGGED {
+        if n.saturating_add(1) == MAX_GPU_ERRORS_LOGGED {
             log::error!("further graphics card errors are not logged");
         }
         n < MAX_GPU_ERRORS_LOGGED
@@ -708,10 +722,21 @@ impl GpuErrors {
 /// Once the graphics card has run out of memory, the map is drawn on the CPU: the GPU map's
 /// pictures, tiles and targets are let go, and a notice says so and how to go back. Turning the
 /// GPU on again from the status bar is up to the user; running out again comes back here.
-/// Another error the card reports is said once a session, as it may leave the map drawn wrong.
+/// Another error the card reports is said once a session, as it may leave the map drawn wrong;
+/// so is running out with the map already on the CPU (egui's own textures), for the window.
 pub(crate) fn leave_gpu_if_out_of_memory(app: &mut RustGisApp) {
     use std::sync::atomic::Ordering;
-    if app.map.gpu_errors.other.swap(false, Ordering::SeqCst) && !app.map.gpu_error_said {
+    let ran_out = app.map.gpu_errors.out_of_memory.swap(false, Ordering::SeqCst);
+    // Errors with running out of memory follow from it (what couldn't be made, used): when the
+    // map leaves the card for it, only that is said, and the notice for another error is kept
+    // for one of its own. With the map already off the card, running out is said as another
+    // error is.
+    let leaves = ran_out && app.map.gpu_enabled;
+    // (The swap comes first, so the flag is cleared every frame whatever else holds.) An unrelated
+    // error in the very frame the card ran out goes unsaid with the rest: a trade-off, as the
+    // errors that follow from running out can't be told apart from it.
+    let other = (app.map.gpu_errors.other.swap(false, Ordering::SeqCst) || ran_out) && !leaves;
+    if other && !app.map.gpu_error_said {
         app.map.gpu_error_said = true;
         // (Clicking GPU helps only with the map on the GPU; otherwise it's egui's own drawing.)
         let text = if app.map.gpu_enabled {
@@ -723,7 +748,7 @@ pub(crate) fn leave_gpu_if_out_of_memory(app: &mut RustGisApp) {
         };
         app.session.notify(text, true);
     }
-    if !app.map.gpu_errors.out_of_memory.swap(false, Ordering::SeqCst) || !app.map.gpu_enabled {
+    if !ran_out || !app.map.gpu_enabled {
         return;
     }
     app.map.gpu_enabled = false;
@@ -1752,7 +1777,6 @@ fn show_gpu_frame(
 
 /// Shows a frame the CPU drew for `view` (of a `w × h` map view) as the map's texture, with its
 /// labels, credits and tile errors.
-#[allow(clippy::too_many_arguments)]
 fn show_frame(
     app: &mut RustGisApp,
     ctx: &egui::Context,
@@ -2062,9 +2086,22 @@ fn draw_label(p: &egui::Painter, l: &PlacedLabel, at: Pos2) {
     draw_label_ink(p, l, at, true, true);
 }
 
+/// The UI draws in its interface font until a named face is actually installed in egui. This
+/// decision uses only readiness, never font-file reads or the renderer's parsed face cache.
+fn fallback_bold_width(bold: bool, named_ready: bool, px: f32) -> f32 {
+    use rustgis_engine::render::fonts;
+    if bold && !named_ready && fonts::bold_is_synthetic() { fonts::bold_thickening(px) } else { 0.0 }
+}
+
 /// Draws a label (not a curved one) at `at`: its halo when `halo`, its text when `text`.
 fn draw_label_ink(p: &egui::Painter, l: &PlacedLabel, at: Pos2, halo: bool, text: bool) {
     let family = crate::labelfonts::family(p.ctx(), l.font, l.bold, l.italic);
+    // Bold with no heavier face to draw it in: drawn again a little to its right, as exports do.
+    // (In the interface fonts: those of a named family not loaded yet too.)
+    let thick = fallback_bold_width(l.bold, family.is_some(), l.size * 1.33);
+    let angle = l.angle.filter(|a| a.is_finite() && a.abs() > 1e-3);
+    let shift = angle.map_or(vec2(thick, 0.0), |a| vec2(thick * a.cos(), thick * a.sin()));
+    let strikes = std::iter::once(egui::Vec2::ZERO).chain((thick > 0.0).then_some(shift));
     let galley = p.layout_job(label_job(&l.text, l.size, l.bold, l.italic, l.spacing, l.line_align, family));
     // Text set beside an icon is lined up by its edge, with egui's own measure of its width.
     let anchor = if l.align < -0.25 {
@@ -2075,7 +2112,7 @@ fn draw_label_ink(p: &egui::Painter, l: &PlacedLabel, at: Pos2, halo: bool, text
         Align2::CENTER_CENTER
     };
     // A label turned with the map (along a street): turned about its centre, at `at`.
-    if let Some(angle) = l.angle.filter(|a| a.is_finite() && a.abs() > 1e-3) {
+    if let Some(angle) = angle {
         let (pos, r) = place_galley(Align2::CENTER_CENTER, at, &galley);
         if halo {
             draw_background(p, l, r, angle);
@@ -2088,11 +2125,15 @@ fn draw_label_ink(p: &egui::Painter, l: &PlacedLabel, at: Pos2, halo: bool, text
         if let Some(h) = l.halo.filter(|h| halo && h.a() > 0) {
             let (offsets, hc) = halo_coats(l, h);
             for offset in offsets {
-                p.add(shape(offset, hc));
+                for s in strikes.clone() {
+                    p.add(shape(offset + s, hc));
+                }
             }
         }
         if text {
-            p.add(shape(egui::Vec2::ZERO, c32(l.color)));
+            for s in strikes {
+                p.add(shape(s, c32(l.color)));
+            }
         }
         return;
     }
@@ -2108,11 +2149,15 @@ fn draw_label_ink(p: &egui::Painter, l: &PlacedLabel, at: Pos2, halo: bool, text
     if let Some(h) = l.halo.filter(|h| halo && h.a() > 0) {
         let (offsets, hc) = halo_coats(l, h);
         for offset in offsets {
-            p.galley_with_override_text_color(pos + offset, galley.clone(), hc);
+            for s in strikes.clone() {
+                p.galley_with_override_text_color(pos + offset + s, galley.clone(), hc);
+            }
         }
     }
     if text {
-        p.galley_with_override_text_color(pos, galley, c32(l.color));
+        for s in strikes {
+            p.galley_with_override_text_color(pos + s, galley.clone(), c32(l.color));
+        }
     }
 }
 
@@ -2711,6 +2756,26 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
         app.map.kept_lonlat = Some((c, app.session.map().instance_id(), app.session.opened));
     }
     let tool = app.session.tool;
+    crate::boxedit::cancel_stale(app);
+    crate::circleedit::cancel_stale(app);
+    if tool == Tool::RotatedBox {
+        if resp.secondary_clicked() {
+            if let Some(c) = resp.interact_pointer_pos().and_then(|p| screen_to_lonlat(app, rect, p)) {
+                crate::boxedit::click(app, c, false, false);
+            }
+            app.map.popup = None;
+        }
+        resp.context_menu(|ui| crate::boxedit::context_menu(app, ui));
+    }
+    if tool == Tool::Circle {
+        if resp.secondary_clicked() {
+            if let Some(c) = resp.interact_pointer_pos().and_then(|p| screen_to_lonlat(app, rect, p)) {
+                crate::circleedit::click(app, c, false, false);
+            }
+            app.map.popup = None;
+        }
+        resp.context_menu(|ui| crate::circleedit::context_menu(app, ui));
+    }
     cancel_changed_selection(app, rect);
 
     // A map tool aims with a crosshair, only over the map: the ribbon and panes keep their cursor.
@@ -2827,7 +2892,7 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
     }
 
     let shift = ui.input(|i| i.modifiers.shift);
-    let middle = ui.input(|i| i.pointer.middle_down());
+    let middle = ui.input(|i| i.pointer.middle_down() || (matches!(tool, Tool::RotatedBox | Tool::Circle) && i.key_down(egui::Key::Space)));
     let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
     // Dragging with the right button turns the map or the globe (to the right turns it
     // clockwise) and tilts it (up tilts it further), as in MapLibre.
@@ -2870,7 +2935,13 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
             app.map.moving_label = Some(MovingLabel { label: l, layer, feature, class, project, map });
             DragKind::Label { origin }
         } else if middle {
+            crate::boxedit::cancel(app);
+            crate::circleedit::cancel(app);
             DragKind::Pan
+        } else if tool == Tool::RotatedBox && crate::boxedit::drag_start(app, rect, origin, ctrl) {
+            DragKind::BoxEdit
+        } else if tool == Tool::Circle && crate::circleedit::drag_start(app, rect, origin, ctrl) {
+            DragKind::CircleEdit
         } else if tool == Tool::EditVertices && crate::vertexedit::drag_start(app, rect, origin) {
             DragKind::Vertex
         } else {
@@ -2979,6 +3050,28 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             ui.ctx().request_repaint();
         }
+    }
+    if let (Some((_, DragKind::BoxEdit)), Some(p)) = (app.map.drag, resp.interact_pointer_pos()) {
+        crate::boxedit::drag_to(app, rect, p, shift);
+        ui.ctx().request_repaint();
+    }
+    if resp.drag_stopped()
+        && let Some((_, DragKind::BoxEdit)) = app.map.drag
+    {
+        app.map.drag = None;
+        crate::boxedit::drag_stop(app);
+        return;
+    }
+    if let (Some((_, DragKind::CircleEdit)), Some(p)) = (app.map.drag, resp.interact_pointer_pos()) {
+        crate::circleedit::drag_to(app, rect, p);
+        ui.ctx().request_repaint();
+    }
+    if resp.drag_stopped()
+        && let Some((_, DragKind::CircleEdit)) = app.map.drag
+    {
+        app.map.drag = None;
+        crate::circleedit::drag_stop(app);
+        return;
     }
     if let (Some((_, DragKind::Vertex)), Some(p)) = (app.map.drag, resp.interact_pointer_pos()) {
         crate::vertexedit::drag_to(app, rect, p);
@@ -3093,7 +3186,7 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
     if resp.double_clicked() {
         if matches!(tool, Tool::Measure | Tool::MeasureArea) || tool.draws_edit() || vertex_shape(tool) {
             finish_sketch(app);
-        } else if tool == Tool::EditVertices {
+        } else if matches!(tool, Tool::EditVertices | Tool::RotatedBox | Tool::Circle) {
             // Its two clicks chose a vertex or a feature; zooming would lose the place.
         } else if let Some(p) = resp.interact_pointer_pos() {
             // A double-click on a text graphic edits it in the Format pane; elsewhere it zooms in.
@@ -3221,6 +3314,16 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
                 app.map.camera_moved = true;
             }
             Tool::EditVertices => crate::vertexedit::click(app, rect, p, c, shift),
+            Tool::RotatedBox => {
+                if !middle {
+                    crate::boxedit::click(app, c, shift, ui.input(|i| i.modifiers.alt));
+                }
+            }
+            Tool::Circle => {
+                if !middle {
+                    crate::circleedit::click(app, c, shift, ui.input(|i| i.modifiers.alt));
+                }
+            }
             Tool::CreatePoint => {
                 let _ = app.run("edit.addFeature", with_template(app, json!({"geometry": {"type": "Point", "coordinates": [c.x, c.y]}})));
             }
@@ -3257,12 +3360,24 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
     {
         ui.ctx().set_cursor_icon(icon);
     }
-    if resp.secondary_clicked() {
+    if tool == Tool::RotatedBox
+        && let Some(icon) = hover.and_then(|p| crate::boxedit::cursor(app, rect, p))
+    {
+        ui.ctx().set_cursor_icon(icon);
+    }
+    if tool == Tool::Circle
+        && let Some(icon) = hover.and_then(|p| crate::circleedit::cursor(app, rect, p))
+    {
+        ui.ctx().set_cursor_icon(icon);
+    }
+    if resp.secondary_clicked() && !matches!(tool, Tool::RotatedBox | Tool::Circle) {
         app.map.menu_lonlat = app.map.pointer_lonlat;
         app.map.menu_text = resp.interact_pointer_pos().and_then(|p| text_graphic_at(app, ui.ctx(), rect, p));
     }
     // No menu off the Earth (a globe's corners): there is no place for it to act on.
-    if let Some(c) = app.map.menu_lonlat {
+    if !matches!(tool, Tool::RotatedBox | Tool::Circle)
+        && let Some(c) = app.map.menu_lonlat
+    {
         resp.context_menu(|ui| crate::mapmenu::show(app, ui, c));
     }
     if hover.is_some() && (matches!(tool, Tool::Measure | Tool::MeasureArea) || tool.draws_edit()) && !app.map.sketch.is_empty() {
@@ -3419,7 +3534,7 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
     let editing = &app.session.map().editing;
     if editing.settings.enabled
         && editing.settings.show_vertices
-        && app.session.tool != Tool::EditVertices
+        && !matches!(app.session.tool, Tool::EditVertices | Tool::RotatedBox | Tool::Circle)
         && (app.session.tool.creates() || app.session.tool.draws_edit() || app.ui.right == Some(crate::RightPane::Editing))
     {
         let mut verts: Vec<Coord> = Vec::new();
@@ -3445,6 +3560,12 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
     // The Edit Vertices tool's handles.
     if app.session.tool == Tool::EditVertices {
         crate::vertexedit::draw(app, p, rect, accent);
+    }
+    if app.session.tool == Tool::RotatedBox {
+        crate::boxedit::draw(app, p, rect, accent);
+    }
+    if app.session.tool == Tool::Circle {
+        crate::circleedit::draw(app, p, rect, accent);
     }
     // The navigator: a compass, zoom buttons and a pan pad in the top-left corner.
     if app.session.map().view.navigator {
@@ -3683,6 +3804,8 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
             Some("Drag a vertex to move it · click an edge to add one · Delete removes the chosen vertex")
         }
         Tool::EditVertices => Some("Click a feature, then drag its vertices · click an edge to add one"),
+        Tool::Circle => Some("Drag centre to edge · radius handle resizes · Space or middle-drag pans · Alt-click cycles overlaps"),
+        Tool::RotatedBox => Some("Drag a box · paddle rotates · Shift snaps · Space or middle-drag pans · Alt-click cycles overlaps"),
         Tool::ZoomIn => Some("Drag a box or click to zoom in"),
         Tool::MoveLabel => Some("Drag a label to where it should be · drag the map to pan · Esc to stop"),
         Tool::Graphic("point") => Some("Click the map to place a point"),
@@ -4958,6 +5081,58 @@ mod halo_tests {
     use super::*;
     use rustgis_engine::map::Rgba;
 
+    /// A child process gives the font cache a deterministic built-in-only fixture without
+    /// changing this test process's environment or racing its other font tests.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn synthetic_bold_strikes_follow_the_baseline() {
+        if std::env::var_os("RUSTGIS_BOLD_PARITY_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "mapview::halo_tests::synthetic_bold_strikes_follow_the_baseline", "--nocapture"])
+                .env("RUSTGIS_BOLD_PARITY_CHILD", "1")
+                .env("RUSTGIS_BUILTIN_FONTS", "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        use rustgis_engine::render::LabelGlyph;
+        assert!(rustgis_engine::render::fonts::bold_is_synthetic());
+        for curved in [false, true] {
+            for angle in [0.0, std::f32::consts::FRAC_PI_2] {
+                let mut l = label(None);
+                (l.x, l.y, l.size, l.bold, l.halo) = (100.0, 100.0, 30.0, true, None);
+                // An unavailable explicit family must use the same fallback as no family.
+                l.font = Some(u16::MAX);
+                let thick = fallback_bold_width(l.bold, false, l.size * 1.33);
+                assert!(thick > 0.0);
+                l.font = None;
+                assert_eq!(fallback_bold_width(l.bold, false, l.size * 1.33), thick);
+                assert_eq!(fallback_bold_width(l.bold, true, l.size * 1.33), 0.0, "a ready named family draws its own face");
+                // The named family may already be indexed for exports while egui is still loading
+                // it: its fallback stays bold until the readiness flag becomes true.
+                l.font = Some(0);
+                assert_eq!(fallback_bold_width(l.bold, false, l.size * 1.33), thick);
+                l.font = Some(u16::MAX);
+                if curved {
+                    l.glyphs = vec![LabelGlyph { text: "A".into(), dx: 0.0, dy: 0.0, angle }];
+                } else {
+                    l.angle = Some(angle);
+                }
+                let ctx = egui::Context::default();
+                crate::theme::install_fonts(&ctx, &[], None);
+                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| draw_label(ui.painter(), &l, pos2(l.x, l.y)));
+                output.textures_delta.clear();
+                let positions: Vec<Pos2> =
+                    output.shapes.iter().filter_map(|s| if let egui::Shape::Text(t) = &s.shape { Some(t.pos) } else { None }).collect();
+                assert_eq!(positions.len(), 2, "one actual text and one visual strike");
+                let ui_shift = positions[1] - positions[0];
+                let expected = vec2(thick * angle.cos(), thick * angle.sin());
+                assert!((ui_shift - expected).length() < 1e-3, "curved={curved}, angle={angle}: {ui_shift:?}");
+            }
+        }
+    }
+
     #[test]
     fn a_backgrounds_outline_is_its_rectangle_rounded_and_turned() {
         let r = Rect::from_min_max(pos2(10.0, 20.0), pos2(50.0, 30.0));
@@ -5077,7 +5252,8 @@ mod tests {
 
     /// The graphics card running out of memory doesn't close the app (#1777): it's noted, and
     /// the map then leaves the GPU for the CPU with a notice, its GPU resources let go. Once:
-    /// turned on again, running out again falls back again. A map on the CPU only forgets it.
+    /// turned on again, running out again falls back again. With the map already on the CPU,
+    /// running out is said once a session, as another error is, worded for the window.
     #[test]
     fn running_out_of_gpu_memory_draws_the_map_on_the_cpu() {
         use egui_wgpu::wgpu::Error;
@@ -5104,12 +5280,19 @@ mod tests {
         assert!(!app.map.gpu_enabled && app.map.gpu_renderer.is_none() && app.map.gpu_frame.is_none() && app.map.split_gpu.is_none());
         assert_eq!(app.session.notices.len(), before + 1);
         assert!(format!("{:?}", app.session.notices.last().unwrap()).contains("ran out of memory"));
-        // Said once; on the CPU already, running out (egui's own textures) is only forgotten.
-        leave_gpu_if_out_of_memory(&mut app);
-        ran_out(&app);
+        // Said once; on the CPU already, running out (egui's own textures) is said as another
+        // error is, once a session, for the window.
         leave_gpu_if_out_of_memory(&mut app);
         assert_eq!(app.session.notices.len(), before + 1);
+        ran_out(&app);
+        leave_gpu_if_out_of_memory(&mut app);
+        assert!(app.map.gpu_error_said && !app.map.gpu_enabled);
+        assert_eq!(app.session.notices.len(), before + 2);
+        assert!(format!("{:?}", app.session.notices.last().unwrap()).contains("window may be drawn wrongly"));
         assert!(!app.map.gpu_errors.out_of_memory.load(Ordering::SeqCst));
+        // (A new session, for what follows.)
+        app.map.gpu_error_said = false;
+        let before = before + 1;
         // Turned on again, running out again falls back again.
         app.run("ui.map.gpu", serde_json::json!({"on": true, "remember": false})).unwrap();
         assert!(app.map.gpu_enabled);
@@ -5117,6 +5300,15 @@ mod tests {
         leave_gpu_if_out_of_memory(&mut app);
         assert!(!app.map.gpu_enabled);
         assert_eq!(app.session.notices.len(), before + 2);
+        // Running out with errors that follow from it, in one frame: only running out is said,
+        // and the notice for another error is kept.
+        app.run("ui.map.gpu", serde_json::json!({"on": true, "remember": false})).unwrap();
+        ran_out(&app);
+        app.map.gpu_errors.note(&invalid());
+        leave_gpu_if_out_of_memory(&mut app);
+        assert!(!app.map.gpu_enabled && !app.map.gpu_error_said);
+        assert_eq!(app.session.notices.len(), before + 3);
+        assert!(format!("{:?}", app.session.notices.last().unwrap()).contains("ran out of memory"));
         // Another error is said once a session, the map left as it is.
         app.map.gpu_enabled = true;
         for _ in 0..2 {
@@ -5124,11 +5316,14 @@ mod tests {
             leave_gpu_if_out_of_memory(&mut app);
         }
         assert!(app.map.gpu_enabled);
-        assert_eq!(app.session.notices.len(), before + 3);
+        assert_eq!(app.session.notices.len(), before + 4);
         assert!(format!("{:?}", app.session.notices.last().unwrap()).contains("Clicking GPU"));
-        // With the map on the CPU, the notice doesn't point at the GPU switch.
+        // With the map on the CPU, the notice doesn't point at the GPU switch, and is said once
+        // for an error and running out together.
         let mut cpu = RustGisApp::with_sample();
+        assert!(!cpu.map.gpu_enabled);
         let before = cpu.session.notices.len();
+        ran_out(&cpu);
         cpu.map.gpu_errors.note(&invalid());
         leave_gpu_if_out_of_memory(&mut cpu);
         assert_eq!(cpu.session.notices.len(), before + 1);
@@ -5147,7 +5342,17 @@ mod tests {
         let r = Raster::new("dem", 4, 4, vec![vec![0.0; 16]], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
         let mut map = Map::new("Relief");
         let id = map.add_raster("dem", RasterLayer::from_path(r, "dem.tif"));
-        let relief = |shadow| RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 315.0, altitude: 30.0, z_factor: 1.0, shadow };
+        let relief = |shadow| RasterRenderer::ShadedRelief {
+            band: 0,
+            ramp: None,
+            azimuth: 315.0,
+            altitude: 30.0,
+            z_factor: 1.0,
+            shadow,
+            sky: 0.0,
+            fill: 0.0,
+            rock: None,
+        };
         let set = |map: &mut Map, shadow: f64, visible: bool| {
             let l = map.layer_mut(id).unwrap();
             l.visible = visible;
@@ -5369,7 +5574,7 @@ mod tests {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !h.state().map.labels.iter().any(|l| l.text == "Place 3") || h.state().map.drawing() {
             assert!(std::time::Instant::now() < end, "labels never drawn");
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(2)); // test-wait: legacy polling for rendered labels
             h.step();
         }
         let rect = h.state().map.view_rect.unwrap().0;
@@ -5432,7 +5637,7 @@ mod tests {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !h.state().map.labels.iter().any(|l| l.collide.pinned) || h.state().map.drawing() {
             assert!(std::time::Instant::now() < end, "labels never drawn again");
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(2)); // test-wait: legacy polling for restored pinned labels
             h.step();
         }
         // Shift-click on a label never moved: no undo step, so undo takes back the move.
@@ -5519,6 +5724,7 @@ mod tests {
     /// nothing selected gives no "nothing is selected" error notice.
     #[test]
     fn explore_click_asking_only_wms_clears_without_a_notice() {
+        let _turn = crate::fetching::turn();
         let mut h = selection_harness();
         let url = "https://wms.example.org/?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=over&STYLES=&CRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&FORMAT=image%2Fpng";
         h.state_mut().run("map.addTiles", json!({"url": url, "name": "Over", "overlay": true})).unwrap();
@@ -5676,7 +5882,7 @@ mod tests {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while h.state().map.key.is_none() || h.state().map.drawing() {
             assert!(std::time::Instant::now() < end, "exact globe frame did not arrive");
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(2)); // test-wait: legacy polling for the exact globe frame
             h.step();
         }
         assert!(!h.state().map.labels.is_empty(), "the sample has labels");
@@ -5743,7 +5949,7 @@ mod tests {
                     break;
                 }
                 assert!(std::time::Instant::now() < end, "{what}");
-                std::thread::sleep(std::time::Duration::from_millis(2));
+                std::thread::sleep(std::time::Duration::from_millis(2)); // test-wait: legacy polling for the settled flat frame
             }
         };
         exact(&mut h, "the first frame did not arrive");
@@ -5766,7 +5972,7 @@ mod tests {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while h.state().map.tilt_settle.busy() {
             assert!(std::time::Instant::now() < end, "the stopped frame never came back");
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(2)); // test-wait: legacy polling for the stopped frame
             h.step();
         }
         h.state_mut().map.last_interaction = -10.0;
@@ -5802,7 +6008,7 @@ mod tests {
                     break;
                 }
                 assert!(std::time::Instant::now() < end, "{what}");
-                std::thread::sleep(std::time::Duration::from_millis(2));
+                std::thread::sleep(std::time::Duration::from_millis(2)); // test-wait: legacy polling for the moving flat frame
             }
         };
         exact(&mut h, "the first frame did not arrive");
@@ -5819,7 +6025,7 @@ mod tests {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while h.state().map.key == Some(before) {
             assert!(std::time::Instant::now() < end, "the gap's frame never landed");
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(2)); // test-wait: legacy polling for the gap frame
             h.step();
         }
         let st = h.state();
@@ -5909,7 +6115,7 @@ mod tests {
                     break;
                 }
                 assert!(std::time::Instant::now() < end, "{what}");
-                std::thread::sleep(std::time::Duration::from_millis(2));
+                std::thread::sleep(std::time::Duration::from_millis(2)); // test-wait: legacy polling for the styled frame
             }
         };
         exact(&mut h, "the first exact frame did not arrive");
@@ -5933,7 +6139,7 @@ mod tests {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while h.state().map.key.is_some_and(|k| k.rev == shown) {
             assert!(std::time::Instant::now() < end, "no frame of the changes arrived");
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(2)); // test-wait: legacy polling for the changed style revision
             h.step();
         }
         assert_eq!(h.state().map.key.map(|k| k.rev), Some(first), "the earlier change's frame was shown first");
@@ -5969,6 +6175,8 @@ mod tests {
             m.view.terrain = Some(rustgis_engine::map::view::Terrain {
                 source: rustgis_engine::map::view::TerrainSource::Layer("dem".into()),
                 exaggeration: 2.0,
+                block: None,
+                water: None,
             });
             m.camera =
                 Camera { center: rustgis_engine::geom::lonlat_to_merc(Coord::new(10.0, 47.6)), res: 300.0, bearing: 0.0, pitch: 60.0 };
@@ -5985,7 +6193,7 @@ mod tests {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let step = |h: &mut egui_kittest::Harness<'_, RustGisApp>, what: &str| {
             assert!(std::time::Instant::now() < end, "{what}");
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(2)); // test-wait: legacy polling for the tilted frame fade
             h.step();
         };
         // The first frame, drawn while the drape stood in for it, fades in too.
@@ -6040,7 +6248,7 @@ mod tests {
             let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while h.state().map.key.is_none_or(|k| k.draft || k.size != h.state().map.view_px) || h.state().map.drawing() {
                 assert!(std::time::Instant::now() < end, "{what}");
-                std::thread::sleep(std::time::Duration::from_millis(2));
+                std::thread::sleep(std::time::Duration::from_millis(2)); // test-wait: legacy polling for the post-drag frame
                 h.step();
             }
         };

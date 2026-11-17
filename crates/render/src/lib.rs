@@ -6,6 +6,7 @@
 //! the labels too, for export and the command line.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod block;
 pub mod cancel;
 mod canvas;
 mod diagrams;
@@ -2030,9 +2031,16 @@ impl ArchiveRevision {
         self.0 == archive_revisions(maps).0
     }
 
-    /// Refuses a spanning render before reporting any ordinary drawing failure.
-    pub(crate) fn finish<'a, T>(self, maps: impl IntoIterator<Item = &'a Map>, result: Option<T>, failure: &str) -> Result<T, String> {
-        self.finish_revision(archive_revisions(maps), result, failure)
+    /// Refuses a spanning render before reporting a drawing failure. `failed_source` is the
+    /// live layer identity returned by the read that stopped this render, never a retained
+    /// error chosen from another layer or an earlier render.
+    pub(crate) fn finish<T>(self, map: &Map, failed_source: Option<u64>, result: Option<T>, failure: &str) -> Result<T, String> {
+        let source_error = failed_source.filter(|_| result.is_none()).and_then(|id| {
+            let layer = map.layers.iter().find(|layer| layer.instance_id() == id)?;
+            layer.source.as_ref()?.read_error().map(|why| format!("{}: {why}", layer.name))
+        });
+        let current = archive_revisions([map]);
+        self.finish_revision(current, result, source_error.as_deref().unwrap_or(failure))
     }
 
     /// Checks a composed output against a newly captured revision of the same source set.
@@ -2065,13 +2073,13 @@ pub fn render(map: &mut Map, view: &View) -> Option<Rendered> {
 
 /// [`render_with_backend`] on the CPU, as pixels.
 fn render_with(map: &mut Map, view: &View, full_res_rasters: bool) -> Option<Rendered> {
-    render_cpu(map, view, full_res_rasters, false)
+    render_cpu(map, view, full_res_rasters, false, &mut None)
 }
 
 /// [`render_with`] on the CPU, kept as vectors where it can be (`record`, see
 /// [`render_frame`]).
-fn render_cpu(map: &mut Map, view: &View, full_res_rasters: bool, record: bool) -> Option<Rendered> {
-    match render_any(map, view, full_res_rasters, Backend::Cpu, record) {
+fn render_cpu(map: &mut Map, view: &View, full_res_rasters: bool, record: bool, failed_source: &mut Option<u64>) -> Option<Rendered> {
+    match render_any(map, view, full_res_rasters, Backend::Cpu, record, failed_source) {
         Some(RenderOutput::Cpu(r)) => Some(r),
         // The Cpu backend never produces RenderOutput::Gpu.
         Some(RenderOutput::Gpu(_)) | None => None,
@@ -2096,14 +2104,22 @@ pub(crate) fn flush_acc(pm: &mut Pixmap, cmds: &mut Vec<gpu_scene::DrawCmd>, dir
 /// `full_res_rasters` renders rasters at full resolution (exports); `backend` selects the CPU
 /// pixmap or a GPU scene (see [`Backend`]).
 fn render_with_backend(map: &mut Map, view: &View, full_res_rasters: bool, backend: Backend) -> Option<RenderOutput> {
-    render_any(map, view, full_res_rasters, backend, false)
+    render_any(map, view, full_res_rasters, backend, false, &mut None)
 }
 
 /// [`render_with_backend`], `record` keeping a flat, north-up frame as vectors where it can
 /// ([`render_frame`]).
-fn render_any(map: &mut Map, view: &View, full_res_rasters: bool, backend: Backend, record: bool) -> Option<RenderOutput> {
+/// `failed_source` carries only a fatal source read's live layer identity to the caller.
+fn render_any(
+    map: &mut Map,
+    view: &View,
+    full_res_rasters: bool,
+    backend: Backend,
+    record: bool,
+    failed_source: &mut Option<u64>,
+) -> Option<RenderOutput> {
     let revisions = archive_revisions([&*map]);
-    let output = render_pass(map, view, full_res_rasters, backend, record);
+    let output = render_pass(map, view, full_res_rasters, backend, record, failed_source);
     // A frame stopped part-way (see `cancel`) is no frame.
     if cancel::requested() {
         return None;
@@ -2122,7 +2138,15 @@ fn drawn_scales(map: &Map, camera: &Camera, view: &View) -> Vec<f64> {
 }
 
 /// One entire pass, including all bands and backend fallbacks, under `render_any`'s guard.
-fn render_pass(map: &mut Map, view: &View, full_res_rasters: bool, backend: Backend, record: bool) -> Option<RenderOutput> {
+fn render_pass(
+    map: &mut Map,
+    view: &View,
+    full_res_rasters: bool,
+    backend: Backend,
+    record: bool,
+    failed_source: &mut Option<u64>,
+) -> Option<RenderOutput> {
+    *failed_source = None;
     // A bearing or pitch set directly on the camera may be unnormalised (or no number, which
     // faces north and looks straight down).
     let mut camera = view.camera;
@@ -2158,6 +2182,7 @@ fn render_pass(map: &mut Map, view: &View, full_res_rasters: bool, backend: Back
             {
                 if let Err(e) = source.open() {
                     source.error = Some(e);
+                    *failed_source = Some(layer.instance_id());
                     return None;
                 }
                 if layer.dataset.fields.is_empty()
@@ -2200,10 +2225,11 @@ fn render_pass(map: &mut Map, view: &View, full_res_rasters: bool, backend: Back
                 if let Some(s) = map.layer_mut(layer.id).and_then(|l| l.source.as_mut()) {
                     s.error = Some(e.to_string());
                 }
+                *failed_source = Some(layer.instance_id());
                 return None;
             }
             if let Some(source) = map.layer_mut(layer.id).and_then(|l| l.source.as_mut()) {
-                source.error = None;
+                source.clear_error();
             }
             layer.selection = features.iter().enumerate().filter_map(|(r, f)| ids.contains(&f.id).then_some(r)).collect();
             layer.source = None;
@@ -2215,11 +2241,11 @@ fn render_pass(map: &mut Map, view: &View, full_res_rasters: bool, backend: Back
         // Owner synchronization has already run. Repeating it on the copy could consume a
         // shared pending result before its owner installs it, even for a plain chunk source.
         let mut output = if backend.is_gpu() {
-            gpu_turned(&mut snapshot, &view, full_res_rasters, true)
+            gpu_turned(&mut snapshot, &view, full_res_rasters, true, failed_source)
                 .map(RenderOutput::Gpu)
-                .or_else(|| render_tilted(&mut snapshot, &view, full_res_rasters, true).map(RenderOutput::Cpu))
+                .or_else(|| render_tilted(&mut snapshot, &view, full_res_rasters, true, failed_source).map(RenderOutput::Cpu))
         } else {
-            render_tilted(&mut snapshot, &view, full_res_rasters, true).map(RenderOutput::Cpu)
+            render_tilted(&mut snapshot, &view, full_res_rasters, true, failed_source).map(RenderOutput::Cpu)
         };
         map.adopt_caches(&snapshot);
         if let Some(output) = &mut output {
@@ -2233,24 +2259,24 @@ fn render_pass(map: &mut Map, view: &View, full_res_rasters: bool, backend: Back
     // The globe turns and tilts itself (`Globe`): one frame.
     if map.projection.is_globe() {
         let view = View { camera, ..*view };
-        return render_frame(map, &view, full_res_rasters, backend, Labels::Own, false);
+        return render_frame(map, &view, full_res_rasters, backend, Labels::Own, false, failed_source);
     }
     {
         let view = View { camera, ..*view };
         if backend.is_gpu()
             && (camera.pitch != 0.0 || camera.bearing != 0.0)
-            && let Some(scene) = gpu_turned(map, &view, full_res_rasters, false)
+            && let Some(scene) = gpu_turned(map, &view, full_res_rasters, false, failed_source)
         {
             return Some(RenderOutput::Gpu(scene));
         }
         if camera.pitch != 0.0 {
-            return render_tilted(map, &view, full_res_rasters, false).map(RenderOutput::Cpu);
+            return render_tilted(map, &view, full_res_rasters, false, failed_source).map(RenderOutput::Cpu);
         }
         if camera.bearing != 0.0 {
-            return render_turned(map, &view, full_res_rasters, record).map(RenderOutput::Cpu);
+            return render_turned(map, &view, full_res_rasters, record, failed_source).map(RenderOutput::Cpu);
         }
     }
-    render_frame(map, view, full_res_rasters, backend, Labels::Own, record)
+    render_frame(map, view, full_res_rasters, backend, Labels::Own, record, failed_source)
 }
 
 /// Persisted local Shapefiles can require complete traversal before a handle is opened.
@@ -2468,7 +2494,14 @@ const LABEL_MIN_DEPTH_SCALE: f64 = 0.3;
 /// ([`Camera::tilt_bands`]), sharp near and coarser toward the horizon (so far tiles come at
 /// lower zoom), then each screen pixel takes its colour from the band under it, fading into fog
 /// and the sky past the view's reach. Labels are placed in the tilted view, upright.
-fn render_tilted(map: &mut Map, view: &View, full_res_rasters: bool, sources_ready: bool) -> Option<Rendered> {
+fn render_tilted(
+    map: &mut Map,
+    view: &View,
+    full_res_rasters: bool,
+    sources_ready: bool,
+    failed_source: &mut Option<u64>,
+) -> Option<Rendered> {
+    *failed_source = None;
     let bands_of = view.camera.tilt_bands(view.width, view.height);
     let data_pending = !sources_ready && sync_tilted(map, view, &bands_of, full_res_rasters);
     // Labels are placed in the tilted view: a lock on a flat view's labels doesn't apply.
@@ -2482,6 +2515,8 @@ fn render_tilted(map: &mut Map, view: &View, full_res_rasters: bool, sources_rea
     // once (at most eight, `Camera::tilt_bands`, each capped at `MAX_BAND_PX` a side) where the flat warp holds
     // one at a time: the cost of hiding what slopes stand in front of.
     let ground = terrain::Ground::of(map, &view.camera);
+    // The bands' Shaded Relief draws this ground's water (see `relief_water`).
+    let _water = BandWater::set(ground.as_ref().and_then(|g| g.water().cloned()));
     let mut kept: Vec<(View, (f64, f64), Pixmap)> = Vec::new();
     let last = bands_of.len().saturating_sub(1);
     let (mut attribution, mut tiles_pending, mut tile_errors) = (Vec::<String>::new(), false, Vec::<String>::new());
@@ -2494,7 +2529,7 @@ fn render_tilted(map: &mut Map, view: &View, full_res_rasters: bool, sources_rea
         }
         let v = band_view(view, &b);
         let Some(RenderOutput::Cpu(r)) =
-            render_frame(map, &v, full_res_rasters, Backend::Cpu, Labels::Tilted(view, &mut candidates), false)
+            render_frame(map, &v, full_res_rasters, Backend::Cpu, Labels::Tilted(view, &mut candidates), false, failed_source)
         else {
             let scale = map.ground_res_at(&v.camera) / rustgis_geom::PIXEL_M;
             let complete = sources_ready
@@ -2590,9 +2625,14 @@ fn render_tilted(map: &mut Map, view: &View, full_res_rasters: bool, sources_rea
 /// triangles raised to the ground's height and mapped from its picture, every band keeping to
 /// its own stretch of ground, all drawn far to near so nearer slopes hide what lies behind
 /// them; fog with distance, and the sky behind. (Without terrain, [`Warp`] does it per pixel.)
-/// Reading the grids' heights and ordering the triangles (tens of milliseconds) doesn't look at
-/// Cancel; drawing them, the long part, does. False when an export cancelled meanwhile stopped
-/// it, the picture left half drawn.
+/// Cancel is looked at before each band's grid of heights is read (up to 641 × 641 points,
+/// `terrain::settled_grid`) and while the triangles are drawn, the long part; ordering them
+/// doesn't. False when an export cancelled meanwhile, or a settled frame gone out of date
+/// (`cancel`), stopped it, the picture left half drawn.
+///
+/// A block diagram (#1914, [`terrain::Ground::block`]) keeps only the ground inside its box,
+/// triangles across its edge cut there (`block::clip`), and stands the walls facing the eye over
+/// it.
 fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, f64), Pixmap)], ground: &terrain::Ground) -> bool {
     let (sky, fog) = tilt_sky(map);
     let cam = view.camera;
@@ -2617,89 +2657,228 @@ fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, 
         None => pm.fill(c(fog)),
     }
     // Every band's triangles: (depth, band, cell * 2 + which half), with each band's grid of
-    // vertices (screen point, picture point, depth). Indices, not corners: the settled mesh is
-    // fine (`terrain::SETTLED_CELLS`), and corners copied into each triangle took 112 bytes a
-    // triangle against 16 (13 MB against 8 with the grids, for a 1600 × 1100 export).
+    // vertices (screen point, picture point, depth) and its cells across. Indices, not corners: the
+    // settled mesh is fine (`terrain::settled_grid`), and corners copied into each triangle took
+    // 112 bytes a triangle against 16 (13 MB against 8 with the grids, for a 1600 × 1100 export
+    // at 160 cells).
     type Vertex = ((f64, f64), (f64, f64), f64);
-    let n = terrain::SETTLED_CELLS;
     let (pw, ph) = (f64::from(pm.width()), f64::from(pm.height()));
-    let mut grids: Vec<Vec<Option<Vertex>>> = Vec::with_capacity(bands.len());
+    let mut grids: Vec<(usize, Vec<Option<Vertex>>, Vec<Option<u8>>)> = Vec::with_capacity(bands.len());
     let mut tris: Vec<(f64, u32, u32)> = Vec::new();
+    // A block diagram (#1914): each vertex's sides of the box it lies beyond, and the stretches of
+    // the box's edge the ground cut to it ends at, for the walls.
+    let block = ground.block(map);
+    let mut edges = Vec::new();
     for (bi, (v, (d0, d1), pic)) in bands.iter().enumerate() {
+        if rustgis_data::progress::check().is_err() || cancel::requested() {
+            return false;
+        }
         let kb = f64::from(pic.width()) / v.width.max(1e-9);
-        let grid: Vec<Option<Vertex>> = (0..=n)
-            .flat_map(|j| (0..=n).map(move |i| (i, j)))
-            .map(|(i, j)| {
-                let (lx, ly) = (v.width * i as f64 / n as f64, v.height * j as f64 / n as f64);
-                let m = v.camera.to_map(lx, ly, v.width, v.height);
-                let depth = 1.0 / cam.depth_scale(m, h)?;
+        let (nx, ny) = band_cells(v, (pic.width(), pic.height()), ground);
+        // Each vertex, and with a block, the sides of its box the vertex lies beyond, from the
+        // same map point.
+        let points = (nx + 1) * (ny + 1);
+        let mut grid: Vec<Option<Vertex>> = Vec::with_capacity(points);
+        let mut codes: Vec<Option<u8>> = Vec::with_capacity(if block.is_some() { points } else { 0 });
+        for (i, j) in (0..=ny).flat_map(|j| (0..=nx).map(move |i| (i, j))) {
+            let (lx, ly) = (v.width * i as f64 / nx as f64, v.height * j as f64 / ny as f64);
+            let m = v.camera.to_map(lx, ly, v.width, v.height);
+            if let Some(b) = &block {
+                codes.push(Some(block::outcode(b, m)));
+            }
+            grid.push(cam.depth_scale(m, h).and_then(|scale| {
                 let (u, gv) = cam.ground_px(m);
                 let (sx, sy) = cam.project_raised(u, gv, ground.up_px(m, &cam), w, h)?;
-                (sx.is_finite() && sy.is_finite()).then_some(((sx * k, sy * k), (lx * kb, ly * kb), depth))
-            })
-            .collect();
+                (sx.is_finite() && sy.is_finite()).then_some(((sx * k, sy * k), (lx * kb, ly * kb), 1.0 / scale))
+            }));
+        }
         // Its own stretch of ground, a little over at the seams.
         let margin = ((d1.min(far) - d0) * 0.02).max(0.0);
-        for (cell, (i, j)) in (0..n).flat_map(|j| (0..n).map(move |i| (i, j))).enumerate() {
-            let Some(halves) = triangles(&grid, n, i, j) else { continue };
+        for (cell, (i, j)) in (0..ny).flat_map(|j| (0..nx).map(move |i| (i, j))).enumerate() {
+            let Some(halves) = triangles(&grid, nx, i, j) else { continue };
+            let codes = triangles(&codes, nx, i, j);
             for (half, [p, q, r]) in halves.into_iter().enumerate() {
                 let depth = (p.2 + q.2 + r.2) / 3.0;
                 if depth < d0 - margin || depth > d1 + margin || p.2.min(q.2).min(r.2) > far {
                     continue;
                 }
-                // Wholly off one side of the picture: nothing to draw.
+                // Wholly beyond one side of the block's box: not drawn.
+                let code = codes.and_then(|c| c.get(half).copied()).unwrap_or([0; 3]);
+                if code[0] & code[1] & code[2] != 0 {
+                    continue;
+                }
+                // Wholly off one side of the picture: nothing to draw. Across the block's edge it
+                // is still cut, for the wall under it, which can reach into the picture.
                 let xs = [p.0.0, q.0.0, r.0.0];
                 let ys = [p.0.1, q.0.1, r.0.1];
-                if xs.iter().all(|x| *x < 0.0) || xs.iter().all(|x| *x > pw) || ys.iter().all(|y| *y < 0.0) || ys.iter().all(|y| *y > ph) {
-                    continue;
+                let off =
+                    xs.iter().all(|x| *x < 0.0) || xs.iter().all(|x| *x > pw) || ys.iter().all(|y| *y < 0.0) || ys.iter().all(|y| *y > ph);
+                // A triangle wholly inside the block's box with an edge on one of its sides still gives
+                // that side's wall its stretch (see below), so it is kept off the picture too.
+                if off && code == [0; 3] {
+                    let m = [p, q, r].map(|c| v.camera.to_map(c.1.0 / kb, c.1.1 / kb, v.width, v.height));
+                    if !block.as_ref().is_some_and(|b| block::on_side(m, b)) {
+                        continue;
+                    }
                 }
                 tris.push((depth, bi as u32, (cell * 2 + half) as u32));
             }
         }
-        grids.push(grid);
+        grids.push((nx, grid, codes));
     }
     tris.sort_by(|a, b| b.0.total_cmp(&a.0));
     let fog_paint = |t: f64| paint(fog, t as f32);
+    let fog_at = |depth: f64| fog_share(depth, far);
     for (drawn, (depth, bi, at)) in tris.into_iter().enumerate() {
         // An export cancelled meanwhile (see `rustgis_data::progress`) stops here: it writes
-        // nothing. The settled frame on screen has no run to cancel.
-        if drawn % 4096 == 0 && rustgis_data::progress::check().is_err() {
+        // nothing. So does a settled frame on screen gone out of date (see `cancel`).
+        if drawn % 4096 == 0 && (rustgis_data::progress::check().is_err() || cancel::requested()) {
             return false;
         }
-        let (Some((_, _, pic)), Some(grid)) = (bands.get(bi as usize), grids.get(bi as usize)) else { continue };
-        let cell = at as usize / 2;
-        let Some([p, q, r]) = triangles(grid, n, cell % n, cell / n).and_then(|t| t.get(at as usize % 2).copied()) else { continue };
+        let (Some((v, _, pic)), Some((nx, grid, codes))) = (bands.get(bi as usize), grids.get(bi as usize)) else { continue };
+        let (nx, cell, half) = (*nx, at as usize / 2, at as usize % 2);
+        let Some([p, q, r]) = triangles(grid, nx, cell % nx, cell / nx).and_then(|t| t.get(half).copied()) else { continue };
         let (dst, src) = ([p.0, q.0, r.0], [p.1, q.1, r.1]);
         let Some(t) = affine(src, dst) else { continue };
-        // A hair larger all round, so neighbours leave no seam.
-        let (cx, cy) = ((dst[0].0 + dst[1].0 + dst[2].0) / 3.0, (dst[0].1 + dst[1].1 + dst[2].1) / 3.0);
-        let mut pb = PathBuilder::new();
-        for (i, (x, y)) in dst.iter().enumerate() {
-            let (dx, dy) = (x - cx, y - cy);
-            let len = dx.hypot(dy).max(1e-9);
-            let (x, y) = ((x + dx / len * 0.6) as f32, (y + dy / len * 0.6) as f32);
-            if i == 0 { pb.move_to(x, y) } else { pb.line_to(x, y) }
-        }
-        pb.close();
-        let Some(path) = pb.finish() else { continue };
-        let shader = tiny_skia::Pattern::new(pic.as_ref(), SpreadMode::Pad, tiny_skia::FilterQuality::Bilinear, 1.0, t);
-        pm.fill_path(&path, &Paint { shader, anti_alias: true, ..Paint::default() }, FillRule::Winding, Transform::identity(), None);
+        // Across the block's edge: the part inside the box, fanned into triangles from its first
+        // corner, and the stretch of edge under it kept for the walls.
+        let cut = match (&block, triangles(codes, nx, cell % nx, cell / nx).and_then(|c| c.get(half).copied())) {
+            (Some(b), Some(c)) => {
+                let kb = f64::from(pic.width()) / v.width.max(1e-9);
+                let m = src.map(|(x, y)| v.camera.to_map(x / kb, y / kb, v.width, v.height));
+                // Wholly inside the box it is drawn whole; but a corner on the box's edge still
+                // gives its wall a stretch, as the triangles across that edge clip to nothing.
+                if c == [0; 3] && !block::on_side(m, b) {
+                    None
+                } else {
+                    let poly = block::clip(m, b);
+                    let screen: Vec<(f64, f64)> = poly
+                        .iter()
+                        .map(|(w, _, _)| {
+                            (w[0] * dst[0].0 + w[1] * dst[1].0 + w[2] * dst[2].0, w[0] * dst[0].1 + w[1] * dst[1].1 + w[2] * dst[2].1)
+                        })
+                        .collect();
+                    block::edges(&poly, &screen, depth, &mut edges);
+                    (c != [0; 3]).then_some(screen)
+                }
+            }
+            _ => None,
+        };
+        let pieces: Vec<[(f64, f64); 3]> = match &cut {
+            Some(s) => (2..s.len()).filter_map(|i| Some([*s.first()?, *s.get(i - 1)?, *s.get(i)?])).collect(),
+            None => vec![dst],
+        };
         // Fog from halfway to the reach.
-        let f = ((depth - far * 0.5) / (far * 0.5)).clamp(0.0, 1.0);
-        let f = f * f * (3.0 - 2.0 * f);
-        if f > 0.004 {
-            pm.fill_path(&path, &fog_paint(f), FillRule::Winding, Transform::identity(), None);
+        let f = fog_at(depth);
+        for piece in pieces {
+            // Each edge moved a hair outward along its normal, so neighbours overlap and leave no seam.
+            let Some(path) = grown_triangle(piece) else { continue };
+            let shader = tiny_skia::Pattern::new(pic.as_ref(), SpreadMode::Pad, tiny_skia::FilterQuality::Bilinear, 1.0, t);
+            pm.fill_path(&path, &Paint { shader, anti_alias: true, ..Paint::default() }, FillRule::Winding, Transform::identity(), None);
+            if f > 0.004 {
+                pm.fill_path(&path, &fog_paint(f), FillRule::Winding, Transform::identity(), None);
+            }
         }
+    }
+    // Walls once the base is settled: over elevation tiles still on their way it would move with
+    // each tile (the frame is drawn again when they arrive, `Ground::pending`).
+    if let Some(b) = block.as_ref().filter(|b| b.walls_stand(ground)) {
+        let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
+        block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b, scale), fog, far);
     }
     true
 }
 
-/// The two triangles of the cell (`i`, `j`) of a band's grid of `n` cells a side, [a, b, d] and
+/// How much of the fog covers what lies `depth` away in a tilted view whose reach is `far`:
+/// none up to halfway, all of it at the reach, eased.
+fn fog_share(depth: f64, far: f64) -> f64 {
+    let f = ((depth - far * 0.5) / (far * 0.5)).clamp(0.0, 1.0);
+    f * f * (3.0 - 2.0 * f)
+}
+
+/// Cells across and down the mesh laying the band `v` over `ground`, its picture `picture`
+/// (width, height) pixels: as fine as the picture, the same size both ways, up to the ground's
+/// own cells along each side of the band (#1882, #2037; `terrain::settled_grid`).
+fn band_cells(v: &View, picture: (u32, u32), ground: &terrain::Ground) -> (usize, usize) {
+    let corners = [(0.0, 0.0), (v.width, 0.0), (0.0, v.height), (v.width, v.height)].map(|(x, y)| v.camera.to_map(x, y, v.width, v.height));
+    let along = ground.cells_along(&corners);
+    terrain::settled_grid(picture, (along.map(|a| a.0), along.map(|a| a.1)))
+}
+
+/// The two triangles of the cell (`i`, `j`) of a band's grid of `nx` cells across, [a, b, d] and
 /// [a, d, c] of its corners a b / c d; none when a corner couldn't be placed.
-fn triangles<V: Copy>(grid: &[Option<V>], n: usize, i: usize, j: usize) -> Option<[[V; 3]; 2]> {
-    let at = |i: usize, j: usize| grid.get(j * (n + 1) + i).copied().flatten();
+fn triangles<V: Copy>(grid: &[Option<V>], nx: usize, i: usize, j: usize) -> Option<[[V; 3]; 2]> {
+    let at = |i: usize, j: usize| grid.get(j * (nx + 1) + i).copied().flatten();
     let (a, b, c, d) = (at(i, j)?, at(i + 1, j)?, at(i, j + 1)?, at(i + 1, j + 1)?);
     Some([[a, b, d], [a, d, c]])
+}
+
+/// How far [`grown_triangle`] moves each edge of a draped triangle outward (physical pixels):
+/// two neighbours then overlap, and their anti-aliased edges leave no seam for the sky to show
+/// through (#1881).
+const DRAPE_GROWTH: f64 = 0.6;
+/// The most [`grown_triangle`] moves an edge, as a share of the triangle's height over it. A
+/// slope seen edge on is a triangle a fraction of a pixel high, and its picture is stretched
+/// across it: moved out the full [`DRAPE_GROWTH`], its margin showed the picture from far
+/// beyond the triangle, a dotted line along the ridge.
+const DRAPE_GROWTH_SHARE: f64 = 0.5;
+/// The farthest away from a corner [`grown_triangle`] puts it (physical pixels); a corner whose
+/// moved edges meet farther gets a bevel. A sliver's sharp corner reaching farther stood out of a
+/// ridge against the sky.
+const DRAPE_CORNER_REACH: f64 = 1.0;
+
+/// The outline of the triangle `t` (either winding) with each edge moved outward along its own
+/// normal, the corners where the moved edges meet. An edge moves [`DRAPE_GROWTH`], or
+/// [`DRAPE_GROWTH_SHARE`] of the triangle's height over it if that's less: an edge with the
+/// triangle at least 1.2 px high over it overlaps its neighbour by the full [`DRAPE_GROWTH`],
+/// whether the triangle is long and thin or not (unless a bevel at its ends holds it down, see
+/// below), and one under a lower triangle by less. Two moves over a shared edge that sum to under
+/// 1 px can leave a faint seam, as when a neighbour is under 0.8 px high over it or both are under
+/// 1 px high. Moving the corners away from the centroid instead barely moved a long thin
+/// triangle's long edges, the ones perspective makes of far cells. Where the moved edges would
+/// meet farther than
+/// [`DRAPE_CORNER_REACH`] from the corner (sharper than about 74° between edges moved in full,
+/// or nearly straight between edges moved unequally), both stop across from it by the smaller
+/// of their two moves, joined by a bevel: no point of the outline lies farther out from an edge
+/// than that edge's own move. So a bevel holds its edge down to the smaller move at that corner,
+/// along the whole edge when both its ends bevel (a tall edge beside a low one can then grow only
+/// the low one's move along its length). `None` for a triangle with no area.
+fn grown_triangle(t: [(f64, f64); 3]) -> Option<tiny_skia::Path> {
+    // Twice the signed area: positive when the corners turn from +x towards +y.
+    let area2 = (t[1].0 - t[0].0) * (t[2].1 - t[0].1) - (t[2].0 - t[0].0) * (t[1].1 - t[0].1);
+    if area2.abs() < 1e-12 || !area2.is_finite() {
+        return None;
+    }
+    let sign = area2.signum();
+    // The edge from corner i to the next: its outward normal (its direction turned a quarter
+    // away from the triangle, which lies on the side `sign` says) and how far it moves. With
+    // some area, no edge has zero length.
+    let edge = |i: usize| {
+        let (a, b) = (t[i], t[(i + 1) % 3]);
+        let (ex, ey) = (b.0 - a.0, b.1 - a.1);
+        let l = ex.hypot(ey);
+        ((sign * ey / l, -sign * ex / l), DRAPE_GROWTH.min(DRAPE_GROWTH_SHARE * area2.abs() / l))
+    };
+    let edges = [edge(0), edge(1), edge(2)];
+    // Each corner's place, or the two ends of its bevel.
+    let corner = |i: usize| -> [Option<(f64, f64)>; 2] {
+        let v = t[i];
+        let ((n1, d1), (n2, d2)) = (edges[(i + 2) % 3], edges[i]);
+        // The moved edges meet at v + x, where x · n1 = d1 and x · n2 = d2.
+        let det = n1.0 * n2.1 - n1.1 * n2.0;
+        let x = ((d1 * n2.1 - d2 * n1.1) / det, (n1.0 * d2 - n2.0 * d1) / det);
+        if det.abs() > 1e-9 && x.0.hypot(x.1) <= DRAPE_CORNER_REACH {
+            return [Some((v.0 + x.0, v.1 + x.1)), None];
+        }
+        let d = d1.min(d2);
+        [Some((v.0 + d * n1.0, v.1 + d * n1.1)), Some((v.0 + d * n2.0, v.1 + d * n2.1))]
+    };
+    let mut pb = PathBuilder::new();
+    for (k, (x, y)) in [corner(0), corner(1), corner(2)].into_iter().flatten().flatten().enumerate() {
+        if k == 0 { pb.move_to(x as f32, y as f32) } else { pb.line_to(x as f32, y as f32) }
+    }
+    pb.close();
+    pb.finish()
 }
 
 /// The affine map taking the triangle `src` onto `dst` (physical pixels); `None` for a
@@ -2767,7 +2946,13 @@ fn lift_labels(view: &View, ground: &terrain::Ground, candidates: &mut [Candidat
 /// [`render_tilted`] warps them), with point markers upright over them and labels placed in
 /// the view. `None` when the view needs pictures drawn on the CPU (tiles, rasters, layers drawn
 /// as pictures, icons or extrusions), or the scene isn't plain: the caller draws it on the CPU.
-fn gpu_turned(map: &mut Map, view: &View, full_res_rasters: bool, sources_ready: bool) -> Option<gpu_scene::GpuScene> {
+fn gpu_turned(
+    map: &mut Map,
+    view: &View,
+    full_res_rasters: bool,
+    sources_ready: bool,
+    failed_source: &mut Option<u64>,
+) -> Option<gpu_scene::GpuScene> {
     use gpu_scene::{CmdClip, DrawCmd, GpuScene, SceneTilt};
     if !gpu_may_turn(map, view) {
         return None;
@@ -2778,7 +2963,9 @@ fn gpu_turned(map: &mut Map, view: &View, full_res_rasters: bool, sources_ready:
     if view.camera.pitch == 0.0 {
         let (bw, bh) = view.camera.rotated_size(view.width, view.height);
         let north = View { width: bw.ceil() + 2.0, height: bh.ceil() + 2.0, camera: Camera { bearing: 0.0, ..view.camera }, ..*view };
-        let Some(RenderOutput::Gpu(scene)) = render_frame(map, &north, full_res_rasters, Backend::Gpu, Labels::Turned(view), false) else {
+        let Some(RenderOutput::Gpu(scene)) =
+            render_frame(map, &north, full_res_rasters, Backend::Gpu, Labels::Turned(view), false, failed_source)
+        else {
             return None;
         };
         if pictures(&scene.cmds) || scene.labels.iter().any(|l| l.icon.is_some()) {
@@ -2803,7 +2990,7 @@ fn gpu_turned(map: &mut Map, view: &View, full_res_rasters: bool, sources_ready:
         }
         let v = band_view(view, b);
         let Some(RenderOutput::Gpu(scene)) =
-            render_frame(map, &v, full_res_rasters, Backend::Gpu, Labels::Tilted(view, &mut candidates), false)
+            render_frame(map, &v, full_res_rasters, Backend::Gpu, Labels::Tilted(view, &mut candidates), false, failed_source)
         else {
             if cancel::requested() {
                 map.label_lock = lock;
@@ -3029,7 +3216,9 @@ fn raise_labels(map: &Map, view: &View, candidates: &mut [Candidate]) {
                 by_id.get(&fid).copied()
             })
             .unwrap_or(usize::MAX);
-        let metres = effects::extrusion_metres(&layer.dataset, x, row);
+        let columns = x.columns(&layer.dataset);
+        // The roof stands on the walls: a height below the ground is none, as the walls draw it.
+        let metres = x.base_metres_at(&layer.dataset, row, columns) + x.metres_at(&layer.dataset, row, columns).max(0.0);
         let offset = |x: f32, y: f32| {
             let m = cam.try_to_map(f64::from(x), f64::from(y), w, h)?;
             let up = (metres / (flat.ground_per_unit(m) * map.body().ratio()).max(1e-9) / cam.res.max(1e-9)).clamp(0.0, 1e7);
@@ -3081,6 +3270,9 @@ pub struct ExtrudedShape {
     /// ground toward the poles).
     pub metres: f64,
     pub height: f64,
+    /// Where its walls start: in metres, and in the camera's units at its place.
+    pub base_metres: f64,
+    pub base_height: f64,
     pub fill: Rgba,
     pub stroke: Rgba,
     /// The layer's extrusion settings: walls facing away culled, walls lit, shadows cast.
@@ -3129,17 +3321,21 @@ pub fn extruded_shapes(map: &mut Map, view: &View) -> Vec<ExtrudedShape> {
         let layer: &rustgis_map::Layer = layer;
         let styler = layer.styler(Some(scale));
         let extents = layer.projected_extents();
+        let columns = x.columns(&layer.dataset);
         for (row, g) in layer.thinned_cache(tol).iter().enumerate() {
             let Some(Geometry::Polygon(polys)) = g else { continue };
             if rows.get(row) != Some(&true) {
                 continue;
             }
             let Some(origin) = polys.iter().flatten().flatten().find(|c| c.is_finite()).copied() else { continue };
-            let metres = effects::extrusion_metres(&layer.dataset, &x, row);
-            let height = metres / (flat.ground_per_unit(origin) * body).max(1e-9);
-            // Off the ground the view shows, even by its height: a tall building just off screen
+            let metres = x.metres_at(&layer.dataset, row, columns);
+            let base_metres = x.base_metres_at(&layer.dataset, row, columns);
+            let per_unit = (flat.ground_per_unit(origin) * body).max(1e-9);
+            let height = metres / per_unit;
+            let base_height = base_metres / per_unit;
+            // Off the ground the view shows, even by its top: a tall building just off screen
             // still stands up into view.
-            let reach = if height.is_finite() { height.clamp(0.0, 1e9) } else { 0.0 };
+            let reach = [height, base_height].iter().filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1e9)).sum::<f64>();
             if extents.get(row).is_some_and(|e| !e.padded(0.0, reach).intersects(&cull)) {
                 continue;
             }
@@ -3158,6 +3354,8 @@ pub fn extruded_shapes(map: &mut Map, view: &View) -> Vec<ExtrudedShape> {
                 holes: polys.iter().flat_map(|p| p.iter().skip(1)).filter(|r| r.len() >= 3).cloned().collect(),
                 metres,
                 height,
+                base_metres,
+                base_height,
                 fill: sym.fill.with_alpha(alpha),
                 stroke: sym.stroke,
                 face_culling: x.face_culling,
@@ -3170,7 +3368,7 @@ pub fn extruded_shapes(map: &mut Map, view: &View) -> Vec<ExtrudedShape> {
 }
 
 pub use effects::LIGHT as EXTRUSION_LIGHT;
-pub use effects::{TiltedWall, clip_near, shadow_shift, tilted_shadow_quads, tilted_walls};
+pub use effects::{TiltedWall, base_within, clip_near, shadow_shift, tilted_shadow_quads, tilted_walls};
 
 /// Extruded features as GPU commands, relative to `origin`: the shadows they cast (when any
 /// do), then their roofs and walls, which the depth buffer sorts out. Walls carry their outward
@@ -3188,13 +3386,16 @@ fn extrusion_cmds(shapes: &[ExtrudedShape], origin: [f64; 2]) -> Option<Vec<gpu_
     let (mut shade, mut shade_i) = (Vec::new(), Vec::<u32>::new());
     let shadow = mesh::premul(Rgba::new(0, 0, 0, 60));
     for s in shapes {
+        // The walls stand from their base, the roof at the base plus the height, together within
+        // 1e9; a height or base that is no number (hostile attributes) is the ground.
+        let foot = base_within(s.base_height, 1e9);
+        let h = if s.height.is_finite() { s.height.clamp(0.0, 1e9 - foot) } else { 0.0 };
+        let top = foot + h;
         let more =
             s.roof.len().saturating_mul(2).saturating_add(s.rings.iter().chain(&s.holes).map(Vec::len).sum::<usize>().saturating_mul(8));
         if solid.len().saturating_add(shade.len()).saturating_add(more) > MAX_VERTICES {
             return None;
         }
-        // A height that is no number (hostile attributes) stands no higher than the ground.
-        let h = if s.height.is_finite() { s.height.clamp(0.0, 1e9) } else { 0.0 };
         // Roof indices beyond its vertices (never from the tessellator) would draw garbage.
         if s.roof_indices.iter().any(|i| *i as usize >= s.roof.len()) {
             continue;
@@ -3204,12 +3405,12 @@ fn extrusion_cmds(shapes: &[ExtrudedShape], origin: [f64; 2]) -> Option<Vec<gpu_
         let roof_at = |p: &[f32; 2]| Coord::new(s.origin.x + f64::from(p[0]), s.origin.y + f64::from(p[1]));
         // The roof.
         let base = solid.len() as u32;
-        solid.extend(s.roof.iter().map(|p| vertex(rel(roof_at(p), h), [0.0; 2], color, [1.0, EXTRUDE_ROOF, lit, 0.0])));
+        solid.extend(s.roof.iter().map(|p| vertex(rel(roof_at(p), top), [0.0; 2], color, [1.0, EXTRUDE_ROOF, lit, 0.0])));
         solid_i.extend(s.roof_indices.iter().map(|i| base + i));
         if s.shadows {
             // The footprint moved away from the light (in the shader).
             let base = shade.len() as u32;
-            shade.extend(s.roof.iter().map(|p| vertex(rel(roof_at(p), 0.0), [0.0; 2], shadow, [0.0, EXTRUDE_SHADOW, 0.0, h as f32])));
+            shade.extend(s.roof.iter().map(|p| vertex(rel(roof_at(p), 0.0), [0.0; 2], shadow, [0.0, EXTRUDE_SHADOW, 0.0, top as f32])));
             shade_i.extend(s.roof_indices.iter().map(|i| base + i));
         }
         // The walls; a hole's face into it (a courtyard).
@@ -3225,13 +3426,15 @@ fn extrusion_cmds(shapes: &[ExtrudedShape], origin: [f64; 2]) -> Option<Vec<gpu_
                 let n =
                     if (area2 > 0.0) != hole { [(dy / len) as f32, (-dx / len) as f32] } else { [(-dy / len) as f32, (dx / len) as f32] };
                 let k = solid.len() as u32;
-                for (c, z, t) in [(a, 0.0, 0.0), (b, 0.0, 0.0), (b, h, 1.0), (a, h, 1.0)] {
+                for (c, z, t) in [(a, foot, 0.0), (b, foot, 0.0), (b, top, 1.0), (a, top, 1.0)] {
                     solid.push(vertex(rel(c, z), n, color, [t, EXTRUDE_WALL, lit, 0.0]));
                 }
                 solid_i.extend([k, k + 1, k + 2, k, k + 2, k + 3]);
-                if s.shadows && !hole {
+                // Raised, a hole's walls cast too: the footprint moved by the base, which no longer
+                // sits under the roof, is the top one's and every edge's sweep between them.
+                if s.shadows && (!hole || foot > 0.0) {
                     let k = shade.len() as u32;
-                    for (c, fall) in [(a, 0.0), (b, 0.0), (b, h), (a, h)] {
+                    for (c, fall) in [(a, foot), (b, foot), (b, top), (a, top)] {
                         shade.push(vertex(rel(c, 0.0), [0.0; 2], shadow, [0.0, EXTRUDE_SHADOW, 0.0, fall as f32]));
                     }
                     shade_i.extend([k, k + 1, k + 2, k, k + 2, k + 3]);
@@ -3648,10 +3851,12 @@ fn sample_band(v: &View, pm: &Pixmap, m: Coord) -> Option<[f32; 4]> {
 /// A view turned to a bearing, on the CPU: the map is drawn facing north over the box around
 /// the turned view, then turned into place. Labels are placed in the turned view and drawn
 /// upright, as MapLibre keeps them.
-fn render_turned(map: &mut Map, view: &View, full_res_rasters: bool, record: bool) -> Option<Rendered> {
+fn render_turned(map: &mut Map, view: &View, full_res_rasters: bool, record: bool, failed_source: &mut Option<u64>) -> Option<Rendered> {
     let (bw, bh) = view.camera.rotated_size(view.width, view.height);
     let north = View { width: bw.ceil() + 2.0, height: bh.ceil() + 2.0, camera: Camera { bearing: 0.0, ..view.camera }, ..*view };
-    let Some(RenderOutput::Cpu(mut r)) = render_frame(map, &north, full_res_rasters, Backend::Cpu, Labels::Turned(view), record) else {
+    let Some(RenderOutput::Cpu(mut r)) =
+        render_frame(map, &north, full_res_rasters, Backend::Cpu, Labels::Turned(view), record, failed_source)
+    else {
         return None;
     };
     // A recorded north-up frame is placed turned as it is: its vectors turn with it.
@@ -3687,11 +3892,68 @@ fn render_turned(map: &mut Map, view: &View, full_res_rasters: bool, record: boo
     Some(Rendered { pixmap: pm.into_pixmap(), ..r })
 }
 
+thread_local! {
+    /// The terrain's water the bands of a tilted view, and of its drape, draw their Shaded Relief
+    /// with (#1915), taken from the ground the whole view lies on ([`BandWater`]): each band at
+    /// its own camera would read the shores again (over elevation tiles, at its own zoom), and
+    /// could get another level than the ground's once shore tiles land between two bands.
+    /// `None` when no view set it; `Some(None)` when the view has no water.
+    static BAND_WATER: std::cell::RefCell<Option<Option<std::sync::Arc<terrain::Water>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Holds [`BAND_WATER`] while a tilted view's bands are drawn, and puts back what was there when
+/// dropped (also when a band panics).
+struct BandWater(Option<Option<std::sync::Arc<terrain::Water>>>);
+
+impl BandWater {
+    fn set(water: Option<std::sync::Arc<terrain::Water>>) -> BandWater {
+        BandWater(BAND_WATER.with(|w| w.replace(Some(water))))
+    }
+}
+
+impl Drop for BandWater {
+    fn drop(&mut self) {
+        let kept = self.0.take();
+        BAND_WATER.with(|w| *w.borrow_mut() = kept);
+    }
+}
+
+/// The terrain's water a frame's Shaded Relief layers draw flat at its level with the even light
+/// of flat ground (#1915), and whether shore tiles it was read from are still on their way. A
+/// band of a tilted view or drape takes the whole view's ([`BAND_WATER`]); another frame reads it
+/// for the view it stands in for. `None` without water or with no Shaded Relief layer drawn at
+/// `scale`.
+fn relief_water(map: &Map, view: &View, labels_to: &Labels, scale: f64) -> Option<(std::sync::Arc<terrain::Water>, bool)> {
+    map.view.terrain.as_ref()?.water.as_ref()?;
+    let relief = map.layers.iter().any(|l| {
+        l.visible
+            && map.draws_at(l, scale)
+            && l.raster.as_ref().is_some_and(|r| matches!(r.style.renderer, rustgis_map::RasterRenderer::ShadedRelief { .. }))
+    });
+    if !relief {
+        return None;
+    }
+    if matches!(labels_to, Labels::Tilted(..) | Labels::Shared)
+        && let Some(water) = BAND_WATER.with(|w| w.borrow().clone())
+    {
+        // The view waits for its own ground's tiles.
+        return water.map(|w| (w, false));
+    }
+    let camera = match labels_to {
+        Labels::Turned(to) | Labels::Tilted(to, _) => &to.camera,
+        Labels::Own | Labels::Shared => &view.camera,
+    };
+    let ground = terrain::Ground::of(map, camera)?;
+    let pending = ground.pending();
+    ground.water().cloned().map(|w| (w, pending))
+}
+
 /// Draws one north-up frame. `labels_to` says where its labels go: a turned or tilted view the
 /// frame stands in for places them itself (and draws their icons). `full_res_rasters` marks an
 /// export, which draws everything as it will stay: rasters at full resolution, and labels in
 /// their installed font families, waiting for those to be indexed (`families::find`). A frame on
 /// screen passes `false`, and never waits for the index (`families::find_ready`).
+/// A fatal streamed read sets `failed_source` to the layer that stopped this frame.
 fn render_frame(
     map: &mut Map,
     view: &View,
@@ -3699,7 +3961,9 @@ fn render_frame(
     backend: Backend,
     mut labels_to: Labels<'_>,
     record: bool,
+    failed_source: &mut Option<u64>,
 ) -> Option<RenderOutput> {
+    *failed_source = None;
     let (w, h) = view.pixel_size();
     // Who draws a layer's cast shadows: this map and the layer, by their live identities (a
     // layer's id repeats from map to map: a locator's and its main map's, say).
@@ -3982,7 +4246,7 @@ fn render_frame(
     let tokens = rustgis_map::graphics::TokenValues::of(map, scale);
     let n_layers = map.layers.len();
     // Masks: layers shown only inside another layer's polygons, or left of the swipe divider.
-    let masks = layer_masks(map, &ctx, w, h, &flat, &key, scale)?;
+    let masks = layer_masks(map, &ctx, w, h, &flat, &key, scale, failed_source)?;
     // Bottom first; a higher depth priority draws later (on top) whatever the order.
     let mut order: Vec<usize> = (0..n_layers).rev().collect();
     order.sort_by_key(|i| map.layers.get(*i).map_or(0, |l| l.priority));
@@ -3999,6 +4263,10 @@ fn render_frame(
     };
     // Extrusion heights are metres on the map's body.
     let body = map.body().ratio();
+    // The terrain's water, drawn flat by Shaded Relief.
+    let (lake_light, lake_pending) = relief_water(map, view, &labels_to, scale).map_or((None, false), |(w, p)| (Some(w), p));
+    // Shore tiles the water's levels wait for: the relief is drawn again once they land.
+    tile_out.pending |= lake_pending;
     // The layer drawn last, whose tile layers go over it before the next.
     let mut below: Option<u32> = None;
     for li in order {
@@ -4051,10 +4319,11 @@ fn render_frame(
                 };
                 let stats = rl.masked_stats();
                 let stats = stats.as_ref().map(|s| s.as_slice());
-                // Its cast shadows, never waited for here (an export waits before it draws, see
-                // `complete`): drawn without them meanwhile, and again once they land. A map's frame
-                // says so as tiles to come; a page's, as shadows to come.
-                let light = match rl.cast_shadows(false, (map_instance, layer.instance_id()), shadows_landed) {
+                // Its cast shadows and sky, never waited for here (an export waits before it draws,
+                // see `complete`): drawn without them meanwhile, and again once they land. A map's
+                // frame says so as tiles to come; a page's, as shadows to come.
+                let owner = (map_instance, layer.instance_id());
+                let mut lit = |got: rustgis_map::raster::CastShadows| match got {
                     rustgis_map::raster::CastShadows::Ready(grid) => Some(grid),
                     rustgis_map::raster::CastShadows::Pending => {
                         if full_res_rasters {
@@ -4080,7 +4349,12 @@ fn render_frame(
                     }
                     rustgis_map::raster::CastShadows::None => None,
                 };
-                let light = light.as_deref().map(Vec::as_slice);
+                let (shadow, sky) = (lit(rl.cast_shadows(false, owner, shadows_landed)), lit(rl.sky_view(false, owner, shadows_landed)));
+                let light = raster::Lights {
+                    shadow: shadow.as_deref().map(Vec::as_slice),
+                    sky: sky.as_deref().map(Vec::as_slice),
+                    water: lake_light.as_deref(),
+                };
                 // Read in place: the part in view, at the level the view needs.
                 let address = rl.path.as_deref().filter(|_| rl.in_place);
                 let mut draw_it = |pm: &mut Pixmap, opacity: f32| match address {
@@ -4155,6 +4429,7 @@ fn render_frame(
                     if let Some(s) = &mut layer.source {
                         s.error = Some(e.to_string());
                     }
+                    *failed_source = Some(layer.instance_id());
                     return None;
                 }
             }
@@ -4193,6 +4468,7 @@ fn render_frame(
                     if let Some(source) = &mut layer.source {
                         source.error = Some(e.to_string());
                     }
+                    *failed_source = Some(layer.instance_id());
                     return None;
                 }
             }
@@ -5072,10 +5348,11 @@ fn render_frame(
                 if let Some(s) = &mut layer.source {
                     s.error = Some(e.to_string());
                 }
+                *failed_source = Some(layer.instance_id());
                 return None;
             }
             if let Some(source) = &mut layer.source {
-                source.error = None;
+                source.clear_error();
             }
         } else if let Err(e) = draw_chunk(layer) {
             log::warn!("cannot render layer '{}': {e}", layer.name);
@@ -5087,6 +5364,7 @@ fn render_frame(
             if let Some(source) = &mut layer.source {
                 source.error = Some(e.to_string());
             }
+            *failed_source = Some(layer.instance_id());
             return None;
         }
         if let Some(sheet) = extruded_charts {
@@ -5246,7 +5524,7 @@ fn render_frame(
             // layer) costs more full-screen uploads than a plain CPU rasterization.
             let images = cmds.iter().filter(|c| matches!(c, gpu_scene::DrawCmd::Image { .. })).count();
             if images > 4 {
-                return render_frame(map, view, full_res_rasters, Backend::Cpu, labels_to, record);
+                return render_frame(map, view, full_res_rasters, Backend::Cpu, labels_to, record, failed_source);
             }
             Some(RenderOutput::Gpu(gpu_scene::GpuScene {
                 clear: mesh::premul(water),
@@ -5302,6 +5580,7 @@ pub(crate) fn blend_mode(b: rustgis_map::effects::Blend) -> tiny_skia::BlendMode
 
 /// The mask of every masked or swiped layer: inside its mask layer's polygons and left of the
 /// swipe divider.
+/// A failed mask read returns its source layer's identity through `failed_source`.
 fn layer_masks(
     map: &mut Map,
     ctx: &Ctx,
@@ -5310,6 +5589,7 @@ fn layer_masks(
     flat: &rustgis_map::projection::Flat,
     key: &str,
     scale: f64,
+    failed_source: &mut Option<u64>,
 ) -> Option<Vec<(u32, tiny_skia::Mask)>> {
     let wanted: Vec<(u32, Option<String>, Option<f64>)> = map
         .layers
@@ -5353,7 +5633,11 @@ fn layer_masks(
                             if let Some(s) = map.layers.get_mut(mi).and_then(|l| l.source.as_mut()) {
                                 s.error = Some(e.to_string());
                             }
+                            *failed_source = map.layers.get(mi).map(|layer| layer.instance_id());
                             return None;
+                        }
+                        if let Some(source) = map.layers.get_mut(mi).and_then(|l| l.source.as_mut()) {
+                            source.clear_error();
                         }
                     } else if let Some(ml) = map.layers.get_mut(mi) {
                         if ctx.globe.is_some() {
@@ -5723,6 +6007,9 @@ pub fn render_tilt_drape(map: &mut Map, view: &View, margin: f64, max_side: u32)
     let anchors = std::mem::take(&mut map.label_lock_line_anchors);
     map.label_display.paused = true;
     let mut out = Vec::new();
+    // The bands' Shaded Relief draws the whole view's water (see `relief_water`).
+    let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
+    let _water = BandWater::set(relief_water(map, view, &Labels::Own, scale).map(|(w, _)| w));
     for b in bands {
         let (mut w, mut h) = (b.width * (1.0 + 2.0 * margin), b.height * (1.0 + 2.0 * margin));
         let mut camera = b.camera;
@@ -5734,7 +6021,7 @@ pub fn render_tilt_drape(map: &mut Map, view: &View, margin: f64, max_side: u32)
         (w, h) = (fw, fh);
         let v = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
         // The bands share the read above.
-        if let Some(RenderOutput::Cpu(r)) = render_frame(map, &v, false, Backend::Cpu, Labels::Shared, false) {
+        if let Some(RenderOutput::Cpu(r)) = render_frame(map, &v, false, Backend::Cpu, Labels::Shared, false, &mut None) {
             out.push(TiltPatch { pixmap: r.pixmap, band: rustgis_map::camera::Band { camera, width: w, height: h, depth: b.depth } });
         }
     }
@@ -6452,7 +6739,7 @@ pub(crate) fn frame_with_shadows_to_come<T>(f: impl FnOnce() -> T) -> (T, bool) 
     (out, to_come)
 }
 
-/// Waits for the cast shadows of the map's Shaded Relief layers drawn in `view` (visible, in
+/// Waits for the cast shadows and sky of the map's Shaded Relief layers drawn in `view` (visible, in
 /// their and their groups' scale range at the view's centre or, tilted, at one of its bands, as
 /// `render_pass` draws them), as an export does (it runs off the interface's thread); the wait
 /// gives up when the run is cancelled.
@@ -6463,12 +6750,14 @@ fn wait_for_cast_shadows(map: &Map, view: &View) {
     let scales = drawn_scales(map, &camera, view);
     for layer in map.layers.iter().filter(|l| scales.iter().any(|s| map.draws_at(l, *s))) {
         if let Some(rl) = &layer.raster {
-            rl.cast_shadows(true, (map.instance_id(), layer.instance_id()), shadows_landed);
+            let owner = (map.instance_id(), layer.instance_id());
+            rl.cast_shadows(true, owner, shadows_landed);
+            rl.sky_view(true, owner, shadows_landed);
         }
     }
 }
 
-/// Render passes [`render_complete`] makes at most with nothing come since the last (the wait ran
+/// Render passes [`complete`] makes at most with nothing come since the last (the wait ran
 /// out, or nothing was under way): passes that draw what came are bound by its minute alone.
 const IDLE_PASSES: usize = 6;
 
@@ -6476,18 +6765,20 @@ const IDLE_PASSES: usize = 6;
 /// missing (a style, then its sources, then their tiles, or a layer's tiles after its picture
 /// failed) and waits for news of it, at most a minute in all. In the browser, which can't wait,
 /// it draws what has arrived.
+/// Pixel regressions use this convenience wrapper without retaining a fatal source identity.
+#[cfg(test)]
 pub(crate) fn render_complete(map: &mut Map, view: &View) -> Option<Rendered> {
-    complete(map, view, false)
+    complete(map, view, false, &mut None)
 }
 
-/// [`render_complete`] kept as vectors where the frame can be (flat, north up, without view
+/// [`complete`] kept as vectors where the frame can be (flat, north up, without view
 /// effects): its `recorded` canvas; anything else as pixels.
-pub(crate) fn render_complete_recorded(map: &mut Map, view: &View) -> Option<Rendered> {
-    complete(map, view, true)
+pub(crate) fn render_complete_recorded(map: &mut Map, view: &View, failed_source: &mut Option<u64>) -> Option<Rendered> {
+    complete(map, view, true, failed_source)
 }
 
-/// [`render_complete`]'s passes, each recorded when `record`.
-fn complete(map: &mut Map, view: &View, record: bool) -> Option<Rendered> {
+/// Full-resolution passes, each recorded when `record`, carrying a fatal source's identity.
+fn complete(map: &mut Map, view: &View, record: bool, failed_source: &mut Option<u64>) -> Option<Rendered> {
     // Cast shadows still being worked out are waited for first, unless this draws on the
     // interface's thread (see `on_the_interface_thread`).
     if !NO_SHADOW_WAIT.with(std::cell::Cell::get) {
@@ -6497,7 +6788,7 @@ fn complete(map: &mut Map, view: &View, record: bool) -> Option<Rendered> {
     // to say: an earlier one's may have been drawn again with them. What frames before it said
     // is kept (see `shadows_said`).
     let before = (SHADOWS_TO_COME.with(|c| c.replace(false)), take_shadow_notices());
-    let r = complete_passes(map, view, record);
+    let r = complete_passes(map, view, record, failed_source);
     SHADOWS_TO_COME.with(|c| c.set(before.0 || c.get()));
     let mut notices = before.1;
     for e in take_shadow_notices() {
@@ -6510,10 +6801,10 @@ fn complete(map: &mut Map, view: &View, record: bool) -> Option<Rendered> {
 }
 
 /// [`complete`]'s passes, each saying afresh what it drew of cast shadows.
-fn complete_passes(map: &mut Map, view: &View, record: bool) -> Option<Rendered> {
+fn complete_passes(map: &mut Map, view: &View, record: bool, failed_source: &mut Option<u64>) -> Option<Rendered> {
     // What had come when it drew: what lands meanwhile is news to the wait.
     let mut drawn_at = rustgis_tiles::cache::generation();
-    let mut r = render_cpu(map, view, true, record)?;
+    let mut r = render_cpu(map, view, true, record, failed_source)?;
     let start = web_time::Instant::now();
     let budget = web_time::Duration::from_secs(60);
     let mut idle = 0;
@@ -6534,7 +6825,7 @@ fn complete_passes(map: &mut Map, view: &View, record: bool) -> Option<Rendered>
         drawn_at = now;
         SHADOWS_TO_COME.with(|c| c.set(false));
         take_shadow_notices();
-        r = render_cpu(map, view, true, record)?;
+        r = render_cpu(map, view, true, record, failed_source)?;
     }
     Some(r)
 }
@@ -6544,12 +6835,14 @@ fn complete_passes(map: &mut Map, view: &View, record: bool) -> Option<Rendered>
 /// Returns an actionable error if a linked archive changes during the complete drawing.
 pub fn render_drawing(map: &mut Map, view: &View) -> Result<vector::Drawing, String> {
     let revisions = archive_revisions([&*map]);
-    let result = render_drawing_inner(map, view);
-    revisions.finish([&*map], result, "could not draw the map")
+    let mut failed_source = None;
+    let result = render_drawing_inner(map, view, &mut failed_source);
+    revisions.finish(map, failed_source, result, "could not draw the map")
 }
 
-fn render_drawing_inner(map: &mut Map, view: &View) -> Option<vector::Drawing> {
-    let r = render_complete_recorded(map, view)?;
+/// Completes the recording, retaining a fatal source's identity through the pixel fallback.
+fn render_drawing_inner(map: &mut Map, view: &View, failed_source: &mut Option<u64>) -> Option<vector::Drawing> {
+    let r = render_complete_recorded(map, view, failed_source)?;
     let mut pm = match r.recorded {
         Some(c) => c,
         None => {
@@ -6613,7 +6906,7 @@ pub fn render_png(map: &mut Map, view: &View) -> Result<Vec<u8>, String> {
     text::scale_bar(&mut pm, view, map.ground_res_at(&view.camera));
     draw_attribution(&mut pm, &r.attribution, view.pixels_per_point as f32, (0.0, 0.0));
     let png = pm.into_pixmap().encode_png().map_err(|e| e.to_string())?;
-    revisions.finish([&*map], Some(png), "could not encode the image")
+    revisions.finish(map, None, Some(png), "could not encode the image")
 }
 
 /// A map drawn as data ([`render_placed`]), with what it holds besides its pixels.
@@ -6645,7 +6938,7 @@ pub fn render_placed(map: &mut Map, view: &View) -> Result<Placed, String> {
     let mut gaps = shadows;
     if to_come {
         gaps.push(
-            "made without the cast shadows still being worked out, as the window doesn't wait for them: once the map shows them, draw or export it again"
+            "made without the cast shadows or sky visibility still being worked out, as the window doesn't wait for them: once the map shows them, draw or export it again"
                 .to_string(),
         );
     }
@@ -6670,15 +6963,16 @@ pub fn render_placed(map: &mut Map, view: &View) -> Result<Placed, String> {
     for l in r.unplaced.iter().chain(&r.labels) {
         text::draw(&mut pm, l, view.pixels_per_point as f32);
     }
-    revisions.finish([&*map], Some(Placed { pixmap: pm.into_pixmap(), credits: r.attribution, gaps }), "could not draw the map")
+    revisions.finish(map, None, Some(Placed { pixmap: pm.into_pixmap(), credits: r.attribution, gaps }), "could not draw the map")
 }
 
 /// The map drawn whole for an export, or why it can't be written: a raster read in place whose
 /// tiles haven't come, or that is drawn from less than the view needs.
 fn render_exported(map: &mut Map, view: &View) -> Result<Rendered, String> {
     let revisions = archive_revisions([&*map]);
-    let result = render_complete(map, view);
-    let r = revisions.finish([&*map], result, "could not draw the map")?;
+    let mut failed_source = None;
+    let result = complete(map, view, false, &mut failed_source);
+    let r = revisions.finish(map, failed_source, result, "could not draw the map")?;
     // A raster read in place drawn from less than the view needs isn't written: its tiles still
     // on their way (the browser can't wait; natively the wait ran out), or a coarser level or
     // tiles it couldn't read (`partial`).
@@ -6943,6 +7237,29 @@ mod tests {
         let mid = pm.pixels().pixel(115, 54).unwrap();
         assert!(mid.red() > 120 && mid.green() < 80 && mid.blue() < 80, "{mid:?}");
         assert!(pm.pixels().pixel(115, 20).is_some_and(|p| p.green() > 200), "nothing above the line");
+    }
+
+    /// A bold label draws more ink than a regular one: in a bold face, or, where the fonts have no
+    /// heavier face (the built-in one, the browser's: `RUSTGIS_BUILTIN_FONTS`), thickened by hand.
+    /// Upright and turned, italic too, and with its halo. (Bold drew exactly as regular there.)
+    #[test]
+    fn bold_labels_are_heavier_than_regular_ones() {
+        let ink = |l: &PlacedLabel| {
+            let mut pm = Canvas::new(300, 120).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            text::draw(&mut pm, l, 1.0);
+            pm.pixels().pixels().iter().map(|p| 255 - u32::from(p.green())).sum::<u32>()
+        };
+        let plain = PlacedLabel { y: 60.0, color: Rgba::rgb(0, 0, 0), halo: None, size: 16.0, ..label("Amsterdam", 150.0, None, 0.0) };
+        for (what, l) in [
+            ("upright", plain.clone()),
+            ("turned", PlacedLabel { angle: Some(0.3), ..plain.clone() }),
+            ("italic", PlacedLabel { italic: true, ..plain.clone() }),
+            ("with a halo", PlacedLabel { halo: Some(Rgba::rgb(255, 0, 255)), ..plain.clone() }),
+        ] {
+            let (regular, bold) = (ink(&l), ink(&PlacedLabel { bold: true, ..l.clone() }));
+            assert!(f64::from(bold) > f64::from(regular) * 1.08, "{what}: bold {bold}, regular {regular}");
+        }
     }
 
     /// A halo of its own width reaches past the letters, so its label's collision box grows by it:
@@ -8763,8 +9080,17 @@ mod tests {
         let lit = |m: &mut Map, shadow: f64| {
             let l = m.layer_mut(id).unwrap();
             l.visible = true;
-            l.raster.as_mut().unwrap().style.renderer =
-                rustgis_map::RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 315.0, altitude: 5.0, z_factor: 1.0, shadow };
+            l.raster.as_mut().unwrap().style.renderer = rustgis_map::RasterRenderer::ShadedRelief {
+                band: 0,
+                ramp: None,
+                azimuth: 315.0,
+                altitude: 5.0,
+                z_factor: 1.0,
+                shadow,
+                sky: 0.0,
+                fill: 0.0,
+                rock: None,
+            };
         };
         let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 1200.0, bearing: 0.0, pitch: 0.0 };
         let view = View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
@@ -8789,8 +9115,17 @@ mod tests {
         assert!(farthest > centre * 1.01, "a far band is drawn at a smaller scale: {scales:?}");
         let l = m.layer_mut(id).unwrap();
         l.visible = true;
-        l.raster.as_mut().unwrap().style.renderer =
-            rustgis_map::RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 210.0, altitude: 5.0, z_factor: 1.0, shadow: 1.0 };
+        l.raster.as_mut().unwrap().style.renderer = rustgis_map::RasterRenderer::ShadedRelief {
+            band: 0,
+            ramp: None,
+            azimuth: 210.0,
+            altitude: 5.0,
+            z_factor: 1.0,
+            shadow: 1.0,
+            sky: 0.0,
+            fill: 0.0,
+            rock: None,
+        };
         // Drawn only zoomed out past a scale between the centre's and the far band's.
         l.max_scale = Some((centre + farthest) / 2.0);
         // Its work held before it traces: an export that waits for it can't end until it is let
@@ -8804,7 +9139,7 @@ mod tests {
         let start = std::time::Instant::now();
         while probe.cast_shadow_waiters() == 0 && !export.is_finished() {
             assert!(start.elapsed() < std::time::Duration::from_secs(30), "the export neither waited for the grid nor ended");
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(std::time::Duration::from_millis(1)); // test-wait: legacy polling for the export to wait on shadow grids
         }
         let waited = probe.cast_shadow_waiters() > 0;
         drop(hold);
@@ -8832,6 +9167,9 @@ mod tests {
                 altitude: 5.0,
                 z_factor: 1.0,
                 shadow: 1.0,
+                sky: 0.0,
+                fill: 0.0,
+                rock: None,
             };
             // Drawn only zoomed in past 1:1: or in a group drawn only there.
             if grouped {
@@ -8896,8 +9234,12 @@ mod tests {
         let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
         let mut flat = hill_map();
         let mut hilly = hill_map();
-        hilly.view.terrain =
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("dem".into()), exaggeration: 2.0 });
+        hilly.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+            exaggeration: 2.0,
+            block: None,
+            water: None,
+        });
         // The ground's height is read from the DEM (exaggerated), and nothing off it.
         let g = terrain::Ground::of(&hilly, &camera).expect("terrain");
         let top = g.height(lonlat_to_merc(Coord::new(0.0, 0.0))).unwrap();
@@ -8920,10 +9262,186 @@ mod tests {
         assert_ne!(a.pixmap.data(), b.pixmap.data());
         assert!(b.pixmap.pixels().iter().all(|p| p.alpha() == 255));
         // A DEM layer gone (renamed or removed) leaves the ground flat.
-        hilly.view.terrain =
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("none".into()), exaggeration: 1.0 });
+        hilly.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("none".into()),
+            exaggeration: 1.0,
+            block: None,
+            water: None,
+        });
         assert!(terrain::Ground::of(&hilly, &camera).is_none());
         assert!(render(&mut hilly, &view).is_some());
+    }
+
+    /// The outline's points and, for each edge a → b of `t`, the farthest any of them lies
+    /// outside it.
+    fn grown_reach(t: [(f64, f64); 3]) -> (Vec<(f64, f64)>, [f64; 3]) {
+        let path = grown_triangle(t).expect("a triangle with area");
+        let pts: Vec<(f64, f64)> = path.points().iter().map(|p| (f64::from(p.x), f64::from(p.y))).collect();
+        let centre = ((t[0].0 + t[1].0 + t[2].0) / 3.0, (t[0].1 + t[1].1 + t[2].1) / 3.0);
+        let out = |i: usize| {
+            let (a, b) = (t[i], t[(i + 1) % 3]);
+            let l = (b.0 - a.0).hypot(b.1 - a.1);
+            let side = |p: (f64, f64)| ((b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)) / l;
+            let s = -side(centre).signum();
+            pts.iter().map(|p| s * side(*p)).fold(f64::MIN, f64::max)
+        };
+        let reach = [out(0), out(1), out(2)];
+        (pts, reach)
+    }
+
+    #[test]
+    fn a_thin_draped_triangle_moves_its_long_edges_out_in_full() {
+        // #1881: half of a far cell, 100 px wide and 4 high. Moving its corners 0.6 px away from
+        // the centroid moved the long edge (0, 0)–(100, 4) out by 0.02 px.
+        for t in [[(0.0, 0.0), (100.0, 0.0), (100.0, 4.0)], [(0.0, 0.0), (100.0, 4.0), (100.0, 0.0)]] {
+            let (_, reach) = grown_reach(t);
+            for r in reach {
+                assert!((r - DRAPE_GROWTH).abs() < 1e-3, "{reach:?} for {t:?}");
+            }
+        }
+        // A right triangle the same way: the right angle where the moved edges meet, 0.85 px
+        // out; the 45° corners, whose meeting points lie 1.6 px out, bevelled.
+        let (pts, reach) = grown_reach([(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)]);
+        assert_eq!(pts.len(), 5, "{pts:?}");
+        assert!(reach.iter().all(|r| (r - DRAPE_GROWTH).abs() < 1e-3), "{reach:?}");
+        assert!((pts[0].0 + DRAPE_GROWTH).abs() < 1e-4 && (pts[0].1 + DRAPE_GROWTH).abs() < 1e-4, "{pts:?}");
+        // No area, nothing to draw.
+        assert!(grown_triangle([(0.0, 0.0), (5.0, 5.0), (10.0, 10.0)]).is_none());
+    }
+
+    #[test]
+    fn a_draped_slivers_sharp_corner_is_bevelled() {
+        // The corner at (0, 0) is 1.1° sharp: its moved edges would meet 60 px out. They stop
+        // across from it instead, joined by a bevel.
+        let t = [(0.0, 0.0), (100.0, 0.0), (100.0, 2.0)];
+        let (pts, reach) = grown_reach(t);
+        assert_eq!(pts.len(), 4, "{pts:?}");
+        assert!(reach.iter().all(|r| (r - DRAPE_GROWTH).abs() < 1e-3), "{reach:?}");
+        assert!(pts.iter().all(|p| p.0 > -DRAPE_GROWTH), "{pts:?}");
+        assert_eq!(pts.iter().filter(|p| p.0.hypot(p.1) < DRAPE_GROWTH + 1e-3).count(), 2, "{pts:?}");
+        // The right angle at (100, 0) moves 0.6 px each way; the 88.9° one at (100, 2) where its
+        // moved edges meet, 0.6 px out from both.
+        let near = |x: f64, y: f64| pts.iter().any(|p| (p.0 - x).abs() < 1e-3 && (p.1 - y).abs() < 1e-3);
+        assert!(near(100.6, -0.6), "{pts:?}");
+        assert!(near(100.6, 2.0 + 0.6 * (2.0_f64.hypot(100.0) + 2.0) / 100.0), "{pts:?}");
+    }
+
+    /// Fills `path` with `paint` as `drape_terrain` does.
+    fn fill_drape(pm: &mut Pixmap, path: &tiny_skia::Path, paint: &Paint) {
+        pm.fill_path(path, paint, FillRule::Winding, Transform::identity(), None);
+    }
+
+    /// A far cell, long and thin as perspective makes it, its two halves drawn over black as
+    /// `drape_terrain` draws them: white, then `fog` black over each if given. The pixmap, and
+    /// the pixels lying a pixel or more inside the cell.
+    fn drawn_cell(fog: Option<f32>) -> (Pixmap, Vec<(u32, u32)>) {
+        let mut pm = Pixmap::new(64, 16).expect("pixmap");
+        pm.fill(tiny_skia::Color::BLACK);
+        let (a, b, c, d) = ((2.3, 4.2), (61.7, 5.1), (4.1, 10.6), (59.2, 11.3));
+        let picture = Paint { anti_alias: true, ..paint(Rgba::rgb(255, 255, 255), 1.0) };
+        for half in [[a, b, d], [a, d, c]] {
+            let path = grown_triangle(half).expect("area");
+            fill_drape(&mut pm, &path, &picture);
+            if let Some(f) = fog {
+                fill_drape(&mut pm, &path, &Paint { anti_alias: true, ..paint(Rgba::rgb(0, 0, 0), f) });
+            }
+        }
+        let quad = [a, b, d, c];
+        let inside = |p: (f64, f64)| {
+            (0..4).all(|i| {
+                let (s, e) = (quad[i], quad[(i + 1) % 4]);
+                let l = (e.0 - s.0).hypot(e.1 - s.1);
+                ((e.0 - s.0) * (p.1 - s.1) - (e.1 - s.1) * (p.0 - s.0)) / l >= 1.0
+            })
+        };
+        let pixels = (0..16u32)
+            .flat_map(|y| (0..64u32).map(move |x| (x, y)))
+            .filter(|&(x, y)| inside((f64::from(x) + 0.5, f64::from(y) + 0.5)))
+            .collect();
+        (pm, pixels)
+    }
+
+    #[test]
+    fn fog_over_two_draped_halves_is_laid_once_where_they_overlap() {
+        // Each triangle is filled with its picture, then its fog, on the grown outline: where the
+        // halves overlap, the nearer one's picture covers the farther one's fogged picture before
+        // its own fog, so the fog isn't laid twice. Only the nearer half's anti-aliased edge
+        // mixes the two, by at most a quarter of f² of the picture's difference from the fog
+        // (f = 0.5: 16 levels here; laid twice: 64).
+        let (pm, pixels) = drawn_cell(Some(0.5));
+        let off = |&(x, y): &(u32, u32)| (i32::from(pm.pixel(x, y).expect("in the pixmap").red()) - 128).abs();
+        let worst = pixels.iter().map(off).max().unwrap_or(0);
+        assert!(worst <= 17, "fog laid twice: {worst} levels off");
+        assert!(pixels.iter().filter(|p| off(p) <= 1).count() > 150);
+    }
+
+    #[test]
+    fn a_draped_slope_seen_edge_on_grows_by_half_its_height_at_most() {
+        // A triangle 0.05 px high, its picture stretched across it: moved out 0.6 px, its margin
+        // would show the picture from twelve times its height away. No point of the outline lies
+        // farther out from an edge than that edge's own move, also at a corner bevelled between
+        // a short edge moved in full and a long one moved 0.025 px.
+        for t in [[(0.0, 0.0), (40.0, 0.05), (80.0, 0.0)], [(0.0, 0.0), (1.0, 0.05), (80.0, 0.0)]] {
+            let (_, reach) = grown_reach(t);
+            for (i, r) in reach.iter().enumerate() {
+                let (a, b) = (t[i], t[(i + 1) % 3]);
+                let limit = DRAPE_GROWTH.min(DRAPE_GROWTH_SHARE * 0.05 * 80.0 / (b.0 - a.0).hypot(b.1 - a.1));
+                assert!(*r > 0.0 && *r <= limit + 1e-6, "edge {i} of {t:?}: {r} out, {limit} at most");
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_halves_of_a_draped_cell_leave_no_seam() {
+        // #1881: moving the halves' corners away from their centroids left the diagonal's pixels
+        // grey. Every pixel lying a pixel or more inside the cell is white.
+        let (pm, pixels) = drawn_cell(None);
+        assert!(pixels.len() > 100, "{}", pixels.len());
+        for (x, y) in pixels {
+            let px = pm.pixel(x, y).expect("in the pixmap");
+            assert!(px.red() == 255 && px.green() == 255 && px.blue() == 255, "a seam at ({x}, {y}): {px:?}");
+        }
+    }
+
+    #[test]
+    fn two_low_draped_triangles_leave_at_most_a_faint_seam() {
+        // Two triangles under 1.2 px high over the edge they share move it less than 0.6 px each,
+        // together under the pixel their anti-aliased edges need to cover each other. Compared
+        // with the pair drawn as one shape, the shared edge's pixels come out at most a little
+        // darker: 16 levels of 255 at 0.6 px, none at 0.1–0.4, 0.8 and 1 px here.
+        let (p, q): ((f64, f64), (f64, f64)) = ((2.0, 7.3), (62.0, 9.1));
+        let l = (q.0 - p.0).hypot(q.1 - p.1);
+        let n = (-(q.1 - p.1) / l, (q.0 - p.0) / l);
+        let m = ((p.0 + q.0) / 2.0, (p.1 + q.1) / 2.0);
+        let white = Paint { anti_alias: true, ..paint(Rgba::rgb(255, 255, 255), 1.0) };
+        for h in [0.1, 0.2, 0.3, 0.4, 0.6, 0.8, 1.0] {
+            let (up, down) = ((m.0 + h * n.0, m.1 + h * n.1), (m.0 - h * n.0, m.1 - h * n.1));
+            let mut apart = Pixmap::new(64, 16).expect("pixmap");
+            apart.fill(tiny_skia::Color::BLACK);
+            for t in [[p, q, up], [p, down, q]] {
+                fill_drape(&mut apart, &grown_triangle(t).expect("area"), &white);
+            }
+            let mut one = Pixmap::new(64, 16).expect("pixmap");
+            one.fill(tiny_skia::Color::BLACK);
+            let mut pb = PathBuilder::new();
+            pb.move_to(p.0 as f32, p.1 as f32);
+            for c in [down, q, up] {
+                pb.line_to(c.0 as f32, c.1 as f32);
+            }
+            pb.close();
+            fill_drape(&mut one, &pb.finish().expect("path"), &white);
+            let mut worst = 0;
+            for y in 0..16u32 {
+                for x in 8..56u32 {
+                    let (cx, cy) = (f64::from(x) + 0.5 - p.0, f64::from(y) + 0.5 - p.1);
+                    if (cx * n.0 + cy * n.1).abs() <= 0.7 {
+                        let red = |pm: &Pixmap| i32::from(pm.pixel(x, y).expect("in the pixmap").red());
+                        worst = worst.max(red(&one) - red(&apart));
+                    }
+                }
+            }
+            assert!(worst <= 20, "{h} px high: the shared edge {worst} levels darker");
+        }
     }
 
     #[test]
@@ -8962,7 +9480,12 @@ mod tests {
             l.visible = false;
         }
         let terrain = |name: &str| {
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer(name.into()), exaggeration: 2.0 })
+            Some(rustgis_map::view::Terrain {
+                source: rustgis_map::view::TerrainSource::Layer(name.into()),
+                exaggeration: 2.0,
+                block: None,
+                water: None,
+            })
         };
         // Where its far edge lies flat, and raised to its height.
         m.view.terrain = terrain("dem");
@@ -8982,8 +9505,218 @@ mod tests {
     }
 
     #[test]
+    fn a_block_diagram_cuts_the_ground_to_its_box_and_stands_its_near_wall() {
+        // #1914: a flat DEM 500 m high and 10 km a side, seen from the south, cut to a box 2 km
+        // a side. With the block, the ground beside the box is the fog behind, and below its near
+        // edge stands the wall, down to the base 1000 m lower.
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 20.0, bearing: 0.0, pitch: 60.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let gt = GeoTransform { origin_x: -5000.0, origin_y: 5000.0, pixel_width: 20.0, pixel_height: -20.0 };
+        let dem =
+            Raster::new("dem", 500, 500, vec![vec![500.0; 500 * 500]], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.add_raster("dem", rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
+        let block = |extent| rustgis_map::view::TerrainBlock {
+            extent,
+            depth: Some(1000.0),
+            walls: rustgis_map::view::BLOCK_WALLS,
+            walls_layer: None,
+        };
+        let terrain = |block: Option<rustgis_map::view::TerrainBlock>| {
+            Some(rustgis_map::view::Terrain {
+                source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+                exaggeration: 1.0,
+                block,
+                water: None,
+            })
+        };
+        // With no box, the DEM's extent.
+        m.view.terrain = terrain(Some(block(None)));
+        let g = terrain::Ground::of(&m, &camera).expect("terrain");
+        let b = g.block(&m).expect("a block");
+        assert!([b.x0 + 5000.0, b.y0 + 5000.0, b.x1 - 5000.0, b.y1 - 5000.0].iter().all(|d| d.abs() < 1e-6), "{b:?}");
+        m.view.terrain = terrain(Some(block(Some([-1000.0, -1000.0, 1000.0, 1000.0]))));
+        let b = g.block(&m).expect("a block");
+        assert!((b.base + 500.0).abs() < 1e-6, "{}", b.base);
+        let cut = render(&mut m, &view).expect("a frame");
+        m.view.terrain = terrain(None);
+        let whole = render(&mut m, &view).expect("a frame");
+        // The near edge's middle, on the ground and at the base.
+        let edge = Coord::new(0.0, -1000.0);
+        let (u, v) = camera.ground_px(edge);
+        let at =
+            |metres: f64| camera.project_raised(u, v, metres / g.per_unit(edge) / camera.res, view.width, view.height).expect("in view").1;
+        let (top, foot) = (at(500.0), at(-500.0));
+        assert!(foot - top > 20.0 && foot < 290.0, "{top} {foot}");
+        // Halfway down the wall: the walls' sandy brown, shaded, where the whole ground showed
+        // the plain map below the edge.
+        let px = |r: &Rendered, x: u32, y: f64| r.pixmap.pixel(x, y as u32).expect("in the frame").demultiply();
+        let wall = px(&cut, 200, (top + foot) / 2.0);
+        assert!(wall.red() > wall.green() && wall.green() > wall.blue() + 8 && wall != px(&whole, 200, (top + foot) / 2.0), "{wall:?}");
+        // Beside the box, level with its near edge: the fog, where the whole ground showed the map.
+        let (_, fog) = tilt_sky(&m);
+        let beside = px(&cut, 4, top - 4.0);
+        assert!(
+            [(beside.red(), fog.r()), (beside.green(), fog.g()), (beside.blue(), fog.b())].iter().all(|(a, b)| a.abs_diff(*b) <= 2),
+            "{beside:?} vs {fog:?}"
+        );
+        assert_ne!(beside, px(&whole, 4, top - 4.0));
+    }
+
+    #[test]
+    fn a_block_diagrams_wall_shows_the_unit_under_its_edge() {
+        // #1914: the near wall of a 2 km box, seen from the south, with a red unit over the box's
+        // west half: red below the edge's west half, the walls' sandy brown below its east half.
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        use rustgis_data::{Dataset, Geometry, GeometryType};
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 20.0, bearing: 0.0, pitch: 60.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let gt = GeoTransform { origin_x: -5000.0, origin_y: 5000.0, pixel_width: 20.0, pixel_height: -20.0 };
+        let dem =
+            Raster::new("dem", 500, 500, vec![vec![500.0; 500 * 500]], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.add_raster("dem", rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
+        let deg = |x: f64, y: f64| rustgis_geom::merc_to_lonlat(Coord::new(x, y));
+        let west = vec![deg(-3000.0, -3000.0), deg(0.0, -3000.0), deg(0.0, 3000.0), deg(-3000.0, 3000.0), deg(-3000.0, -3000.0)];
+        let mut d = Dataset::new("geo", GeometryType::Polygon, Vec::new());
+        d.push(Some(Geometry::Polygon(vec![vec![west]])), Vec::new());
+        m.add_dataset(d);
+        let red = Rgba::rgb(220, 30, 30);
+        if let Some(l) = m.layers.iter_mut().find(|l| l.name == "geo") {
+            l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol {
+                fill: red,
+                ..rustgis_map::Symbol::default_for(GeometryType::Polygon, 0)
+            });
+            l.visible = false;
+        }
+        m.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+            exaggeration: 1.0,
+            block: Some(rustgis_map::view::TerrainBlock {
+                extent: Some([-1000.0, -1000.0, 1000.0, 1000.0]),
+                depth: Some(1000.0),
+                walls: rustgis_map::view::BLOCK_WALLS,
+                walls_layer: Some("geo".into()),
+            }),
+            water: None,
+        });
+        let frame = render(&mut m, &view).expect("a frame");
+        let g = terrain::Ground::of(&m, &camera).expect("terrain");
+        // Halfway down the near wall, 500 m each side of its middle.
+        let at = |x: f64| {
+            let edge = Coord::new(x, -1000.0);
+            let (u, v) = camera.ground_px(edge);
+            let y = |metres: f64| {
+                camera.project_raised(u, v, metres / g.per_unit(edge) / camera.res, view.width, view.height).expect("in view")
+            };
+            let ((px, top), (_, foot)) = (y(500.0), y(-500.0));
+            frame.pixmap.pixel(px as u32, ((top + foot) / 2.0) as u32).expect("in the frame").demultiply()
+        };
+        let (w, e) = (at(-500.0), at(500.0));
+        assert!(w.red() > 2 * w.green() && w.red() > 2 * w.blue(), "west: {w:?}");
+        assert!(e.green() > e.blue() + 8 && e.red() < 2 * e.green(), "east: {e:?}");
+        // With blue hatch lines over its fill, the unit's stretch of wall is striped red and blue
+        // up its height; off the unit, the walls stay plain.
+        let blue = Rgba::rgb(20, 40, 230);
+        let hatch = rustgis_map::fills::FillPattern::Hatch { angle: 0.0, spacing: 6.0, width: 2.0, offset: 0.0 };
+        if let Some(l) = m.layers.iter_mut().find(|l| l.name == "geo") {
+            l.fill_layers = vec![
+                rustgis_map::fills::FillLayer { color: None, pattern: rustgis_map::fills::FillPattern::Solid },
+                rustgis_map::fills::FillLayer { color: Some(blue), pattern: hatch },
+            ];
+        }
+        let frame = render(&mut m, &view).expect("a frame");
+        let column = |x: f64| {
+            let edge = Coord::new(x, -1000.0);
+            let (u, v) = camera.ground_px(edge);
+            let y = |metres: f64| {
+                camera.project_raised(u, v, metres / g.per_unit(edge) / camera.res, view.width, view.height).expect("in view")
+            };
+            let ((px, top), (_, foot)) = (y(400.0), y(-400.0));
+            (top as u32..foot as u32).filter_map(|py| frame.pixmap.pixel(px as u32, py)).map(|c| c.demultiply()).collect::<Vec<_>>()
+        };
+        let striped = |c: &[tiny_skia::ColorU8]| {
+            let r = |c: &tiny_skia::ColorU8| u16::from(c.red());
+            let b = |c: &tiny_skia::ColorU8| u16::from(c.blue());
+            let blues = c.iter().filter(|c| b(c) > 2 * r(c)).count();
+            let reds = c.iter().filter(|c| r(c) > 2 * b(c)).count();
+            (blues, reds)
+        };
+        let (blues, reds) = striped(&column(-500.0));
+        assert!(blues >= 3 && reds >= 3, "west: {blues} blue, {reds} red");
+        assert_eq!(striped(&column(500.0)).0, 0, "east");
+    }
+
+    #[test]
+    fn the_settled_mesh_follows_the_picture_up_to_the_dem() {
+        // #1882: each band's mesh grows with its picture, within 160 and 640 cells along its
+        // longer side, and never past the DEM's own cells along its ground; a small DEM keeps
+        // 160. #2037: the shorter side with cells of the same size, no fewer than 40.
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        type Band = ((u32, u32), (usize, usize), Option<(f64, f64)>);
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 10.0, bearing: 30.0, pitch: 65.0 };
+        let cells = |side: u32, cell: f64, ppp: f64| -> Vec<Band> {
+            let half = f64::from(side) * cell / 2.0;
+            let gt = GeoTransform { origin_x: -half, origin_y: half, pixel_width: cell, pixel_height: -cell };
+            let heights = vec![0.0; (side * side) as usize];
+            let dem = Raster::new("dem", side, side, vec![heights], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+            let mut m = Map::new("Map");
+            m.add_raster("dem", rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
+            m.view.terrain = Some(rustgis_map::view::Terrain {
+                source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+                exaggeration: 1.0,
+                block: None,
+                water: None,
+            });
+            let g = terrain::Ground::of(&m, &camera).expect("terrain");
+            let view = View { width: 1600.0, height: 1100.0, pixels_per_point: ppp, camera, sky: false };
+            camera
+                .tilt_bands(view.width, view.height)
+                .iter()
+                .map(|b| {
+                    let v = band_view(&view, b);
+                    let (w, h) = v.pixel_size();
+                    let c = [(0.0, 0.0), (v.width, 0.0), (0.0, v.height), (v.width, v.height)];
+                    let along = g.cells_along(&c.map(|(x, y)| v.camera.to_map(x, y, v.width, v.height)));
+                    ((w, h), band_cells(&v, (w, h), &g), along)
+                })
+                .collect()
+        };
+        let long = |b: &Band| b.1.0.max(b.1.1);
+        // A DEM of 8 m cells, 16 km a side: finer than the bands' pictures.
+        let (screen, print) = (cells(2000, 8.0, 1.0), cells(2000, 8.0, 3.0));
+        assert!(print.iter().all(|b| (terrain::SETTLED_CELLS..=terrain::MAX_SETTLED_CELLS).contains(&long(b))), "{print:?}");
+        assert!(screen.iter().zip(&print).all(|(a, b)| a.1.0 <= b.1.0 && a.1.1 <= b.1.1), "{screen:?} vs {print:?}");
+        assert!(print.iter().any(|b| long(b) == terrain::MAX_SETTLED_CELLS), "{print:?}");
+        assert!(screen.iter().any(|b| long(b) > terrain::SETTLED_CELLS && long(b) < terrain::MAX_SETTLED_CELLS), "{screen:?}");
+        // The bands are wider than tall: fewer rows than columns, each as many pixels high as a
+        // column is wide (to the pixel), or the moving drape's 40.
+        for b in screen.iter().chain(&print) {
+            let ((w, h), (nx, ny), _) = *b;
+            assert!(w > h && ny < nx, "{b:?}");
+            let (cw, ch) = (f64::from(w) / nx as f64, f64::from(h) / ny as f64);
+            assert!(ny == terrain::CELLS || (ch <= cw && cw - ch < ch / (ny - 1) as f64), "{b:?}");
+        }
+        // A coarser DEM caps each side at its cells along it, no lower than 160 along the longer
+        // side and 40 along the shorter.
+        let coarse = cells(400, 40.0, 3.0);
+        let cap = |d: Option<f64>, floor: usize| d.unwrap_or(0.0).ceil().max(floor as f64) as usize;
+        for b in &coarse {
+            let (_, (nx, ny), along) = *b;
+            assert!(nx <= cap(along.map(|a| a.0), terrain::SETTLED_CELLS), "{b:?}");
+            assert!(ny <= cap(along.map(|a| a.1), terrain::CELLS), "{b:?}");
+        }
+        assert!(coarse.iter().zip(&print).any(|(c, p)| c.1.0 < p.1.0), "{coarse:?} vs {print:?}");
+        // A 120-cell DEM: 160 across everywhere, as before.
+        assert!(cells(120, 100.0, 3.0).iter().all(|b| b.1.0 == terrain::SETTLED_CELLS), "{:?}", cells(120, 100.0, 3.0));
+    }
+
+    #[test]
     fn a_cancelled_export_stops_laying_the_map_over_its_terrain() {
-        // Cancelled once the terrain's drawing has looked once: halfway through its triangles.
+        // Cancelled once the terrain's drawing has looked once: before its second band's grid.
         struct CancelledMidway(std::sync::atomic::AtomicUsize);
         impl rustgis_data::progress::Probe for CancelledMidway {
             fn cancelled(&self) -> bool {
@@ -8995,8 +9728,12 @@ mod tests {
         let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, -0.6)), res: 600.0, bearing: 0.0, pitch: 65.0 };
         let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
         let mut m = hill_map();
-        m.view.terrain =
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("dem".into()), exaggeration: 2.0 });
+        m.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+            exaggeration: 2.0,
+            block: None,
+            water: None,
+        });
         if let Some(l) = m.layers.iter_mut().find(|l| l.name == "dem") {
             l.visible = true;
         }
@@ -9013,6 +9750,36 @@ mod tests {
         probe.0.store(0, std::sync::atomic::Ordering::Relaxed);
         let _probe = rustgis_data::progress::install(Some(probe));
         assert_eq!(render_png(&mut m, &view).err().as_deref(), Some(rustgis_data::DataError::Cancelled.to_string().as_str()));
+    }
+
+    #[test]
+    fn a_settled_frame_gone_out_of_date_stops_laying_its_terrain() {
+        // A settled frame's worker stops it (`cancel`): the drape, now up to 640 cells a band
+        // (#1882), stops too, before reading another band's grid.
+        let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, -0.6)), res: 600.0, bearing: 0.0, pitch: 65.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let mut m = hill_map();
+        m.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+            exaggeration: 2.0,
+            block: None,
+            water: None,
+        });
+        let ground = terrain::Ground::of(&m, &camera).expect("terrain");
+        let bands: Vec<(View, (f64, f64), Pixmap)> = camera
+            .tilt_bands(view.width, view.height)
+            .iter()
+            .filter_map(|b| {
+                let v = band_view(&view, b);
+                let (w, h) = v.pixel_size();
+                Some((v, b.depth, Pixmap::new(w, h)?))
+            })
+            .collect();
+        let mut pm = Pixmap::new(400, 300).expect("a pixmap");
+        assert!(drape_terrain(&mut pm, &view, &m, &bands, &ground));
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let _stop = cancel::install(flag);
+        assert!(!drape_terrain(&mut pm, &view, &m, &bands, &ground));
     }
 
     #[test]
@@ -9156,6 +9923,7 @@ mod tests {
                 face_culling: true,
                 lighting: true,
                 shadows: false,
+                ..Default::default()
             });
         }
         let flat =
@@ -9206,6 +9974,7 @@ mod tests {
                 face_culling: true,
                 lighting: true,
                 shadows: true,
+                ..Default::default()
             });
         }
         let camera = Camera { center: Coord::new(0.0, 0.0), res: 2000.0, bearing: 30.0, pitch: 60.0 };
@@ -9285,6 +10054,7 @@ mod tests {
             face_culling: true,
             lighting: true,
             shadows: true,
+            ..Default::default()
         });
         let camera = Camera { center: Coord::new(0.0, 0.0), res: 2000.0, bearing: 0.0, pitch: 60.0 };
         let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
@@ -9296,6 +10066,109 @@ mod tests {
         raise_labels(&m, &view, &mut c);
         assert!(c[0].label.y < 150.0 - 15.0, "the tall one rises onto its roof: {}", c[0].label.y);
         assert!((c[1].label.y - 150.0).abs() < 1.0, "the low one stays on the ground: {}", c[1].label.y);
+    }
+
+    /// A square about 200 km a side at the centre, extruded `height` m from `base` m.
+    fn raised_square(height: f64, base: f64, shadows: bool) -> Map {
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        let mut d = Dataset::new("blocks", GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+        let s = 0.9;
+        let ring = vec![Coord::new(-s, -s), Coord::new(s, -s), Coord::new(s, s), Coord::new(-s, s), Coord::new(-s, -s)];
+        d.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Value::Text("Block".into())]);
+        let id = m.add_dataset(d);
+        if let Some(l) = m.layer_mut(id) {
+            l.labels.enabled = true;
+            l.extrusion = Some(rustgis_map::effects::Extrusion { height, base, shadows, ..Default::default() });
+        }
+        m
+    }
+
+    /// The first and last rows (over the middle columns) that differ from the background.
+    fn ink_rows(r: &Rendered) -> (u32, u32) {
+        let bg = r.pixmap.pixel(5, 295).unwrap();
+        let ink = |y: &u32| (150..250).any(|x| r.pixmap.pixel(x, *y).is_some_and(|p| p != bg));
+        ((0..300u32).find(ink).unwrap(), (0..300u32).rev().find(ink).unwrap())
+    }
+
+    #[test]
+    fn a_raised_part_starts_at_its_base_in_a_flat_view() {
+        let view =
+            View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera: Camera::new(Coord::new(0.0, 0.0), 2000.0), sky: false };
+        let (top, bottom) = ink_rows(&render(&mut raised_square(50_000.0, 0.0, false), &view).unwrap());
+        let (top_up, bottom_up) = ink_rows(&render(&mut raised_square(50_000.0, 50_000.0, false), &view).unwrap());
+        // 50 km is 25 px at this scale: the roof and the whole part rise by about that.
+        assert!(top_up + 15 < top, "roof from row {top_up}, from {top} without a base");
+        assert!(bottom_up + 15 < bottom, "foot at row {bottom_up}, at {bottom} without a base");
+        // A base that is no use (negative) draws what no base does.
+        let plain = render(&mut raised_square(50_000.0, 0.0, false), &view).unwrap();
+        let junk = render(&mut raised_square(50_000.0, -9.0, false), &view).unwrap();
+        assert_eq!(plain.pixmap.data(), junk.pixmap.data());
+    }
+
+    #[test]
+    fn a_raised_part_stands_higher_in_a_tilted_view() {
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 2000.0, bearing: 30.0, pitch: 60.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let (top, _) = ink_rows(&render(&mut raised_square(50_000.0, 0.0, true), &view).unwrap());
+        let (top_up, _) = ink_rows(&render(&mut raised_square(50_000.0, 50_000.0, true), &view).unwrap());
+        assert!(top_up + 10 < top, "roof from row {top_up}, from {top} without a base");
+        let plain = render(&mut raised_square(50_000.0, 0.0, true), &view).unwrap();
+        let junk = render(&mut raised_square(50_000.0, f64::NAN, true), &view).unwrap();
+        assert_eq!(plain.pixmap.data(), junk.pixmap.data(), "a base that is no number is the ground");
+    }
+
+    /// A label sits on the roof, at the base plus the height (it rose by the height alone).
+    #[test]
+    fn a_raised_label_sits_at_base_plus_height() {
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 2000.0, bearing: 0.0, pitch: 60.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let lifted = |height: f64, base: f64| {
+            let m = raised_square(height, base, false);
+            let id = m.layers[0].id;
+            let mut c: Vec<Candidate> = vec![(PlacedLabel { y: 150.0, ..label("Block", 200.0, None, 0.0) }, 1.0, (id, 1, 0, 0)).into()];
+            raise_labels(&m, &view, &mut c);
+            c[0].label.y
+        };
+        let (on_stilts, whole, short) = (lifted(50_000.0, 50_000.0), lifted(100_000.0, 0.0), lifted(50_000.0, 0.0));
+        assert!((on_stilts - whole).abs() < 0.5, "base + height is the roof: {on_stilts} vs {whole}");
+        assert!(on_stilts < short - 10.0, "higher than the height alone: {on_stilts} vs {short}");
+        // A height below the ground (a hand-edited file) is none, as the walls draw it: the label
+        // sits on the roof at the base.
+        assert!((lifted(-50_000.0, 50_000.0) - short).abs() < 0.5, "at the base, where the roof is");
+    }
+
+    /// The GPU's commands stand the walls on the base, the roof at the base plus the height, and
+    /// the shadow falls from the base's to the top's.
+    #[test]
+    fn gpu_extrusions_stand_on_their_base() {
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 2000.0, bearing: 30.0, pitch: 60.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let z_range = |height: f64, base: f64| {
+            let shapes = extruded_shapes(&mut raised_square(height, base, true), &view);
+            assert_eq!(shapes.len(), 1);
+            assert!((shapes[0].base_metres - base).abs() < 1e-9);
+            let (b, h) = (shapes[0].base_height, shapes[0].height);
+            let (mut zs, mut falls) = (Vec::new(), Vec::new());
+            for cmd in extrusion_cmds(&shapes, [0.0, 0.0]).expect("within the budget") {
+                let gpu_scene::DrawCmd::Extrusion { vertices, shadows, .. } = cmd else { panic!("an extrusion") };
+                if shadows {
+                    falls.extend(vertices.iter().map(|v| f64::from(v.info[3])));
+                } else {
+                    zs.extend(vertices.iter().map(|v| f64::from(v.position[2])));
+                }
+            }
+            let range = |v: &[f64]| (v.iter().cloned().fold(f64::MAX, f64::min), v.iter().cloned().fold(f64::MIN, f64::max));
+            (b, h, range(&zs), range(&falls))
+        };
+        let (b, h, (zlo, zhi), (flo, fhi)) = z_range(50_000.0, 50_000.0);
+        assert!(b > 0.0 && h > 0.0);
+        let near = |a: f64, e: f64| (a - e).abs() <= e.abs() * 1e-5 + 1e-3;
+        assert!(near(zlo, b) && near(zhi, b + h), "walls from {zlo} to {zhi}, not {b} to {}", b + h);
+        assert!(near(flo, b) && near(fhi, b + h), "shadow falls from {flo} to {fhi}, not {b} to {}", b + h);
+        // No base: from the ground, as before.
+        let (_, h, (zlo, zhi), (flo, fhi)) = z_range(50_000.0, 0.0);
+        assert!(zlo == 0.0 && near(zhi, h) && flo == 0.0 && near(fhi, h), "{zlo} {zhi} {flo} {fhi}");
     }
 
     /// Extruded features with junk heights or roof indices (hostile data) give finite geometry
@@ -9312,6 +10185,8 @@ mod tests {
             holes: vec![],
             metres: height,
             height,
+            base_metres: 0.0,
+            base_height: 0.0,
             fill: Rgba::rgb(200, 100, 50),
             stroke: Rgba::rgb(0, 0, 0),
             face_culling: true,
@@ -9324,6 +10199,126 @@ mod tests {
             assert!(vertices.iter().all(|v| v.position.iter().chain(&v.info).all(|x| x.is_finite())));
             assert!(indices.iter().all(|i| (*i as usize) < vertices.len()));
         }
+        // A base and a height at the cap stand within it together.
+        let tall = ExtrudedShape { base_metres: 1e12, base_height: 1e12, ..shape(1e12, vec![0, 1, 2, 0, 2, 3]) };
+        for cmd in extrusion_cmds(&[tall], [0.0, 0.0]).expect("within the budget") {
+            let gpu_scene::DrawCmd::Extrusion { vertices, .. } = cmd else { panic!("an extrusion") };
+            assert!(vertices.iter().all(|v| v.position[2] <= 1e9 && v.info[3] <= 1e9));
+        }
+    }
+
+    /// A raised footprint's shadow also covers where the base's shifted footprint falls inside a
+    /// hole of the top one: the hole's walls cast their sweep too. A solid block needs nothing more.
+    #[test]
+    fn a_raised_part_with_a_hole_casts_its_holes_walls_too() {
+        let c = Coord::new;
+        let ring = |a: f64| vec![c(-a, -a), c(a, -a), c(a, a), c(-a, a)];
+        let shape = |base: f64, holes: Vec<Vec<Coord>>| ExtrudedShape {
+            origin: c(0.0, 0.0),
+            center: c(0.0, 0.0),
+            roof: vec![[-10.0, -10.0], [10.0, -10.0], [10.0, 10.0], [-10.0, 10.0]],
+            roof_indices: vec![0, 1, 2, 0, 2, 3],
+            rings: vec![ring(10.0)],
+            holes,
+            metres: 5.0,
+            height: 5.0,
+            base_metres: base,
+            base_height: base,
+            fill: Rgba::rgb(200, 100, 50),
+            stroke: Rgba::rgb(0, 0, 0),
+            face_culling: true,
+            lighting: true,
+            shadows: true,
+        };
+        let falls = |base: f64, holes: Vec<Vec<Coord>>| -> Vec<f32> {
+            let cmds = extrusion_cmds(&[shape(base, holes)], [0.0, 0.0]).expect("within the budget");
+            cmds.into_iter()
+                .filter_map(|cmd| match cmd {
+                    gpu_scene::DrawCmd::Extrusion { vertices, shadows: true, .. } => Some(vertices),
+                    _ => None,
+                })
+                .flatten()
+                .map(|v| v.info[3])
+                .collect()
+        };
+        let (ground, raised) = (falls(0.0, vec![ring(4.0)]), falls(10.0, vec![ring(4.0)]));
+        // The roof's 4 vertices come first, then the sides: the outer ring's, and (raised) the hole's.
+        assert_eq!(raised.len(), ground.len() + 16, "the hole's 4 walls cast their sweep");
+        assert_eq!(raised.get(..4), Some(&[15.0f32; 4][..]), "the roof from the top");
+        assert_eq!(raised.iter().filter(|f| **f == 10.0).count(), 16, "8 sides, each from the base");
+        assert_eq!(ground.get(..4), Some(&[5.0f32; 4][..]));
+        assert_eq!(ground.iter().filter(|f| **f == 0.0).count(), 8, "no base: the outer sides' feet alone fall from the ground");
+        // A solid block casts as many vertices raised as on the ground.
+        assert_eq!(falls(10.0, vec![]).len(), falls(0.0, vec![]).len());
+    }
+
+    fn ring_px(cam: &Camera) -> Vec<(f64, f64)> {
+        let (u, v) = cam.ground_px(cam.center);
+        vec![(u - 60.0, v - 60.0), (u + 60.0, v - 60.0), (u + 60.0, v + 60.0), (u - 60.0, v + 60.0)]
+    }
+
+    /// The walls' feet stand at the base (projected raised by it), not on the ground.
+    #[test]
+    fn tilted_walls_stand_on_their_base() {
+        let cam = Camera { center: Coord::new(0.0, 0.0), res: 2000.0, bearing: 30.0, pitch: 60.0 };
+        let (w, h) = (400.0, 300.0);
+        let ring = ring_px(&cam);
+        let feet = |base: f64| -> Vec<(f64, f64)> {
+            tilted_walls(&cam, w, h, std::slice::from_ref(&ring), &[], base, 40.0, false, false)
+                .iter()
+                .flat_map(|wall| [wall.quad[0], wall.quad[1]])
+                .collect()
+        };
+        let near = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9;
+        let at = |base: f64| -> Vec<(f64, f64)> { ring.iter().filter_map(|p| cam.project_raised(p.0, p.1, base, w, h)).collect() };
+        let (grounded, raised) = (feet(0.0), feet(30.0));
+        assert_eq!(raised.len(), 8, "four walls, two feet each");
+        let (on_ground, on_base) = (at(0.0), at(30.0));
+        assert!(grounded.iter().all(|f| on_ground.iter().any(|p| near(*f, *p))));
+        assert!(raised.iter().all(|f| on_base.iter().any(|p| near(*f, *p))), "{raised:?} vs {on_base:?}");
+        assert!(!raised.iter().any(|f| on_ground.iter().any(|p| near(*f, *p))), "no foot left on the ground");
+    }
+
+    /// The shadow's sides start from the outline moved by the base's shift, not from the outline.
+    #[test]
+    fn tilted_shadow_quads_start_from_the_base_shadow() {
+        let cam = Camera { center: Coord::new(0.0, 0.0), res: 2000.0, bearing: 30.0, pitch: 60.0 };
+        let (w, h) = (400.0, 300.0);
+        let ring = ring_px(&cam);
+        let quads = tilted_shadow_quads(&cam, w, h, std::slice::from_ref(&ring), 30.0, 40.0);
+        assert_eq!(quads.len(), 4);
+        let (bu, bv) = shadow_shift(30.0);
+        assert!(bu != 0.0 || bv != 0.0);
+        let near = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9;
+        for (i, q) in quads.iter().enumerate() {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            let ground = |p: (f64, f64)| cam.project_raised(p.0, p.1, 0.0, w, h).unwrap();
+            assert!(near(q[0], ground((a.0 + bu, a.1 + bv))) && near(q[1], ground((b.0 + bu, b.1 + bv))), "side {i}: {q:?}");
+            assert!(!near(q[0], ground(a)), "not the outline itself");
+        }
+    }
+
+    /// The flat shadow falls from the base's to the top's: raising a part moves the ink it casts.
+    #[test]
+    fn a_raised_part_casts_its_flat_shadow_further_away() {
+        let view =
+            View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera: Camera::new(Coord::new(0.0, 0.0), 2000.0), sky: false };
+        // The corner of the pixels a shadow changes (the far south-east of them).
+        let reach = |base: f64| {
+            let lit = render(&mut raised_square(50_000.0, base, false), &view).unwrap();
+            let dark = render(&mut raised_square(50_000.0, base, true), &view).unwrap();
+            let width = lit.pixmap.width() as usize;
+            let (mut x, mut y) = (0usize, 0usize);
+            for (i, (a, b)) in lit.pixmap.data().chunks(4).zip(dark.pixmap.data().chunks(4)).enumerate() {
+                if a != b {
+                    (x, y) = (x.max(i % width), y.max(i / width));
+                }
+            }
+            (x, y)
+        };
+        let (grounded, raised) = (reach(0.0), reach(50_000.0));
+        assert!(grounded.0 > 0 && grounded.1 > 0, "the shadow shows: {grounded:?}");
+        assert!(raised.0 > grounded.0 + 4 && raised.1 > grounded.1 + 2, "{raised:?} vs {grounded:?}");
     }
 
     #[test]
@@ -9357,6 +10352,7 @@ mod tests {
                 face_culling: true,
                 lighting: true,
                 shadows: false,
+                ..Default::default()
             });
         }
         let camera = Camera { center: Coord::new(0.0, 0.0), res: 2_000.0, bearing: 0.0, pitch: 30.0 };
@@ -9396,6 +10392,7 @@ mod tests {
                 face_culling: true,
                 lighting: true,
                 shadows: true,
+                ..Default::default()
             });
         }
         let camera = Camera { center: Coord::new(0.0, 0.0), res: 2_000.0, bearing: 0.0, pitch: 60.0 };

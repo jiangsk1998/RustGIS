@@ -58,6 +58,21 @@ Config `include` directives are also rejected so those checks cannot be bypassed
 another file; put intentional dependency patches in `Cargo.toml` for review.
 User-level Cargo mirrors are outside this repository check.
 
+CI runs the workspace's tests with [cargo-nextest](https://nexte.st), and `cargo test --doc` for the
+doctests it doesn't run (`.config/nextest.toml`, profile `ci`). Nextest runs a test that fails
+again, up to twice, and a test that passes on a retry is flaky: it is listed in the job summary,
+and on a push to `main` it gets an issue titled `Flaky test: <binary> <test>`. A flaky test is a
+bug to fix, not a retry to rely on; the retries are a stopgap for tests that wait on timers
+(`cargo xtask test-hygiene`) and go back to zero once those are gone. `cargo xtask ci` still runs
+`cargo test` locally.
+
+A pull request's CI runs the tests of the packages it changes and those that depend on them, as
+`cargo xtask changed --list` finds them. The whole workspace is tested for a push to `main`, a
+`ci:` label, a manual run on every platform, a change to `Cargo.lock`, `rust-toolchain*`, `.github/`
+or `.config/`, and a file outside every package that nothing includes. Lint, the wasm build, the
+licence check and the schema check always run whole. The `Tests pass` job fails when any other job
+does; it is the check to require before merging.
+
 Workflow actions are pinned to full commit SHAs with the previous version or branch in a comment.
 Dependabot's existing GitHub Actions updates keep these pins current. When changing an action,
 resolve the commit in that action's own repository and keep the version comment in step.
@@ -66,6 +81,7 @@ Other workspace tasks:
 
 | Task | Purpose |
 | --- | --- |
+| `cargo xtask changed [--list] [base]` | Run the `cargo xtask ci` checks on only the packages your branch changes and those that depend on them: a quicker check while you work. A file outside every package that no package includes, such as `Cargo.lock`, checks the whole workspace. `--list` prints the packages without checking them |
 | `cargo xtask layers` | Check crate dependency direction and keep UI dependencies out of lower layers |
 | `cargo xtask notices` | Regenerate the shipped `THIRD-PARTY-LICENSES.txt` files after changing dependencies, or after adding code or data from another project to `INCLUDED` in `xtask/src/notices.rs` (with its licence text in `third-party/`); requires `cargo-about` |
 | `cargo xtask notices --check` | Check the notices without writing them; stale notices warn in CI but block releases |
@@ -77,9 +93,11 @@ to English until the catalogs are updated; see [Languages](i18n.md).
 
 ### Saved-file compatibility
 
-`crates/engine/src/project.rs::FORMAT` is the saved-document compatibility version, separate
-from the application release version. Project, map, layer and style imports check a top-level
-`format` before interpreting their payloads. Missing metadata remains supported legacy content;
+`crates/engine/src/project.rs::FORMAT` is the saved-document compatibility version that
+RustGIS writes, separate from the application release version; `READ_FORMAT` is the newest it
+reads. Project, map, layer and style imports check a top-level `format`, and a top-level
+`requires` (the capabilities a document needs, `CAPABILITIES` listing those this RustGIS knows),
+before interpreting their payloads. Missing metadata remains supported legacy content;
 style files currently remain arrays. Current companion writers keep their existing output.
 Every project serialization, including templates and packages, writes the current `FORMAT`,
 even when the project was loaded from an older supported file.
@@ -87,10 +105,14 @@ These reader checks prepare for future writers; they do not protect already rele
 or detect new information in files that omit the required version.
 
 When a future change would cause an older reader to misinterpret or lose meaningful saved
-information on resaving, advance `FORMAT` and declare it in each affected document's top-level
-`format`. This includes additive fields that parse successfully but disappear when an older
-writer saves. For a style file that needs metadata, the future writer must use an object rather
-than the legacy array; readers with this guard refuse its newer format before interpreting it.
+information on resaving, name it in the document's `requires` and add the name to `CAPABILITIES`
+where it is read; a format beyond `READ_FORMAT` is for a change a capability can't describe. This
+includes additive fields that parse successfully but disappear when an older writer saves. Task,
+presentation and notebook documents, and models inside a task's steps, don't check `requires` yet:
+a change to them that an older reader would lose needs that check first (see
+[maintaining](maintaining.md#saved-files-and-settings)). For a style file that needs metadata,
+the future writer must use an object rather than the legacy array; readers with this guard refuse
+its newer format before interpreting it.
 A payload or wrapper for such a new format belongs in that future change. Keep existing legacy
 readers and test that unsupported versions fail before typed deserialization, normalization or
 source reopening, including alternate import and package paths.
@@ -288,6 +310,24 @@ with `RUSTGIS_WORKFLOW_DATA` naming their folder (the list of files is in `night
 it locally, download the files listed there into one folder, check them with `sha256sum` against
 the checksums beside them, and run
 `RUSTGIS_WORKFLOW_DATA=<folder> cargo test -p rustgis-engine --test workflows -- --ignored`.
+
+### Property tests
+
+A property test checks a rule over generated inputs instead of a few written ones: an export
+comes back the same or says what changed (`crates/engine/tests/never_silent_roundtrip.rs`). They
+use [proptest](https://docs.rs/proptest) (a dev-dependency) and follow one pattern, so CI runs
+them all the same way:
+
+- An integration test (`crates/<crate>/tests/`) seeds its runner from `PROPERTY_SEED` (1 if
+  unset) and runs `PROPERTY_CASES` cases, with a default that takes a few seconds, and no
+  failure file. A failure panics with `PROPERTY_SEED=<seed>` and the smallest input found.
+- Pull requests run the fixed seed with `cargo test`. The nightly runs each property test on a
+  new seed with more cases; add a new one to its step in `nightly.yml`.
+- What the rule allows (a format's limits, a tolerance) is a list in the test, each entry with
+  its reason.
+
+To run a failing seed again, or deeper:
+`PROPERTY_SEED=7 PROPERTY_CASES=2000 cargo test -p rustgis-engine --test never_silent_roundtrip`.
 
 ## Documentation
 

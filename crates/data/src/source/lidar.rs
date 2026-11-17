@@ -19,7 +19,7 @@ pub struct LidarSource {
 impl LidarSource {
     /// Opens a local cloud for display without presenting its sample as the whole file.
     pub fn open_path(path: &Path, name: &str) -> Result<LidarSource> {
-        let f = std::io::BufReader::new(std::fs::File::open(path)?);
+        let f = std::io::BufReader::new(crate::provenance::open(path)?);
         Self::from_read(crate::lidar::read_sample(f, name)?)
     }
 
@@ -85,6 +85,13 @@ impl FeatureSource for LidarSource {
         let limit = req.limit.max(1);
         let step = hits.len().div_ceil(limit).max(1);
         let features: Vec<Feature> = hits.into_iter().step_by(step).take(limit).cloned().collect();
-        Ok(Batch { complete: !incomplete && features.len() as u64 == matched, matched, features, skipped: 0, unread_dates: Vec::new() })
+        Ok(Batch {
+            complete: !incomplete && features.len() as u64 == matched,
+            matched,
+            features,
+            skipped: 0,
+            unread_dates: Vec::new(),
+            rounded_dates: Vec::new(),
+        })
     }
 }

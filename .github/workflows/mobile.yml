@@ -1,0 +1,572 @@
+name: Mobile release
+
+# The phone apps (apps/rustgis-mobile, #1902) for a published release: signed Android APKs (one for
+# arm64, one for x86_64), the Android App Bundle for Google Play signed with the same key (see the
+# README for its role in Play App Signing) and the signed iOS app (an IPA for the App Store), each
+# attached to the release with its .sha256; the App Bundle released on Google Play's production
+# track, and the iOS build uploaded to TestFlight. A manual run (from
+# main) builds and signs them all and keeps them as workflow artifacts; it uploads to Play and
+# TestFlight only when asked. A pull request that changes apps/rustgis-mobile or this workflow
+# builds both with no secrets: the Android APK signed with a throwaway debug key, the iOS app
+# unsigned.
+#
+# Building and signing are separate jobs. A build job runs every crate's build script and holds no
+# secret; it hands on only the unsigned app. A sign job runs on a fresh runner, from a fresh
+# checkout the build never touched, and compiles nothing: a build script can't reach the keys,
+# nor change the scripts that use them. The signature vouches for what the build job made, no more:
+# what a dependency compiles into the app is kept in hand by Cargo.lock and the reviewed updates.
+#
+# The secrets are the `mobile-release` environment's, which only main and v* tags may use, so a
+# run from any other branch never sees them (GeoLibre uses the same names):
+#   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS: the release key.
+#     Every APK must be signed with the same one, or Android refuses it as an update.
+#   APPLE_IOS_CERTIFICATE_BASE64, APPLE_IOS_CERTIFICATE_PASSWORD: the Apple Distribution
+#     certificate and its key, as a .p12.
+#   APPLE_IOS_PROVISIONING_PROFILE_BASE64: the App Store profile for org.rustgis.mobile.
+#   APP_STORE_CONNECT_API_KEY_ID, APP_STORE_CONNECT_API_ISSUER_ID, APP_STORE_CONNECT_API_KEY:
+#     an App Store Connect API key (App Manager) for the upload; the key is the .p8's text.
+#   PLAY_SERVICE_ACCOUNT_JSON: the JSON key of a Google Cloud service account that Play Console
+#     lets release to production and testing tracks, for the App Bundle's upload to Google Play.
+# A job whose secrets are missing says which and stops: a release without its phone apps is
+# said, not passed over.
+
+on:
+  release:
+    types: [published]
+  pull_request:
+    paths:
+      - .github/workflows/mobile.yml
+      - apps/rustgis-mobile/**
+  workflow_dispatch:
+    inputs:
+      testflight:
+        description: "Upload the iOS build to TestFlight"
+        type: boolean
+        default: false
+      ios_build:
+        description: "iOS build number, for a commit already uploaded (default: the commit count)"
+        type: string
+        default: ""
+      play:
+        description: "Upload the App Bundle to Google Play"
+        type: boolean
+        default: false
+      play_track:
+        description: "Google Play track for the upload"
+        type: choice
+        options: [internal, alpha, beta, production]
+        default: internal
+      play_status:
+        description: "Google Play release: a draft to roll out in Play Console, or completed to roll it out"
+        type: choice
+        options: [draft, completed]
+        default: draft
+
+permissions:
+  contents: read
+
+# Only a pull request's runs are cancelled by a newer one: a release run is the only one that
+# attaches that tag's APK, and a manual run may be uploading to TestFlight.
+concurrency:
+  group: mobile-${{ github.event_name }}-${{ github.event.release.tag_name || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Whether this run signs (a release or a manual run), and so hands its apps to the sign jobs.
+  SIGNS: ${{ github.event_name != 'pull_request' }}
+
+jobs:
+  android-build:
+    name: Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_code: ${{ steps.version.outputs.version_code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The version code is the count of commits.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: false
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-ndk
+
+      - name: Version
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          crate="$(awk '/^\[/ { s = ($0 == "[workspace.package]") } s && /^version *=/ { gsub(/.*= *"|".*/, ""); print; exit }' Cargo.toml)"
+          if [ -n "$TAG" ] && [ "${TAG#v}" != "$crate" ]; then
+            echo "::error::Tag $TAG does not match the workspace version $crate in Cargo.toml."
+            exit 1
+          fi
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
+          # The version code build-apk.sh gives the APKs and the App Bundle.
+          echo "version_code=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+
+      # The platform the manifest targets (build-apk.sh refuses an older one), named here rather
+      # than left to the runner image.
+      - name: The Android platform
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" >/dev/null
+
+      - name: bundletool
+        env:
+          # Pinned by version and digest (GeoLibre's android.yml uses the same).
+          BUNDLETOOL_VERSION: "1.18.3"
+          BUNDLETOOL_SHA256: "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
+        run: |
+          set -euo pipefail
+          jar="$RUNNER_TEMP/bundletool.jar"
+          curl -fsSL -o "$jar" "https://github.com/google/bundletool/releases/download/$BUNDLETOOL_VERSION/bundletool-all-$BUNDLETOOL_VERSION.jar"
+          echo "$BUNDLETOOL_SHA256  $jar" | sha256sum -c -
+          echo "BUNDLETOOL=$jar" >> "$GITHUB_ENV"
+
+      # A pull request's build: both architectures in one APK, signed with a debug key made for it.
+      - name: Build the APK
+        if: env.SIGNS != 'true'
+        run: apps/rustgis-mobile/build-apk.sh arm64-v8a x86_64
+
+      # A signing run leaves them unsigned for the sign job: an APK for each architecture (arm64 for
+      # phones and tablets, x86_64 for emulators and some Chromebooks), each half the size of one
+      # holding both, and one App Bundle holding both, from which Play gives each device its own.
+      - name: Build the APKs and the App Bundle
+        if: env.SIGNS == 'true'
+        env:
+          ANDROID_UNSIGNED: "1"
+        run: |
+          set -euo pipefail
+          for abi in arm64-v8a x86_64; do
+            BUNDLETOOL= apps/rustgis-mobile/build-apk.sh "$abi"
+            mv target/android/aligned.apk "target/android/aligned-$abi.apk"
+          done
+          # The bundle; the APK built beside it, with both architectures, isn't kept.
+          apps/rustgis-mobile/build-apk.sh arm64-v8a x86_64
+          rm target/android/aligned.apk
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: env.SIGNS == 'true'
+        with:
+          name: android-unsigned
+          path: |
+            target/android/aligned-arm64-v8a.apk
+            target/android/aligned-x86_64.apk
+            target/android/unsigned.aab
+          if-no-files-found: error
+          retention-days: 1
+
+  android-sign:
+    name: Sign the APKs and the App Bundle
+    if: github.event_name != 'pull_request'
+    needs: android-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: mobile-release
+    steps:
+      # The scripts from a checkout of the same commit that no build has run in.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: android-unsigned
+          path: target/android
+
+      - name: Sign with the release key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$KEYSTORE_BASE64" ] || missing+=(ANDROID_KEYSTORE_BASE64)
+          [ -n "$ANDROID_KEYSTORE_PASSWORD" ] || missing+=(ANDROID_KEYSTORE_PASSWORD)
+          [ -n "$ANDROID_KEY_ALIAS" ] || missing+=(ANDROID_KEY_ALIAS)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::No release key: the secrets ${missing[*]} aren't set in the mobile-release environment."
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          # --sign-only signs target/android/aligned.apk, and the bundle on its first run.
+          for abi in arm64-v8a x86_64; do
+            mv "target/android/aligned-$abi.apk" target/android/aligned.apk
+            ANDROID_KEYSTORE="$RUNNER_TEMP/release.keystore" apps/rustgis-mobile/build-apk.sh --sign-only
+            mv target/android/rustgis-mobile.apk "target/android/signed-$abi.apk"
+          done
+
+      - name: Remove the release key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore"
+
+      - name: Check and name the APKs and the App Bundle
+        env:
+          VERSION: ${{ needs.android-build.outputs.version }}
+          # The release key's certificate (CN=RustGIS, O=OpenGeos), as `apksigner verify
+          # --print-certs` prints it.
+          RELEASE_CERT_SHA256: c8ba985148386fae4ccbc4e1256d3234dd35f85e7eb921d74a593d7a73d93d89
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tools="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)"
+          for abi in arm64-v8a x86_64; do
+            # Named by the architecture as people know it: arm64, x86_64.
+            apk="RustGIS-$VERSION-android-${abi%-v8a}.apk"
+            cp "target/android/signed-$abi.apk" "dist/$apk"
+            (cd dist && sha256sum "$apk" > "$apk.sha256")
+            signer="$("$tools/apksigner" verify --print-certs "dist/$apk")"
+            printf '%s: %s\n' "$apk" "$(printf '%s\n' "$signer" | grep -E 'SHA-256')"
+            # An APK signed with anything but the release key couldn't update an installed one:
+            # its certificate is pinned (a key replaced by mistake fails here, before a release).
+            if ! printf '%s\n' "$signer" | grep -q "certificate SHA-256 digest: $RELEASE_CERT_SHA256"; then
+              echo "::error::$apk isn't signed with the release key (certificate SHA-256 $RELEASE_CERT_SHA256)."
+              exit 1
+            fi
+            # Only its own architecture's library.
+            # `unzip` exits 11 for an APK with no libraries (the check below then names none); any
+            # other failure (a damaged APK) is said with unzip's own message.
+            status=0
+            listing="$(unzip -Z1 "dist/$apk" 'lib/*' 2>&1)" || status=$?
+            if [ "$status" -eq 11 ]; then
+              listing=""
+            elif [ "$status" -ne 0 ]; then
+              echo "::error::unzip couldn't read $apk: $listing"
+              exit 1
+            fi
+            libs="$(printf '%s\n' "$listing" | grep . | cut -d/ -f2 | sort -u | tr '\n' ' ' || true)"
+            if [ "$libs" != "$abi " ]; then
+              echo "::error::$apk holds libraries for: $libs"
+              exit 1
+            fi
+          done
+          # The App Bundle, for Google Play, signed with the same key.
+          mkdir -p bundle
+          aab="RustGIS-$VERSION-android.aab"
+          cp target/android/rustgis-mobile.aab "bundle/$aab"
+          jarsigner -verify "bundle/$aab" | tail -1
+          printed="$(keytool -printcert -jarfile "bundle/$aab" | awk '/SHA256:/ { print $2; exit }' | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          if [ "$printed" != "$RELEASE_CERT_SHA256" ]; then
+            echo "::error::The App Bundle isn't signed with the release key."
+            exit 1
+          fi
+          (cd bundle && sha256sum "$aab" > "$aab.sha256")
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rustgis-android
+          path: dist/*
+          if-no-files-found: error
+
+      # For Google Play, uploaded in the Play Console; attached to the release too, beside the APKs.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rustgis-android-bundle
+          path: bundle/*
+          if-no-files-found: error
+
+  # Its own job, so only it holds a token that can write to the repository.
+  android-release:
+    name: Attach the APKs and the App Bundle to the release
+    if: github.event_name == 'release'
+    needs: android-sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: rustgis-android
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: rustgis-android-bundle
+          path: dist
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Its own job, after the signing: the App Bundle on Google Play. A published release goes to the
+  # production track, rolled out to everyone once Google's review passes; a pre-release goes to
+  # internal testing as a draft, never to production; a manual run goes to the track and status
+  # asked for (by default an internal testing draft). An app never published yet takes only drafts,
+  # which the script makes it and says. A build Play already has (a manual run's upload of the same
+  # commit) is released by its version code. Only this job holds the Play service account's key.
+  android-play:
+    name: Upload the App Bundle to Google Play
+    if: github.event_name == 'release' || inputs.play
+    needs: [android-build, android-sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: mobile-release
+    # One upload at a time across runs: Play drops an open edit when the same account starts another.
+    # `queue: max` keeps every waiting upload (up to 100) instead of only the latest.
+    concurrency:
+      group: google-play-upload
+      cancel-in-progress: false
+      queue: max
+    steps:
+      # The script from a checkout of the same commit that no build has run in.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: rustgis-android-bundle
+          path: bundle
+      - name: Upload
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          VERSION: ${{ needs.android-build.outputs.version }}
+          TAG: ${{ github.event.release.tag_name }}
+          VERSION_CODE: ${{ needs.android-build.outputs.version_code }}
+          TRACK: ${{ github.event_name == 'release' && (github.event.release.prerelease && 'internal' || 'production') || inputs.play_track }}
+          STATUS: ${{ github.event_name == 'release' && (github.event.release.prerelease && 'draft' || 'completed') || inputs.play_status }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PLAY_SERVICE_ACCOUNT_JSON" ]; then
+            echo "::error::No upload: the secret PLAY_SERVICE_ACCOUNT_JSON isn't set in the mobile-release environment."
+            exit 1
+          fi
+          if [ -n "$TAG" ]; then
+            notes="RustGIS $VERSION. What's new: https://github.com/opengeos/RustGIS/releases/tag/$TAG"
+          else
+            notes="RustGIS $VERSION, built from ${GITHUB_SHA::8}."
+          fi
+          python3 .github/scripts/play_upload.py "bundle/RustGIS-$VERSION-android.aab" \
+            --package org.rustgis.mobile --track "$TRACK" --status "$STATUS" \
+            --name "$VERSION (${TAG:-${GITHUB_SHA::8}})" --notes "$notes" --version-code "$VERSION_CODE"
+
+  ios-build:
+    name: iOS app
+    runs-on: macos-latest
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The build number is the count of commits, as for the builds uploaded by hand.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: false
+
+      - name: Version
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          crate="$(awk '/^\[/ { s = ($0 == "[workspace.package]") } s && /^version *=/ { gsub(/.*= *"|".*/, ""); print; exit }' Cargo.toml)"
+          if [ -n "$TAG" ] && [ "${TAG#v}" != "$crate" ]; then
+            echo "::error::Tag $TAG does not match the workspace version $crate in Cargo.toml."
+            exit 1
+          fi
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
+
+      - name: The newest Xcode
+        # App Store Connect refuses an upload built with an SDK below its current floor, and the
+        # image's default Xcode moves with image updates: the newest present, said in the log.
+        run: |
+          set -euo pipefail
+          newest="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1 || true)"
+          [ -n "$newest" ] || { echo "::error::No Xcode on the runner."; exit 1; }
+          sudo xcode-select -s "$newest/Contents/Developer"
+          echo "::notice::$(xcodebuild -version | head -1), iOS SDK $(xcrun --sdk iphoneos --show-sdk-version)"
+
+      # The whole bundle, unsigned: any failure on the way fails the step.
+      - name: Build the app
+        env:
+          IOS_BUILD: ${{ inputs.ios_build }}
+        run: IOS_UNSIGNED=1 apps/rustgis-mobile/build-ios.sh device
+
+      # As a tar, which keeps the executable's mode (an artifact's zip doesn't).
+      - name: Pack the unsigned app
+        if: env.SIGNS == 'true'
+        run: tar -C target/ios -cf "$RUNNER_TEMP/RustGIS.app.tar" RustGIS.app
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: env.SIGNS == 'true'
+        with:
+          name: ios-unsigned
+          path: ${{ runner.temp }}/RustGIS.app.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  ios-sign:
+    name: Sign the iOS app
+    if: github.event_name != 'pull_request'
+    needs: ios-build
+    runs-on: macos-latest
+    timeout-minutes: 30
+    environment: mobile-release
+    steps:
+      # The scripts from a checkout of the same commit that no build has run in.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ios-unsigned
+          path: ${{ runner.temp }}
+      - name: Unpack the app
+        run: mkdir -p target/ios && tar -C target/ios -xf "$RUNNER_TEMP/RustGIS.app.tar"
+
+      - name: The newest Xcode
+        run: |
+          set -euo pipefail
+          newest="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1 || true)"
+          [ -n "$newest" ] || { echo "::error::No Xcode on the runner."; exit 1; }
+          sudo xcode-select -s "$newest/Contents/Developer"
+
+      - name: The signing identity and profile
+        id: signing
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_IOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_IOS_CERTIFICATE_PASSWORD }}
+          PROFILE_BASE64: ${{ secrets.APPLE_IOS_PROVISIONING_PROFILE_BASE64 }}
+          # Apple's intermediate the distribution certificate is issued by, pinned by digest.
+          WWDR_URL: https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer
+          WWDR_SHA256: dcf21878c77f4198e4b4614f03d696d89c66c66008d4244e1b99161aac91601f
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$CERTIFICATE_BASE64" ] || missing+=(APPLE_IOS_CERTIFICATE_BASE64)
+          [ -n "$CERTIFICATE_PASSWORD" ] || missing+=(APPLE_IOS_CERTIFICATE_PASSWORD)
+          [ -n "$PROFILE_BASE64" ] || missing+=(APPLE_IOS_PROVISIONING_PROFILE_BASE64)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::No iOS signing: the secrets ${missing[*]} aren't set in the mobile-release environment."
+            exit 1
+          fi
+          umask 077
+          # A keychain of this run's own, with a random password, so the key never reaches the
+          # login keychain; removed at the end. `security` takes its passwords as arguments only.
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          echo "keychain=$keychain" >> "$GITHUB_OUTPUT"
+          pass="$(openssl rand -base64 24)"
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          curl -fsSL -o "$RUNNER_TEMP/wwdr.cer" "$WWDR_URL"
+          echo "$WWDR_SHA256  $RUNNER_TEMP/wwdr.cer" | shasum -a 256 -c -
+          security import "$RUNNER_TEMP/wwdr.cer" -k "$keychain"
+          printf '%s' "$CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+          security import "$RUNNER_TEMP/dist.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/dist.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Apple Distribution/ { print $2; exit }')"
+          [ -n "$identity" ] || { echo "::error::The certificate holds no Apple Distribution identity."; exit 1; }
+          printf '%s' "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/app.mobileprovision"
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the app
+        env:
+          IOS_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+        run: IOS_PROFILE="$RUNNER_TEMP/app.mobileprovision" apps/rustgis-mobile/build-ios.sh --sign-only
+
+      - name: Name the IPA
+        env:
+          VERSION: ${{ needs.ios-build.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p ipa
+          ipa="RustGIS-$VERSION-ios.ipa"
+          cp target/ios/RustGIS.ipa "ipa/$ipa"
+          (cd ipa && shasum -a 256 "$ipa" > "$ipa.sha256")
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rustgis-ios
+          path: ipa/*
+          if-no-files-found: error
+
+      - name: Remove the keys and the keychain
+        if: always()
+        env:
+          KEYCHAIN: ${{ steps.signing.outputs.keychain }}
+        run: |
+          rm -rf "$RUNNER_TEMP/dist.p12" "$RUNNER_TEMP/app.mobileprovision"
+          if [ -n "$KEYCHAIN" ]; then security delete-keychain "$KEYCHAIN" || true; fi
+
+  # Its own job, so only it holds a token that can write to the repository. The IPA is signed for
+  # the App Store: it installs through TestFlight and the App Store, not on its own.
+  ios-release:
+    name: Attach the IPA to the release
+    if: github.event_name == 'release'
+    needs: ios-sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: rustgis-ios
+          path: dist
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Its own job, after the signing: the IPA reaches the release and the artifacts whatever happens
+  # here, and only this job holds the App Store Connect key.
+  ios-testflight:
+    name: Upload the iOS app to TestFlight
+    if: github.event_name == 'release' || inputs.testflight
+    needs: [ios-build, ios-sign]
+    runs-on: macos-latest
+    timeout-minutes: 30
+    environment: mobile-release
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: rustgis-ios
+          path: ipa
+
+      - name: The newest Xcode
+        run: |
+          set -euo pipefail
+          newest="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1 || true)"
+          [ -n "$newest" ] || { echo "::error::No Xcode on the runner."; exit 1; }
+          sudo xcode-select -s "$newest/Contents/Developer"
+
+      - name: Upload
+        env:
+          VERSION: ${{ needs.ios-build.outputs.version }}
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$KEY_ID" ] || missing+=(APP_STORE_CONNECT_API_KEY_ID)
+          [ -n "$ISSUER_ID" ] || missing+=(APP_STORE_CONNECT_API_ISSUER_ID)
+          [ -n "$KEY" ] || missing+=(APP_STORE_CONNECT_API_KEY)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::No upload: the secrets ${missing[*]} aren't set in the mobile-release environment."
+            exit 1
+          fi
+          umask 077
+          # Where altool looks for the key of an id.
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          printf '%s\n' "$KEY" > "$HOME/.appstoreconnect/private_keys/AuthKey_$KEY_ID.p8"
+          xcrun altool --upload-app --type ios --file "ipa/RustGIS-$VERSION-ios.ipa" --apiKey "$KEY_ID" --apiIssuer "$ISSUER_ID"
+
+      - name: Remove the key
+        if: always()
+        run: rm -rf "$HOME/.appstoreconnect/private_keys"

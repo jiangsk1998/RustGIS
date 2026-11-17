@@ -28,7 +28,7 @@ pub fn commands() -> Vec<C> {
             .when(|s| if s.can_redo() { None } else { Some("nothing to redo") }),
         C::new("tool.set", "Set Map Tool", "Home › Navigate", set_tool).roles(&[]).effects(crate::policy::Effects::NONE)
             .view()
-            .params(r#"{"tool": "explore"|"select"|"selectPolygon"|"selectLasso"|"selectRadius"|"zoomIn"|"measure"|"measureArea"|"createPoint"|"createLine"|"createPolygon"|"editVertices"|"cutPolygon"|"reshape"|"graphicPoint"|"graphicText"|"graphicLine"|"graphicCurve"|"graphicFreehand"|"graphicPolygon"|"graphicLasso"|"graphicRectangle"|"graphicCircle"|"graphicEllipse"|"graphicPicture"}"#),
+            .params(r#"{"tool": "explore"|"select"|"selectPolygon"|"selectLasso"|"selectRadius"|"zoomIn"|"measure"|"measureArea"|"createPoint"|"createLine"|"createPolygon"|"editVertices"|"rotatedBox"|"circle"|"cutPolygon"|"reshape"|"graphicPoint"|"graphicText"|"graphicLine"|"graphicCurve"|"graphicFreehand"|"graphicPolygon"|"graphicLasso"|"graphicRectangle"|"graphicCircle"|"graphicEllipse"|"graphicPicture"}"#),
         C::new("info.project", "Project Info", "Project", info).inputs(super::tiles::listing_inputs).roles(&[]).effects(crate::policy::Effects::NONE).view().params(r#"{"nameFilter"?: string, "includeFields"?: bool}"#),
         C::new("info.commands", "List Commands", "Help", list).roles(&[]).effects(crate::policy::Effects::NONE).view(),
         // The session log (#797): read, written out, emptied, turned on or off. It sits outside
@@ -122,7 +122,7 @@ fn export_log(s: &mut Session, p: &Value) -> CmdResult {
     rustgis_data::io::write_atomic_with(&path, |w| s.log.write(w, format == "csv")).map_err(|e| format!("{}: {e}", path.display()))?;
     // Entries dropped past the log's limits aren't in the file: said.
     let dropped = s.log.dropped_said().map(|d| format!("; not in it: {d}")).unwrap_or_default();
-    s.notify(format!("Exported the session log ({n} entries) to {}{dropped}", path.display()), false);
+    s.notify_written(format!("Exported the session log ({n} entries) to {}{dropped}", path.display()), false);
     Ok(json!({"path": path.display().to_string(), "entries": n, "format": format}))
 }
 
@@ -280,6 +280,26 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
     }
 }
 
+/// Why a block with `extent` can't be drawn on the DEM `dem` (its name, its box and its footprint,
+/// as `cmd/view.rs` refuses it): no box fits the DEM and the block has none, or its box lies off the
+/// DEM's footprint. None when it can be drawn.
+pub(super) fn off_dem(extent: Option<[f64; 4]>, dem: Option<&(String, Option<[f64; 4]>, Option<[f64; 4]>)>) -> Option<String> {
+    let (n, bbox, footprint) = dem?;
+    match (*bbox, extent) {
+        (None, None) => Some(format!("no box fits inside '{n}'s extent on the map: give the block an extent [xmin, ymin, xmax, ymax]")),
+        (_, Some(e)) => {
+            let d = (*footprint)?;
+            (e[2] <= d[0] || e[0] >= d[2] || e[3] <= d[1] || e[1] >= d[3]).then(|| {
+                format!(
+                    "block's extent doesn't overlap '{n}' (its corners are [{:.0}, {:.0}, {:.0}, {:.0}] in Web Mercator metres)",
+                    d[0], d[1], d[2], d[3]
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Replaces project authority, clearing the exchange record, item trust and active connections.
 fn reset(s: &mut Session, p: Project) {
     s.exchange = None;
@@ -325,6 +345,79 @@ fn reset(s: &mut Session, p: Project) {
     }
     super::raster::say_losses(s, lost);
     say_conversion_fallbacks(s);
+    // A block diagram the terrain command would refuse (a box turned inside out, say) is dropped
+    // as the project opens, and said: the terrain then draws the whole map.
+    let mut dropped: Vec<(String, String)> = Vec::new();
+    for m in s.project.maps.iter_mut() {
+        let Some(t) = m.view.terrain.as_ref() else { continue };
+        // Over elevation tiles there is no layer's extent to cut the block to, so it needs a box.
+        let over_tiles = matches!(t.source, rustgis_map::view::TerrainSource::Tiles { .. });
+        // The DEM's boxes, when its data is loaded (as the terrain command reads them).
+        let dem = match &t.source {
+            rustgis_map::view::TerrainSource::Layer(n) => m
+                .layer_by_name(n)
+                .and_then(|l| l.raster.as_ref())
+                .and_then(|r| r.data.clone())
+                .map(|r| (n.clone(), rustgis_render::terrain::raster_box(&r), rustgis_render::terrain::raster_footprint(&r))),
+            _ => None,
+        };
+        let Some(e) = t.block.as_ref().and_then(|b| {
+            b.check().err().or_else(|| {
+                (over_tiles && b.extent.is_none())
+                    .then(|| "over elevation tiles a block needs an extent box [xmin, ymin, xmax, ymax]".to_string())
+                    .or_else(|| off_dem(b.extent, dem.as_ref()))
+            })
+        }) else {
+            continue;
+        };
+        if let Some(t) = m.view.terrain.as_mut() {
+            t.block = None;
+        }
+        dropped.push((m.name.clone(), e));
+    }
+    match dropped.as_slice() {
+        [] => {}
+        [(map, e)] => s.notify(format!("{map}: a block diagram on its terrain was dropped ({e}); the terrain draws the whole map"), false),
+        _ => {
+            let maps: Vec<String> = dropped.iter().map(|(map, e)| format!("{map} ({e})")).collect();
+            s.notify(
+                format!(
+                    "{} maps have a block diagram on their terrain that was dropped: {}; their terrains draw the whole map",
+                    dropped.len(),
+                    maps.join(", ")
+                ),
+                false,
+            );
+        }
+    }
+    // A block whose walls layer (#1914) is missing, holds no polygons, is read a view at a time or
+    // shares its name with another layer draws its walls in their own colour (`block::runs`, as
+    // the terrain command refuses such a layer): said, and kept, so a polygon layer of that name
+    // colours them again.
+    let plain: Vec<String> = s
+        .project
+        .maps
+        .iter()
+        .filter_map(|m| {
+            let l = m.view.terrain.as_ref()?.block.as_ref()?.walls_layer.as_ref()?;
+            rustgis_render::terrain::walls_layer(m, l).is_none().then(|| format!("{} ('{l}')", m.name))
+        })
+        .collect();
+    match plain.as_slice() {
+        [] => {}
+        [one] => s.notify(
+            format!("{one}: the block diagram's walls layer is missing, not a polygon layer, read a view at a time or of a name another layer shares, so its walls are one colour"),
+            false,
+        ),
+        _ => s.notify(
+            format!(
+                "{} block diagrams have a walls layer missing, not a polygon layer, read a view at a time or of a name another layer shares, so their walls are one colour: {}",
+                plain.len(),
+                plain.join(", ")
+            ),
+            false,
+        ),
+    }
     // A terrain saved on a DEM name two layers share draws the first of them: said, as the
     // project opens (its layers keep their names).
     let shared: Vec<(String, String)> = s
@@ -377,16 +470,27 @@ fn sample(s: &mut Session, _: &Value) -> CmdResult {
 /// Largest project package opened (1 GiB).
 const MAX_PACKAGE: u64 = 1 << 30;
 
-/// `project.open`: a project file, or a package (`.rgispkg`) opened unsaved; either must be a
-/// regular file within its limit.
+/// `project.open`: a project file, or a package (`.rgispkg`, or a field package, `.rgisfield`)
+/// opened unsaved; either must be a regular file within its limit.
+///
+/// It runs on the window's thread, as opening a project does: a package is one read, and a field
+/// package's unpacking one write of each file it holds (its tile archives, up to its limit), with
+/// no Cancel between them.
 fn open(s: &mut Session, p: &Value) -> CmdResult {
     let path = PathBuf::from(super::ps(p, "path").ok_or("path is required")?);
-    let is_package = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("rgispkg"));
+    // A field package opens as a package does, from where it is unpacked.
+    let is_field = super::field::is_field_package(&path.to_string_lossy());
+    let is_package = is_field || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("rgispkg"));
     let origin = if is_package { path.canonicalize() } else { std::path::absolute(&path) }
         .map_err(|error| format!("{}: {error}", path.display()))?;
     super::connections::clear_active();
     let proj = (|| {
-        if is_package {
+        if is_field {
+            let bytes = crate::project::read_file(&path, MAX_PACKAGE)?;
+            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let (dir, text) = super::field::unpack(&bytes, &stem)?;
+            super::field::project_in(&text, &dir)
+        } else if is_package {
             let bytes = crate::project::read_file(&path, MAX_PACKAGE)?;
             Project::from_import_json(&super::items::package_text(&bytes)?, None)
         } else {
@@ -457,21 +561,31 @@ fn write(s: &mut Session, path: PathBuf) -> CmdResult {
             format!("a project saves to a .rgis file, not a .{ext} one")
         });
     }
+    let construction_notes = s.construction_output_notes()?;
     let report = s.project.save(&destination)?;
     let stripped = report.layer_addresses();
     s.mark_saved();
     s.edit_counts.clear();
-    s.notify(format!("Saved {}", path.display()), false);
+    let written = s.notice_mark();
+    s.notify_written(format!("Saved {}", path.display()), false);
     crate::durable::notify(s, &report);
+    for note in construction_notes {
+        s.notify(note, false);
+    }
+    s.retain_written_notices(written);
     s.path = Some(destination);
     Ok(json!({"path": path.display().to_string(), "stripped": stripped}))
 }
 
 /// Names the project after its file, as Save As does, so a renamed or copied file opens under
-/// its own name.
+/// its own name. A file name over 200 characters is cut to 200, and that is said.
 fn name_from_file(s: &mut Session, file: &std::path::Path) {
     if let Some(stem) = file.file_stem().and_then(|x| x.to_str()).map(str::trim).filter(|x| !x.is_empty()) {
         s.project.name = stem.chars().take(200).collect();
+        let n = stem.chars().count();
+        if n > 200 {
+            s.notify(format!("Open Project: the file's name is {n} characters, so the project's name is its first 200 characters"), false);
+        }
     }
 }
 
@@ -496,7 +610,7 @@ fn save_as(s: &mut Session, p: &Value) -> CmdResult {
 
 fn rename(s: &mut Session, p: &Value) -> CmdResult {
     let n = super::ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).ok_or("name is required")?;
-    s.project.name = n.chars().take(200).collect();
+    s.project.name = super::within("name", "a project's name", n, 200)?;
     Ok(Value::Null)
 }
 
@@ -520,6 +634,12 @@ fn set_tool(s: &mut Session, p: &Value) -> CmdResult {
     if matches!(t, Tool::EditVertices | Tool::CutPolygon | Tool::Reshape) && !s.map().editing.settings.enabled {
         return Err("editing is turned off (Edit › Edit)".into());
     }
+    if t == Tool::RotatedBox {
+        crate::box_edit::check_tool(s, s.layer_id(&Value::Null)?)?;
+    }
+    if t == Tool::Circle {
+        crate::circle_edit::check_tool(s, s.layer_id(&Value::Null)?)?;
+    }
     s.tool = t;
     Ok(Value::Null)
 }
@@ -539,6 +659,7 @@ pub(crate) fn bbox(e: rustgis_geom::Extent) -> Value {
 /// Everything about the open project in one call (the AI Assistant's and MCP's `list_layers`).
 /// Layers are in table-of-contents order, top first. `nameFilter` keeps the layers and tables
 /// whose name holds it (ignoring case); `includeFields: false` leaves out their fields.
+/// Project inventory; additive element addresses leave existing map-frame summaries intact.
 fn info(s: &mut Session, p: &Value) -> CmdResult {
     let filter = ps(p, "nameFilter").map(|f| f.trim().to_lowercase()).filter(|f| !f.is_empty());
     let named = |name: &str| filter.as_deref().is_none_or(|f| name.to_lowercase().contains(f));
@@ -610,7 +731,7 @@ fn info(s: &mut Session, p: &Value) -> CmdResult {
                 })
                 .collect();
             // The page in millimetres, as `layout.page` sets it.
-            json!({"name": lo.name, "width": lo.width, "height": lo.height, "mapFrames": frames})
+            json!({"name": lo.name, "width": lo.width, "height": lo.height, "mapFrames": frames, "elements": super::layout::element_list(lo)})
         })
         .collect();
     Ok(json!({

@@ -378,7 +378,6 @@ pub(crate) fn choose(s: &mut Session, source: &str, id: &str) -> crate::CmdResul
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     /// Whether `address` reads through the login `binding`.

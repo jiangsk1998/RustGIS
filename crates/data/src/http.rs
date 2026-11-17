@@ -44,9 +44,18 @@ fn system_roots() -> RootCerts {
     })
 }
 
-#[cfg(not(all(unix, not(target_vendor = "apple"), not(target_os = "android"))))]
+#[cfg(not(any(all(unix, not(target_vendor = "apple")), target_os = "android")))]
 fn system_roots() -> RootCerts {
     RootCerts::PlatformVerifier
+}
+
+/// Android: the bundled Mozilla roots. The platform verifier there calls Android's trust manager
+/// through a Java class the app must ship and hand to it at start-up; the spike's `NativeActivity`
+/// has no Java (#1902). The session says the trust source was assumed, as on a Linux without
+/// certificates.
+#[cfg(target_os = "android")]
+fn system_roots() -> RootCerts {
+    RootCerts::WebPki
 }
 
 /// The roots on Linux and the BSDs: the bundled ones only when neither `SSL_CERT_FILE` nor
@@ -54,7 +63,10 @@ fn system_roots() -> RootCerts {
 /// asked only then). The variables count as `rustls-native-certs` reads them: any `SSL_CERT_FILE`
 /// (even empty), or an `SSL_CERT_DIR` with a non-empty entry.
 // Only Linux and the BSDs fall back; the rule is tested on every platform.
-#[cfg_attr(not(all(unix, not(target_vendor = "apple"), not(target_os = "android"))), allow(dead_code))]
+#[cfg_attr(
+    not(any(test, all(unix, not(target_vendor = "apple"), not(target_os = "android")))),
+    expect(dead_code, reason = "only Linux and the BSDs fall back")
+)]
 fn roots(file: Option<std::ffi::OsString>, dirs: Option<std::ffi::OsString>, no_system_roots: impl FnOnce() -> bool) -> RootCerts {
     let named = file.is_some() || dirs.is_some_and(|d| std::env::split_paths(&d).any(|p| !p.as_os_str().is_empty()));
     if !named && no_system_roots() { RootCerts::WebPki } else { RootCerts::PlatformVerifier }

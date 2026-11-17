@@ -250,7 +250,14 @@ impl SqliteSource {
 
     /// Turns a row (id, geometry?, fields…) into a feature; `Skip` for one outside the request
     /// (or without geometry), `Bad` for one that can't be read.
-    fn feature(&self, r: &rusqlite::Row<'_>, native: Option<&Extent>, req: &Request) -> rusqlite::Result<Row> {
+    fn feature(
+        &self,
+        r: &rusqlite::Row<'_>,
+        native: Option<&Extent>,
+        req: &Request,
+        unread_dates: &mut Vec<usize>,
+        rounded_dates: &mut Vec<usize>,
+    ) -> rusqlite::Result<Row> {
         // Integer keys, negative ones too, map to distinct ids.
         let Some(id) = r.get::<_, Option<i64>>(0)?.map(|i| i as u64) else { return Ok(Row::Bad) };
         let (geometry, at) = match &self.geometry {
@@ -282,7 +289,10 @@ impl SqliteSource {
             .fields
             .iter()
             .enumerate()
-            .map(|(i, f)| r.get_ref(i + at).ok().and_then(|v| gpkg_value(v, f.ty)).unwrap_or(Value::Null))
+            .map(|(i, f)| match r.get_ref(i + at) {
+                Ok(v) => gpkg_value(v, f.ty, unread_dates, Some(&mut *rounded_dates), i),
+                Err(_) => Value::Null,
+            })
             .collect();
         Ok(Row::Feature(Feature { id, geometry, attrs }))
     }
@@ -306,9 +316,13 @@ impl FeatureSource for SqliteSource {
         let guard = self.conn.lock().map_err(|_| DataError::Format("SQLite connection poisoned".into()))?;
         let conn = guard.as_ref().ok_or_else(|| DataError::Format("SQLite connection closed".into()))?;
         let native = match (&self.geometry, req.extent) {
-            (Some(_), Some(e)) => Some(self.reproject.extent_from_lonlat(&e)),
+            (Some(_), Some(e)) => self.reproject.extent_from_lonlat(&e),
             _ => None,
         };
+        // A refused view needs a geometry scan to count.
+        if limit == 0 && req.extent.is_some() && self.geometry.is_some() && native.is_none() {
+            return Err(super::unbounded_count());
+        }
         let sql = format!("SELECT {} FROM {}", self.select_list(), gpkg_quote(&self.table));
         let mut st = conn.prepare(&sql).map_err(err)?;
         let mut rows = st.query([]).map_err(err)?;
@@ -334,7 +348,7 @@ impl FeatureSource for SqliteSource {
             if known && !sample.wants() {
                 continue;
             }
-            match self.feature(r, native.as_ref(), req).map_err(err)? {
+            match self.feature(r, native.as_ref(), req, &mut out.unread_dates, &mut out.rounded_dates).map_err(err)? {
                 Row::Feature(f) if known || sample.wants() => sample.keep(f),
                 Row::Feature(_) | Row::Skip => {}
                 Row::Bad => out.skipped += 1,
@@ -369,7 +383,7 @@ impl FeatureSource for SqliteSource {
         same_file()?;
         let req = Request { extent, limit: usize::MAX };
         let native = match (&self.geometry, extent) {
-            (Some(_), Some(e)) => Some(self.reproject.extent_from_lonlat(&e)),
+            (Some(_), Some(e)) => self.reproject.extent_from_lonlat(&e),
             _ => None,
         };
         let sql = format!("SELECT {} FROM {}", self.select_list(), gpkg_quote(&self.table));
@@ -377,7 +391,7 @@ impl FeatureSource for SqliteSource {
         let mut rows = st.query([]).map_err(err)?;
         let mut out = Batch { complete: true, ..Batch::default() };
         while let Some(r) = rows.next().map_err(err)? {
-            match self.feature(r, native.as_ref(), &req).map_err(err)? {
+            match self.feature(r, native.as_ref(), &req, &mut out.unread_dates, &mut out.rounded_dates).map_err(err)? {
                 Row::Feature(f) => {
                     out.matched += 1;
                     chunks.push(f)?;

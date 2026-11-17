@@ -52,6 +52,8 @@ pub enum Script {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CjkFont {
     SimplifiedChinese,
+    /// Taiwan's standard glyph forms.
+    TraditionalChinese,
     Japanese,
     Korean,
 }
@@ -85,7 +87,7 @@ macro_rules! lang {
 }
 
 /// The registry. English first: it is the source language and the fallback.
-pub static LANGUAGES: [LangInfo; 21] = [
+pub static LANGUAGES: [LangInfo; 22] = [
     LangInfo {
         code: "en",
         name: "English",
@@ -109,6 +111,10 @@ pub static LANGUAGES: [LangInfo; 21] = [
     lang!("vi", "Tiếng Việt", "Vietnamese", Script::Alphabetic, "vi.tsv"),
     lang!("fa", "فارسی", "Persian (Farsi)", Script::Arabic, "fa.tsv"),
     lang!("zh", "简体中文", "Chinese (Simplified)", Script::Cjk(CjkFont::SimplifiedChinese), "zh.tsv"),
+    // Taiwan's wording (GIS terms after the National Academy for Educational Research's
+    // glossary), drawn in a Traditional Chinese face with Taiwan's glyph forms where one is
+    // installed (Microsoft JhengHei, PingFang TC, Noto Sans CJK TC) or on the web.
+    lang!("zh-tw", "繁體中文（臺灣）", "Chinese (Traditional, Taiwan)", Script::Cjk(CjkFont::TraditionalChinese), "zh-tw.tsv"),
     lang!("ja", "日本語", "Japanese", Script::Cjk(CjkFont::Japanese), "ja.tsv"),
     lang!("ko", "한국어", "Korean", Script::Cjk(CjkFont::Korean), "ko.tsv"),
     lang!("ka", "ქართული", "Georgian", Script::Alphabetic, "ka.tsv"),
@@ -275,10 +281,17 @@ pub fn lang_from_tag(tag: &str) -> Option<Lang> {
     }
     let mut parts = base.split('-');
     let primary = parts.next().unwrap_or("");
-    // Only Simplified Chinese has a catalog: Traditional-script locales fall back to English
-    // rather than get Simplified text.
-    if primary == "zh" && parts.any(|p| matches!(p, "hant" | "tw" | "hk" | "mo")) {
-        return None;
+    // Taiwan (`zh-TW`) and `zh-Hant` get the Traditional (Taiwan) catalog, unless an explicit
+    // `Hans` script asks for Simplified (`zh-Hans-TW`). Hong Kong and Macau have no catalog of
+    // their own: they fall back to English whatever the script (`zh-Hans-HK` too), as before.
+    if primary == "zh" {
+        let rest: Vec<&str> = parts.collect();
+        if rest.iter().any(|p| matches!(*p, "hk" | "mo")) {
+            return None;
+        }
+        if !rest.contains(&"hans") && rest.iter().any(|p| matches!(*p, "hant" | "tw")) {
+            return Lang::from_code("zh-tw");
+        }
     }
     Lang::from_code(primary)
 }

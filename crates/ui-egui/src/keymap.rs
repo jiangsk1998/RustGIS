@@ -41,6 +41,9 @@ const DEFAULTS: &[(&str, &str, &str)] = &[
     ("Alt+Shift+ArrowLeft", "layer.outdent", ""),
     ("Alt+Shift+ArrowUp", "layer.moveUp", ""),
     ("Alt+Shift+ArrowDown", "layer.moveDown", ""),
+    // Renames the active layer, as F2 renames a file: without a name, the key opens the Rename
+    // dialog (see `chrome`).
+    ("F2", "layer.rename", ""),
 ];
 
 /// The clipboard keys: (keys, command). They arrive as copy, cut and paste events rather than key
@@ -61,6 +64,8 @@ pub const MAP_TOOLS: &[(&str, &str)] = &[
     ("createLine", "Create Line"),
     ("createPolygon", "Create Polygon"),
     ("editVertices", "Edit Vertices"),
+    ("rotatedBox", "Rotated Box"),
+    ("circle", "Circle"),
     ("cutPolygon", "Cut Polygon"),
     ("reshape", "Reshape"),
 ];

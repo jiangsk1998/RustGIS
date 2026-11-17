@@ -10,6 +10,9 @@
 Home › New Layout adds a page layout (Letter, Legal, Tabloid or A5 to A0, landscape or portrait)
 with a map frame, title, legend, north arrow, scale bar and a dynamic credits line. The command
 `layout.new` also accepts custom `width` and `height` in millimetres and `"template": "blank"`.
+Both `layout.new` and each layout in `info` include an `elements` array with each element's
+`element` ID, `name` and `kind`, ready to use in `layout.update` or `layout.removeElement`.
+The existing layout index, name and `info` map-frame summaries keep their meanings.
 Layouts open as tabs next to the maps; while one is open, its groups lead the Publish tab:
 
 - **Publication layouts**: Home › New Layout › **Publication Layout** builds a finished sheet or
@@ -82,9 +85,14 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     fill and no labels, such as neighbouring borders, don't count as what the map draws here, unless
     nothing else is shown, nor do polygon layers in one colour with no labels that run on past the
     frame, such as neighbouring states, beside a layer drawn by classes or a raster. When no shape
-    of the legend fits, the map is first moved towards an edge, as far as the asked extent stays in
-    the frame, so the room on both its sides joins (the answer's `mapShift`, in mm right and down,
-    and a warning). Where the projection stretches, as Web Mercator does away from the equator, the
+    of the legend fits, the map is first moved towards an edge, by a quarter, a half, three quarters
+    or all of the way the asked extent can go and stay in the frame, so the room on both its sides
+    joins (the answer's `mapShift`, in mm right and down, and a warning). Of the moves that need the
+    fewest legend columns, the one that leaves the extent's centre nearest the page's visual centre
+    (in the middle across, 45% of the way down) is kept: a move away from that centre goes only as
+    far as makes room, one towards it as far as keeps it nearest. Of the moves within 1 mm of the
+    nearest, the one with the most room is kept. Where the projection stretches, as Web Mercator
+    does away from the equator, the
     moved frame is drawn at its new centre's ground scale, and the extent has to stay whole at that
     scale. Only when no move makes room for it, a continuous map with a long legend is veiled: at
     the asked scale, at least 80% of the extent's part of the frame and 30% of the rest are drawn
@@ -100,6 +108,21 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     ordinary elements, to move or delete as any other; `"veil": false` leaves the map unveiled and
     at its scale. If the legend or colorbar cannot fit, the result warns about clipping or resizing.
     A streamed layer still loading gets a fixed-size legend to adjust by hand.
+  - **Context and north**: the layers the placement takes as context around the data (polygons
+    only outlined, and polygons in one colour that run on past the frame beside a layer drawn by
+    classes or a raster) are left out of the legend too, which a warning names;
+    `"contextInLegend": true` lists them. A name is left out only when every layer shown under it
+    is context. When the extent spans 20° or more on its longer side (its width taken at its middle
+    latitude), the layout has no north arrow: the graticule gives north there, and one arrow can't
+    point north across the whole frame. A warning says so; `"northArrow": "always"` draws one, and
+    `"none"` leaves it out at any span.
+  - **Legend box**: over the map, the legend's box is left clear where the map shows nothing under
+    it but its light plain paper or water: no layer, label, context layer, basemap shape or graticule
+    line, no web tiles, and no veil. Dark basemaps keep a white backing so the dark legend text
+    stays readable. Over light water its text sits on the page as on open sea. The answer's
+    `legendBox` says whether it has one; the clear box is still an element, to fill by hand, and
+    `"legendBox": "always"` keeps it white. A legend in a side column or on a card keeps its box
+    (`legendBox` is `true`).
   - **Decimal comma**: `"decimal": ","` prints the graticule, scale bar and colorbar numbers and
     `{scale}` with a decimal comma and points between thousands (`0,05`, `1:6.300.000`).
     `layout.page={"decimal": ","}` sets it on any layout; `"."` restores decimal points.
@@ -113,6 +136,9 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   - **The locator** (at the frame's top left unless the data is there): `"locator": "globe"` (a
     sheet's default) adds a separate globe map with simplified copies of the map's visible polygon
     layers held in the project. Streamed layers, rasters, points, lines and labels are left out.
+    What simplifying changes or leaves alone there (a vertex past a pole taken to the pole, a
+    polygon left as it was for a missing coordinate, or too intricate to simplify whole) is said
+    in the layout's warnings; one kept as it was because its ring would collapse is not.
     It uses the map's basemap, not its web tiles, in a round frame, the globe
     nearly filling it and the area outlined in red; `"inset"` shows the surrounding region (about
     four times the area across) on the map itself, outlined the same way; `"none"` (a figure's
@@ -225,6 +251,11 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     (`"allClasses": true`) to list every class of every visible layer instead, and **Hide other
     values** (`"hideOther": true`) to leave `<all other values>` out of the legend in either
     mode (the features it stands for are still drawn).
+  - **Show no data** (`"showNoData": true` on `layout.addElement` or `layout.update`) adds a
+    **No data** row for a Graduated Colors layer's missing numeric values, using the same
+    symbol as the map. It follows the frame's definition query and display filters; with
+    **All classes**, it lists the symbol even when unused. It is off by default, including in
+    older saved layouts. It changes only the legend; other renderer kinds keep their entries.
   - **Rasters drawn by classes** (Colormap, Unique Values, Classify) are listed under their name
     with the rows the Layers pane shows for them: a swatch of each class's colour and its label,
     the class name in the file when it has one, else the value or the range. The legend lists the
@@ -323,6 +354,11 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   be an arrow. From a command:
   `layout.addElement={"kind":"arrow","angle":30,"length":60}`, or
   `layout.update={"element":7,"angle":-90}` to turn one.
+- **Text clipping**: the layout view and PNG, PDF and SVG exports warn when a text element or
+  legend title runs off the page, or a text element has more lines than its height allows.
+  The notice counts and names the affected elements with their IDs. A line may extend beyond
+  its element's width while remaining on the page; that alone is not clipped. Reduce the size,
+  add line breaks, or resize or move the element to keep all its text.
 - **Text** and **Dynamic Text**: `{date}`, `{time}`, `{scale}`, `{map}`, `{crs}`, `{page}`,
   `{pages}`, `{pageName}` and `{layout}` fill in when the page is drawn; the Format pane's
   **Insert Dynamic Text** menu, under the text, lists each with what it shows. The text, its
@@ -362,8 +398,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   sets its text in the letters' own outlines, so it shows the family wherever it is opened, and
   the text can still be searched and copied; no font file goes into it. **Picture** places a PNG
   or JPEG.
-- **Map Series**: one page per feature of an index layer, with the frame zoomed to each feature;
-  step through pages, refresh, and export every page into one PDF.
+- **Map Series**: one page per feature of an index layer; see [Map series](#map-series) for setup,
+  page names, scales and a locator.
 - Click an element to select it, drag to move, drag its handles to resize, and edit it in the
   **Format** pane, which opens as a tab beside the other right-hand panes. Closing the pane keeps
   the element selected; selecting an element, or clicking the selected one, opens it again. The
@@ -408,8 +444,10 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   file's default; when its file doesn't hold it as drawn; when its file can't be subset (a damaged
   file, or a CFF2 variable font); when its subset would pass 8 MB; or when the document's
   embedded faces would pass 32 MB.
-  `"pdf": {"text": "outlines"}` on `layout.export` sets all the text as outlines, as a print shop
-  asking for outlined type wants.
+  A label's halo is a copy of its text under it, filled and stroked as wide as the halo, so it is
+  text too (marked as decoration, an artifact, for readers that leave those out of what they copy).
+  `"pdf": {"text": "outlines"}` on `layout.export` sets all the text, halos too, as outlines, as a
+  print shop asking for outlined type wants.
   Its page has layers (PDF optional content groups), which a vector editor that reads them opens
   as layers (VectorCraft, where it was checked), and PDF readers list in their layers panel:
   one for each element, named after it, and inside a map frame's, one for each map layer and one
@@ -446,6 +484,43 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   typed. A page that would pass 16 million pixels, or 12,000 pixels on a side, is copied at a lower
   dpi, and the notice says so; a page that would need less than 36 dpi is too large to copy, so
   export it instead.
+
+## Map series
+
+Select the main map frame, then **Publish › Map Frames › Map Series** and choose its index layer
+(tracts, for example). The series follows the layer's feature order. **Previous Page** and
+**Next Page** step through it; **Refresh** refits the current page after changes to the index layer.
+
+Use `layout.series` to set a page-name field and margin; for example, on the active layout:
+
+```text
+layout.series={"layer":"Tracts","nameField":"GEOID","margin":0.1}
+```
+
+Without `frame` (the frame's element id), the command uses the layout's first map frame, so
+name the frame when the series is on another one. Running `layout.series` again starts the series
+over at its first page. `nameField` supplies
+`{pageName}` in dynamic text; if omitted, it uses the index layer's label field, or the row number
+(starting at 1) when that field is unavailable or its value is null, empty or whitespace-only.
+Add a text element such as
+`Tract {pageName} · {page} of {pages}`. In commands, `layout.seriesPage={"page":0}` is the
+first page; the displayed `{page}` starts at 1.
+
+The frame fits each feature's extent anew, so its scale varies by page. `margin` is a fraction
+of the feature's longitude/latitude extent added on **each side**: `0.1` (the default) adds
+10% of its width on the left and right, and 10% of its height above and below, with at least
+0.01° on each side. Bind a scale bar to the series frame; `{scale}` text uses the layout's first
+map frame, so keep the series on that frame when using it. A feature without geometry or with
+an empty extent leaves the frame at the preceding view.
+
+For a locator, add a second map frame and pan/zoom it to the whole study area. Select that
+locator frame, then **Publish › Map Frames › Extent Indicator** and choose the main frame.
+The locator outlines the main frame's changing extent as the series turns its pages.
+
+**Export Layout** writes all pages to PDF by default, but only the **first 500** when there are
+more, with a warning. Split longer books' index data into layers of at most 500 features.
+`layout.export` with `"allPages":false` writes only the current PDF page; PNG and SVG always
+write the current page.
 
 ## Reports
 

@@ -488,7 +488,6 @@ pub struct Reducing {
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// The summary as a GeoTIFF, and what reading its slices said, which the GeoTIFF doesn't carry.
-    #[allow(clippy::type_complexity)]
     pub result: std::sync::Arc<std::sync::Mutex<Option<Result<(Vec<u8>, Vec<String>), String>>>>,
 }
 
@@ -992,7 +991,6 @@ pub fn catalog_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -1157,7 +1155,7 @@ mod tests {
             if h.state().ws.reducing.is_none() {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10)); // test-wait: legacy polling for time-series reduction
         }
         assert!(h.state().ws.reducing.is_none(), "the summary lands");
         let mean = h

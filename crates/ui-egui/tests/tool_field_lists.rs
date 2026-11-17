@@ -40,7 +40,7 @@ fn click_run(h: &mut Harness<'_, RustGisApp>) {
     let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while h.state().gp.tool_run.is_some() {
         assert!(std::time::Instant::now() < end, "the run never landed");
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::thread::sleep(std::time::Duration::from_millis(5)); // test-wait: legacy polling for background tool completion
         h.run_steps(1);
     }
     h.run_steps(2);
@@ -500,4 +500,35 @@ fn summarize_within_statistics_offer_the_point_layers_fields() {
     assert_eq!(out.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["zone_only", "point_count", "CONCATENATE_target_only"]);
     assert_eq!(out.value(0, 1), &Value::Int(2));
     assert_eq!(out.value(0, 2), &Value::Text("a, b".into()));
+}
+
+/// Removing the last zone field leaves a runnable form whose area-unit choice reaches history.
+#[test]
+fn tabulate_intersection_runs_with_empty_zone_fields_and_chosen_area_unit() {
+    use rustgis_engine::{data::Geometry, geom::Coord};
+    let mut h = harness("tabulateIntersection", json!({"zones":"Zones", "zoneFields":["name"], "classes":"Classes"}));
+    let ring = vec![Coord::new(0.0, 0.0), Coord::new(1.0, 0.0), Coord::new(1.0, 1.0), Coord::new(0.0, 1.0), Coord::new(0.0, 0.0)];
+    for name in ["Zones", "Classes"] {
+        let mut ds = Dataset::new(name, GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+        ds.push_next(Some(Geometry::Polygon(vec![vec![ring.clone()]])), vec![Value::Text(name.into())]);
+        h.state_mut().session.map_mut().add_dataset(ds);
+    }
+    h.run_steps(3);
+    assert!(h.query_by_label("Zone Fields *").is_none());
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Remove").click();
+    h.run_steps(3);
+    h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("km2")).unwrap().click();
+    h.run_steps(2);
+    h.get_by_label("ac").click();
+    h.run_steps(2);
+    assert_eq!(h.state().gp.values["areaUnit"], "ac");
+    click_run(&mut h);
+    assert!(h.state().gp.last.as_ref().unwrap().0);
+    let output = &h.state().session.project.tables.last().unwrap().dataset;
+    assert_eq!(output.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["zone_row", "area_ac", "percentage"]);
+    assert_eq!(output.value(0, 0), &Value::Int(0));
+    assert!((output.value(0, 2).as_f64().unwrap() - 100.0).abs() < 1e-8);
+    let history = h.state().session.project.gp_history.last().unwrap();
+    assert_eq!(history.params["zoneFields"], json!([]));
+    assert_eq!(history.params["areaUnit"], json!("ac"));
 }

@@ -53,12 +53,22 @@ pub fn load(app: &mut RustGisApp) {
         return;
     }
     app.ui.sources.loaded = true;
+    // A change made before this first read (a source just added, which is what usually brings
+    // it on) is still to be saved, with the stored lists.
+    let changed = app.session.sources.generation != app.ui.sources_saved;
     if let Some(text) = app.services.load_pref.as_ref().and_then(|load| load(PREF)) {
         // What this session already has (added, saved or made favourite before the first read)
-        // stays; the stored lists are added after it.
-        app.session.sources.merge(rustgis_engine::sources::Sources::from_json(&text));
+        // stays; the stored lists are added after it. What of them isn't used here is said.
+        let stored = rustgis_engine::sources::Sources::from_json(&text);
+        app.session.sources.merge(stored);
+        // After the merge: sources it moved past a list's limit are said too.
+        for said in app.session.sources.unread() {
+            app.session.warn(said);
+        }
     }
-    app.ui.sources_saved = app.session.sources.generation;
+    if !changed {
+        app.ui.sources_saved = app.session.sources.generation;
+    }
 }
 
 /// Keeps the sources with the preferences when they changed.
@@ -79,8 +89,8 @@ pub fn save(app: &mut RustGisApp) {
 pub fn load_connections(app: &mut RustGisApp) {
     use rustgis_engine::{connections::Connections, sources::Sources};
     let Some(load) = &app.services.load_pref else { return };
-    app.session.connections = if let Some(text) = load(rustgis_engine::connections::PREF) {
-        Connections::from_json(&text)
+    if let Some(text) = load(rustgis_engine::connections::PREF) {
+        app.session.load_connections(&text);
     } else {
         let imported =
             Connections::import(&Sources::from_json(&load(PREF).unwrap_or_default()), &load(crate::s3ui::SAVED).unwrap_or_default());
@@ -88,8 +98,8 @@ pub fn load_connections(app: &mut RustGisApp) {
         if let Some(save) = &app.services.save_pref {
             save(rustgis_engine::connections::PREF, &imported.to_json());
         }
-        imported
-    };
+        app.session.connections = imported;
+    }
     app.ui.connections_saved = app.session.connections.generation;
 }
 
@@ -332,6 +342,10 @@ fn connection_header(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, c: &Connecti
                 .on_hover_text(tl!("Keys were saved for this connection, but there is no credential store here to read them from."));
         }
     }
+    if rustgis_engine::service_logins::is_service(c) && c.remembered {
+        let label = if app.session.database_logins.has_store() { tl!("Saved login") } else { tl!("Saved login unavailable") };
+        ui.label(RichText::new(label).small().weak());
+    }
     ui.label(RichText::new(tl!(crate::connectionui::label(&c.kind))).small().weak());
     response.context_menu(|ui| {
         let mut items = vec![
@@ -364,9 +378,25 @@ fn connection_header(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, c: &Connecti
                 }
                 ui.close();
             }
+            if service_login
+                && c.remembered
+                && ui.add_enabled(app.session.database_logins.has_store(), egui::Button::new(tl!("Forget Saved Login"))).clicked()
+            {
+                match app.run("connection.forgetLogin", json!({"id":c.id})) {
+                    Ok(_) => {
+                        crate::connectiontree::refresh(app, Some(&c.id));
+                        app.session.notify(tl!("The saved login was forgotten; a login in this session keeps working.").to_string(), false);
+                    }
+                    Err(e) => app.session.notify(crate::connectionui::translated(&e), true),
+                }
+                ui.close();
+            }
             if service_login && rustgis_engine::service_logins::logged_in(&app.session, c) && ui.button(tl!("Log Out")).clicked() {
                 match app.run("connection.logout", json!({"id": c.id})) {
-                    Ok(_) => crate::connectiontree::refresh(app, Some(&c.id)),
+                    Ok(_) => {
+                        crate::connectiontree::refresh(app, Some(&c.id));
+                        app.session.notify(tl!("Logged out. Log in explicitly to use this connection again.").to_string(), false);
+                    }
                     Err(e) => app.session.notify(crate::connectionui::translated(&e), true),
                 }
                 ui.close();

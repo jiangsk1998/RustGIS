@@ -487,7 +487,6 @@ pub fn draw(app: &RustGisApp, p: &Painter, rect: Rect, accent: Color32) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use rustgis_engine::{Project, Session, data::Dataset};

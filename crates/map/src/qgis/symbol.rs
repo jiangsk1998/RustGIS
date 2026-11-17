@@ -923,7 +923,6 @@ pub(super) fn property_text(property: Node) -> Option<String> {
 /// symbol into `by` when RustGIS draws it by expression: a marker's size and angle, the fill and
 /// outline colours and the outline's (a line's) width, sizes turned from the layer's unit into
 /// points. False for one it doesn't. A second symbol layer's for the same keeps the first's (noted).
-#[allow(clippy::too_many_arguments)]
 fn by_expression(
     kind: Option<&str>,
     name: &str,

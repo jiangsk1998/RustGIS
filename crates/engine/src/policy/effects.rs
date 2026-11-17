@@ -67,6 +67,12 @@ pub(super) fn declared(spec: &CommandSpec, params: &Value) -> Effects {
     if spec.id == "map.addTiles" {
         effects = effects.union(crate::cmd::tiles::add_reach(params));
     }
+    if spec.id == "layer.addDataBytes" && crate::cmd::raster::bytes_is_jpeg2000(params) {
+        effects = effects.with(Effect::Files);
+    }
+    if spec.id == "s3.list" {
+        effects = effects.union(crate::cmd::s3::declared_reach(params));
+    }
     let params = crate::cmd::items::layer_name_left_out(spec.id, params);
     // These owners read an explicit null path as no output file. Keep the existing narrow
     // in-memory raster contract, including rasterization, without ignoring any other place.
@@ -93,6 +99,7 @@ pub(super) fn command(s: &crate::cmd::InputContext<'_>, spec: &CommandSpec, para
         "map.search" => crate::cmd::search::metadata_reach(s, params),
         "map.tiles" | "info.project" => crate::cmd::tiles::listing_reach(s.map()),
         "map.setTiles" => crate::cmd::tiles::set_reach(s, params),
+        "s3.list" => crate::cmd::s3::list_reach(s, params),
         "time.export" => crate::cmd::time::export_reach(s, params),
         // A tile layer's export fetches its tiles (an archive, from its file).
         "share.exportRaster" => crate::cmd::tile_export::target(s, params)
@@ -104,7 +111,13 @@ pub(super) fn command(s: &crate::cmd::InputContext<'_>, spec: &CommandSpec, para
     });
     if matches!(
         spec.id,
-        "layout.export" | "presentation.export" | "share.exportMap" | "animation.export" | "project.thumbnail" | "map.thumbnail"
+        "layout.export"
+            | "presentation.export"
+            | "share.exportMap"
+            | "animation.export"
+            | "map.exportOrbit"
+            | "project.thumbnail"
+            | "map.thumbnail"
     ) && let Some(select) = spec.inputs
         && let Ok(inputs) = select(s, params)
     {

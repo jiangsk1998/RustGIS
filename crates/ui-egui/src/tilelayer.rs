@@ -58,7 +58,7 @@ struct Runs(Vec<(usize, Range<u32>)>);
 struct Chunk {
     texture: wgpu::Texture,
     bind: wgpu::BindGroup,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the tests only"))]
     layers: u32,
     /// Its pictures' side, and its bytes.
     side: u32,

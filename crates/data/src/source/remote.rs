@@ -70,6 +70,20 @@ pub fn with_optional_still<T>(still: Option<Still>, f: impl FnOnce() -> T) -> T 
     let _restore = Restore(previous);
     f()
 }
+/// Hands a shared I/O completion to an independently captured request, restoring the current
+/// scope afterwards. Use only at that callback boundary; nested work uses [`with_optional_still`]
+/// to inherit restrictions. This synchronous guard must never cross an await.
+pub fn with_captured_still<T>(still: Option<Still>, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Still>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            STILL.with(|s| *s.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(STILL.with(|s| s.replace(still)));
+    f()
+}
+
 /// Checked immediately before a request-producing stage, without suspension before sending.
 pub fn check_still(still: &Option<Still>) -> std::result::Result<(), String> {
     if still.as_ref().is_some_and(|s| !s()) { Err("request cancelled before it was sent".into()) } else { Ok(()) }
@@ -472,6 +486,12 @@ pub fn forget_file(url: &str) {
 /// The error a read that needs bytes gives (it runs again once they are fetched).
 pub fn need() -> DataError {
     DataError::Format(NEED.into())
+}
+
+/// A refused native view needs geometry matching before sampling, but that scan cannot fit.
+/// Returning a partial sample here could wrongly make a nonempty view look empty.
+pub(crate) fn view_budget() -> DataError {
+    DataError::Format("the requested view can't be bounded in the file's coordinate system, and matching it would exceed the remote read budget; download the file or choose a smaller view".into())
 }
 
 /// Runs `work` until it needs nothing it hasn't got: each run that finds bytes missing fetches

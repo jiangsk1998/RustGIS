@@ -107,10 +107,18 @@ pub fn usable() -> bool {
 }
 
 fn missing() -> DataError {
-    DataError::Unsupported(
+    DataError::Unsupported(missing_text(crate::no_programs_here()))
+}
+
+/// Why a format read through GDAL can't be read: GDAL isn't installed, or (`here` names it) this
+/// build runs no programs, where installing it wouldn't help.
+fn missing_text(here: &str) -> String {
+    if here.is_empty() {
         "this format needs GDAL: install it (ogr2ogr and ogrinfo on the PATH, or RUSTGIS_GDAL_BIN naming their folder) and add the file again"
-            .into(),
-    )
+            .into()
+    } else {
+        format!("this format is read through GDAL, a program {here} can't run: convert the file to a GeoPackage on a computer and add that")
+    }
 }
 
 /// Where converted layers are kept: the platform's cache folder, or `RUSTGIS_GDAL_CACHE`.
@@ -120,7 +128,7 @@ pub fn cache_dir() -> Option<PathBuf> {
 
 /// A layer: its name, the one kind of geometry it holds (`None`: it mixes them), and its
 /// feature count when GDAL knows it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct LayerInfo {
     name: String,
     /// SQLite's geometry column name; unnamed OGR geometry fields are exposed as `geometry`.
@@ -130,6 +138,48 @@ struct LayerInfo {
     /// Whether the layer says its coordinate system.
     has_srs: bool,
     has_zm: bool,
+}
+
+/// The full source signature guards against hash collisions; the version in the key lets a
+/// later reader discard metadata whose meaning has changed. This is disposable cache data.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Listing {
+    key: String,
+    layers: Vec<LayerInfo>,
+}
+
+/// Reuses layer metadata under the conversion cache's path, size and modification-time rules,
+/// including the source count needed to check cached FlatGeobufs. Missing or invalid metadata
+/// is listed again. Explicit Reload bypasses this helper, and a cache write failure is harmless.
+fn cached_list(dir: &Path, src: &Path) -> Result<Vec<LayerInfo>> {
+    use std::io::{BufReader, Read};
+
+    crate::provenance::path(src);
+    let full = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
+    drivers(&full)?;
+    let signature = stamp(&full)?;
+    let key = format!("GDAL listing v1\n{}\n{}\n{}", full.display(), signature.0, signature.1);
+    let tag = format!("{:016x}", fnv1a(key.as_bytes()));
+    let path = dir.join(format!("{tag}.layers"));
+    // Bound reads of disposable metadata, including a damaged file that is unexpectedly large.
+    if let Ok(file) = std::fs::File::open(&path)
+        && let Ok(stored) = serde_json::from_reader::<_, Listing>(BufReader::new(file.take(4 * 1024 * 1024)))
+        && stored.key == key
+    {
+        touch(&path);
+        return Ok(stored.layers);
+    }
+    let layers = list(&full)?;
+    // A listing made while the source changed must not vouch for either generation.
+    if stamp(&full)? == signature && std::fs::create_dir_all(dir).is_ok() {
+        external::prune(dir, ours, KEEP);
+        if let Ok(mut tmp) = tempfile::Builder::new().prefix(&format!("{tag}.")).suffix(".tmp.layers").tempfile_in(dir)
+            && serde_json::to_writer(tmp.as_file_mut(), &Listing { key, layers: layers.clone() }).is_ok()
+        {
+            let _ = tmp.persist(&path);
+        }
+    }
+    Ok(layers)
 }
 
 /// GDAL before 3.8 ignores `ogrinfo -if` (and `ogr2ogr` refuses it), so it could open a file as
@@ -157,16 +207,17 @@ fn version(text: &str) -> Option<(u32, u32)> {
 
 /// The vector layers of a dataset, from `ogrinfo -json`.
 fn list(src: &Path) -> Result<Vec<LayerInfo>> {
+    crate::provenance::path(src);
     let src = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
     // A file or folder on this computer: GDAL would fetch a `/vsicurl/` address.
     std::fs::metadata(&src)?;
     // Its type first, so a type that isn't read through GDAL says so whether GDAL is installed or not.
     let drivers = drivers(&src)?;
     let ogrinfo = program("ogrinfo").ok_or_else(missing)?;
-    check_version(&ogrinfo)?;
+    check_version(&ogrinfo).map_err(|e| DataError::Format(format!("{}: {e}", src.display())))?;
     let mut c = command(ogrinfo, drivers);
-    c.arg("-json").arg("-ro").arg("-so").arg("-nomd").arg(&src);
-    let out = output(c, LIST_TIMEOUT, "GDAL")?;
+    c.args(["-json", "-ro", "-so", "-nomd", "-noextent"]).arg(&src);
+    let out = output(c, LIST_TIMEOUT, &format!("GDAL listing {}", src.display()))?;
     if !out.status.success() {
         return Err(DataError::Format(format!("GDAL: {}", String::from_utf8_lossy(&out.stderr).trim())));
     }
@@ -189,9 +240,13 @@ fn list(src: &Path) -> Result<Vec<LayerInfo>> {
         .collect())
 }
 
-/// The vector layers of a dataset.
+/// The vector layers of a dataset, reusing metadata while its conversion signature is unchanged.
 pub fn layers(src: &Path) -> Result<Vec<String>> {
-    Ok(list(src)?.into_iter().take(MAX_LAYERS).map(|l| l.name).collect())
+    let all = match cache_dir() {
+        Some(dir) => cached_list(&dir, src)?,
+        None => list(src)?,
+    };
+    Ok(all.into_iter().take(MAX_LAYERS).map(|l| l.name).collect())
 }
 
 /// Converts the dataset's layers (or just `layer`) to FlatGeobufs, reusing earlier conversions of
@@ -200,8 +255,9 @@ pub fn layers(src: &Path) -> Result<Vec<String>> {
 /// GDAL overrides accept `AUTH:CODE`: at least two ASCII letters for the authority and an ASCII
 /// alphanumeric code (also `.` and `_`), at most 64 bytes total; or the exact well-known geographic
 /// names `WGS84`, `WGS72`, `NAD27`, `NAD83` (in any case, as GDAL reads them). Files, addresses, WKT and other aliases are refused.
-/// Returns the converted layers, and the layers that couldn't be converted (with why), so a
-/// partial result is never mistaken for the whole file.
+/// Returns the converted layers and notices about layers or features left out, so a partial
+/// result is never mistaken for the whole file. Feature losses compare the known source count
+/// with the converted headers, including when reusing cached conversions.
 pub fn convert(src: &Path, layer: Option<&str>, crs: Option<&str>) -> Result<(Vec<Converted>, Vec<String>)> {
     check_crs(crs)?;
     let dir = cache_dir().ok_or_else(|| DataError::Format("no cache folder for GDAL conversions".into()))?;
@@ -225,12 +281,15 @@ fn check_crs(crs: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Converts selected layers, reporting failed layers and known feature-count shortfalls across
+/// all their geometry families. Cache hits are checked too, without scanning converted features.
 fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) -> Result<(Vec<Converted>, Vec<String>)> {
+    crate::provenance::path(src);
     check_crs(crs)?;
     if !available() {
         return Err(missing());
     }
-    let all = list(src)?;
+    let all = cached_list(dir, src)?;
     let chosen: Vec<LayerInfo> = match layer {
         Some(l) => {
             all.iter().find(|x| x.name == l).or_else(|| all.iter().find(|x| x.name.eq_ignore_ascii_case(l))).cloned().into_iter().collect()
@@ -269,6 +328,26 @@ fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) ->
                 Err(e) => errors.push(e),
             }
         }
+        // Count all converted families together: splitting a mixed layer isn't a loss. Read
+        // only the headers, so checking a cache hit doesn't scan its features or date columns.
+        // A layer with nothing converted and no error lost every feature (all empty polygons,
+        // say); one that failed is said below, with why.
+        if (out.len() > before || errors.is_empty())
+            && let Some(expected) = l.count.and_then(|n| u64::try_from(n).ok()).filter(|n| *n > 0)
+        {
+            // A part whose header can't be read leaves the count unchecked, and says so.
+            let count: std::result::Result<u64, DataError> = out
+                .iter()
+                .skip(before)
+                .try_fold(0u64, |total, converted| Ok(total.saturating_add(super::fgb::header_feature_count(&converted.path)?)));
+            match count {
+                Ok(actual) if actual < expected => {
+                    failed.push(format!("{}: GDAL conversion left out {} of {expected} source features", l.name, expected - actual));
+                }
+                Ok(_) => {}
+                Err(e) => failed.push(format!("{}: couldn't check how many features GDAL's conversion kept ({e})", l.name)),
+            }
+        }
         // A layer none of whose parts converted is reported, with the first reason.
         if out.len() == before
             && let Some(e) = errors.into_iter().next()
@@ -278,7 +357,10 @@ fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) ->
         }
     }
     if out.is_empty() {
-        return Err(last.unwrap_or_else(|| DataError::Format("GDAL found no features to read".into())));
+        // Nothing converted and no error: what was left out says why (all of it empty polygons).
+        return Err(last.unwrap_or_else(|| {
+            DataError::Format(if failed.is_empty() { "GDAL found no features to read".into() } else { failed.join("; ") })
+        }));
     }
     Ok((out, failed))
 }
@@ -289,10 +371,10 @@ fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) ->
 pub fn convert_one(src: &Path, layer: &str, family: Option<Family>, crs: Option<&str>) -> Result<Option<PathBuf>> {
     check_crs(crs)?;
     let dir = cache_dir().ok_or_else(|| DataError::Format("no cache folder for GDAL conversions".into()))?;
-    // The layer's own kind of geometry, and whether it says its coordinate system, as a fresh
-    // listing tells. Its name is matched as `convert` matches it, ignoring case (the exact
-    // spelling first), and converted under the listed spelling, so the two share a conversion.
-    let all = list(src)?;
+    // The layer's geometry kind and coordinate-system declaration, retained while the source
+    // signature is unchanged. Match its name as `convert` does (exact spelling first, then
+    // ignoring case), and convert under the listed spelling, so the two share a conversion.
+    let all = cached_list(&dir, src)?;
     let info = all
         .iter()
         .find(|l| l.name == layer)
@@ -358,6 +440,20 @@ fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Fami
     if converted.unprojected {
         converted.notes.push(format!("GDAL: '{layer}' has no declared coordinate system; its coordinates were left unprojected"));
     }
+    // A repair/reload reports the same conversion loss as Add. For a mixed layer, compare
+    // only the selected family; the other families have their own counted notice.
+    let expected = match family {
+        Some(family) => count_geometry_filter(src, &info.name, family.filter()).map(Some),
+        None => Ok(info.count.and_then(|n| u64::try_from(n).ok())),
+    };
+    match expected.and_then(|expected| super::fgb::header_feature_count(&converted.path).map(|actual| (expected, actual))) {
+        Ok((expected, actual)) => {
+            if let Some(note) = conversion_count_note(&info.name, expected, actual, !converted.empty) {
+                converted.notes.push(note);
+            }
+        }
+        Err(error) => converted.notes.push(format!("{}: couldn't check how many features GDAL's conversion kept ({error})", info.name)),
+    }
     let mut zm_dropped = info.has_zm && !converted.empty;
     if zm_dropped {
         let count = info.count.filter(|n| *n >= 0).map_or_else(|| "an unknown number of".into(), |n| n.to_string());
@@ -380,6 +476,19 @@ fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Fami
         }
     }
     Ok(FreshConverted { path: converted.path, notes: converted.notes, empty: converted.empty, zm_dropped, workspace })
+}
+
+/// A counted loss, or an honest diagnostic when a nonempty replacement's source count is unknown.
+fn conversion_count_note(layer: &str, expected: Option<u64>, actual: u64, nonempty: bool) -> Option<String> {
+    match expected {
+        Some(expected) if actual < expected => {
+            Some(format!("{layer}: GDAL conversion left out {} of {expected} source features", expected - actual))
+        }
+        None if nonempty => Some(format!(
+            "{layer}: couldn't check how many source features GDAL's conversion kept because the source count is unknown; features may have been left out"
+        )),
+        _ => None,
+    }
 }
 
 struct ConversionRequest<'a> {
@@ -464,7 +573,7 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
     c.arg(&tmp).arg(&full).arg(layer);
     // The temp file goes whatever happens, unless it becomes the conversion.
     let mut tmp_guard = TempFile(Some(tmp.clone()));
-    let res = output(c, CONVERT_TIMEOUT, "GDAL")?;
+    let res = output(c, CONVERT_TIMEOUT, &format!("GDAL conversion of {}, layer '{layer}'", full.display()))?;
     if !res.status.success() {
         let text = String::from_utf8_lossy(&res.stderr);
         // The ERROR lines say what went wrong (the rest is the usage text); else the first line.
@@ -477,17 +586,19 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
     }
     // Whether it holds anything: a feature read, not the header's count (which FlatGeobuf may leave
     // out, as 0). A filter matching nothing leaves no file at all.
-    let any = if fresh {
-        // A read failure is not an empty dataset. Never install a corrupt or partially readable
-        // conversion as a successful replacement.
-        let source = super::open_path(&tmp, None)?;
-        !source.read(&super::Request { extent: None, limit: 1 })?.features.is_empty()
-    } else {
-        tmp.exists()
-            && super::open_path(&tmp, None)
-                .ok()
-                .is_some_and(|s| s.read(&super::Request { extent: None, limit: 1 }).is_ok_and(|b| !b.features.is_empty()))
-    };
+    let any = crate::provenance::without(|| {
+        if fresh {
+            // A read failure is not an empty dataset. Never install a corrupt or partially readable
+            // conversion as a successful replacement.
+            let source = super::open_path(&tmp, None)?;
+            Ok::<_, DataError>(!source.read(&super::Request { extent: None, limit: 1 })?.features.is_empty())
+        } else {
+            Ok(tmp.exists()
+                && super::open_path(&tmp, None)
+                    .ok()
+                    .is_some_and(|s| s.read(&super::Request { extent: None, limit: 1 }).is_ok_and(|b| !b.features.is_empty())))
+        }
+    })?;
     // The entry is replaced in an order that never leaves it naming a missing file: the new state
     // first, then the key that vouches for it.
     let _ = std::fs::remove_file(&keyfile);
@@ -537,9 +648,14 @@ fn count_other_families(src: &Path, layer: &str, selected: Family) -> Result<u64
         Family::Polygons => (Family::Points, Family::Lines),
     };
     let filter = format!("({}) OR ({})", first.filter(), second.filter());
+    count_geometry_filter(src, layer, &filter)
+}
+
+/// The count under the exact family filter used by conversion, including empty geometries.
+fn count_geometry_filter(src: &Path, layer: &str, filter: &str) -> Result<u64> {
     let mut c = command(program("ogrinfo").ok_or_else(missing)?, drivers(src)?);
-    c.args(["-json", "-ro", "-so", "-nomd", "-where", &filter]).arg(src).arg(layer);
-    let out = output(c, CONVERT_TIMEOUT, "GDAL")?;
+    c.args(["-json", "-ro", "-so", "-nomd", "-where", filter]).arg(src).arg(layer);
+    let out = output(c, CONVERT_TIMEOUT, &format!("GDAL geometry count for {}, layer '{layer}'", src.display()))?;
     if !out.status.success() {
         return Err(DataError::Format(format!("GDAL: {}", String::from_utf8_lossy(&out.stderr).trim())));
     }
@@ -568,7 +684,7 @@ fn count_zm_features(src: &Path, layer: &LayerInfo, family: Option<Family>) -> R
     let sql = format!("SELECT COUNT(*) AS zm_count FROM {name} WHERE (ST_Is3D({geometry}) = 1 OR ST_IsMeasured({geometry}) = 1){filter}");
     let mut c = command(program("ogrinfo").ok_or_else(missing)?, drivers(&src)?);
     c.args(["-json", "-ro", "-features", "-nomd", "-dialect", "SQLite", "-sql", &sql]).arg(&src);
-    let out = output(c, CONVERT_TIMEOUT, "GDAL")?;
+    let out = output(c, CONVERT_TIMEOUT, &format!("GDAL dimension count for {}, layer '{}'", src.display(), layer.name))?;
     if !out.status.success() {
         return Err(DataError::Format(format!("GDAL: {}", String::from_utf8_lossy(&out.stderr).trim())));
     }
@@ -593,18 +709,31 @@ const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60)
 /// Conversions not used for this long are removed from the cache.
 const KEEP: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
 
-/// Whether a file name is one this module writes: `<16 hex>.fgb|.key|.empty`, or a
-/// `<16 hex>.<pid>.tmp.fgb` left by a conversion that didn't finish.
+/// Whether a file name is a conversion, its key or layer metadata, or a temporary file left
+/// by an interrupted conversion or metadata write.
 fn ours(name: &str) -> bool {
     let Some((tag, rest)) = name.split_once('.') else { return false };
     let tmp = rest.strip_suffix(".tmp.fgb").is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
-    tag.len() == 16 && tag.bytes().all(|b| b.is_ascii_hexdigit()) && (matches!(rest, "fgb" | "key" | "empty") || tmp)
+    let listing_tmp =
+        rest.strip_suffix(".tmp.layers").is_some_and(|nonce| !nonce.is_empty() && nonce.bytes().all(|b| b.is_ascii_alphanumeric()));
+    tag.len() == 16
+        && tag.bytes().all(|b| b.is_ascii_hexdigit())
+        && (matches!(rest, "fgb" | "key" | "empty" | "layers") || tmp || listing_tmp)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::GeometryType;
+
+    #[test]
+    fn where_programs_cant_run_the_message_says_so_instead_of_asking_for_an_install() {
+        assert!(missing_text("").contains("install it"));
+        let phone = missing_text("a phone");
+        assert!(phone.contains("a phone can't run") && !phone.contains("install"), "{phone}");
+        // Where programs run, the build reports none missing for that reason.
+        assert_eq!(crate::RUNS_PROGRAMS, crate::no_programs_here().is_empty());
+    }
 
     #[test]
     fn names() {
@@ -740,7 +869,8 @@ mod tests {
 
     /// A KML mixing points and polygons, through GDAL when it is installed (skipped otherwise).
     #[test]
-    fn converts_a_mixed_kml_when_gdal_is_installed() {
+    fn converts_a_mixed_kml_with_source_provenance_when_gdal_is_installed() {
+        use crate::source::FeatureSource;
         if !usable() {
             return;
         }
@@ -757,8 +887,11 @@ mod tests {
         )
         .unwrap();
         let cache = dir.join("cache");
+        let captured = crate::provenance::Capture::start();
         let (out, failed) = convert_in(&cache, &kml, None, None).unwrap();
         assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(captured.inputs().iter().map(|i| &i.path).collect::<Vec<_>>(), vec![&kml.display().to_string()]);
+        drop(captured);
         let kinds: Vec<(String, u64)> = out
             .iter()
             .map(|c| {
@@ -768,10 +901,140 @@ mod tests {
             .collect();
         assert_eq!(kinds, vec![("mixed (points)".to_string(), 2), ("mixed (polygons)".to_string(), 1)], "{kinds:?}");
         // Converted once: the second call reuses the cache.
+        let captured = crate::provenance::Capture::start();
+        cached_list(&cache, &kml).unwrap();
         let (again, _) = convert_in(&cache, &kml, Some("mixed"), None).unwrap();
+        let fresh = convert_one_fresh_in(&cache, &kml, "mixed", Some(Family::Points), None).unwrap();
+        assert_eq!(captured.inputs().iter().map(|i| &i.path).collect::<Vec<_>>(), vec![&kml.display().to_string()]);
+        drop(captured);
+        // Repeated streamed reads attribute both persistent and fresh conversions to the source.
+        for (path, workspace) in [(&again[0].path, None), (&fresh.path, Some(fresh.workspace.clone()))] {
+            let source = super::super::fgb::FgbSource::open_converted_path(path, "mixed", &kml, workspace).unwrap();
+            let captured = crate::provenance::Capture::start();
+            source.read(&super::super::Request { extent: None, limit: 1 }).unwrap();
+            source.visit_chunks(None, 1024, &mut |_| Ok(())).unwrap();
+            assert_eq!(captured.inputs().iter().map(|i| &i.path).collect::<Vec<_>>(), vec![&kml.display().to_string()]);
+        }
         assert_eq!(again.iter().map(|c| &c.path).collect::<Vec<_>>(), out.iter().map(|c| &c.path).collect::<Vec<_>>());
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn unknown_nonempty_conversion_counts_are_reported_and_known_clean_counts_are_silent() {
+        let note = conversion_count_note("source", None, 1, true).unwrap();
+        assert!(note.contains("source count is unknown") && note.contains("features may have been left out"));
+        assert!(conversion_count_note("source", Some(1), 1, true).is_none());
+        assert!(conversion_count_note("source", Some(0), 0, false).is_none());
+        assert!(conversion_count_note("source", None, 0, false).is_none());
+        assert_eq!(
+            conversion_count_note("source", Some(3), 1, true).as_deref(),
+            Some("source: GDAL conversion left out 2 of 3 source features")
+        );
+    }
+
+    /// Indexed FlatGeobuf conversion drops empty polygons in GDAL, before RustGIS reads it.
+    /// Both a new conversion and a cache hit must say how many source features were lost.
+    #[test]
+    fn conversion_reports_empty_polygons_left_out_but_not_clean_input() {
+        if !usable() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let polygon = r#"{"type":"Feature","properties":{"id":2},"geometry":{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]}}"#;
+        let empty = r#"{"type":"Feature","properties":{"id":1},"geometry":{"type":"Polygon","coordinates":[]}}"#;
+        for lossy in [true, false] {
+            let path = dir.path().join(if lossy { "lossy.geojsonl" } else { "clean.geojsonl" });
+            std::fs::write(&path, if lossy { format!("{empty}\n{polygon}\n") } else { format!("{polygon}\n") }).unwrap();
+            for _ in 0..2 {
+                let (converted, notes) = convert_in(&dir.path().join("cache"), &path, None, None).unwrap();
+                assert_eq!(converted.len(), 1);
+                let source = super::super::open_path(&converted[0].path, None).unwrap();
+                let batch = source.read(&super::super::Request { extent: None, limit: 10 }).unwrap();
+                assert_eq!(batch.features.len(), 1);
+                assert_eq!(batch.skipped, 0, "GDAL dropped the feature before RustGIS read it");
+                if lossy {
+                    assert_eq!(notes, vec!["lossy: GDAL conversion left out 1 of 2 source features"]);
+                } else {
+                    assert!(notes.is_empty(), "clean input loses no features: {notes:?}");
+                }
+            }
+        }
+        let empties = dir.path().join("empties.geojsonl");
+        std::fs::write(&empties, format!("{empty}\n{empty}\n")).unwrap();
+        // A file of only empty polygons converts to nothing: the error says how many were left out.
+        for _ in 0..2 {
+            let error = convert_in(&dir.path().join("cache"), &empties, None, None).unwrap_err().to_string();
+            assert!(error.contains("empties: GDAL conversion left out 2 of 2 source features"), "{error}");
+        }
+        // A cached conversion whose header can't be read is said, and the layer still comes back.
+        // Repair refuses malformed geometry rather than installing a partial conversion.
+        let lossy = dir.path().join("lossy.geojsonl");
+        assert!(convert_one_fresh_in(&dir.path().join("fresh"), &lossy, "lossy", None, None).is_err());
+        let clean = dir.path().join("clean.geojsonl");
+        let converted = convert_one_fresh_in(&dir.path().join("fresh"), &clean, "clean", None, None).unwrap();
+        assert!(converted.notes.is_empty(), "{:?}", converted.notes);
+
+        let path = dir.path().join("clean.geojsonl");
+        let (converted, _) = convert_in(&dir.path().join("cache"), &path, None, None).unwrap();
+        std::fs::write(&converted[0].path, b"not a FlatGeobuf").unwrap();
+        let (again, notes) = convert_in(&dir.path().join("cache"), &path, None, None).unwrap();
+        assert_eq!(again.len(), 1);
+        assert!(notes.len() == 1 && notes[0].starts_with("clean: couldn't check how many features GDAL's conversion kept"), "{notes:?}");
+    }
+
+    /// A conversion hit must not open the source in GDAL again. Preserve exactly the signature
+    /// the conversion cache trusts while making the source unreadable by its allowed driver.
+    #[test]
+    fn reused_conversion_skips_listing_and_keeps_the_source_count() {
+        if !usable() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("parcels.geojsonl");
+        let input = concat!(
+            "{\"type\":\"Feature\",\"properties\":{},\"geometry\":{\"type\":\"Polygon\",\"coordinates\":[]}}\n",
+            "{\"type\":\"Feature\",\"properties\":{},\"geometry\":{\"type\":\"Polygon\",\"coordinates\":[[[0,0],[1,0],[1,1],[0,0]]]}}\n"
+        );
+        std::fs::write(&path, input).unwrap();
+        let cache = dir.path().join("cache");
+        let (first, notes) = convert_in(&cache, &path, None, None).unwrap();
+        assert_eq!(notes, vec!["parcels: GDAL conversion left out 1 of 2 source features"]);
+        let modified = path.metadata().unwrap().modified().unwrap();
+        std::fs::write(&path, vec![b'!'; input.len()]).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
+        assert!(list(&path).is_err(), "the source must require the stored listing");
+        let (again, reused_notes) = convert_in(&cache, &path, None, None).unwrap();
+        assert_eq!(again, first);
+        assert_eq!(reused_notes, notes, "the cached count must still detect conversion loss");
+        assert_eq!(cached_list(&cache, &path).unwrap()[0].count, Some(2));
+        assert!(convert_one_fresh_in(&cache, &path, "parcels", None, None).is_err(), "Reload must always list afresh");
+
+        let metadata =
+            std::fs::read_dir(&cache).unwrap().map(|e| e.unwrap().path()).find(|p| p.extension().is_some_and(|e| e == "layers")).unwrap();
+        let stored = std::fs::read(&metadata).unwrap();
+        // Even at the right hash, a different full key must not be trusted.
+        let mut wrong: Listing = serde_json::from_slice(&stored).unwrap();
+        wrong.key.push('!');
+        std::fs::write(&metadata, serde_json::to_vec(&wrong).unwrap()).unwrap();
+        assert!(convert_in(&cache, &path, None, None).is_err());
+        std::fs::write(&metadata, b"broken metadata").unwrap();
+        assert!(convert_in(&cache, &path, None, None).is_err());
+        std::fs::remove_file(&metadata).unwrap();
+        assert!(convert_in(&cache, &path, None, None).is_err());
+        // Old caches without metadata are repaired by listing once, preserving their conversion.
+        std::fs::write(&path, input).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
+        assert_eq!(convert_in(&cache, &path, None, None).unwrap(), (first, notes));
+
+        // Each part of the existing source signature invalidates stored metadata independently.
+        std::fs::write(&path, vec![b'!'; input.len()]).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified + std::time::Duration::from_secs(1)).unwrap();
+        assert!(cached_list(&cache, &path).is_err(), "modification time changed");
+        std::fs::write(&path, vec![b'!'; input.len() + 1]).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
+        assert!(cached_list(&cache, &path).is_err(), "size changed");
+    }
+
     #[test]
     fn fresh_conversion_reports_dropped_dimensions_but_not_for_clean_xy_data() {
         if !usable() {

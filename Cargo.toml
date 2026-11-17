@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/rustgis", "apps/rustgis-cli", "xtask"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.90"
@@ -19,6 +19,7 @@ rustgis-analysis = { path = "crates/analysis" }
 rustgis-render = { path = "crates/render" }
 rustgis-engine = { path = "crates/engine" }
 rustgis-ui-egui = { path = "crates/ui-egui" }
+rustgis-ui-touch = { path = "crates/ui-touch" }
 rustgis-geolibre = { path = "crates/geolibre" }
 rustgis-plugins = { path = "crates/plugins" }
 rustgis-tiles = { path = "crates/tiles" }
@@ -32,6 +33,9 @@ serde = { version = "1", features = ["derive", "rc"] }
 # baselines (row hashes) see every reopened row as changed.
 serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 sha2 = "0.11"
+# JSON Schema of the project file, generated from the saved types (`cargo xtask schema`); only
+# behind the `schema` features, so the app, the browser build and the packages never compile it.
+schemars = "1.2"
 log = "0.4"
 # std::time that also works in the browser (std panics on wasm32-unknown-unknown).
 web-time = "1"
@@ -62,8 +66,10 @@ tiff = "0.11"
 weezl = "0.2"
 # The tests' Zstandard-compressed GeoTIFFs (the version the tiff crate decodes with).
 zstd = { version = "0.14", default-features = false }
-proj4rs = { version = "0.3", default-features = false }
 crs-definitions = { version = "0.6", default-features = false, features = ["proj4"] }
+# Coordinate systems and transformations: EPSG, ESRI and IAU tables, datum shifts and grids, in pure
+# Rust (opengeos/RustGIS#2032).
+terrio-crs = { version = "0.2.4", default-features = false }
 base64 = "0.23"
 # Deflate for PDF image streams.
 miniz_oxide = "0.9"
@@ -78,6 +84,8 @@ roxmltree = "0.21"
 # the tree through calamine).
 quick-xml = "0.42"
 url = "2.5.8"
+# Property tests (dev-dependency): only what generating values and shrinking need.
+proptest = { version = "1", default-features = false, features = ["std"] }
 epaint_default_fonts = "0.37"
 # Vector data providers: GeoParquet (pure Rust, so the browser reads it too), FlatGeobuf and
 # GeoPackage (SQLite, desktop only).
@@ -108,6 +116,9 @@ laz = { version = "0.13", default-features = false }
 # build through parquet) and a zstd decoder.
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-decode", "checked-decode"] }
 ruzstd = { version = "0.9", default-features = false, features = ["std"] }
+# LERC (Esri's Limited Error Raster Compression), pure Rust: LERC-compressed GeoTIFF tiles (#1818).
+lerc-reader = { version = "0.5", default-features = false }
+lerc-core = { version = "0.5", default-features = false }
 # PMTiles archives compressed with Brotli, in pure Rust (the browser too).
 brotli-decompressor = { version = "~6.0.1", default-features = false, features = ["std"] }
 
@@ -117,7 +128,7 @@ egui-wgpu = "0.37"
 egui_extras = { version = "0.37", default-features = false }
 eframe = { version = "0.37", default-features = false }
 egui_kittest = "0.37"
-rfd = "0.17"
+rfd = "0.18"
 pollster = "1.0"
 
 [workspace.lints.rust]
@@ -126,6 +137,9 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 dbg_macro = "warn"
 todo = "warn"
+# A suppression says why, and `expect` reports one that is no longer needed.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
 too_many_arguments = "allow"
 type_complexity = "allow"
 

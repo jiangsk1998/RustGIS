@@ -342,7 +342,7 @@ can be used only once), and the keychain is read under the same lock.
 Plain HTTP is only used for servers on your computer or local network.
 
 In the web app, the browser calls the provider directly. Anthropic, OpenAI, Gemini,
-OpenRouter, Requesty, TrustedRouter, Opper and UberLLM accept that; a local Ollama server must allow the page's origin
+OpenRouter, Requesty, TrustedRouter and Opper accept that; a local Ollama server must allow the page's origin
 (`OLLAMA_ORIGINS=https://web.rustgis.app ollama serve`).
 
 ## Retries and long conversations

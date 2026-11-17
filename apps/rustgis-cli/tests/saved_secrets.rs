@@ -1,5 +1,4 @@
 //! One real CLI check of the saved-connection opt-in boundary; no network or keychain reads.
-#![allow(clippy::unwrap_used)]
 
 use serde_json::{Value, json};
 use std::process::Command;

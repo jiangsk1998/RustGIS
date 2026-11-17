@@ -469,6 +469,9 @@ pub struct Ended {
 /// Answers what `plugin`'s program sent since the last call, at most [`POLL_BATCH`] lines,
 /// without waiting for more. Each host request goes to `host`.
 pub fn poll(plugin: &str, host: &mut dyn Host) -> Polled {
+    // What it asks between commands is answered like what it asks during one: settings by its own id.
+    let mut scoped = crate::settings::Scoped::new(plugin, host);
+    let host: &mut dyn Host = &mut scoped;
     let Some(mut r) = take(plugin) else { return Polled::default() };
     log_errors(&mut r);
     let mut out = Polled::default();

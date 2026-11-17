@@ -1,5 +1,4 @@
 //! `--threads` sets the most threads one piece of work uses (#1562), as `gp.threads` reports it.
-#![allow(clippy::unwrap_used)]
 
 use serde_json::{Value, json};
 use std::process::Command;

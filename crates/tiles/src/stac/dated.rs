@@ -316,7 +316,6 @@ pub fn search_blocking(root: &str, filter: &Filter, period: (&str, &str), max_it
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;

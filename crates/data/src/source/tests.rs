@@ -5,6 +5,57 @@ use rustgis_geom::{Coord, lonlat_to_merc};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Builds a minimal synthetic X.509 v3 CA certificate in DER and PEM for offline CA-loader tests.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn synthetic_ca_cert() -> (Vec<u8>, String) {
+    use base64::Engine;
+    fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        if body.len() < 128 {
+            out.push(body.len() as u8);
+        } else {
+            out.push(0x81);
+            out.push(body.len() as u8);
+        }
+        out.extend_from_slice(body);
+        out
+    }
+    let alg = tlv(0x30, &[0x06, 0x03, 0x2b, 0x65, 0x70]); // Ed25519 OID 1.3.101.112
+    let cn = tlv(0x30, &[0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x02, b'c', b'a']);
+    let name = tlv(0x30, &tlv(0x31, &cn));
+    let mut times = Vec::new();
+    times.extend(tlv(0x17, b"250101000000Z"));
+    times.extend(tlv(0x17, b"350101000000Z"));
+    let validity = tlv(0x30, &times);
+    let mut pk_bits = vec![0x00];
+    pk_bits.extend_from_slice(&[0x11; 32]);
+    let mut spki_body = alg.clone();
+    spki_body.extend(tlv(0x03, &pk_bits));
+    let spki = tlv(0x30, &spki_body);
+    // BasicConstraints CA=TRUE (OID 2.5.29.19)
+    let bc_val = tlv(0x04, &tlv(0x30, &[0x01, 0x01, 0xff]));
+    let mut bc_ext = vec![0x06, 0x03, 0x55, 0x1d, 0x13, 0x01, 0x01, 0xff];
+    bc_ext.extend(bc_val);
+    let exts = tlv(0xa3, &tlv(0x30, &tlv(0x30, &bc_ext)));
+    let mut tbs_body = vec![0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x01, 0x01];
+    tbs_body.extend(&alg);
+    tbs_body.extend(&name);
+    tbs_body.extend(&validity);
+    tbs_body.extend(&name);
+    tbs_body.extend(&spki);
+    tbs_body.extend(&exts);
+    let tbs = tlv(0x30, &tbs_body);
+    let mut sig_bits = vec![0x00];
+    sig_bits.extend_from_slice(&[0x22; 64]);
+    let mut cert_body = tbs;
+    cert_body.extend(&alg);
+    cert_body.extend(tlv(0x03, &sig_bits));
+    let der = tlv(0x30, &cert_body);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+    let pem = format!("-----BEGIN CERTIFICATE-----\n{b64}\n-----END CERTIFICATE-----\n");
+    (der, pem)
+}
+
 #[test]
 fn explicit_method_1028_warns_for_known_geopackage_authorities() {
     let wkt = r#"PROJCRS["World EQC",BASEGEOGCRS["WGS 84",DATUM["WGS_1984",ELLIPSOID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0]],CONVERSION["EQC",METHOD["Equidistant Cylindrical",ID["EPSG",1028]]],CS[Cartesian,2],AXIS["Easting",east],AXIS["Northing",north],LENGTHUNIT["metre",1]]"#;
@@ -19,11 +70,11 @@ fn explicit_method_1028_warns_for_known_geopackage_authorities() {
         if warned {
             assert!(
                 notes[0].contains("srs_id 100001")
-                    && notes[0].contains("PROJ/GDAL")
+                    && notes[0].contains("PROJ 9.8")
                     && notes[0].contains("using EPSG:4087 parameters in preference to the WKT definition"),
                 "{notes:?}"
             );
-            let point = Geometry::Point(Coord::new(0.0, 5_009_377.085_697_311));
+            let point = Geometry::Point(Coord::new(0.0, 4_984_944.377_977_743));
             let Geometry::Point(at) = read.geometry(point).unwrap() else { panic!("not a point") };
             assert!(at.x.abs() < 1e-9 && (at.y - 45.0).abs() < 1e-9, "{at:?}");
         }
@@ -332,6 +383,54 @@ fn file_geodatabase_names() {
 fn tls_provider_builds_client_config() {
     tls_provider();
     let _ = rustls::ClientConfig::builder();
+}
+
+/// SQLite's upload copies never replace the original input in provenance, including later scans.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_provenance_excludes_temporary_copies() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("original.gpkg");
+    write_gpkg(&path, true);
+    let captured = crate::provenance::Capture::start();
+    let bytes = crate::provenance::read(&path).unwrap();
+    assert!(gpkg::unsupported_table_counts_bytes(&bytes).unwrap().is_empty());
+    let source = open_bytes("upload.gpkg", bytes, None).unwrap();
+    assert!(!source.read(&Request { extent: None, limit: 1 }).unwrap().features.is_empty());
+    assert_eq!(captured.inputs().len(), 1);
+    assert_eq!(captured.inputs()[0].path, path.display().to_string());
+    assert!(captured.inputs()[0].sha256.is_some());
+    drop(captured);
+    let captured = crate::provenance::Capture::start();
+    assert!(!source.read(&Request { extent: None, limit: 1 }).unwrap().features.is_empty());
+    let mut count = 0;
+    source
+        .visit_chunks(None, 1 << 20, &mut |features| {
+            count += features.len();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(count, points().len());
+    assert!(captured.inputs().is_empty(), "in-memory inputs have no local path to observe");
+}
+
+/// A retained SQLite connection must not describe the replacement at its former path.
+#[cfg(unix)]
+#[test]
+fn geopackage_provenance_skips_a_replaced_path() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("original.gpkg");
+    write_gpkg(&path, true);
+    let source = open_path(&path, None).unwrap();
+    let captured = crate::provenance::Capture::start();
+    source.read(&Request { extent: None, limit: 1 }).unwrap();
+    assert!(captured.inputs().iter().any(|i| i.path == path.display().to_string()));
+    drop(captured);
+    std::fs::rename(&path, folder.path().join("retained.gpkg")).unwrap();
+    std::fs::write(&path, b"replacement").unwrap();
+    let captured = crate::provenance::Capture::start();
+    assert!(!source.read(&Request { extent: None, limit: 1 }).unwrap().features.is_empty());
+    assert!(captured.inputs().is_empty());
 }
 
 /// 30 × 20 points over the world, named and numbered.
@@ -1403,11 +1502,11 @@ fn assert_placed(what: &str, geometry: Option<&Geometry>, lonlat: Coord) {
     assert!(off < 0.01, "{what}: {off} m off");
 }
 
-/// #1486: the placement cases, each read from a Shapefile's `.prj` (in place and whole) and a
-/// GeoPackage's definition, on the desktop and in the browser: WKT1 in `definition`, WKT2 in
-/// `definition_12_063`.
+/// #1486: the placement cases, each read from a Shapefile's `.prj` (in place and whole), a
+/// GeoPackage's definition and a FlatGeobuf header's WKT without a code (#1855), on the desktop and
+/// in the browser: WKT1 in `definition`, WKT2 in `definition_12_063`.
 #[test]
-fn placement_cases_are_placed_from_a_prj_and_a_geopackage() {
+fn placement_cases_are_placed_from_a_prj_a_geopackage_and_a_flatgeobuf() {
     let d = dir().join("placement");
     std::fs::create_dir_all(&d).unwrap();
     for (i, PlacementCase { what, wkt, xy, lonlat }) in placement_cases().into_iter().enumerate() {
@@ -1434,6 +1533,130 @@ fn placement_cases_are_placed_from_a_prj_and_a_geopackage() {
             assert_placed(what, geometry.as_ref(), lonlat);
             assert!(notes.is_empty(), "{what}: {notes:?}");
         }
+
+        let f = d.join(format!("case{i}.fgb"));
+        write_header_fgb(&f, None, 0, Some(&wkt), xy);
+        for (geometry, notes) in fgb_reads(&f) {
+            assert_placed(what, geometry.as_ref(), lonlat);
+            assert!(notes.is_empty(), "{what}: {notes:?}");
+        }
+    }
+}
+
+/// A FlatGeobuf of one point at `xy` whose header names its system by `org` and `code`, with
+/// `wkt`.
+fn write_header_fgb(path: &Path, org: Option<&str>, code: i32, wkt: Option<&str>, xy: Coord) {
+    use flatgeobuf::{FgbCrs, FgbWriter, FgbWriterOptions, GeometryType as G};
+    let options = FgbWriterOptions { crs: FgbCrs { org, code, wkt, ..Default::default() }, ..Default::default() };
+    let mut w = FgbWriter::create_with_options("point", G::Point, options).unwrap();
+    w.add_feature_geom(flatgeobuf::geozero::wkb::Wkb(wkb::encode(&Geometry::Point(xy))), |_| {}).unwrap();
+    w.write(std::fs::File::create(path).unwrap()).unwrap();
+}
+
+/// A FlatGeobuf's first geometry and notes, as the desktop opens the file and as the browser opens
+/// its bytes.
+fn fgb_reads(path: &Path) -> Vec<(Option<Geometry>, Vec<String>)> {
+    let desktop = open_path(path, None).unwrap();
+    let browser = open_shared("point.fgb", Arc::new(std::fs::read(path).unwrap()), None).unwrap();
+    [desktop, browser]
+        .into_iter()
+        .map(|src| {
+            let batch = src.read(&Request::all()).unwrap();
+            (batch.features.first().and_then(|f| f.geometry.clone()), src.info().notes.clone())
+        })
+        .collect()
+}
+
+/// #1855: a FlatGeobuf header's system is read as a GeoPackage row's is, on the desktop and in the
+/// browser. Its EPSG code is used when its WKT gives no other shift to WGS 84, and the WKT
+/// otherwise, where a `.prj` of it places the point. A grid the WKT gives beside the code is said.
+/// Without an EPSG code the WKT is read; one that can't be read is said. A code without a WKT is
+/// read as before. A negative code without a WKT is longitude/latitude, said.
+#[test]
+fn a_flatgeobuf_headers_system_is_read_as_a_geopackage_rows_is() {
+    use crate::raster::wkt::{read_wkt, to_wkt};
+    let d = dir().join("fgb_header");
+    std::fs::create_dir_all(&d).unwrap();
+    let prj = |wkt: &str, xy: Coord| read_wkt(wkt).unwrap().0.transformer().unwrap().to_lonlat(xy).unwrap();
+    let mut n = 0;
+    let mut read = |org: Option<&str>, code: i32, wkt: Option<&str>, xy: Coord| {
+        n += 1;
+        let p = d.join(format!("case{n}.fgb"));
+        write_header_fgb(&p, org, code, wkt, xy);
+        fgb_reads(&p)
+    };
+    // British National Grid, in England: its own shift is the code's; another `TOWGS84` puts the
+    // point some 4 m away, where a `.prj` of it does.
+    let xy = Coord::new(450_000.0, 250_000.0);
+    let by_code = Crs::Epsg(27700).transformer().unwrap().to_lonlat(xy).unwrap();
+    let bng = to_wkt(Crs::Epsg(27700)).unwrap();
+    let other = bng.replace(BNG_SHIFT, "TOWGS84[375,-111,431,0,0,0,0]");
+    assert_ne!(other, bng);
+    assert!(metres_apart(prj(&other, xy), by_code) > 1.0);
+    for (org, wkt, lonlat) in [
+        (Some("EPSG"), Some(bng.as_str()), by_code),
+        (Some("EPSG"), Some(other.as_str()), prj(&other, xy)),
+        (None, Some(&other), prj(&other, xy)),
+        (Some("EPSG"), None, by_code),
+    ] {
+        for (geometry, notes) in read(org, 27700, wkt, xy) {
+            assert_placed(&format!("{wkt:?}"), geometry.as_ref(), lonlat);
+            assert!(notes.is_empty(), "{notes:?}");
+        }
+    }
+    // Text that isn't WKT beside the code: the code, said.
+    let e = read_wkt("PROJCS[").unwrap_err();
+    for (geometry, notes) in read(Some("EPSG"), 27700, Some("PROJCS["), xy) {
+        assert_placed("not WKT", geometry.as_ref(), by_code);
+        assert_eq!(notes, [format!("its coordinate system: its definition can't be read ({e}), so EPSG:27700 is used")]);
+    }
+    // ED50 / UTM zone 31N bound by Spain's NTv2 grid: read by the code, whose own Helmert shift
+    // stands in for the grid, said.
+    let xy = Coord::new(430_000.0, 4_580_000.0);
+    let by_code = Crs::Epsg(23031).transformer().unwrap().to_lonlat(xy).unwrap();
+    for (geometry, notes) in read(Some("EPSG"), 23031, Some(&ed50_utm31_bound()), xy) {
+        assert_placed("a grid", geometry.as_ref(), by_code);
+        assert_eq!(
+            notes,
+            [
+                "its coordinate system: the definition's NTv2 transformation to WGS 84 (SPED2ETV2.gsb) isn't applied; EPSG:23031's own shift to WGS 84 is used in its place, so positions may be off by the difference between the two"
+            ]
+        );
+    }
+    // Without an EPSG code: WGS 84 / UTM zone 33N, whose name says WGS 84, was read as
+    // longitude/latitude with nothing said; it is read by its WKT. So is another organization's
+    // system. One that can't be read is longitude/latitude, said.
+    let xy = Coord::new(500_000.0, 5_800_000.0);
+    let utm = to_wkt(Crs::Epsg(32633)).unwrap();
+    assert!(utm.contains("WGS 84"), "{utm}");
+    let utm = utm.replace(r#",AUTHORITY["EPSG","32633"]]"#, "]");
+    let lonlat = Crs::Epsg(32633).transformer().unwrap().to_lonlat(xy).unwrap();
+    for (org, code) in [(None, 0), (Some("EPSG"), 0), (Some("EPSG"), -5), (Some("ESRI"), 102_033)] {
+        for (geometry, notes) in read(org, code, Some(&utm), xy) {
+            assert_placed(&format!("{org:?} {code}"), geometry.as_ref(), lonlat);
+            assert!(notes.is_empty(), "{notes:?}");
+        }
+    }
+    for (geometry, notes) in read(None, 0, Some("PROJCS["), Coord::new(5.0, 50.0)) {
+        assert_placed("lon/lat", geometry.as_ref(), Coord::new(5.0, 50.0));
+        assert_eq!(notes, [format!("its coordinate system can't be read ({e}); read as longitude/latitude")]);
+    }
+    // Another organization's code without a WKT: longitude/latitude, said, as before.
+    for (_, notes) in read(Some("ESRI"), 102_033, None, Coord::new(5.0, 50.0)) {
+        assert_eq!(notes, ["its coordinate system is defined by ESRI, not EPSG; read as longitude/latitude"]);
+    }
+    // A negative code isn't an EPSG one: longitude/latitude, said. EPSG's 0 is no code, so nothing
+    // is (a header without an organization is read in `flatgeobuf`).
+    let lonlat = Coord::new(5.0, 50.0);
+    for org in [None, Some("EPSG")] {
+        for (geometry, notes) in read(org, -5, None, lonlat) {
+            assert_placed("a negative code", geometry.as_ref(), lonlat);
+            assert_eq!(notes, ["its coordinate system's code -5 isn't an EPSG code; read as longitude/latitude"]);
+        }
+    }
+    for (geometry, notes) in read(Some("EPSG"), 0, None, lonlat) {
+        assert_placed("no code", geometry.as_ref(), lonlat);
+        assert!(notes.is_empty(), "{notes:?}");
     }
 }
 
@@ -1633,7 +1856,7 @@ fn hostile_files_are_errors_not_panics() {
 /// Reads every vector file in `RUSTGIS_SAMPLE_VECTORS` (the opengeos sample data, e.g.
 /// <https://source.coop/giswqs/opengeos>): `cargo test -p rustgis-data -- --ignored vector_samples --nocapture`.
 #[test]
-#[ignore]
+#[ignore = "needs external vector samples in RUSTGIS_SAMPLE_VECTORS"]
 fn vector_samples() {
     let Ok(dir) = std::env::var("RUSTGIS_SAMPLE_VECTORS") else { return };
     let mut paths: Vec<_> =
@@ -2095,7 +2318,7 @@ fn writes_points_lines_kmz_and_zipped_shapefiles() {
 /// Compares the browser's GeoPackage reader with SQLite on every table of every `.gpkg` in
 /// `RUSTGIS_SAMPLE_VECTORS`: `cargo test -p rustgis-data --release -- --ignored gpkg_mem_matches --nocapture`.
 #[test]
-#[ignore]
+#[ignore = "needs external GeoPackage samples in RUSTGIS_SAMPLE_VECTORS"]
 fn gpkg_mem_matches_sqlite() {
     let Ok(dir) = std::env::var("RUSTGIS_SAMPLE_VECTORS") else { return };
     let mut paths: Vec<_> = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| ext(p) == "gpkg").collect();
@@ -2448,7 +2671,7 @@ fn damaged_shapefiles_are_errors_or_skips_not_panics() {
 /// Reads every Shapefile under `RUSTGIS_SAMPLE_SHAPEFILES` both ways, in place and whole, and
 /// compares them: `cargo test --release -p rustgis-data -- --ignored shapefile_samples --nocapture`.
 #[test]
-#[ignore]
+#[ignore = "needs external Shapefile samples in RUSTGIS_SAMPLE_SHAPEFILES"]
 fn shapefile_samples() {
     let Ok(dir) = std::env::var("RUSTGIS_SAMPLE_SHAPEFILES") else { return };
     fn walk(d: &Path, out: &mut Vec<PathBuf>) {
@@ -2969,22 +3192,40 @@ fn exports_are_written_in_the_system_the_layer_was_read_in() {
         let prj = std::fs::read_to_string(shp.with_extension("prj")).unwrap();
         assert!(prj.starts_with("PROJCS[") && prj.ends_with(&format!("AUTHORITY[\"EPSG\",\"{code}\"]]")), "{prj}");
     }
-    // By default an export keeps the layer's system where the format can say it; a system without
-    // an EPSG code only where its WKT is read back (a Shapefile's .prj).
+    // By default an export keeps the layer's system where the format can say it. A system without
+    // an EPSG code goes in by its WKT definition, read back as the same system; one WKT can't
+    // describe only into a Shapefile (which says so), else the layer is written in WGS 84, said.
     let mut ds = utm_squares(25832);
     let utm = Crs::from_epsg(25832).unwrap();
     assert_eq!(crate::io::default_export_crs(&ds, "GPKG"), utm);
     assert_eq!(crate::io::default_export_crs(&ds, "geojson"), Crs::LonLat);
+    assert_eq!(crate::io::default_export_note(&ds, "a.gpkg"), None);
     let wkt = crate::raster::wkt::to_wkt(utm).unwrap().replace(",AUTHORITY[\"EPSG\",\"25832\"]", "").replace("EPSG:25832", "My grid");
     let custom = crate::raster::wkt::crs_from_wkt(&wkt).unwrap();
     assert_eq!(custom.epsg(), 0);
     ds.crs = Some(custom);
-    assert_eq!(crate::io::default_export_crs(&ds, "shp"), custom);
-    assert_eq!(crate::io::default_export_crs(&ds, "fgb"), Crs::LonLat);
-    // Asked for, it goes into a Shapefile, but not a file that would read back as longitude/latitude.
-    assert!(crate::io::write_path_in(&ds, &d.join("custom.shp"), custom).is_ok());
-    assert!(crate::io::write_path_in(&ds, &d.join("custom.gpkg"), custom).is_err());
-    assert!(crate::io::write_bytes_in(&ds, "fgb", custom).is_err());
+    for ext in ["shp", "gpkg", "fgb"] {
+        assert_eq!(crate::io::default_export_crs(&ds, ext), custom, "{ext}");
+        let p = d.join(format!("custom.{ext}"));
+        crate::io::write_path_in(&ds, &p, custom).unwrap();
+        if ext != "shp" {
+            let (back, _) = materialize(open_path(&p, None).unwrap().as_ref()).unwrap();
+            assert_eq!(back.crs, Some(custom), "{ext}");
+        }
+        assert_eq!(crate::io::default_export_note(&ds, &p.display().to_string()), None, "{ext}");
+    }
+    let gnomonic = Crs::parse("+proj=gnom +lat_0=51 +lon_0=9 +datum=WGS84 +units=m +no_defs").unwrap();
+    assert!(crate::raster::wkt::to_wkt(gnomonic).is_none());
+    ds.crs = Some(gnomonic);
+    assert_eq!(crate::io::default_export_crs(&ds, "shp"), gnomonic);
+    for ext in ["gpkg", "fgb"] {
+        assert_eq!(crate::io::default_export_crs(&ds, ext), Crs::LonLat, "{ext}");
+        let note = crate::io::default_export_note(&ds, &format!("a.{ext}")).unwrap();
+        assert!(note.contains("WGS 84") && note.contains(&gnomonic.label()), "{note}");
+        // Asked for, it is refused: the file would read back as longitude/latitude.
+        assert!(crate::io::write_path_in(&ds, &d.join(format!("gnom.{ext}")), gnomonic).is_err(), "{ext}");
+    }
+    assert_eq!(crate::io::default_export_note(&ds, "a.shp"), None);
     // GeoJSON is longitude/latitude only.
     let ds = utm_squares(25832);
     assert!(crate::io::write_path_in(&ds, &d.join("squares.geojson"), Crs::from_epsg(25832).unwrap()).is_err());
@@ -3358,7 +3599,7 @@ fn declared_z_and_m_are_said_and_counted() {
 
 /// A GeoParquet whose columns RustGIS has no field type for (a decimal too wide for a 64-bit
 /// integer, binary, a list, a struct, a leaf beside the bbox covering's box) are said and left
-/// out, and whose dates and times, read as whole numbers, are said with their unit; the box's
+/// out, while dates and timestamps become native values; the box's
 /// zmin and zmax aren't, and a file of ordinary columns says nothing.
 #[test]
 fn geoparquet_columns_not_kept_or_read_as_numbers_are_said() {
@@ -3421,21 +3662,24 @@ fn geoparquet_columns_not_kept_or_read_as_numbers_are_said() {
 
     let left_out = "4 columns of types RustGIS has no field for were left out: \
                     price (decimal), tags (list), extra (struct), geometry_bbox (struct)";
-    let as_numbers = "3 columns of dates or times were read as whole numbers: seen (milliseconds since 1970-01-01), \
-                      logged (microseconds since 1970-01-01), day (days since 1970-01-01)";
     let photo = "photo holds data that isn't pictures RustGIS can show, so it isn't read";
     // Read in place: the source's notes, which adding the layer gives as notices.
     let src = open_path(&path, None).unwrap();
     let info = src.info();
-    assert_eq!(info.notes, vec![left_out.to_string(), as_numbers.to_string(), photo.to_string()]);
+    assert_eq!(info.notes, vec![left_out.to_string(), photo.to_string()]);
     let names: Vec<&str> = info.fields.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, ["name", "seen", "logged", "day"]);
     // Read whole: the same, in the read's report, and the values as said.
     let (ds, report) = materialize(src.as_ref()).unwrap();
-    assert_eq!(report.messages, vec![format!("columns: {left_out}"), format!("columns: {as_numbers}"), format!("columns: {photo}")]);
+    assert_eq!(report.messages, vec![format!("columns: {left_out}"), format!("columns: {photo}")]);
     assert_eq!(
         ds.features[0].attrs,
-        vec![Value::Text("a".into()), Value::Int(1_790_856_000_000), Value::Int(1_790_856_000_000_000), Value::Int(20_727)]
+        vec![
+            Value::Text("a".into()),
+            Value::DateTime(crate::DateTime::with_offset(1_790_856_000_000_000, 0).unwrap()),
+            Value::DateTime(crate::DateTime::local(1_790_856_000_000_000).unwrap()),
+            Value::Date(crate::Date::from_days(20_727).unwrap())
+        ]
     );
 
     // Ordinary columns, with a bbox covering: nothing to say.
@@ -3489,6 +3733,21 @@ fn gpkg_tables(path: &Path) -> Vec<String> {
     st.query_map([], |r| r.get(0)).unwrap().collect::<std::result::Result<_, _>>().unwrap()
 }
 
+/// Text in a date-time field with digits past the microsecond is written as a read takes it: as
+/// that date-time, to the millisecond and counted, not kept as text a read would call no date.
+#[test]
+fn geopackage_writes_fine_date_time_text_as_a_date_time() {
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().join("fine.gpkg");
+    let mut ds = Dataset::new("fine", GeometryType::Point, vec![Field::new("seen", FieldType::DateTime)]);
+    ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Text("2026-03-05T14:30:00.1234567Z".into())]);
+    assert_eq!(crate::io::fine_dates(ds.features.iter(), &ds.fields), [1]);
+    assert_eq!(crate::io::text_in_dates(ds.features.iter(), &ds.fields), [0], "a read takes it as a date-time");
+    crate::io::write_path(&ds, &path).unwrap();
+    let stored: String = rusqlite::Connection::open(&path).unwrap().query_row("SELECT seen FROM fine", [], |r| r.get(0)).unwrap();
+    assert_eq!(stored, "2026-03-05T14:30:00.123Z");
+}
+
 /// A GeoPackage export writes DATE and DATETIME columns, as GeoPackage gives them: a date-time with
 /// a zone in UTC with `Z` (its other offset said), one without a zone without, milliseconds always.
 /// The desktop and browser readers read them back as dates; a value that isn't one, as null, said
@@ -3502,7 +3761,7 @@ fn geopackage_dates_are_written_and_read_as_dates() {
     let (day, at) = (|d| Value::parse(d, FieldType::Date), |t| Value::parse(t, FieldType::DateTime));
     let rows = [
         [day("2026-03-05"), at("2026-03-05T14:30:00+02:00")],
-        [day("1999-12-31"), at("2026-03-05T14:30:00.000250")],
+        [day("1999-12-31"), at("2026-03-05T14:30:00.250")],
         [Value::Null, Value::Null],
         // What another program may leave: text that isn't a date, a number, and empty text (no loss).
         [Value::Text("2026-02-30".into()), Value::Int(1_772_700_000)],
@@ -3519,6 +3778,27 @@ fn geopackage_dates_are_written_and_read_as_dates() {
             .as_deref(),
         Some("permits.gpkg: 1 date-time was written in UTC, as GeoPackage stores them, without their own offsets, in 'seen'")
     );
+    // Milliseconds are all a DATETIME holds: finer digits are rounded, and said; none lost, none said.
+    assert_eq!(crate::io::fine_dates(permits.features.iter(), &permits.fields), [0, 0]);
+    let mut fine = Dataset::new("fine", GeometryType::Point, permits.fields.clone());
+    for t in ["2026-03-05T14:30:00.000750+02:00", "2026-03-05T14:30:00.000400", "9999-12-31T23:59:59.999999Z", "2026-03-05T14:30:00.5"] {
+        fine.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Null, at(t)]);
+    }
+    assert_eq!(
+        crate::io::fine_dates_note(&fine.fields, &crate::io::fine_dates(fine.features.iter(), &fine.fields), "fine.gpkg").as_deref(),
+        Some("fine.gpkg: 3 date-times were rounded to the millisecond, as GeoPackage stores them, in 'seen'")
+    );
+    let rounded = workspace.path().join("fine.gpkg");
+    crate::io::write_path(&fine, &rounded).unwrap();
+    let stored: Vec<String> = rusqlite::Connection::open(&rounded)
+        .unwrap()
+        .prepare("SELECT seen FROM fine ORDER BY fid")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(stored, ["2026-03-05T12:30:00.001Z", "2026-03-05T14:30:00.000", "9999-12-31T23:59:59.999Z", "2026-03-05T14:30:00.500"]);
     let c = rusqlite::Connection::open(&path).unwrap();
     let declared: Vec<String> = c
         .prepare("SELECT type FROM pragma_table_info('permits') WHERE name IN ('issued', 'seen') ORDER BY cid")
@@ -3538,7 +3818,7 @@ fn geopackage_dates_are_written_and_read_as_dates() {
     let text = |s: &str| Some(s.to_string());
     assert_eq!(
         stored,
-        [(text("2026-03-05"), text("2026-03-05T12:30:00.000Z")), (text("1999-12-31"), text("2026-03-05T14:30:00.000250")), (None, None)]
+        [(text("2026-03-05"), text("2026-03-05T12:30:00.000Z")), (text("1999-12-31"), text("2026-03-05T14:30:00.250")), (None, None)]
     );
     drop(c);
     let desktop = open_path(&path, None).unwrap();
@@ -3848,4 +4128,715 @@ fn geojson_in_a_declared_projected_system_is_not_taken_for_swapped() {
     let (ds, messages, _) = geojson_paths("merc-quiet.geojson", &merc_collection(&[point]));
     assert_eq!(ds.features.len(), 1);
     assert!(messages.is_empty(), "{messages:?}");
+}
+
+/// Native writer schemas and independent Arrow decoding distinguish UTC instants from local
+/// clocks. Mixed columns fall back to text; invalid native values are counted as null.
+#[test]
+fn native_file_dates_preserve_zone_policy_and_fractional_seconds() {
+    use ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use arrow_schema::{DataType, TimeUnit};
+    let fields = vec![
+        Field::new("day", FieldType::Date),
+        Field::new("local", FieldType::DateTime),
+        Field::new("instant", FieldType::DateTime),
+        Field::new("mixed", FieldType::DateTime),
+    ];
+    let mut ds = Dataset::new("dates", GeometryType::Point, fields);
+    for (i, zone) in ["", "Z"].iter().enumerate() {
+        ds.push(
+            Some(Geometry::Point(Coord::new(i as f64, 0.0))),
+            vec![
+                Value::parse("2024-02-29", FieldType::Date),
+                Value::parse("1969-12-31T23:59:59.123456", FieldType::DateTime),
+                Value::parse("2026-03-05T14:30:00.123456+02:00", FieldType::DateTime),
+                Value::parse(&format!("2026-01-01T00:00:00{zone}"), FieldType::DateTime),
+            ],
+        );
+    }
+    let bytes = {
+        use std::sync::atomic::Ordering;
+        let progress = Arc::new(crate::progress::tests::Counted::default());
+        let _guard = crate::progress::install(Some(progress.clone()));
+        crate::progress::begin(ds.features.len());
+        let bytes = parquet::write(&ds).unwrap();
+        assert_eq!(progress.done.load(Ordering::Relaxed), ds.features.len() as u64, "the layout pass must not count written rows");
+        bytes
+    };
+    let arrow = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes.clone())).unwrap();
+    assert_eq!(arrow.schema().field_with_name("day").unwrap().data_type(), &DataType::Date32);
+    assert_eq!(arrow.schema().field_with_name("local").unwrap().data_type(), &DataType::Timestamp(TimeUnit::Microsecond, None));
+    assert_eq!(
+        arrow.schema().field_with_name("instant").unwrap().data_type(),
+        &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+    );
+    assert_eq!(arrow.schema().field_with_name("mixed").unwrap().data_type(), &DataType::Utf8);
+    let (back, report) = crate::io::read_bytes("dates.parquet", &bytes).unwrap();
+    assert!(report.messages.is_empty(), "{report:?}");
+    assert_eq!(back.features[0].attrs[0], ds.features[0].attrs[0]);
+    assert_eq!(back.features[0].attrs[1], ds.features[0].attrs[1]);
+    assert_eq!(back.features[0].attrs[2].to_string(), "2026-03-05T12:30:00.123456Z");
+    assert_eq!(back.features[1].attrs[3], Value::Text("2026-01-01T00:00:00Z".into()));
+    let note = parquet::values_note(&ds, "out.parquet").unwrap();
+    assert!(note.contains("2 date-times were written in UTC") && note.contains("2 date-times were written as ISO text"), "{note}");
+    // A replayable source feed chooses the same schema as an in-memory export.
+    let input = fgb::write(&ds).unwrap();
+    let source = open_bytes("dates.fgb", input, None).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("stream.parquet");
+    let summary = crate::export::write_source_in(source.as_ref(), &ds, &path, Crs::LonLat).unwrap();
+    assert_eq!(summary.written, 2);
+    assert_eq!(summary.date_messages.len(), 2);
+    let (streamed, _) = crate::io::read_path(&path).unwrap();
+    assert_eq!(streamed.fields, back.fields);
+    ds.features[0].attrs[0] = Value::Text("2026-02-30".into());
+    assert!(fgb::write(&ds).unwrap_err().to_string().contains("invalid date"));
+    let note = parquet::values_note(&ds, "bad.parquet").unwrap();
+    assert!(note.contains("1 value couldn't be written"));
+    let (bad, _) = crate::io::read_bytes("bad.parquet", &parquet::write(&ds).unwrap()).unwrap();
+    assert!(bad.features[0].attrs[0].is_null());
+    // Date fields accept the same unzoned midnight text as stored-value conversion;
+    // non-midnight times and zoned midnight still cannot be narrowed to a calendar date.
+    for (text, valid) in [("2026-03-05T00:00:00", true), ("2026-03-05T00:00:01", false), ("2026-03-05T00:00:00Z", false)] {
+        ds.features[0].attrs[0] = Value::Text(text.into());
+        let (read, _) = crate::io::read_bytes("midnight.parquet", &parquet::write(&ds).unwrap()).unwrap();
+        assert_eq!(read.features[0].attrs[0].is_null(), !valid, "{text}");
+        if valid {
+            assert_eq!(read.features[0].attrs[0], Value::parse("2026-03-05", FieldType::Date));
+        }
+    }
+}
+
+/// FlatGeobuf has a shared DateTime wire type. Local classification sees the whole column;
+/// a remote source preserves text with a notice rather than scanning the file at open.
+#[test]
+fn flatgeobuf_classifies_local_dates_and_preserves_remote_text() {
+    use flatgeobuf::geozero::{ColumnValue, PropertyProcessor, wkb::Wkb};
+    use flatgeobuf::{ColumnType, FgbWriter, FgbWriterOptions, GeometryType as G};
+    let mut writer = FgbWriter::create_with_options("dates", G::Point, FgbWriterOptions::default()).unwrap();
+    for name in ["day", "moment", "clock"] {
+        writer.add_column(name, ColumnType::DateTime, |_, c| c.nullable = true);
+    }
+    for (i, values) in
+        [["2024-02-29", "2026-03-05T14:30:00.123456+02:00", "12:30:00.123456789"], ["2026-02-30", "99:99:99", "13:00:00-05:00"]]
+            .iter()
+            .enumerate()
+    {
+        writer
+            .add_feature_geom(Wkb(wkb::encode(&Geometry::Point(Coord::new(i as f64, 0.0)))), |out| {
+                for (k, s) in values.iter().enumerate() {
+                    out.property(k, ["day", "moment", "clock"][k], &ColumnValue::DateTime(s)).unwrap();
+                }
+            })
+            .unwrap();
+    }
+    let mut bytes = Vec::new();
+    writer.write(&mut bytes).unwrap();
+    let local = open_bytes("dates.fgb", bytes.clone(), None).unwrap();
+    assert_eq!(local.info().fields.iter().map(|f| f.ty).collect::<Vec<_>>(), [FieldType::Date, FieldType::DateTime, FieldType::Text]);
+    let batch = local.read(&Request::all()).unwrap();
+    // A malformed clock must not force the moment column to Text; real clock fractions stay intact.
+    assert_eq!(batch.unread_dates, [1, 1]);
+    assert!(batch.features.iter().any(|f| f.attrs[2].to_string() == "12:30:00.123456789"));
+    let (_, report) = materialize(local.as_ref()).unwrap();
+    assert!(report.unread_dates.unwrap().contains("2 values"));
+    let mut rows = Vec::new();
+    let streamed = local
+        .visit_chunks(None, 256, &mut |chunk| {
+            rows.extend(chunk);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed.unread_dates, batch.unread_dates);
+    assert_eq!(rows, batch.features);
+    let url = "https://test.example/native-date-fields.fgb";
+    remote::testing::serve(url, bytes);
+    let remote = open_driven(url);
+    assert!(remote.info().fields.iter().all(|f| f.ty == FieldType::Text));
+    assert!(remote.info().notes.iter().any(|n| n.contains("3 date/time columns are kept as ISO text")));
+    let remote_batch = remote.read(&Request::all()).unwrap();
+    assert!(remote_batch.features.iter().any(|f| f.attrs[0] == Value::Text("2026-02-30".into())));
+}
+
+/// A FlatGeobuf column with a date and a date-time with digits past the microsecond is a
+/// date-time column: classification reads the date-time as the read does, rounded and counted.
+#[test]
+fn flatgeobuf_classifies_fine_date_times_as_date_times() {
+    use flatgeobuf::geozero::{ColumnValue, PropertyProcessor, wkb::Wkb};
+    use flatgeobuf::{ColumnType, FgbWriter, FgbWriterOptions, GeometryType as G};
+    let mut writer = FgbWriter::create_with_options("fine", G::Point, FgbWriterOptions::default()).unwrap();
+    writer.add_column("at", ColumnType::DateTime, |_, c| c.nullable = true);
+    for (i, s) in ["2026-03-05", "2026-03-05T14:30:00.123456789Z"].iter().enumerate() {
+        writer
+            .add_feature_geom(Wkb(wkb::encode(&Geometry::Point(Coord::new(i as f64, 0.0)))), |out| {
+                out.property(0, "at", &ColumnValue::DateTime(s)).unwrap();
+            })
+            .unwrap();
+    }
+    let mut bytes = Vec::new();
+    writer.write(&mut bytes).unwrap();
+    let src = open_bytes("fine.fgb", bytes, None).unwrap();
+    assert_eq!(src.info().fields[0].ty, FieldType::DateTime);
+    let batch = src.read(&Request::all()).unwrap();
+    // FlatGeobuf keeps features in its spatial index's order.
+    let mut shown: Vec<String> = batch.features.iter().map(|f| f.attrs[0].to_string()).collect();
+    shown.sort();
+    assert_eq!(shown, ["2026-03-05T00:00:00", "2026-03-05T14:30:00.123457Z"]);
+    assert!(batch.unread_dates.is_empty());
+    assert_eq!(batch.rounded_dates, [1]);
+}
+
+/// Date-time text a read takes (digits past the microsecond) is exported to FlatGeobuf as it is,
+/// not refused as an invalid date; reading it back rounds it and says so.
+#[test]
+fn flatgeobuf_exports_fine_date_time_text_as_it_is() {
+    let mut ds = Dataset::new("fine", GeometryType::Point, vec![Field::new("at", FieldType::DateTime)]);
+    ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Text("2026-03-05T14:30:00.1234567Z".into())]);
+    let bytes = fgb::write(&ds).unwrap();
+    let batch = open_bytes("fine.fgb", bytes, None).unwrap().read(&Request::all()).unwrap();
+    assert_eq!(batch.features[0].attrs[0].to_string(), "2026-03-05T14:30:00.123457Z");
+    assert_eq!(batch.rounded_dates, [1]);
+}
+
+/// A date field's text that is a midnight is exported to FlatGeobuf as its day, so the column
+/// still reads back as dates.
+#[test]
+fn flatgeobuf_exports_a_midnight_in_a_date_field_as_its_day() {
+    let mut ds = Dataset::new("days", GeometryType::Point, vec![Field::new("day", FieldType::Date)]);
+    ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Text("2026-03-05T00:00:00".into())]);
+    ds.push(Some(Geometry::Point(Coord::new(2.0, 2.0))), vec![Value::parse("2026-03-06", FieldType::Date)]);
+    // A date-time value that is a midnight too.
+    ds.push(Some(Geometry::Point(Coord::new(3.0, 2.0))), vec![Value::parse("2026-03-07T00:00:00", FieldType::DateTime)]);
+    let src = open_bytes("days.fgb", fgb::write(&ds).unwrap(), None).unwrap();
+    assert_eq!(src.info().fields[0].ty, FieldType::Date);
+    let mut days: Vec<String> = src.read(&Request::all()).unwrap().features.iter().map(|f| f.attrs[0].to_string()).collect();
+    days.sort();
+    assert_eq!(days, ["2026-03-05", "2026-03-06", "2026-03-07"]);
+}
+
+/// A moment in a GeoPackage date field isn't rounded into a midnight: it reads back as null, as
+/// the export counted it.
+#[test]
+fn geopackage_keeps_a_moment_in_a_date_field_from_becoming_a_day() {
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().join("days.gpkg");
+    let mut ds = Dataset::new("days", GeometryType::Point, vec![Field::new("day", FieldType::Date)]);
+    ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::parse("2026-03-05T00:00:00.000400", FieldType::DateTime)]);
+    assert_eq!(crate::io::text_in_dates(ds.features.iter(), &ds.fields), [1]);
+    // Said once, as a value that reads as null: it isn't rounded to the millisecond.
+    assert_eq!(crate::io::fine_dates(ds.features.iter(), &ds.fields), [0]);
+    // In a text field, the same date-time is written to the millisecond, and counted.
+    let mut text = Dataset::new("days", GeometryType::Point, vec![Field::new("day", FieldType::Text)]);
+    text.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), ds.features[0].attrs.clone());
+    assert_eq!(crate::io::fine_dates(text.features.iter(), &text.fields), [1]);
+    crate::io::write_path(&ds, &path).unwrap();
+    let (back, _) = crate::io::read_path(&path).unwrap();
+    assert!(back.value(0, 0).is_null(), "{:?}", back.value(0, 0));
+}
+
+/// A property length that runs past the feature's properties (a hostile or damaged file) skips
+/// that feature as unreadable, whole and streamed, instead of panicking in the reader; the
+/// features around it are read. Found by fuzzing `read_layers`.
+#[test]
+fn flatgeobuf_property_lengths_past_the_end_skip_the_feature() {
+    let mut ds = Dataset::new("places", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+    for (i, name) in ["first", "BROKEN", "third"].into_iter().enumerate() {
+        ds.push(Some(Geometry::Point(Coord::new(i as f64, 0.0))), vec![Value::Text(name.into())]);
+    }
+    let mut bytes = fgb::write(&ds).unwrap();
+    // The u32 length before "BROKEN" (6) made far longer than the properties.
+    let at = bytes.windows(10).position(|w| w == [6, 0, 0, 0, b'B', b'R', b'O', b'K', b'E', b'N']).unwrap();
+    bytes[at..at + 4].copy_from_slice(&0x7fff_0000u32.to_le_bytes());
+    let src = open_bytes("places.fgb", bytes, None).unwrap();
+    let batch = src.read(&Request::all()).unwrap();
+    assert_eq!(batch.skipped, 1);
+    let mut names: Vec<String> = batch.features.iter().map(|f| f.attrs[0].to_string()).collect();
+    names.sort();
+    assert_eq!(names, ["first", "third"]);
+    let mut rows = 0;
+    let streamed = src
+        .visit_chunks(None, 256, &mut |chunk| {
+            rows += chunk.len();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!((rows, streamed.skipped), (2, 1));
+}
+
+/// A readable size prefix can contain invalid UTF-8 properties. Classification ignores
+/// that row just as whole and streamed reads do, and the read reports the skipped feature.
+#[test]
+fn flatgeobuf_dates_skip_malformed_properties() {
+    let mut ds = Dataset::new("dates", GeometryType::Point, vec![Field::new("day", FieldType::Date)]);
+    for day in ["2001-01-01", "2024-02-29"] {
+        ds.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::parse(day, FieldType::Date)]);
+    }
+    let mut bytes = fgb::write(&ds).unwrap();
+    let at = bytes.windows(10).position(|s| s == b"2001-01-01").unwrap();
+    bytes[at] = 0xff;
+    let source = open_bytes("dates.fgb", bytes, None).unwrap();
+    assert_eq!(source.info().fields[0].ty, FieldType::Date);
+    let read = source.read(&Request::all()).unwrap();
+    assert_eq!(read.skipped, 1);
+    assert_eq!(read.features.len(), 1);
+    assert_eq!(read.features[0].attrs[0].to_string(), "2024-02-29");
+    let streamed = source.visit_chunks(None, 256, &mut |_| Ok(())).unwrap();
+    assert_eq!(streamed.skipped, 1);
+}
+
+/// Independently authored Arrow columns exercise units, UTC flags, pre-epoch values, nulls,
+/// out-of-range dates and nanosecond values in both whole and streamed reads.
+#[test]
+fn parquet_date_units_invalid_values_and_nulls() {
+    use arrow_array::{
+        ArrayRef, BinaryArray, Date32Array, RecordBatch, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    };
+    use arrow_schema::{DataType, Field as AField, Schema, TimeUnit};
+    let geoms: Vec<Vec<u8>> = (0..3).map(|x| wkb::encode(&Geometry::Point(Coord::new(f64::from(x), 0.0)))).collect();
+    let schema = Arc::new(Schema::new(vec![
+        AField::new("geometry", DataType::Binary, false),
+        AField::new("day", DataType::Date32, true),
+        AField::new("ms", DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())), true),
+        AField::new("us", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+        AField::new("ns", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
+    ]));
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(BinaryArray::from(geoms.iter().map(Vec::as_slice).collect::<Vec<_>>())),
+        Arc::new(Date32Array::from(vec![Some(-1), Some(i32::MAX), None])),
+        Arc::new(TimestampMillisecondArray::from(vec![Some(-1), Some(i64::MAX), None]).with_timezone("UTC")),
+        Arc::new(TimestampMicrosecondArray::from(vec![Some(-1), Some(i64::MAX), None])),
+        Arc::new(TimestampNanosecondArray::from(vec![Some(-1000), Some(1001), None])),
+    ];
+    let mut bytes = Vec::new();
+    let mut w = ::parquet::arrow::ArrowWriter::try_new(&mut bytes, schema.clone(), None).unwrap();
+    w.write(&RecordBatch::try_new(schema, cols).unwrap()).unwrap();
+    w.close().unwrap();
+    let source = open_bytes("units.parquet", bytes, None).unwrap();
+    let batch = source.read(&Request::all()).unwrap();
+    // Three out-of-range values are read as empty; 1001 ns is rounded to a microsecond, and counted.
+    assert_eq!(batch.unread_dates, [1, 1, 1]);
+    assert_eq!(batch.rounded_dates, [0, 0, 0, 1]);
+    assert_eq!(
+        batch.features[0].attrs.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["1969-12-31", "1969-12-31T23:59:59.999Z", "1969-12-31T23:59:59.999999", "1969-12-31T23:59:59.999999"]
+    );
+    assert!(batch.features[1].attrs[..3].iter().all(Value::is_null));
+    assert_eq!(batch.features[1].attrs[3].to_string(), "1970-01-01T00:00:00.000001");
+    assert!(batch.features[2].attrs.iter().all(Value::is_null));
+    let extent = Extent::new(-0.1, -0.1, 0.1, 0.1);
+    let filtered = source.read(&Request { extent: Some(extent), limit: usize::MAX }).unwrap();
+    assert_eq!(filtered.features.len(), 1);
+    assert!(filtered.unread_dates.is_empty(), "invalid dates in filtered-out rows aren't read losses");
+    let filtered = source.visit_chunks(Some(extent), 256, &mut |_| Ok(())).unwrap();
+    assert!(filtered.unread_dates.is_empty());
+    let mut rows = Vec::new();
+    let streamed = source
+        .visit_chunks(None, 256, &mut |chunk| {
+            rows.extend(chunk);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(rows, batch.features);
+    assert_eq!(streamed.unread_dates, batch.unread_dates);
+}
+
+/// INT96 stores Julian days and nanoseconds of day with no UTC flag. Negative epochs must use
+/// the day plus its positive time, and finer-than-microsecond input is rounded and counted.
+#[test]
+fn parquet_int96_is_unzoned_and_checks_submicroseconds() {
+    use ::parquet::basic::{LogicalType, Repetition, TimeUnit, Type as Physical};
+    use ::parquet::data_type::{ByteArray, ByteArrayType, Int64Type, Int96, Int96Type};
+    use ::parquet::file::{properties::WriterProperties, writer::SerializedFileWriter};
+    use ::parquet::schema::types::Type;
+    let base = ::parquet::schema::parser::parse_message_type("message m { REQUIRED BINARY geometry; OPTIONAL INT96 legacy; }").unwrap();
+    let mut fields = base.get_fields().to_vec();
+    for (name, utc) in [("clock_local", false), ("clock_utc", true)] {
+        fields.push(Arc::new(
+            Type::primitive_type_builder(name, Physical::INT64)
+                .with_repetition(Repetition::OPTIONAL)
+                .with_logical_type(Some(LogicalType::time(utc, TimeUnit::MICROS)))
+                .build()
+                .unwrap(),
+        ));
+    }
+    let schema = Arc::new(Type::group_type_builder("m").with_fields(fields).build().unwrap());
+    let mut bytes = Vec::new();
+    let mut w = SerializedFileWriter::new(&mut bytes, schema, Arc::new(WriterProperties::builder().build())).unwrap();
+    let mut rg = w.next_row_group().unwrap();
+    let geom = ByteArray::from(wkb::encode(&Geometry::Point(Coord::new(0.0, 0.0))));
+    let mut col = rg.next_column().unwrap().unwrap();
+    col.typed::<ByteArrayType>().write_batch(&[geom.clone(), geom], None, None).unwrap();
+    col.close().unwrap();
+    let make = |ns: u64, day| {
+        let mut t = Int96::new();
+        t.set_data(ns as u32, (ns >> 32) as u32, day);
+        t
+    };
+    let mut col = rg.next_column().unwrap().unwrap();
+    col.typed::<Int96Type>().write_batch(&[make(86_399_999_999_000, 2_440_587), make(1, 2_440_588)], Some(&[1, 1]), None).unwrap();
+    col.close().unwrap();
+    for _ in 0..2 {
+        let mut col = rg.next_column().unwrap().unwrap();
+        col.typed::<Int64Type>().write_batch(&[0, 1], Some(&[1, 1]), None).unwrap();
+        col.close().unwrap();
+    }
+    rg.close().unwrap();
+    w.close().unwrap();
+    let src = open_bytes("legacy.parquet", bytes, None).unwrap();
+    let batch = src.read(&Request::all()).unwrap();
+    assert_eq!(batch.features[0].attrs[0].to_string(), "1969-12-31T23:59:59.999999");
+    // One nanosecond is rounded to the microsecond, and counted.
+    assert_eq!(batch.features[1].attrs[0].to_string(), "1970-01-01T00:00:00");
+    assert!(batch.unread_dates.is_empty());
+    assert_eq!(batch.rounded_dates, [1]);
+    assert_eq!(batch.features[0].attrs[1].to_string(), "00:00:00");
+    assert_eq!(batch.features[1].attrs[1].to_string(), "00:00:00.000001");
+    assert_eq!(batch.features[0].attrs[2].to_string(), "00:00:00.000000Z");
+    assert_eq!(batch.features[1].attrs[2].to_string(), "00:00:00.000001Z");
+    assert!(batch.features[0].attrs[2] < batch.features[1].attrs[2]);
+}
+
+/// A feature just below an extent, within the rounding of the Shapefile and GeoJSON indexes'
+/// single-precision boxes, is left out of a read of that extent, as it is in a whole read's
+/// filter and the other formats.
+#[test]
+fn a_feature_just_outside_an_extent_is_left_out_of_its_read() {
+    let d = dir().join("just-outside");
+    std::fs::create_dir_all(&d).unwrap();
+    let mut ds = Dataset::new("edge", GeometryType::Point, vec![]);
+    ds.push(Some(Geometry::Point(Coord::new(0.0, 0.999_999_999))), vec![]);
+    let extent = Some(Extent::new(-1.0, 1.0, 1.0, 2.0));
+    let req = Request { extent, limit: 1000 };
+    let (shp_path, geojson_path) = (d.join("edge.shp"), d.join("edge.geojson"));
+    crate::io::write_path(&ds, &shp_path).unwrap();
+    crate::io::write_path(&ds, &geojson_path).unwrap();
+    let shp = shp::ShpSource::open_path(&shp_path, "edge").unwrap();
+    assert!(shp.read(&req).unwrap().features.is_empty());
+    let mut rows = Vec::new();
+    shp.visit_chunks(extent, 1 << 20, &mut |chunk| {
+        rows.extend(chunk);
+        Ok(())
+    })
+    .unwrap();
+    assert!(rows.is_empty());
+    let geojson = geojson::GeoJsonSource::open_path(&geojson_path, "edge").unwrap();
+    assert!(geojson.read(&req).unwrap().features.is_empty());
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// A view the layer's projection refuses part of the edge of (#1925): the box queried in the
+/// layer's coordinates must still hold every place in the view the projection takes, or a read
+/// leaves out features without a word. Here, a UTM zone 17 layer and views reaching past 90°
+/// from its meridian, where transverse Mercator refuses places: such a view isn't bounded.
+#[test]
+fn a_query_box_leaves_out_nothing_in_view_when_its_edge_is_refused() {
+    let r = Reproject::from_crs(Crs::from_epsg(32617).unwrap(), &mut Vec::new());
+    let t = r.transformer().unwrap();
+    for view in [
+        Extent::new(-120.0, -30.0, 10.0, 30.0),
+        Extent::new(-180.0, -60.0, 180.0, 60.0),
+        Extent::new(-81.5, -5.0, 15.0, 5.0),
+        Extent::new(-175.0, -1.0, -60.0, 1.0),
+    ] {
+        // Unbounded (`None`) reads everything in view.
+        let Some(native) = r.extent_from_lonlat(&view) else { continue };
+        for i in 0..=40 {
+            for j in 0..=40 {
+                let p = Coord::new(view.min_x + view.width() * f64::from(i) / 40.0, view.min_y + view.height() * f64::from(j) / 40.0);
+                if let Some(q) = t.from_lonlat(p) {
+                    assert!(native.contains(q), "{view:?}: {p:?} goes to {q:?}, outside the box queried, {native:?}");
+                }
+            }
+        }
+    }
+    // A view in the zone is still a box.
+    assert!(r.extent_from_lonlat(&Extent::new(-84.0, 30.0, -78.0, 40.0)).is_some_and(|e| !e.is_empty()));
+}
+
+/// The ISO text database servers give for dates (PostgreSQL with `DateStyle` ISO and `TimeZone`
+/// UTC, MySQL's casts with `Z` added for a `TIMESTAMP`, SQL Server's style 126 cut to
+/// microseconds) reads as dates without a count. What RustGIS can't hold (`infinity`, a year BC
+/// or past 9999, MySQL's zero and partial dates) is null and counted, and none is null uncounted.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn database_date_text_reads_as_dates_and_counts_the_rest() {
+    let mut unread = Vec::new();
+    let clean = [
+        (Some("2026-03-05"), FieldType::Date, "2026-03-05"),
+        (Some("2026-03-05 14:30:00.25"), FieldType::DateTime, "2026-03-05T14:30:00.250"),
+        (Some("2026-03-05 14:30:00+00"), FieldType::DateTime, "2026-03-05T14:30:00Z"),
+        (Some("2026-03-05 14:30:00.123456Z"), FieldType::DateTime, "2026-03-05T14:30:00.123456Z"),
+        (Some("2026-03-05T14:30:00.123456+02:00"), FieldType::DateTime, "2026-03-05T14:30:00.123456+02:00"),
+        (None, FieldType::Date, "<Null>"),
+    ];
+    for (text, ty, shown) in clean {
+        assert_eq!(server_date(text, ty, &mut unread, 1).to_string(), shown, "{text:?}");
+    }
+    assert!(unread.is_empty(), "clean text counts nothing: {unread:?}");
+    for text in ["infinity", "-infinity", "0044-03-15 BC", "12026-01-01", "0000-00-00", "2026-03-00", "0000-00-00 00:00:00Z"] {
+        assert_eq!(server_date(Some(text), FieldType::DateTime, &mut unread, 1).to_string(), "<Null>", "{text}");
+    }
+    assert_eq!(unread, [0, 7]);
+    // A server gives at most microseconds: more digits aren't rounded, so it isn't a date.
+    assert_eq!(server_date(Some("2026-03-05 14:30:00.1234567"), FieldType::DateTime, &mut unread, 1).to_string(), "<Null>");
+    assert_eq!(unread, [0, 8]);
+}
+
+/// A read of a view whose box the layer's system can't bound (#1925) still matches the view: a
+/// UTM zone 17 layer with 200 points in view, 2000 in the zone outside it and a row without
+/// geometry, read with a limit of 10, gives a sample of the points in view and not the row. Sampling
+/// the whole layer before testing the view would keep about one.
+#[test]
+fn a_view_its_system_cant_bound_reads_what_is_in_view() {
+    let d = dir().join("unbounded-view");
+    std::fs::create_dir_all(&d).unwrap();
+    let mut ds = Dataset::new("pts", GeometryType::Point, vec![Field::new("n", FieldType::Integer)]);
+    for i in 0..2200 {
+        let (lat, k) = if i < 200 { (0.0, 25.0 * f64::from(i) / 200.0) } else { (40.0, 40.0 * f64::from(i - 200) / 2000.0) };
+        let lon = -84.0 + 6.0 * f64::from(i % 37) / 37.0;
+        ds.push(Some(Geometry::Point(Coord::new(lon, lat + k))), vec![Value::Int(i64::from(i))]);
+    }
+    ds.push(None, vec![Value::Int(-1)]);
+    let view = Extent::new(-120.0, -30.0, 10.0, 30.0);
+    let r = Reproject::from_crs(Crs::from_epsg(32617).unwrap(), &mut Vec::new());
+    assert!(r.extent_from_lonlat(&view).is_none(), "the view's edge is refused");
+    for ext in ["shp", "fgb", "gpkg", "parquet", "geojson"] {
+        let p = d.join(format!("pts.{ext}"));
+        write_unbounded_view_fixture(&ds, &p);
+        let source = open_path(&p, None).unwrap();
+        let mut sources: Vec<&dyn FeatureSource> = vec![source.as_ref()];
+        let memory = if ext == "gpkg" {
+            let bytes = Shared(std::sync::Arc::new(std::fs::read(&p).unwrap()));
+            Some(gpkg_mem::GpkgMemSource::open_shared(bytes, None).unwrap())
+        } else {
+            None
+        };
+        if let Some(memory) = &memory {
+            sources.push(memory);
+        }
+        let fetched = if matches!(ext, "fgb" | "parquet") {
+            let url = format!("https://test.example/unbounded-view.{ext}");
+            remote::testing::serve(&url, std::fs::read(&p).unwrap());
+            Some(open_driven(&url))
+        } else {
+            None
+        };
+        if let Some(fetched) = &fetched {
+            sources.push(fetched);
+        }
+        for source in sources {
+            {
+                // A zero limit cannot give a count for a view requiring a complete geometry scan.
+                let probe = crate::progress::tests::Counted::cancelling_after(0);
+                let _guard = crate::progress::install(Some(probe.clone()));
+                let error = source.read(&Request { extent: Some(view), limit: 0 }).unwrap_err().to_string();
+                assert!(error.contains("zero-limit") && error.contains("count"), "{ext}: {error}");
+                assert_eq!(probe.done.load(std::sync::atomic::Ordering::Relaxed), 0, "{ext}");
+            }
+            for limit in [10, 2201] {
+                let read = source.read(&Request { extent: Some(view), limit }).unwrap();
+                assert_eq!(read.matched, 200, "{ext}: count only view matches before sampling");
+                if limit == 10 {
+                    // Adaptive sampling keeps between half the limit and the limit.
+                    assert!((5..=10).contains(&read.features.len()), "{ext}: {} features", read.features.len());
+                } else {
+                    // A full view read excludes the null-geometry row and all out-of-view points.
+                    assert_eq!(read.features.len(), 200, "{ext}");
+                    assert!(read.complete, "{ext}");
+                }
+                for f in &read.features {
+                    let g = f.geometry.as_ref().unwrap_or_else(|| panic!("{ext}: feature {} has no geometry", f.id));
+                    assert!(g.extent().intersects(&view), "{ext}: feature {} is outside the view", f.id);
+                }
+            }
+            {
+                // Cancel while scanning, not before the read starts; the view needs a complete scan.
+                let probe = crate::progress::tests::Counted::cancelling_after(3);
+                let _guard = crate::progress::install(Some(probe.clone()));
+                assert!(matches!(source.read(&Request { extent: Some(view), limit: 10 }), Err(DataError::Cancelled)), "{ext}");
+                assert_eq!(probe.done.load(std::sync::atomic::Ordering::Relaxed), 3, "{ext}");
+            }
+            if source.visits_chunks() {
+                let probe = crate::progress::tests::Counted::cancelling_after(3);
+                let _guard = crate::progress::install(Some(probe.clone()));
+                assert!(matches!(source.visit_chunks(Some(view), 1 << 20, &mut |_| Ok(())), Err(DataError::Cancelled)));
+                assert_eq!(probe.done.load(std::sync::atomic::Ordering::Relaxed), 3);
+            }
+        }
+    }
+}
+
+/// A view match after the row cap must not disappear from an unbounded GeoParquet read.
+#[test]
+fn unbounded_parquet_view_refuses_a_capped_group() {
+    let p = dir().join("capped-view.parquet");
+    let mut ds = Dataset::new("pts", GeometryType::Point, vec![Field::new("n", FieldType::Integer)]);
+    ds.push(Some(Geometry::Point(Coord::new(-81.0, 40.0))), vec![Value::Int(0)]);
+    ds.push(Some(Geometry::Point(Coord::new(-81.0, 0.0))), vec![Value::Int(1)]);
+    write_unbounded_view_fixture(&ds, &p);
+    let source = parquet::ParquetSource::open_path(&p, "pts").unwrap().with_group_rows(1);
+    let req = Request { extent: Some(Extent::new(-120.0, -30.0, 10.0, 30.0)), limit: 10 };
+    let error = source.read(&req).unwrap_err().to_string();
+    assert!(error.contains("more than the 1 read from one"), "{error}");
+}
+
+/// Repeated text can expand from a small dictionary into one owned string per scanned row.
+#[test]
+fn unbounded_parquet_view_refuses_decoded_columns_over_budget() {
+    let p = dir().join("decoded-view.parquet");
+    let mut ds = Dataset::new("pts", GeometryType::Point, vec![Field::new("label", FieldType::Text)]);
+    for _ in 0..20 {
+        ds.push(Some(Geometry::Point(Coord::new(-81.0, 0.0))), vec![Value::Text("x".repeat(1024))]);
+    }
+    write_unbounded_view_fixture(&ds, &p);
+    let source = parquet::ParquetSource::open_path(&p, "pts").unwrap().with_scan_bytes(16 << 10);
+    let req = Request { extent: Some(Extent::new(-120.0, -30.0, 10.0, 30.0)), limit: 1 };
+    let error = source.read(&req).unwrap_err().to_string();
+    assert!(error.contains("decoded-column budget"), "{error}");
+    let error = source.visit_chunks(req.extent, 4096, &mut |_| Ok(())).unwrap_err().to_string();
+    assert!(error.contains("decoded-column budget"), "{error}");
+    let clean = Request { extent: Some(Extent::new(-84.0, -1.0, -78.0, 1.0)), limit: 1 };
+    assert_eq!(source.read(&clean).unwrap().features.len(), 1);
+    let source = parquet::ParquetSource::open_path(&p, "pts").unwrap();
+    let batch = source.read(&req).unwrap();
+    assert_eq!(batch.matched, 20);
+    assert_eq!(batch.features[0].attrs[0], Value::Text("x".repeat(1024)));
+}
+
+/// The same small file must remain readable with plain or dictionary-encoded binary columns.
+#[test]
+fn unbounded_parquet_scan_accepts_two_thousand_distinct_points() {
+    let p = dir().join("ordinary-view.parquet");
+    let mut ds = Dataset::new("pts", GeometryType::Point, vec![]);
+    for i in 0..2000 {
+        ds.push(Some(Geometry::Point(Coord::new(-82.0 + f64::from(i) / 2000.0, 0.0))), vec![]);
+    }
+    write_projected_parquet_fixture(&ds, &p, 2000, true);
+    let source = parquet::ParquetSource::open_path(&p, "pts").unwrap();
+    let req = Request { extent: Some(Extent::new(-120.0, -30.0, 10.0, 30.0)), limit: 10 };
+    let batch = source.read(&req).unwrap();
+    assert_eq!(batch.matched, 2000);
+    assert!((5..=10).contains(&batch.features.len()));
+    drop(source);
+    write_projected_parquet_fixture(&ds, &p, 2000, false);
+    let source = parquet::ParquetSource::open_path(&p, "pts").unwrap();
+    assert_eq!(source.read(&req).unwrap().matched, 2000);
+}
+
+/// Streamed sources own the scan count; nested export writers must still observe Cancel.
+#[test]
+fn streamed_export_progress_counts_each_source_row_once() {
+    use std::sync::atomic::Ordering;
+    let d = dir();
+    let mut ds = Dataset::new("pts", GeometryType::Point, vec![]);
+    for i in 0..10 {
+        ds.push(Some(Geometry::Point(Coord::new(f64::from(i), 0.0))), vec![]);
+    }
+    for input in ["shp", "fgb", "gpkg", "parquet"] {
+        let path = d.join(format!("input.{input}"));
+        crate::io::write_path(&ds, &path).unwrap();
+        let source = open_path(&path, None).unwrap();
+        let memory = if input == "gpkg" {
+            Some(gpkg_mem::GpkgMemSource::open_shared(Shared(Arc::new(std::fs::read(&path).unwrap())), None).unwrap())
+        } else {
+            None
+        };
+        let mut sources: Vec<&dyn FeatureSource> = vec![source.as_ref()];
+        if let Some(memory) = &memory {
+            sources.push(memory);
+        }
+        for (i, source) in sources.into_iter().enumerate() {
+            for output in ["geojson", "csv", "gpkg"] {
+                let progress = Arc::new(crate::progress::tests::Counted::default());
+                let _guard = crate::progress::install(Some(progress.clone()));
+                let out = d.join(format!("output-{input}-{i}.{output}"));
+                assert_eq!(crate::export::write_source_in(source, &ds, &out, Crs::LonLat).unwrap().written, 10);
+                assert_eq!(progress.total.load(Ordering::Relaxed), 10, "{input} to {output}");
+                assert_eq!(progress.done.load(Ordering::Relaxed), 10, "{input} to {output}");
+            }
+        }
+    }
+}
+
+/// Per-group limits do not bound the sum of the masks retained across many small groups.
+#[test]
+fn unbounded_parquet_view_bounds_aggregate_row_masks() {
+    let p = dir().join("many-groups.parquet");
+    let mut ds = Dataset::new("pts", GeometryType::Point, vec![]);
+    ds.features =
+        (0..40_000).map(|id| crate::Feature { id, geometry: Some(Geometry::Point(Coord::new(-81.0, 0.0))), attrs: vec![] }).collect();
+    write_projected_parquet_fixture(&ds, &p, 100, true);
+    let source = parquet::ParquetSource::open_path(&p, "pts").unwrap().with_scan_bytes(32 << 10);
+    let req = Request { extent: Some(Extent::new(-120.0, -30.0, 10.0, 30.0)), limit: 10 };
+    let error = source.read(&req).unwrap_err().to_string();
+    assert!(error.contains("row-mask budget"), "{error}");
+    let source = parquet::ParquetSource::open_path(&p, "pts").unwrap();
+    assert_eq!(source.read(&req).unwrap().matched, 40_000);
+}
+
+/// Writes the projected reader fixture, including formats whose public writer accepts only WGS 84.
+fn write_unbounded_view_fixture(ds: &Dataset, path: &Path) {
+    let crs = Crs::from_epsg(32617).unwrap();
+    match path.extension().and_then(|s| s.to_str()).unwrap() {
+        "geojson" => {
+            let projected = crate::io::project(ds, crs).unwrap();
+            let mut json = crate::io::to_geojson(&projected);
+            json["crs"] = serde_json::json!({"type": "name", "properties": {"name": "EPSG:32617"}});
+            std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
+        }
+        "parquet" => write_projected_parquet_fixture(ds, path, 100, true),
+        _ => {
+            crate::io::write_path_in(ds, path, crs).unwrap();
+        }
+    }
+}
+
+/// A UTM fixture with selectable row-group size and binary encoding, using the same covering.
+fn write_projected_parquet_fixture(ds: &Dataset, path: &Path, rows: usize, dictionary: bool) {
+    let crs = Crs::from_epsg(32617).unwrap();
+    use arrow_array::{BinaryArray, Float64Array, RecordBatch, StringArray, StructArray};
+    use arrow_schema::{DataType, Field as AField, Schema};
+    let projected = crate::io::project(ds, crs).unwrap();
+    let wkbs: Vec<_> = projected.features.iter().map(|f| f.geometry.as_ref().map(wkb::encode)).collect();
+    let geometry = BinaryArray::from(wkbs.iter().map(|w| w.as_deref()).collect::<Vec<_>>());
+    let bbox_fields = ["xmin", "ymin", "xmax", "ymax"].map(|n| Arc::new(AField::new(n, DataType::Float64, true)));
+    let coord = |at: fn(Extent) -> f64| -> arrow_array::ArrayRef {
+        Arc::new(Float64Array::from(projected.features.iter().map(|f| f.geometry.as_ref().map(|g| at(g.extent()))).collect::<Vec<_>>()))
+    };
+    let bbox = StructArray::new(
+        bbox_fields.iter().cloned().collect(),
+        vec![coord(|e| e.min_x), coord(|e| e.min_y), coord(|e| e.max_x), coord(|e| e.max_y)],
+        None,
+    );
+    let mut fields = vec![
+        AField::new("geometry", DataType::Binary, true),
+        AField::new("bbox", DataType::Struct(bbox_fields.iter().cloned().collect()), false),
+    ];
+    let mut columns: Vec<arrow_array::ArrayRef> = vec![Arc::new(geometry), Arc::new(bbox)];
+    for (i, field) in ds.fields.iter().enumerate().filter(|(_, f)| f.ty == FieldType::Text) {
+        fields.push(AField::new(&field.name, DataType::Utf8, true));
+        columns.push(Arc::new(StringArray::from(
+            ds.features
+                .iter()
+                .map(|f| match f.attrs.get(i) {
+                    Some(Value::Text(s)) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        )));
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+    let geo = serde_json::json!({"version": "1.1.0", "primary_column": "geometry", "columns": {"geometry": {
+        "encoding": "WKB", "geometry_types": ["Point"], "crs": {"type": "ProjectedCRS", "id": {"authority": "EPSG", "code": 32617}},
+        "covering": {"bbox": {"xmin": ["bbox", "xmin"], "ymin": ["bbox", "ymin"], "xmax": ["bbox", "xmax"], "ymax": ["bbox", "ymax"]}}
+    }}});
+    let props = ::parquet::file::properties::WriterProperties::builder()
+        .set_max_row_group_row_count(Some(rows))
+        .set_dictionary_enabled(dictionary)
+        .set_key_value_metadata(Some(vec![::parquet::file::metadata::KeyValue::new("geo".into(), geo.to_string())]))
+        .build();
+    let mut writer = ::parquet::arrow::ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, Some(props)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
 }

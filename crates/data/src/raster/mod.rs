@@ -16,16 +16,20 @@ mod esri;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gdal;
 pub mod geotiff;
+mod image_grid;
+mod lerc;
 mod lzw;
 mod mask;
 pub mod pam;
 pub mod planetary;
 pub mod wkt;
+pub mod world;
 pub mod zarr;
 
 use std::path::Path;
 
 pub use crs::{Crs, Transformer};
+pub use image_grid::ImageGrid;
 use rustgis_geom::{Coord, Extent};
 use serde::{Deserialize, Serialize};
 
@@ -165,16 +169,33 @@ pub struct BandStats {
 impl BandStats {
     /// Statistics of the finite values in `data`.
     pub fn from_values(data: &[f32]) -> BandStats {
-        BandStats::compute(data, f32::is_finite)
+        BandStats::compute_with(data, |_, v| v.is_finite(), None)
     }
 
-    fn compute(data: &[f32], valid: impl Fn(f32) -> bool + Sync) -> BandStats {
-        BandStats::compute_with(data, valid, None)
+    /// Statistics of a raster's band `data`: the values `valid` takes, less, for a colour band of
+    /// a raster with alpha, the cells its alpha band (`alpha`) draws see-through ([`see_through`],
+    /// an alpha of `opaque` being opaque). `stored` is the band's whole statistics, for a reduced
+    /// overview ([`BandStats::compute_with`]); GDAL counts see-through cells in all but 8-bit
+    /// images, so a band with `alpha` doesn't take them.
+    fn of_band(
+        data: &[f32],
+        valid: impl Fn(f32) -> bool + Sync,
+        alpha: Option<&[f32]>,
+        opaque: f32,
+        stored: Option<pam::Stats>,
+    ) -> BandStats {
+        match alpha {
+            Some(alpha) => {
+                BandStats::compute_with(data, |i, v| valid(v) && alpha.get(i).is_some_and(|&a| !see_through(a, valid(a), opaque)), None)
+            }
+            None => BandStats::compute_with(data, |_, v| valid(v), stored),
+        }
     }
 
-    /// [`BandStats::compute`], taking the range, mean and spread from `stored` (statistics of the
-    /// whole band, when `data` is a reduced overview of it).
-    fn compute_with(data: &[f32], valid: impl Fn(f32) -> bool + Sync, stored: Option<pam::Stats>) -> BandStats {
+    /// Statistics of the values of `data` that `valid` takes (given each one's place in `data` and
+    /// its value), taking the range, mean and spread from `stored` (statistics of the whole band,
+    /// when `data` is a reduced overview of it).
+    fn compute_with(data: &[f32], valid: impl Fn(usize, f32) -> bool + Sync, stored: Option<pam::Stats>) -> BandStats {
         BandStats::compute_on(data, valid, stored, threads_for(data.len()))
     }
 
@@ -184,10 +205,14 @@ impl BandStats {
     /// the same to the bit; what doesn't depend on the order is counted on the others
     /// ([`on_runs`]), the range while this thread sums. The range keeps the first of equal values
     /// (−0 or 0) in the band's order either way.
-    fn compute_on(data: &[f32], valid: impl Fn(f32) -> bool + Sync, stored: Option<pam::Stats>, threads: usize) -> BandStats {
-        let ranged = |run: &[f32], sum: bool| {
+    fn compute_on(data: &[f32], valid: impl Fn(usize, f32) -> bool + Sync, stored: Option<pam::Stats>, threads: usize) -> BandStats {
+        // A run of `data` from `start`.
+        let ranged = |start: usize, run: &[f32], sum: bool| {
             let (mut n, mut min, mut max, mut whole, mut sums) = (0usize, f64::INFINITY, f64::NEG_INFINITY, true, (0.0f64, 0.0f64));
-            for &v in run.iter().filter(|&&v| valid(v)) {
+            for (j, &v) in run.iter().enumerate() {
+                if !valid(start + j, v) {
+                    continue;
+                }
                 let x = v as f64;
                 n += 1;
                 (min, max) = (lower(min, x), higher(max, x));
@@ -199,10 +224,10 @@ impl BandStats {
             (n, min, max, whole, sums)
         };
         let (n, mut min, mut max, whole, (sum, sum2)) = if threads <= 1 {
-            ranged(data, true)
+            ranged(0, data, true)
         } else {
-            let sums = || ranged(data, true).4;
-            let (runs, sums) = on_runs_beside(data, threads, sums, |run| ranged(run, false));
+            let sums = || ranged(0, data, true).4;
+            let (runs, sums) = on_runs_beside(data, threads, sums, |start, run| ranged(start, run, false));
             let mut all = (0usize, f64::INFINITY, f64::NEG_INFINITY, true, sums);
             for (rn, rmin, rmax, rwhole, _) in runs {
                 all = (all.0 + rn, lower(all.1, rmin), higher(all.2, rmax), all.3 && rwhole, all.4);
@@ -225,8 +250,8 @@ impl BandStats {
         let small_ints = whole && min >= 0.0 && max <= 65_535.0;
         let k = (HISTOGRAM_BINS as f64 - 1.0) / if span > 0.0 { span } else { 1.0 };
         let b = Binning { min, k, small_ints, whole };
-        let mut runs = on_runs(data, threads, |run| Tally::run(run, &valid, b)).into_iter();
-        let mut tally = runs.next().unwrap_or_else(|| Tally::run(&[], &valid, b));
+        let mut runs = on_runs(data, threads, |start, run| Tally::run(start, run, &valid, b)).into_iter();
+        let mut tally = runs.next().unwrap_or_else(|| Tally::run(0, &[], &valid, b));
         for t in runs {
             tally.histogram.iter_mut().zip(&t.histogram).for_each(|(a, b)| *a += b);
             tally.bits.iter_mut().zip(&t.bits).for_each(|(a, b)| *a |= b);
@@ -310,32 +335,40 @@ fn threads_for(len: usize) -> usize {
     if cfg!(target_arch = "wasm32") || len < PARALLEL_VALUES { 1 } else { crate::threads::max().min(len / (PARALLEL_VALUES / 4)) }
 }
 
-/// `f` over `threads` runs of `data` that cover it in order, its results in that order, the
-/// calling thread taking the first. A worker's panic is raised again here; a run whose thread
-/// can't start is made on this one.
-fn on_runs<T: Send>(data: &[f32], threads: usize, f: impl Fn(&[f32]) -> T + Sync) -> Vec<T> {
+/// `f` over `threads` runs of `data` that cover it in order, each given with where it starts in
+/// `data`, its results in that order, the calling thread taking the first. A worker's panic is
+/// raised again here; a run whose thread can't start is made on this one.
+fn on_runs<T: Send>(data: &[f32], threads: usize, f: impl Fn(usize, &[f32]) -> T + Sync) -> Vec<T> {
     on_runs_beside(data, threads, || (), f).0
 }
 
 /// [`on_runs`], the calling thread running `beside` first, while the other threads start on
 /// their runs.
-fn on_runs_beside<T: Send, U>(data: &[f32], threads: usize, beside: impl FnOnce() -> U, f: impl Fn(&[f32]) -> T + Sync) -> (Vec<T>, U) {
+fn on_runs_beside<T: Send, U>(
+    data: &[f32],
+    threads: usize,
+    beside: impl FnOnce() -> U,
+    f: impl Fn(usize, &[f32]) -> T + Sync,
+) -> (Vec<T>, U) {
     if threads <= 1 || data.is_empty() {
         let beside = beside();
-        return (vec![f(data)], beside);
+        return (vec![f(0, data)], beside);
     }
-    let mut runs = data.chunks(data.len().div_ceil(threads));
-    let first = runs.next().unwrap_or_default();
+    let size = data.len().div_ceil(threads);
+    let mut runs = data.chunks(size).enumerate().map(|(k, run)| (k * size, run));
+    let (start, first) = runs.next().unwrap_or_default();
     let f = &f;
     std::thread::scope(|scope| {
-        let started: Vec<_> = runs.map(|run| std::thread::Builder::new().spawn_scoped(scope, move || f(run)).map_err(|_| run)).collect();
+        let started: Vec<_> = runs
+            .map(|(start, run)| std::thread::Builder::new().spawn_scoped(scope, move || f(start, run)).map_err(|_| (start, run)))
+            .collect();
         let beside = beside();
-        let mut out = vec![f(first)];
+        let mut out = vec![f(start, first)];
         for run in started {
             out.push(match run {
                 Ok(h) => h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)),
                 // The OS refused a thread: made here.
-                Err(run) => f(run),
+                Err((start, run)) => f(start, run),
             });
         }
         (out, beside)
@@ -343,14 +376,14 @@ fn on_runs_beside<T: Send, U>(data: &[f32], threads: usize, beside: impl FnOnce(
 }
 
 impl Tally {
-    /// `data`'s valid values counted on this thread.
-    fn run(data: &[f32], valid: &impl Fn(f32) -> bool, b: Binning) -> Tally {
+    /// `data`'s valid values counted on this thread: a run of a band from `start`.
+    fn run(start: usize, data: &[f32], valid: &impl Fn(usize, f32) -> bool, b: Binning) -> Tally {
         let mut histogram = vec![0u64; HISTOGRAM_BINS];
         let mut bits = if b.small_ints { vec![0u64; 1024] } else { Vec::new() };
         let mut distinct = std::collections::BTreeSet::new();
         let mut track = b.whole;
-        for &v in data {
-            if !valid(v) {
+        for (j, &v) in data.iter().enumerate() {
+            if !valid(start + j, v) {
                 continue;
             }
             let x = v as f64;
@@ -538,6 +571,13 @@ pub fn alpha_max(data_type: &str) -> f32 {
     }
 }
 
+/// Whether an alpha value draws its cell fully see-through, as the map draws it: an alpha of no
+/// value (`valid` false: NaN, or the raster's no-data), or one under half a 256th of `opaque` (the
+/// pixel type's [`alpha_max`]), which is nothing in 8 bits.
+pub fn see_through(a: f32, valid: bool, opaque: f32) -> bool {
+    !valid || ((a / opaque).clamp(0.0, 1.0) * 255.0).round() == 0.0
+}
+
 /// How a raster's bands were meant to be shown, from the file.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum ColorHint {
@@ -549,6 +589,19 @@ pub enum ColorHint {
     Rgb { alpha: bool },
     /// Band 1 indexes this colour table (RGBA).
     Palette(Vec<[u8; 4]>),
+}
+
+impl ColorHint {
+    /// For a raster of `bands` bands shown this way with alpha, its alpha band and the colour
+    /// bands that band makes see-through: an RGBA image's fourth band over its first three, grey
+    /// and alpha's second over its first.
+    pub fn alpha(&self, bands: usize) -> Option<(usize, std::ops::Range<usize>)> {
+        match self {
+            ColorHint::Rgb { alpha: true } if bands >= 4 => Some((3, 0..3)),
+            ColorHint::GrayAlpha if bands >= 2 => Some((1, 0..1)),
+            _ => None,
+        }
+    }
 }
 
 /// A raster on a grid: georeferenced, unless `georeferenced` is false (a scan, whose transform
@@ -569,6 +622,10 @@ pub struct Raster {
     pub source: Option<String>,
     /// Whether the pixels come from a reduced-resolution overview.
     pub overview: Option<(u32, u32)>,
+    /// With `overview`, whether the pixels are every `step`-th of the file's, from its top-left
+    /// corner (a picture too large to read whole): each then spans exactly `step` of its pixels,
+    /// where an overview's span its size over the file's. 1 otherwise.
+    pub(crate) step: u32,
     /// `false` for a scan (a TIFF with no GeoTIFF tags, a PNG, a JPEG): `transform` is then only
     /// a stand-in until the picture is placed or georeferenced, and says nothing about the ground.
     pub georeferenced: bool,
@@ -680,7 +737,6 @@ pub fn gdal_metadata_changed(r: &Raster, bands: &[usize]) -> usize {
 
 impl Raster {
     /// Builds a raster from bands of `width × height` pixels and computes statistics.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: impl Into<String>,
         width: u32,
@@ -697,7 +753,6 @@ impl Raster {
 
     /// [`Raster::new`] without statistics (each band's are empty): a part of a larger raster,
     /// drawn with the whole's (a cloud-optimised GeoTIFF's view, read in place).
-    #[allow(clippy::too_many_arguments)]
     pub fn unmeasured(
         name: impl Into<String>,
         width: u32,
@@ -712,7 +767,6 @@ impl Raster {
         Raster::build(name, width, height, bands, transform, crs, nodata, color, data_type, false)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn build(
         name: impl Into<String>,
         width: u32,
@@ -738,16 +792,21 @@ impl Raster {
         let transformer = crs.transformer().map_err(DataError::Format)?;
         let nd = nodata.filter(|v| v.is_finite()).map(|v| v as f32);
         let valid = move |v: f32| v.is_finite() && nd.is_none_or(|d| v != d);
+        let data_type = data_type.into();
+        let (alpha, opaque) = (color.alpha(bands.len()), alpha_max(&data_type));
+        let stats: Vec<BandStats> = bands
+            .iter()
+            .enumerate()
+            .map(|(i, data)| {
+                let alpha = alpha.as_ref().filter(|(_, colour)| colour.contains(&i)).and_then(|(a, _)| bands.get(*a));
+                if measure { BandStats::of_band(data, valid, alpha.map(Vec::as_slice), opaque, None) } else { BandStats::default() }
+            })
+            .collect();
         let bands = bands
             .into_iter()
+            .zip(stats)
             .enumerate()
-            .map(|(i, data)| Band {
-                name: format!("Band {}", i + 1),
-                stats: if measure { BandStats::compute(&data, valid) } else { BandStats::default() },
-                data,
-                classes: Vec::new(),
-                wavelength: None,
-            })
+            .map(|(i, (data, stats))| Band { name: format!("Band {}", i + 1), stats, data, classes: Vec::new(), wavelength: None })
             .collect();
         let mut r = Raster {
             name: name.into(),
@@ -758,9 +817,10 @@ impl Raster {
             crs,
             nodata: nodata.filter(|v| v.is_finite()),
             color,
-            data_type: data_type.into(),
+            data_type,
             source: None,
             overview: None,
+            step: 1,
             georeferenced: true,
             lost: Vec::new(),
             rounded: Vec::new(),
@@ -839,90 +899,48 @@ impl Raster {
         let nd = self.nodata.map(|v| v as f32);
         let valid = move |v: f32| v.is_finite() && nd.is_none_or(|d| v != d);
         let overview = self.overview.is_some();
+        // Bands whose attribute table's class names aren't used: the file names their classes.
+        let mut unused_tables = 0usize;
+        // Worked out before the bands change, as a colour band's take its alpha band's values.
+        let (alpha, opaque) = (self.color.alpha(self.bands.len()), alpha_max(&self.data_type));
+        let mut measured: Vec<Option<BandStats>> = (0..self.bands.len())
+            .map(|i| {
+                let stored = pam.band(i + 1).and_then(|p| p.stats).filter(|_| overview);
+                let data = self.bands.get(i).filter(|_| recompute || stored.is_some())?;
+                let alpha = alpha.as_ref().filter(|(_, colour)| colour.contains(&i)).and_then(|(a, _)| self.bands.get(*a));
+                Some(BandStats::of_band(&data.data, valid, alpha.map(|a| a.data.as_slice()), opaque, stored))
+            })
+            .collect();
         for (i, band) in self.bands.iter_mut().enumerate() {
             let p = pam.band(i + 1);
             if let Some(d) = p.and_then(|p| p.description.as_ref()) {
                 band.name = d.clone();
             }
+            // A table's names don't replace those the file's own metadata gave.
             if let Some(p) = p.filter(|p| !p.categories.is_empty()) {
-                band.classes = p.categories.clone();
+                if p.from_table && !band.classes.is_empty() {
+                    unused_tables += 1;
+                } else {
+                    band.classes = p.categories.clone();
+                }
             }
             if let Some(w) = p.and_then(|p| p.wavelength) {
                 band.wavelength = Some(w);
             }
-            let stored = p.and_then(|p| p.stats).filter(|_| overview);
-            if recompute || stored.is_some() {
-                band.stats = BandStats::compute_with(&band.data, valid, stored);
+            if let Some(stats) = measured.get_mut(i).and_then(Option::take) {
+                band.stats = stats;
             }
+        }
+        if unused_tables > 0 {
+            self.lost.push(format!(
+                "{from}: {unused_tables} attribute table(s) of class names not read: the file's own metadata names those bands' classes"
+            ));
         }
     }
 
     /// Longitude/latitude bounds, from points along the grid's edges.
     fn compute_extent(&self) -> Extent {
-        let mut e = Extent::EMPTY;
-        let (w, h) = (self.width as f64, self.height as f64);
-        let steps = 32;
-        let mut add = |col: f64, row: f64| {
-            if let Some(c) = self.transformer.to_lonlat_for_extent(self.transform.to_world(col, row)) {
-                e.expand(Coord::new(c.x, c.y.clamp(-90.0, 90.0)));
-            }
-        };
-        for i in 0..=steps {
-            let t = i as f64 / steps as f64;
-            for (col, row) in [(t * w, 0.0), (t * w, h), (0.0, t * h), (w, t * h)] {
-                add(col, row);
-            }
-        }
-        // Interior points too: in polar and other projections the grid can reach further than its
-        // edges do. (A raster crossing the antimeridian still gets a world-wide extent.)
-        let n = 16;
-        for i in 1..n {
-            for j in 1..n {
-                add(w * i as f64 / n as f64, h * j as f64 / n as f64);
-            }
-        }
-        // Normalize the transformed range as a whole, retaining its winding: a range crossing
-        // the antimeridian needs world-wide bounds to include both strips in a single Extent.
-        // A native full turn remains world-wide even if a datum shift contracts its samples.
-        if !e.is_empty() && self.transformer.is_geographic() && w * self.transform.pixel_width.abs() >= 360.0 {
-            (e.min_x, e.max_x) = (-180.0, 180.0);
-        } else if !e.is_empty() && (e.min_x < -180.0 || e.max_x > 180.0) {
-            let shift = 360.0 * ((e.min_x + 180.0) / 360.0).floor();
-            let (lo, hi) = (e.min_x - shift, e.max_x - shift);
-            (e.min_x, e.max_x) = if lo >= -180.0 && hi <= 180.0 { (lo, hi) } else { (-180.0, 180.0) };
-        }
-        // A whole world in a world projection RustGIS computes reaches the antimeridian and the
-        // poles at its outline's edge, which samples miss when the grid's edges are a little past
-        // it (its corners are off the outline): whatever of them is in the grid is in its extent
-        // (#1701).
-        if let Some(centre) = self.transformer.world_central_meridian().filter(|_| !e.is_empty()) {
-            let inside = |lon: f64, lat: f64| {
-                self.transformer.from_lonlat(Coord::new(lon, lat)).is_some_and(|m| {
-                    let (col, row) = self.transform.to_pixel(m);
-                    (-1e-6..=w + 1e-6).contains(&col) && (-1e-6..=h + 1e-6).contains(&row)
-                })
-            };
-            let along = |i: usize| -180.0 + 360.0 * i as f64 / steps as f64;
-            if (0..=steps).any(|i| inside(180.0, along(i) / 2.0)) {
-                e.max_x = 180.0;
-            }
-            if (0..=steps).any(|i| inside(-180.0, along(i) / 2.0)) {
-                e.min_x = -180.0;
-            }
-            if (0..=steps).any(|i| inside(along(i), 90.0)) {
-                e.max_y = 90.0;
-            }
-            if (0..=steps).any(|i| inside(along(i), -90.0)) {
-                e.min_y = -90.0;
-            }
-            // Centred elsewhere than on 0°, the outline's edges are another meridian than the
-            // antimeridian: the one opposite its centre, on either side of it.
-            let edge = (centre + 360.0).rem_euclid(360.0) - 180.0;
-            if edge.abs() < 180.0 - 1e-6 && (0..=steps).any(|i| [-1e-9, 1e-9].iter().any(|d| inside(edge + d, along(i) / 2.0))) {
-                (e.min_x, e.max_x) = (e.min_x.min(edge), e.max_x.max(edge));
-            }
-        }
-        e
+        extent_of(&self.transform, &self.transformer, self.width, self.height)
     }
 
     /// Refuses a raster with no coordinates, for the tools that would give their result a place
@@ -986,6 +1004,67 @@ impl Raster {
         Ok(())
     }
 
+    /// How many of the file's pixels one pixel read spans, across and down: exactly `step` for
+    /// every `step`-th pixel, an overview's size over the file's, else 1.
+    fn file_pixels(&self) -> (f64, f64) {
+        if self.step > 1 {
+            return (f64::from(self.step), f64::from(self.step));
+        }
+        let (full_w, full_h) = self.overview.unwrap_or((self.width, self.height));
+        (f64::from(full_w) / f64::from(self.width.max(1)), f64::from(full_h) / f64::from(self.height.max(1)))
+    }
+
+    /// A scan placed by its world file, in `crs`: georeferenced. The world file speaks of the
+    /// file's pixels, so a scan read at a reduced size keeps its place with pixels as much
+    /// larger. A rotated, skewed or mirrored one is resampled north up, as a rotated GeoTIFF is,
+    /// keeping its bands' names, classes and wavelengths. When it can't be placed (it would lie
+    /// nowhere it can be drawn, or be too large turned), the scan comes back unchanged with why.
+    pub fn placed_by_world_file(mut self, wf: &world::WorldFile, crs: Crs) -> std::result::Result<Raster, (Box<Raster>, String)> {
+        if self.georeferenced {
+            return Err((Box::new(self), "only a raster with no coordinates can be placed".into()));
+        }
+        let (sx, sy) = self.file_pixels();
+        let (affine, transformer) = match world_placement(wf, crs, self.width, self.height, (sx, sy)) {
+            Ok(placed) => placed,
+            Err(why) => return Err((Box::new(self), why)),
+        };
+        let mut r = if wf.is_north_up() {
+            self.transform = GeoTransform { origin_x: affine[0], origin_y: affine[3], pixel_width: affine[1], pixel_height: affine[5] };
+            self.crs = crs;
+            self.transformer = transformer;
+            self.extent = self.compute_extent();
+            self
+        } else {
+            // The bands are only read, so a picture that can't be turned comes back as it was.
+            let data: Vec<&[f32]> = self.bands.iter().map(|b| b.data.as_slice()).collect();
+            let (data, ow, oh, t) = match north_up(&data, self.width, self.height, affine, max_samples()) {
+                Ok(turned) => turned,
+                Err(e) => return Err((Box::new(self), e.to_string())),
+            };
+            let mut r = match Raster::new(self.name.clone(), ow, oh, data, t, crs, self.nodata, self.color.clone(), self.data_type.clone())
+            {
+                Ok(r) => r,
+                Err(e) => return Err((Box::new(self), e.to_string())),
+            };
+            // Each band keeps all it was but its pixels and their statistics.
+            for (new, mut old) in r.bands.iter_mut().zip(std::mem::take(&mut self.bands)) {
+                old.data = std::mem::take(&mut new.data);
+                old.stats = new.stats.clone();
+                *new = old;
+            }
+            // A picture read at a reduced size still says so, as a turned GeoTIFF does: of the
+            // turned grid at the file's resolution, so the two sizes said are alike.
+            let full = |n: u32, s: f64| (f64::from(n) * s).round().clamp(1.0, f64::from(u32::MAX)) as u32;
+            r.overview = self.overview.map(|_| (full(ow, sx), full(oh, sy)));
+            (r.source, r.lost, r.copyright) = (self.source, self.lost, self.copyright);
+            (r.rounded, r.rounded_some) = (self.rounded, self.rounded_some);
+            r
+        };
+        r.georeferenced = true;
+        r.step = 1;
+        Ok(r)
+    }
+
     /// Longitude/latitude bounds.
     pub fn extent(&self) -> Extent {
         self.extent
@@ -1021,6 +1100,17 @@ impl Raster {
         }
         self.rounded = Vec::new();
         self.rounded_some = if marks.contains(&true) { marks } else { Vec::new() };
+    }
+
+    /// The cells of `band` drawn see-through, by their place (row by row): `band` is a colour
+    /// band of a raster with alpha ([`ColorHint::alpha`]) and the cell's alpha draws it so
+    /// ([`see_through`]). Its statistics leave them out. `None` when the band has no such cells
+    /// to have: no alpha, or the alpha band or a band of data beside the colours.
+    pub fn see_through_cells(&self, band: usize) -> Option<impl Fn(usize) -> bool + Sync + '_> {
+        let (a, colour) = self.color.alpha(self.bands.len())?;
+        let alpha = &self.bands.get(a).filter(|_| colour.contains(&band))?.data;
+        let opaque = alpha_max(&self.data_type);
+        Some(move |i: usize| alpha.get(i).is_none_or(|&v| see_through(v, self.is_valid(v), opaque)))
     }
 
     /// Whether a value is a real measurement (not no-data or NaN).
@@ -1076,8 +1166,21 @@ impl Raster {
     }
 }
 
-/// Reads a raster file by path.
+/// Reads a raster file by path: a picture with a world file beside it placed by it (#2075).
 pub fn read_path(path: &Path) -> Result<Raster> {
+    read_path_placing(path, true)
+}
+
+/// [`read_path_with`] without the world file beside a picture: the picture as the file holds it,
+/// for one opened as a scan (`"as": "scan"`, or a layer laid over a placement reopened), so a
+/// world file that is there, or turns up later, doesn't place or resample it. A GDAL file's
+/// `subdataset` and `crs`, a Zarr store's variable, are read as [`read_path_with`] reads them.
+pub fn read_path_unplaced(path: &Path, subdataset: Option<&str>, crs: Option<&str>) -> Result<Raster> {
+    read_path_with_placing(path, subdataset, crs, false)
+}
+
+/// [`read_path`], applying a picture's world file when `world` is true.
+fn read_path_placing(path: &Path, world: bool) -> Result<Raster> {
     // A Zarr store is a folder: its first variable.
     #[cfg(not(target_arch = "wasm32"))]
     if zarr::is_store(path) {
@@ -1100,15 +1203,15 @@ pub fn read_path(path: &Path) -> Result<Raster> {
             #[cfg(not(target_arch = "wasm32"))]
             let r = geotiff::read_file_with_nodata(path, &name, sidecar_nodata)?;
             #[cfg(target_arch = "wasm32")]
-            let r = geotiff::read_with_nodata(std::io::BufReader::new(std::fs::File::open(path)?), &name, sidecar_nodata)?;
+            let r = geotiff::read_with_nodata(std::io::BufReader::new(crate::provenance::open(path)?), &name, sidecar_nodata)?;
             r
         }
-        "png" | "jpg" | "jpeg" => read_scan(&name, std::io::BufReader::new(std::fs::File::open(path)?))?,
+        "png" | "jpg" | "jpeg" => read_scan(&name, std::io::BufReader::new(crate::provenance::open(path)?))?,
         "asc" => {
             if meta.len() > MAX_ASCII_BYTES {
                 return Err(DataError::Format("the ASCII grid is too large to open".into()));
             }
-            let text = std::fs::read_to_string(path)?;
+            let text = crate::provenance::read_to_string(path)?;
             read_ascii(path, &text, &name, sidecar_nodata)?
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -1134,26 +1237,99 @@ pub fn read_path(path: &Path) -> Result<Raster> {
         // The second read gives all the first did: the first goes before it, so two aren't held.
         drop(r);
         r = if ext == "asc" {
-            read_ascii(path, &std::fs::read_to_string(path)?, &name, nd)?
+            read_ascii(path, &crate::provenance::read_to_string(path)?, &name, nd)?
         } else {
             #[cfg(not(target_arch = "wasm32"))]
             let again = geotiff::read_file_with_nodata(path, &name, nd)?;
             #[cfg(target_arch = "wasm32")]
-            let again = geotiff::read_with_nodata(std::io::BufReader::new(std::fs::File::open(path)?), &name, nd)?;
+            let again = geotiff::read_with_nodata(std::io::BufReader::new(crate::provenance::open(path)?), &name, nd)?;
             again
         };
     }
     if let Some(p) = &pam {
         r.apply_pam(p, pam::SIDECAR);
     }
+    if world && matches!(ext.as_str(), "tif" | "tiff" | "png" | "jpg" | "jpeg") {
+        r = apply_world_file(path, r);
+    }
     r.source = Some(path.display().to_string());
     Ok(r)
+}
+
+/// A picture at `path` with the world file beside it applied (#2075). A scan is placed by it, in
+/// the coordinate system of the `.prj` beside it. Whatever goes wrong (no `.prj`, one that can't
+/// be used, a world file that can't be read, or one that places it nowhere it can be drawn), the
+/// picture still opens as the scan it was, and a notice says why. A GeoTIFF keeps its own tags,
+/// and says so when the world file places it differently.
+pub fn apply_world_file(path: &Path, mut r: Raster) -> Raster {
+    let Some((found, read)) = world::beside(path) else { return r };
+    let name = found.file_name().map_or_else(|| found.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let unplaced = "it opens without coordinates";
+    let wf = match read {
+        Ok(wf) => wf,
+        Err(e) => {
+            let then = if r.georeferenced { "the GeoTIFF's own coordinates are used" } else { unplaced };
+            r.lost.push(format!("the world file {name} can't be read ({e}): {then}"));
+            return r;
+        }
+    };
+    if r.georeferenced {
+        if !world_file_agrees(&r, &wf) {
+            r.lost.push(format!("the world file {name} places it differently from the GeoTIFF's own tags, which are used"));
+        }
+        return r;
+    }
+    let (crs, note) = match sidecar_crs(path) {
+        Ok(found) => found,
+        Err(e) => {
+            r.lost.push(format!("the world file {name} isn't used ({e}): {unplaced}"));
+            return r;
+        }
+    };
+    let Some(crs) = crs else {
+        let why = note.map_or_else(String::new, |n| format!(" (the .prj file: {n})"));
+        r.lost.push(format!(
+            "the world file {name} places it, but no .prj beside it says the coordinate system{why}: {unplaced}; put a .prj next to it and add it again"
+        ));
+        return r;
+    };
+    match r.placed_by_world_file(&wf, crs) {
+        Ok(mut r) => {
+            r.lost.extend(note.map(|n| format!("the .prj file: {n}")));
+            r
+        }
+        Err((r, why)) => {
+            let mut r = *r;
+            r.lost.push(format!("the world file {name} isn't used ({why}): {unplaced}"));
+            r
+        }
+    }
+}
+
+/// Whether a world file places a GeoTIFF where its tags do: the same corner and pixel size, to a
+/// thousandth of a pixel (at the file's resolution). A turned world file isn't compared: a turned
+/// GeoTIFF is resampled north up as it is read, so its tags can't be compared with one, and
+/// nothing is claimed.
+fn world_file_agrees(r: &Raster, wf: &world::WorldFile) -> bool {
+    if !wf.is_north_up() {
+        return true;
+    }
+    let (sx, sy) = r.file_pixels();
+    let t = r.transform;
+    let (pw, ph) = (t.pixel_width / sx, t.pixel_height / sy);
+    let [x0, xc, _, y0, _, yr] = wf.affine();
+    let close = |a: f64, b: f64, unit: f64| (a - b).abs() <= unit.abs() * 1e-3;
+    close(xc, pw, pw) && close(yr, ph, ph) && close(x0, t.origin_x, pw) && close(y0, t.origin_y, ph)
 }
 
 /// Reads a raster file, with the GDAL choices a raster GDAL reads may have been added with: its
 /// subdataset (a NetCDF variable) and the coordinate system it doesn't say. Other files ignore
 /// them.
 pub fn read_path_with(path: &Path, subdataset: Option<&str>, crs: Option<&str>) -> Result<Raster> {
+    read_path_with_placing(path, subdataset, crs, true)
+}
+
+fn read_path_with_placing(path: &Path, subdataset: Option<&str>, crs: Option<&str>, world: bool) -> Result<Raster> {
     // A Zarr store's variable and slice (`t2m[time=3]`).
     #[cfg(not(target_arch = "wasm32"))]
     if zarr::is_store(path) {
@@ -1164,14 +1340,15 @@ pub fn read_path_with(path: &Path, subdataset: Option<&str>, crs: Option<&str>) 
         return read_converted(path, &gdal::convert(path, subdataset, crs)?);
     }
     let _ = (subdataset, crs);
-    read_path(path)
+    read_path_placing(path, world)
 }
 
 /// Reads the GeoTIFF GDAL converted `path` to, named and sourced as `path` (and its subdataset).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_converted(path: &Path, c: &gdal::Converted) -> Result<Raster> {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("raster");
-    let mut r = geotiff::read_file(&c.path, stem)?;
+    crate::provenance::path(path);
+    let mut r = crate::provenance::without(|| geotiff::read_file(&c.path, stem))?;
     if let Some(s) = &c.subdataset {
         r.name = format!("{stem} {}", gdal::short_name(s));
     }
@@ -1279,6 +1456,7 @@ fn read_scan_limited<R: std::io::BufRead + std::io::Seek>(name: &str, mut source
     let mut r = Raster::new(name, ow, oh, bands, unreferenced(ow, oh), Crs::LonLat, None, color, data_type)?;
     r.georeferenced = false;
     r.overview = (k > 1).then_some((w, h));
+    r.step = k;
     Ok(r)
 }
 
@@ -1341,7 +1519,7 @@ fn rotate(r: &Raster, degrees: f64) -> Result<Raster> {
 /// row, y, y per column, y per row), resampled (nearest pixel) to the north-up grid of square
 /// pixels over its bounding box: pixels of the same area, coarser if that would hold more than
 /// `max` samples. Outside the image is NaN (transparent). Returns the bands, their size and grid.
-fn north_up(bands: Vec<Vec<f32>>, w: u32, h: u32, affine: [f64; 6], max: usize) -> Result<(Vec<Vec<f32>>, u32, u32, GeoTransform)> {
+fn north_up<B: AsRef<[f32]>>(bands: &[B], w: u32, h: u32, affine: [f64; 6], max: usize) -> Result<(Vec<Vec<f32>>, u32, u32, GeoTransform)> {
     let [x0, xc, xr, y0, yc, yr] = affine;
     let det = xc * yr - xr * yc;
     if !affine.iter().all(|v| v.is_finite()) || !det.is_normal() {
@@ -1381,8 +1559,8 @@ fn north_up(bands: Vec<Vec<f32>>, w: u32, h: u32, affine: [f64; 6], max: usize) 
             }
             let src = r as usize * w as usize + c as usize;
             let dst = row as usize * ow as usize + col as usize;
-            for (o, b) in out.iter_mut().zip(&bands) {
-                if let (Some(o), Some(v)) = (o.get_mut(dst), b.get(src)) {
+            for (o, b) in out.iter_mut().zip(bands) {
+                if let (Some(o), Some(v)) = (o.get_mut(dst), b.as_ref().get(src)) {
                     *o = *v;
                 }
             }
@@ -1461,7 +1639,7 @@ fn read_ascii(path: &Path, text: &str, name: &str, nodata: Option<f64>) -> Resul
 fn sidecar_crs(path: &Path) -> Result<(Option<Crs>, Option<String>)> {
     let Some(prj) = read_prj(path) else {
         // One that is there but can't be read as text (not UTF-8, too large to be one) is said too.
-        let there = std::fs::metadata(path.with_extension("prj")).is_ok_and(|m| m.is_file());
+        let there = prj_path(path).is_some();
         return Ok((None, there.then(|| "it can't be read as text".to_string())));
     };
     match wkt::read_wkt(&prj) {
@@ -1479,14 +1657,132 @@ fn sidecar_crs(path: &Path) -> Result<(Option<Crs>, Option<String>)> {
     }
 }
 
+/// Whether a world file lays a `w` × `h` picture somewhere on Earth in `crs`: its corners convert,
+/// and in a geographic system lie within the poles and at longitudes wrapping explains (the
+/// check [`Raster::placed_by_world_file`] makes, on the corners alone, without the pixels).
+pub(crate) fn lands_on_earth(wf: &world::WorldFile, crs: Crs, w: u32, h: u32) -> bool {
+    world_placement(wf, crs, w, h, (1.0, 1.0)).is_ok()
+}
+
+/// Where a world file lays a `w` × `h` picture whose pixels each span `(sx, sy)` of the file's, in
+/// `crs`: the affine of those pixels' corners (GDAL's order) and the system's transformer, or why
+/// it lays the picture nowhere it can be drawn. Checked on the box of its corners, before any
+/// pixel moves: the grid over it must be valid with an extent, and in a geographic system its
+/// corners within the poles and at longitudes wrapping explains, since the extent clamps
+/// latitudes and wraps longitudes and can't show numbers in another system (UTM meters with a
+/// longitude/latitude .prj).
+fn world_placement(
+    wf: &world::WorldFile,
+    crs: Crs,
+    w: u32,
+    h: u32,
+    (sx, sy): (f64, f64),
+) -> std::result::Result<([f64; 6], Transformer), String> {
+    let transformer = crs.transformer()?;
+    let [x0, xc, xr, y0, yc, yr] = wf.affine();
+    let affine = [x0, xc * sx, xr * sy, y0, yc * sx, yr * sy];
+    let (fw, fh) = (f64::from(w), f64::from(h));
+    let corners = [(0.0, 0.0), (fw, 0.0), (0.0, fh), (fw, fh)]
+        .map(|(c, r)| (affine[0] + c * affine[1] + r * affine[2], affine[3] + c * affine[4] + r * affine[5]));
+    let (min_x, max_x) = corners.iter().fold((f64::MAX, f64::MIN), |(a, b), (x, _)| (a.min(*x), b.max(*x)));
+    let (min_y, max_y) = corners.iter().fold((f64::MAX, f64::MIN), |(a, b), (_, y)| (a.min(*y), b.max(*y)));
+    let boxed = GeoTransform {
+        origin_x: min_x,
+        origin_y: max_y,
+        pixel_width: (max_x - min_x) / fw.max(1.0),
+        pixel_height: -(max_y - min_y) / fh.max(1.0),
+    };
+    let on_earth = !transformer.is_geographic() || (min_y >= -90.5 && max_y <= 90.5 && min_x >= -540.0 && max_x <= 540.0);
+    if !boxed.is_valid() || !on_earth || extent_of(&boxed, &transformer, w, h).is_empty() {
+        return Err(format!("it places the picture nowhere it can be drawn in {}", crs.label()));
+    }
+    Ok((affine, transformer))
+}
+
+/// The `.prj` next to a file, in lower or upper case (`.PRJ`, beside an `IMAGE.TFW`), for file
+/// systems that tell them apart.
+fn prj_path(path: &Path) -> Option<std::path::PathBuf> {
+    ["prj", "PRJ"].into_iter().map(|e| path.with_extension(e)).find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file()))
+}
+
 /// The text of the `.prj` next to a file (`None` when there's none, or it's too large to be one).
 pub fn read_prj(path: &Path) -> Option<String> {
-    let prj = path.with_extension("prj");
+    let prj = prj_path(path)?;
     let meta = std::fs::metadata(&prj).ok()?;
     if !meta.is_file() || meta.len() > 1 << 20 {
         return None;
     }
-    std::fs::read_to_string(prj).ok()
+    crate::provenance::read_to_string(prj).ok()
+}
+
+/// Longitude/latitude bounds of a `width` × `height` grid placed by `transform` in `transformer`'s
+/// system, from points along its edges and inside it ([`Raster::compute_extent`]): also for a
+/// placement checked before any pixel is moved.
+fn extent_of(transform: &GeoTransform, transformer: &Transformer, width: u32, height: u32) -> Extent {
+    let mut e = Extent::EMPTY;
+    let (w, h) = (width as f64, height as f64);
+    let steps = 32;
+    let mut add = |col: f64, row: f64| {
+        if let Some(c) = transformer.to_lonlat_for_extent(transform.to_world(col, row)) {
+            e.expand(Coord::new(c.x, c.y.clamp(-90.0, 90.0)));
+        }
+    };
+    for i in 0..=steps {
+        let t = i as f64 / steps as f64;
+        for (col, row) in [(t * w, 0.0), (t * w, h), (0.0, t * h), (w, t * h)] {
+            add(col, row);
+        }
+    }
+    // Interior points too: in polar and other projections the grid can reach further than its
+    // edges do. (A raster crossing the antimeridian still gets a world-wide extent.)
+    let n = 16;
+    for i in 1..n {
+        for j in 1..n {
+            add(w * i as f64 / n as f64, h * j as f64 / n as f64);
+        }
+    }
+    // Normalize the transformed range as a whole, retaining its winding: a range crossing
+    // the antimeridian needs world-wide bounds to include both strips in a single Extent.
+    // A native full turn remains world-wide even if a datum shift contracts its samples.
+    if !e.is_empty() && transformer.is_geographic() && w * transform.pixel_width.abs() >= 360.0 {
+        (e.min_x, e.max_x) = (-180.0, 180.0);
+    } else if !e.is_empty() && (e.min_x < -180.0 || e.max_x > 180.0) {
+        let shift = 360.0 * ((e.min_x + 180.0) / 360.0).floor();
+        let (lo, hi) = (e.min_x - shift, e.max_x - shift);
+        (e.min_x, e.max_x) = if lo >= -180.0 && hi <= 180.0 { (lo, hi) } else { (-180.0, 180.0) };
+    }
+    // A whole world in Natural Earth, Winkel Tripel or Eckert IV reaches the antimeridian and the
+    // poles at its outline's edge, which samples miss when the grid's edges are a little past
+    // it (its corners are off the outline): whatever of them is in the grid is in its extent
+    // (#1701).
+    if let Some(centre) = transformer.world_central_meridian().filter(|_| !e.is_empty()) {
+        let inside = |lon: f64, lat: f64| {
+            transformer.from_lonlat(Coord::new(lon, lat)).is_some_and(|m| {
+                let (col, row) = transform.to_pixel(m);
+                (-1e-6..=w + 1e-6).contains(&col) && (-1e-6..=h + 1e-6).contains(&row)
+            })
+        };
+        let along = |i: usize| -180.0 + 360.0 * i as f64 / steps as f64;
+        if (0..=steps).any(|i| inside(180.0, along(i) / 2.0)) {
+            e.max_x = 180.0;
+        }
+        if (0..=steps).any(|i| inside(-180.0, along(i) / 2.0)) {
+            e.min_x = -180.0;
+        }
+        if (0..=steps).any(|i| inside(along(i), 90.0)) {
+            e.max_y = 90.0;
+        }
+        if (0..=steps).any(|i| inside(along(i), -90.0)) {
+            e.min_y = -90.0;
+        }
+        // Centred elsewhere than on 0°, the outline's edges are another meridian than the
+        // antimeridian: the one opposite its centre, on either side of it.
+        let edge = (centre + 360.0).rem_euclid(360.0) - 180.0;
+        if edge.abs() < 180.0 - 1e-6 && (0..=steps).any(|i| [-1e-9, 1e-9].iter().any(|d| inside(edge + d, along(i) / 2.0))) {
+            (e.min_x, e.max_x) = (e.min_x.min(edge), e.max_x.max(edge));
+        }
+    }
+    e
 }
 
 #[cfg(test)]
@@ -1551,14 +1847,30 @@ pub(crate) mod tests {
             ("gaps", (0..n).map(|i| [f32::NAN, -0.0, 0.0, -9999.0, 17.5][at(i) % 5]).collect()),
         ];
         let bits = |s: &BandStats| (s.count, s.min.to_bits(), s.max.to_bits(), s.mean.to_bits(), s.std_dev.to_bits());
-        let valid = |v: f32| v.is_finite() && v != -9999.0;
+        let value = |v: f32| v.is_finite() && v != -9999.0;
+        let valid = |_: usize, v: f32| value(v);
         for (name, data) in &bands {
-            let want = one_pass(data, valid);
+            let want = one_pass(data, value);
             for threads in [1, 2, 7, 16] {
                 let got = BandStats::compute_on(data, valid, None, threads);
                 assert_eq!(bits(&got), bits(&want), "{name} on {threads}");
                 assert_eq!(got.histogram, want.histogram, "{name} on {threads}");
                 assert_eq!(got.categories, want.categories, "{name} on {threads}");
+            }
+        }
+        // A validity that depends on the cell's place, as a see-through cell's does (#1810): each
+        // run is given where it starts, so several threads leave out the same cells as one. A
+        // cell's place is checked against its band too: every third one is left out, and so is
+        // the band's last cell, which a run off by one would miss or count twice.
+        for (name, data) in &bands {
+            let by_place = |i: usize, v: f32| value(v) && !i.is_multiple_of(3) && i + 1 != data.len();
+            let kept: Vec<f32> = data.iter().enumerate().map(|(i, &v)| if by_place(i, v) { v } else { f32::NAN }).collect();
+            let want = one_pass(&kept, value);
+            for threads in [1, 2, 7, 16] {
+                let got = BandStats::compute_on(data, by_place, None, threads);
+                assert_eq!(bits(&got), bits(&want), "{name} by place on {threads}");
+                assert_eq!(got.histogram, want.histogram, "{name} by place on {threads}");
+                assert_eq!(got.categories, want.categories, "{name} by place on {threads}");
             }
         }
         assert!(BandStats::compute_on(&bands[1].1, valid, None, 2).categories.is_none(), "257 small whole values");
@@ -1567,6 +1879,93 @@ pub(crate) mod tests {
         let small: Vec<f32> = (0..1000).map(|i| (i % 37) as f32).collect();
         assert_eq!(BandStats::from_values(&small), one_pass(&small, f32::is_finite));
         assert_eq!(BandStats::compute_on(&vec![f32::NAN; n], valid, None, 4), BandStats::default());
+    }
+
+    /// Cells a raster's alpha draws see-through are left out of its colour bands' statistics,
+    /// whatever their values (#1810): −3.4e38 in a Float32 image, a stray byte in an 8-bit one. An
+    /// opaque black cell counts, the alpha band counts every cell, and a raster without alpha (or
+    /// with a fourth band of data) counts every valid cell, as before.
+    #[test]
+    fn see_through_cells_are_left_out_of_colour_statistics() {
+        let gt = GeoTransform { origin_x: 500_000.0, origin_y: 4_800_000.0, pixel_width: 1.0, pixel_height: -1.0 };
+        let utm = Crs::from_epsg(32611).unwrap();
+        // 4 × 4: the bottom row see-through (holding `see`), the first cell opaque black, the rest 100.
+        let colour = |see: f32| {
+            (0..16)
+                .map(|i| {
+                    if i >= 12 {
+                        see
+                    } else if i == 0 {
+                        0.0
+                    } else {
+                        100.0
+                    }
+                })
+                .collect::<Vec<f32>>()
+        };
+        let alpha = |opaque: f32| (0..16).map(|i| if i >= 12 { 0.0 } else { opaque }).collect::<Vec<f32>>();
+        let stats = |b: &Band| (b.stats.count, b.stats.min, b.stats.max);
+        for (data_type, see, opaque) in [("Float32", -3.4e38_f32, 1.0), ("UInt8", 7.0, 255.0), ("UInt16", 7.0, 65535.0)] {
+            let bands = vec![colour(see), colour(see), colour(see), alpha(opaque)];
+            let r = Raster::new("rgba", 4, 4, bands, gt, utm, None, ColorHint::Rgb { alpha: true }, data_type).unwrap();
+            for b in &r.bands[..3] {
+                assert_eq!(stats(b), (12, 0.0, 100.0), "{data_type}");
+                // Eleven cells of 100 and one of 0: the mean GDAL 3.9.3 gives an 8-bit RGBA band.
+                assert!((b.stats.mean - 1100.0 / 12.0).abs() < 1e-9, "{data_type}: {}", b.stats.mean);
+                assert_eq!(b.stats.histogram.iter().sum::<u64>(), 12, "{data_type}");
+            }
+            assert_eq!(stats(&r.bands[3]), (16, 0.0, f64::from(opaque)), "{data_type}");
+            // Read back from its GeoTIFF, the same.
+            let back = geotiff::read(std::io::Cursor::new(geotiff::write(&r, 0).unwrap()), "back").unwrap();
+            assert_eq!(back.color, ColorHint::Rgb { alpha: true }, "{data_type}");
+            // Written in the type it was before: a Float32 image whose see-through cells hold
+            // −3.4e38 isn't taken for bytes, as a GeoTIFF or a cloud-optimised one.
+            if data_type == "Float32" {
+                let cog = geotiff::read(std::io::Cursor::new(cogwrite::write(&r, 0).unwrap()), "cog").unwrap();
+                assert_eq!((back.data_type.as_str(), cog.data_type.as_str()), ("Float32", "Float32"));
+            }
+            assert_eq!(back.bands.iter().map(stats).collect::<Vec<_>>(), r.bands.iter().map(stats).collect::<Vec<_>>(), "{data_type}");
+        }
+        // As the map draws it: an alpha under half a 256th of opaque is see-through (16 bits: 100
+        // of 65535), one above it isn't (200).
+        let faint: Vec<f32> = (0..16)
+            .map(|i| {
+                if i >= 12 {
+                    100.0
+                } else if i >= 8 {
+                    200.0
+                } else {
+                    65535.0
+                }
+            })
+            .collect();
+        let r = Raster::new(
+            "faint",
+            4,
+            4,
+            vec![colour(7.0), colour(7.0), colour(7.0), faint],
+            gt,
+            utm,
+            None,
+            ColorHint::Rgb { alpha: true },
+            "UInt16",
+        )
+        .unwrap();
+        assert_eq!(r.bands[0].stats.count, 12);
+        // Grey and alpha: the grey band.
+        let r = Raster::new("grey", 4, 4, vec![colour(7.0), alpha(255.0)], gt, utm, None, ColorHint::GrayAlpha, "UInt8").unwrap();
+        assert_eq!((stats(&r.bands[0]), r.bands[1].stats.count), ((12, 0.0, 100.0), 16));
+        // No-data 0: an alpha of no value is see-through, as the map draws it, and the black cell
+        // is no-data, as before.
+        let bands = vec![colour(-3.4e38), colour(-3.4e38), colour(-3.4e38), alpha(1.0)];
+        let r = Raster::new("nodata", 4, 4, bands, gt, utm, Some(0.0), ColorHint::Rgb { alpha: true }, "Float32").unwrap();
+        assert_eq!(stats(&r.bands[0]), (11, 100.0, 100.0));
+        // Without alpha every valid cell counts: RGB, and RGB with a fourth band of data.
+        for nb in [3, 4] {
+            let bands = (0..nb).map(|_| colour(7.0)).collect();
+            let r = Raster::new("rgb", 4, 4, bands, gt, utm, None, ColorHint::Rgb { alpha: false }, "UInt8").unwrap();
+            assert!(r.bands.iter().all(|b| stats(b) == (16, 0.0, 100.0)), "{nb} bands");
+        }
     }
 
     /// A band the machine can't hold is an error naming its size, not the end of the program
@@ -1645,6 +2044,38 @@ pub(crate) mod tests {
         std::fs::write(dir.join("dem.tif.aux.xml"), "<PAMDataset><PAMRasterBand").unwrap();
         assert_eq!(read_path(&tif).unwrap().bands[0].name, "Band 1");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gdal_sidecars_name_classes_from_an_attribute_table() {
+        let dir = std::env::temp_dir().join(format!("rustgis-pam-rat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gt = GeoTransform { origin_x: 10.0, origin_y: 50.0, pixel_width: 0.5, pixel_height: -0.5 };
+        let r = Raster::new("lc", 2, 2, vec![vec![1.0, 3.0, 3.0, 1.0]], gt, Crs::LonLat, None, ColorHint::Gray, "UInt8").unwrap();
+        let tif = dir.join("lc.tif");
+        std::fs::write(&tif, geotiff::write(&r, 0).unwrap()).unwrap();
+        let xml = r#"<PAMDataset><PAMRasterBand band="1"><GDALRasterAttributeTable Row0Min="0" BinSize="1">
+<FieldDefn index="0"><Name>Value</Name><Type>0</Type><Usage>5</Usage></FieldDefn>
+<FieldDefn index="1"><Name>Class_Name</Name><Type>2</Type><Usage>2</Usage></FieldDefn>
+<Row index="0"><F>1</F><F>Water</F></Row><Row index="1"><F>3</F><F>Forest</F></Row>
+</GDALRasterAttributeTable></PAMRasterBand></PAMDataset>"#;
+        std::fs::write(dir.join("lc.tif.aux.xml"), xml).unwrap();
+        let back = read_path(&tif).unwrap();
+        let b = &back.bands[0];
+        assert_eq!(b.classes, ["", "Water", "", "Forest"]);
+        assert_eq!((b.class_name(1.0), b.class_name(3.0), b.class_name(2.0)), (Some("Water"), Some("Forest"), None));
+        assert!(back.lost.is_empty(), "{:?}", back.lost);
+        // Class names the GeoTIFF gives itself are kept over the table's, and that is said.
+        let mut named = r.clone();
+        named.bands[0].classes = vec![String::new(), "Lake".into()];
+        std::fs::write(&tif, geotiff::write(&named, 0).unwrap()).unwrap();
+        let own = read_path(&tif).unwrap();
+        assert_eq!(own.bands[0].classes, ["", "Lake"]);
+        assert_eq!(
+            own.lost,
+            ["its .aux.xml sidecar: 1 attribute table(s) of class names not read: the file's own metadata names those bands' classes"]
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -2067,7 +2498,7 @@ mod scan_tests {
 /// <https://source.coop/giswqs/opengeos>): `cargo test -p rustgis-data -- --ignored samples`.
 #[cfg(test)]
 #[test]
-#[ignore]
+#[ignore = "needs external raster samples in RUSTGIS_SAMPLE_RASTERS"]
 fn samples() {
     let Ok(dir) = std::env::var("RUSTGIS_SAMPLE_RASTERS") else { return };
     let mut paths: Vec<_> =

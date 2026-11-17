@@ -12,33 +12,33 @@ Used by: a5, ab_glyph, ab_glyph_rasterizer, aes, ahash, allocator-api2, approx, 
 async-channel, async-executor, async-io, async-lock, async-process, async-recursion, async-signal,
 async-task, async-trait, atomic-waker, autocfg, aws-lc-sys, base64, bitflags, block-buffer,
 block-padding, blocking, btoi, bufstream, bumpalo, bytemuck, bytemuck_derive, cbc, cc, cfg-if,
-chacha20, cipher, cmake, cmov, codepage, concurrent-queue, console_log, const-oid, const-random,
-const-random-macro, core-foundation, core-foundation-sys, core_detect, cpubits, cpufeatures,
-crossbeam-deque, crossbeam-epoch, crossbeam-queue, crossbeam-utils, crypto-common, ctutils, der,
-der_derive, derive_utils, digest, displaydoc, dunce, either, encoding_rs, equivalent, errno, euclid,
-event-listener, event-listener-strategy, fastrand, fdeflate, filetime, find-msvc-tools, flagset,
-flatbuffers, flate2, form_urlencoded, futures-lite, futures-timer, geo, geo-traits, geo-types,
-geozero, gif, half, hash32, hashbrown, hashlink, heapless, heck, hkdf, hmac, httparse, hybrid-array,
-i_overlay, idna, idna_adapter, image, image-webp, indexmap, inout, io-enum, itoa, jobserver, js-sys,
-laz, lazy_static, libc, linux-raw-sys, lock_api, log, lyon, lyon_algorithms, lyon_geom, lyon_path,
-lyon_tessellation, md-5, md5, miniz_oxide, multiversion_no_op, mysql, mysql_common, named_pipe,
-ntapi, num, num-bigint, num-complex, num-conv, num-integer, num-iter, num-rational, num-traits,
-objc2-core-foundation, objc2-io-kit, objc2-system-configuration, once_cell, openssl-probe,
-ordered-stream, owned_ttf_parser, parking, parking_lot, parking_lot_core, percent-encoding,
-pin-project-lite, piper, pkg-config, png, polling, postgres, postgres-protocol, postgres-types,
-proc-macro2, proj4rs, proj4rs-geodesic, pyo3, pyo3-build-config, pyo3-ffi, pyo3-macros,
-pyo3-macros-backend, quote, rand, rayon, rayon-core, regex, regex-automata, regex-syntax, ring,
-robust, roxmltree, rstar, rustc-hash, rustc_version, rustix, rustls, rustls-native-certs,
-rustls-pemfile, rustls-platform-verifier, rustversion, ryu, scopeguard, secrecy, secret-service,
-security-framework, security-framework-sys, semver, seq-macro, serde, serde_core, serde_derive,
-serde_json, serde_repr, sha1, sha2, shlex, sif-itree, signal-hook-registry, simdutf8, siphasher,
-smallvec, socket2, spade, spki, stable_deref_trait, subsetter, syn, sys-locale, tar, tempfile,
-thiserror, thiserror-impl, tiberius-macros, time, time-core, tinyvec, tokio-postgres, ttf-parser,
-typed-path, unicode-bidi, unicode-ident, unicode-normalization, unicode-properties,
-unicode-segmentation, ureq, ureq-proto, url, utf8-zero, utf8_iter, uuid, vcpkg, version_check,
-wasm-bindgen, wasm-bindgen-macro, wasm-bindgen-macro-support, wasm-bindgen-shared, wasmi,
-wasmi_collections, wasmi_core, wasmi_ir, wasmparser, web-sys, weezl, whoami, winauth, wkt,
-x509-cert, xattr, zeroize, zune-core, zune-jpeg
+chacha20, cipher, cmake, cmov, codepage, concurrent-queue, const-oid, const-random,
+const-random-macro, constant_time_eq, core-foundation, core-foundation-sys, core_detect, cpubits,
+cpufeatures, crossbeam-deque, crossbeam-epoch, crossbeam-queue, crossbeam-utils, crypto-common,
+ctutils, der, der_derive, derive_utils, digest, displaydoc, dunce, either, encoding_rs, equivalent,
+errno, euclid, event-listener, event-listener-strategy, fastrand, fdeflate, filetime,
+find-msvc-tools, flagset, flatbuffers, flate2, form_urlencoded, futures-lite, futures-timer, geo,
+geo-traits, geo-types, geozero, gif, half, hash32, hashbrown, hashlink, heapless, heck, hkdf, hmac,
+httparse, hybrid-array, i_overlay, idna, idna_adapter, image, image-webp, indexmap, inout, io-enum,
+itoa, jobserver, js-sys, laz, lazy_static, lerc-core, lerc-reader, libc, linux-raw-sys, lock_api,
+log, lyon, lyon_algorithms, lyon_geom, lyon_path, lyon_tessellation, md-5, md5, miniz_oxide,
+multiversion_no_op, mysql, mysql_common, named_pipe, ntapi, num, num-bigint, num-complex, num-conv,
+num-integer, num-iter, num-rational, num-traits, objc2-core-foundation, objc2-io-kit,
+objc2-system-configuration, once_cell, openssl-probe, ordered-stream, owned_ttf_parser, parking,
+parking_lot, parking_lot_core, percent-encoding, pin-project-lite, piper, pkg-config, png, polling,
+postgres, postgres-protocol, postgres-types, proc-macro2, pyo3, pyo3-build-config, pyo3-ffi,
+pyo3-macros, pyo3-macros-backend, quote, rand, rayon, rayon-core, regex, regex-automata,
+regex-syntax, ring, robust, roxmltree, rstar, rustc-hash, rustc_version, rustix, rustls,
+rustls-native-certs, rustls-pemfile, rustls-platform-verifier, rustversion, ryu, scopeguard,
+secrecy, secret-service, security-framework, security-framework-sys, semver, seq-macro, serde,
+serde_core, serde_derive, serde_json, serde_repr, sha1, sha2, shlex, sif-itree,
+signal-hook-registry, simdutf8, siphasher, smallvec, socket2, spade, spki, stable_deref_trait,
+subsetter, syn, sys-locale, tar, tempfile, thiserror, thiserror-impl, tiberius-macros, time,
+time-core, tinyvec, tokio-postgres, ttf-parser, typed-path, unicode-bidi, unicode-ident,
+unicode-normalization, unicode-properties, unicode-segmentation, ureq, ureq-proto, url, utf8-zero,
+utf8_iter, uuid, vcpkg, version_check, wasm-bindgen, wasm-bindgen-macro, wasm-bindgen-macro-support,
+wasm-bindgen-shared, wasmi, wasmi_collections, wasmi_core, wasmi_ir, wasmparser, web-sys, weezl,
+whoami, winauth, wkt, x509-cert, xattr, zeroize, zeroize_derive, zune-core, zune-jpeg
 ====================================================================================================
 
                                  Apache License
@@ -8732,6 +8732,40 @@ SOFTWARE.
 
 ====================================================================================================
 MIT License
+Used by: terrio-crs
+====================================================================================================
+
+MIT License
+
+Copyright (c) 2026 Qiusheng Wu and Terrio contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+terrio ports and adapts code and data from other projects, among them GDAL,
+PROJ and PDAL. The copyright in that code and data remains with its authors.
+NOTICE lists them with their licenses, and LICENSE-THIRD-PARTY.md lists the
+licenses of the Rust crates terrio is built with.
+
+====================================================================================================
+MIT License
 Used by: tiff
 ====================================================================================================
 
@@ -9894,6 +9928,277 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ====================================================================================================
+NOTICE of terrio-crs
+====================================================================================================
+
+terrio-crs
+Licensed under the MIT License (see LICENSE).
+
+This crate adapts algorithms and data from the projects below. The copyright in those algorithms
+and data remains with their authors, whose notices follow.
+
+Each source file derived from another project's source files starts with SPDX headers: the
+copyright lines of those source files, copied verbatim, the licenses that apply, and the files it
+was translated or adapted from. The REUSE.toml of the terrio repository
+(https://github.com/opengeos/terrio) records the copyright and license of the data files.
+
+-------------------------------------------------------------------------------
+PROJ (https://github.com/OSGeo/PROJ)
+-------------------------------------------------------------------------------
+
+Terrio files derived from PROJ source files (each file's header names them):
+  crates/terrio-crs/src/datum.rs
+  crates/terrio-crs/src/def.rs
+  crates/terrio-crs/src/grid.rs
+  crates/terrio-crs/src/math.rs
+  crates/terrio-crs/src/projections.rs
+  crates/terrio-crs/src/projections/perspective.rs
+  crates/terrio-crs/src/proj_write.rs
+  crates/terrio-crs/src/rotation.rs
+  crates/terrio-crs/src/route.rs
+
+The two-point form of the Hotine oblique Mercator follows src/projections/omerc.cpp in PROJ 9.8.1.
+
+The copyright notices of those source files:
+  Copyright (c) 2016, Thomas Knudsen / SDFE
+  Copyright (c) 2017, Kristian Evers
+  Copyright (c) 2019, Even Rouault, <even.rouault at spatialys.com>
+  Copyright (c) 2022, Even Rouault <even.rouault at spatialys.com>
+  Copyright (c) 2018-2024, Even Rouault, <even.rouault at spatialys.com>
+  Copyright (c) 2016, 2017 Thomas Knudsen/SDFE
+  Copyright (c) 2000, Frank Warmerdam
+  Copyright (c) 2018, Even Rouault <even dot rouault at spatialys dot com>
+  Copyright (c) 2023, Even Rouault <even dot rouault at spatialys dot com>
+  Copyright (c) 2000, Frank Warmerdam <warmerdam@pobox.com>
+  Copyright (c) 2022, Even Rouault, <even.rouault at spatialys.com>
+  Copyright (c) 2025 Javier Jimenez Shaw
+  Copyright (c) 1995, Gerald Evenden
+  Copyright (c) 2003   Gerald I. Evenden
+  Changes to handle +over are: Copyright 2011-2014 Morelli Informatik
+  Copyright (c) 2003, 2006   Gerald I. Evenden
+  Copyright (c) 2001, Thomas Flemming, tf@ttqv.com
+  Copyright (c) 2004   Gerald I. Evenden
+  Copyright (c) 2012   Martin Raspaud
+  Copyright (c) 2011, 2012  Martin Lambers <marlam@marlam.de>
+  Copyright (c) 2017-2019 Heidelberg University
+
+All source, data files and other contents of the PROJ package are
+available under the following terms.  Note that the PROJ 4.3 and earlier
+was "public domain" as is common with US government work, but apparently
+this is not a well defined legal term in many countries. Frank Warmerdam placed
+everything under the following MIT style license because he believed it is
+effectively the same as public domain, allowing anyone to use the code as
+they wish, including making proprietary derivatives.
+
+Initial PROJ 4.3 public domain code was put as Frank Warmerdam as copyright
+holder, but he didn't mean to imply he did the work. Essentially all work was
+done by Gerald Evenden.
+
+Copyright information can be found in source files.
+
+ --------------
+
+ Permission is hereby granted, free of charge, to any person obtaining a
+ copy of this software and associated documentation files (the "Software"),
+ to deal in the Software without restriction, including without limitation
+ the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ and/or sell copies of the Software, and to permit persons to whom the
+ Software is furnished to do so, subject to the following conditions:
+
+ The above copyright notice and this permission notice shall be included
+ in all copies or substantial portions of the Software.
+
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ DEALINGS IN THE SOFTWARE.
+
+-------------------------------------------------------------------------------
+GDAL (https://github.com/OSGeo/gdal)
+-------------------------------------------------------------------------------
+
+Terrio files derived from GDAL source files (each file's header names them):
+  crates/terrio-crs/src/lib.rs
+
+The copyright notices of those source files:
+  Copyright (c) 2000, Frank Warmerdam
+  Copyright (c) 2008-2013, Even Rouault <even dot rouault at spatialys.com>
+
+In general GDAL/OGR is licensed under an MIT style license with the
+following terms:
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+-------------------------------------------------------------------------------
+EPSG Geodetic Parameter Dataset
+-------------------------------------------------------------------------------
+
+crates/terrio-crs/data/epsg.tsv.zst, datums.tsv.zst, epsg_vertical.tsv.zst and point_motion.tsv,
+and the EPSG definitions in crates/terrio-crs/data/esri.tsv.zst, are derived from the EPSG
+Geodetic Parameter Dataset (https://epsg.org), owned by the International Association of Oil &
+Gas Producers (IOGP), through PROJ's database and GDAL. They are redistributed under the EPSG
+Dataset Terms of Use (https://epsg.org/terms-of-use.html), with this attribution. They are not the EPSG Dataset itself, and
+terrio is not endorsed by IOGP. The EPSG method and parameter names and codes in
+crates/terrio-crs/src/projjson_write.rs and crates/terrio/src/drivers/vector/projjson.rs come
+from the same dataset.
+crates/terrio-crs/src/projjson_db.tsv.zst is derived from the same dataset (EPSG v12.029), through
+PROJ 9.7.1's database, under the same terms; the EPSG method and parameter names and codes in
+crates/terrio-crs/src/projjson_gdal.rs come from it too.
+The EPSG names, areas of use and projection method names in
+crates/terrio-crs/data/crs_catalog.tsv.zst are derived from the same dataset (EPSG v12.029),
+through PROJ 9.8.1's database and GDAL (scripts/gen_crs_catalog.py), under the same terms.
+The EPSG rows of the test data crates/terrio-crs/tests/data/proj_string_export.tsv and
+wkt1_strict_export.tsv (PROJ 9.8.1's PROJ strings and WKT 1 of EPSG CRSs, by
+scripts/gen_proj_string_export.py and scripts/gen_wkt1_strict_export.py) and geokeys_gdal.tsv
+(GDAL 3.12.1's GeoKeys and WKT 1 of EPSG CRSs, by scripts/gen_geokeys_gdal.py) are derived from
+the same dataset, under the same terms, as are the EPSG rows of crs_accessors.tsv (PROJ 9.8.1's
+axis orders, ellipsoids and conversion parameters of EPSG CRSs, by scripts/gen_crs_accessors.py).
+
+-------------------------------------------------------------------------------
+Esri projection engine data
+-------------------------------------------------------------------------------
+
+crates/terrio-crs/data/esri.tsv.zst, and the Esri datum names in
+crates/terrio-crs/data/datums.tsv.zst, are derived, through PROJ 9.7.1's database, from Esri's
+projection engine documentation (https://github.com/Esri/projection-engine-db-doc), modified.
+The ESRI names, areas of use and projection method names in
+crates/terrio-crs/data/crs_catalog.tsv.zst are derived from the same documentation (ArcGIS Pro
+3.6), through PROJ 9.8.1's database, as are the ESRI rows of the test data
+crates/terrio-crs/tests/data/proj_string_export.tsv and wkt1_strict_export.tsv (PROJ 9.8.1's
+PROJ strings and WKT 1 of ESRI CRSs), geokeys_gdal.tsv (GDAL 3.12.1's GeoKeys of ESRI CRSs) and
+crs_accessors.tsv (PROJ 9.8.1's axis orders, ellipsoids and conversion parameters of ESRI CRSs).
+The ESRI celestial bodies and their semi-major axes in crates/terrio-crs/src/bodies.rs are derived
+from the same documentation, through PROJ 9.8.1's database (scripts/gen_celestial_bodies.py).
+
+  Copyright © 2010-2025 Esri
+
+Licensed under the Apache License, Version 2.0, reproduced at the end of this file.
+
+-------------------------------------------------------------------------------
+IAU_2015 definitions
+-------------------------------------------------------------------------------
+
+crates/terrio-crs/data/iau.tsv.zst and iau-source.json are derived from PROJ 9.8.1's
+data/sql/iau.sql, Git blob 900564ccf2e1f77fb708ddc2c8544843b29bc24a, generated by
+scripts/build_db_from_iau.py (Copyright (c) 2021, Hobu Inc; author Even Rouault), under PROJ's
+license (see the PROJ section). The source planetary reference is the IAU Working Group report
+at https://doi.org/10.1007/s10569-017-9805-5 .
+The IAU_2015 names in crates/terrio-crs/data/crs_catalog.tsv.zst, and the IAU_2015 celestial
+bodies, their NAIF codes and semi-major axes in crates/terrio-crs/src/bodies.rs, come from the same
+source, through PROJ 9.8.1's database.
+
+-------------------------------------------------------------------------------
+CRS benchmark reference data
+-------------------------------------------------------------------------------
+
+The pair-4979-4978, pair-mars-iau, form-27700-projjson, seed-tpers, edge-tpers-back,
+seed-igh, seed-ob_tran-moll, method-qsc, method-healpix, method-rhealpix and method-omerc-2pt numeric fixtures are from Michael Sumner's rust-proj-capability
+(https://github.com/mdsumner/rust-proj-capability), revision
+ddd9fac70ec370acd9651ebb8b46035207347ad5, generated with PROJ 9.9.0.
+The CRS-study oracle version is retained separately from projection-suite data.
+The repository carries no license yet; terrio has asked its author for one (see
+LICENSES/LicenseRef-rust-proj-capability.txt in https://github.com/opengeos/terrio).
+
+-------------------------------------------------------------------------------
+Apache License, Version 2.0
+-------------------------------------------------------------------------------
+
+The license of the Apache-2.0 data credited above:
+
+Apache License
+Version 2.0, January 2004
+http://www.apache.org/licenses/
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions.
+
+"License" shall mean the terms and conditions for use, reproduction, and distribution as defined by Sections 1 through 9 of this document.
+
+"Licensor" shall mean the copyright owner or entity authorized by the copyright owner that is granting the License.
+
+"Legal Entity" shall mean the union of the acting entity and all other entities that control, are controlled by, or are under common control with that entity. For the purposes of this definition, "control" means (i) the power, direct or indirect, to cause the direction or management of such entity, whether by contract or otherwise, or (ii) ownership of fifty percent (50%) or more of the outstanding shares, or (iii) beneficial ownership of such entity.
+
+"You" (or "Your") shall mean an individual or Legal Entity exercising permissions granted by this License.
+
+"Source" form shall mean the preferred form for making modifications, including but not limited to software source code, documentation source, and configuration files.
+
+"Object" form shall mean any form resulting from mechanical transformation or translation of a Source form, including but not limited to compiled object code, generated documentation, and conversions to other media types.
+
+"Work" shall mean the work of authorship, whether in Source or Object form, made available under the License, as indicated by a copyright notice that is included in or attached to the work (an example is provided in the Appendix below).
+
+"Derivative Works" shall mean any work, whether in Source or Object form, that is based on (or derived from) the Work and for which the editorial revisions, annotations, elaborations, or other modifications represent, as a whole, an original work of authorship. For the purposes of this License, Derivative Works shall not include works that remain separable from, or merely link (or bind by name) to the interfaces of, the Work and Derivative Works thereof.
+
+"Contribution" shall mean any work of authorship, including the original version of the Work and any modifications or additions to that Work or Derivative Works thereof, that is intentionally submitted to Licensor for inclusion in the Work by the copyright owner or by an individual or Legal Entity authorized to submit on behalf of the copyright owner. For the purposes of this definition, "submitted" means any form of electronic, verbal, or written communication sent to the Licensor or its representatives, including but not limited to communication on electronic mailing lists, source code control systems, and issue tracking systems that are managed by, or on behalf of, the Licensor for the purpose of discussing and improving the Work, but excluding communication that is conspicuously marked or otherwise designated in writing by the copyright owner as "Not a Contribution."
+
+"Contributor" shall mean Licensor and any individual or Legal Entity on behalf of whom a Contribution has been received by Licensor and subsequently incorporated within the Work.
+
+2. Grant of Copyright License. Subject to the terms and conditions of this License, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable copyright license to reproduce, prepare Derivative Works of, publicly display, publicly perform, sublicense, and distribute the Work and such Derivative Works in Source or Object form.
+
+3. Grant of Patent License. Subject to the terms and conditions of this License, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this section) patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer the Work, where such license applies only to those patent claims licensable by such Contributor that are necessarily infringed by their Contribution(s) alone or by combination of their Contribution(s) with the Work to which such Contribution(s) was submitted. If You institute patent litigation against any entity (including a cross-claim or counterclaim in a lawsuit) alleging that the Work or a Contribution incorporated within the Work constitutes direct or contributory patent infringement, then any patent licenses granted to You under this License for that Work shall terminate as of the date such litigation is filed.
+
+4. Redistribution. You may reproduce and distribute copies of the Work or Derivative Works thereof in any medium, with or without modifications, and in Source or Object form, provided that You meet the following conditions:
+
+     (a) You must give any other recipients of the Work or Derivative Works a copy of this License; and
+
+     (b) You must cause any modified files to carry prominent notices stating that You changed the files; and
+
+     (c) You must retain, in the Source form of any Derivative Works that You distribute, all copyright, patent, trademark, and attribution notices from the Source form of the Work, excluding those notices that do not pertain to any part of the Derivative Works; and
+
+     (d) If the Work includes a "NOTICE" text file as part of its distribution, then any Derivative Works that You distribute must include a readable copy of the attribution notices contained within such NOTICE file, excluding those notices that do not pertain to any part of the Derivative Works, in at least one of the following places: within a NOTICE text file distributed as part of the Derivative Works; within the Source form or documentation, if provided along with the Derivative Works; or, within a display generated by the Derivative Works, if and wherever such third-party notices normally appear. The contents of the NOTICE file are for informational purposes only and do not modify the License. You may add Your own attribution notices within Derivative Works that You distribute, alongside or as an addendum to the NOTICE text from the Work, provided that such additional attribution notices cannot be construed as modifying the License.
+
+     You may add Your own copyright statement to Your modifications and may provide additional or different license terms and conditions for use, reproduction, or distribution of Your modifications, or for any such Derivative Works as a whole, provided Your use, reproduction, and distribution of the Work otherwise complies with the conditions stated in this License.
+
+5. Submission of Contributions. Unless You explicitly state otherwise, any Contribution intentionally submitted for inclusion in the Work by You to the Licensor shall be under the terms and conditions of this License, without any additional terms or conditions. Notwithstanding the above, nothing herein shall supersede or modify the terms of any separate license agreement you may have executed with Licensor regarding such Contributions.
+
+6. Trademarks. This License does not grant permission to use the trade names, trademarks, service marks, or product names of the Licensor, except as required for reasonable and customary use in describing the origin of the Work and reproducing the content of the NOTICE file.
+
+7. Disclaimer of Warranty. Unless required by applicable law or agreed to in writing, Licensor provides the Work (and each Contributor provides its Contributions) on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied, including, without limitation, any warranties or conditions of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A PARTICULAR PURPOSE. You are solely responsible for determining the appropriateness of using or redistributing the Work and assume any risks associated with Your exercise of permissions under this License.
+
+8. Limitation of Liability. In no event and under no legal theory, whether in tort (including negligence), contract, or otherwise, unless required by applicable law (such as deliberate and grossly negligent acts) or agreed to in writing, shall any Contributor be liable to You for damages, including any direct, indirect, special, incidental, or consequential damages of any character arising as a result of this License or out of the use or inability to use the Work (including but not limited to damages for loss of goodwill, work stoppage, computer failure or malfunction, or any and all other commercial damages or losses), even if such Contributor has been advised of the possibility of such damages.
+
+9. Accepting Warranty or Additional Liability. While redistributing the Work or Derivative Works thereof, You may choose to offer, and charge a fee for, acceptance of support, warranty, indemnity, or other liability obligations and/or rights consistent with this License. However, in accepting such obligations, You may act only on Your own behalf and on Your sole responsibility, not on behalf of any other Contributor, and only if You agree to indemnify, defend, and hold each Contributor harmless for any liability incurred by, or claims asserted against, such Contributor by reason of your accepting any such warranty or additional liability.
+
+END OF TERMS AND CONDITIONS
+
+APPENDIX: How to apply the Apache License to your work.
+
+To apply the Apache License to your work, attach the following boilerplate notice, with the fields enclosed by brackets "[]" replaced with your own identifying information. (Don't include the brackets!)  The text should be enclosed in the appropriate comment syntax for the file format. We also recommend that a file or class name and description of purpose be included on the same "printed page" as the copyright notice for easier identification within third-party archives.
+
+Copyright [yyyy] [name of copyright owner]
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+====================================================================================================
 Colour maps. Scientific colour maps sampled at evenly spaced stops (scientific.rs): Viridis, Plasma,
 Inferno and Magma by Stéfan van der Walt and Nathaniel Smith (CC0-1.0), and Cividis by Jamie R.
 Nuñez, Christopher R. Anderton and Ryan S. Renslow, as matplotlib ships them; Turbo by Anton
@@ -10159,46 +10464,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ====================================================================================================
-The meridian distance of the sinusoidal projection and its inverse, after pj_enfn, pj_mlfn and
-pj_inv_mlfn in PROJ (https://proj.org).
-In rustgis-geom: crates/geom/src/sinusoidal.rs
-====================================================================================================
-
-All source, data files and other contents of the PROJ package are
-available under the following terms.  Note that the PROJ 4.3 and earlier
-was "public domain" as is common with US government work, but apparently
-this is not a well defined legal term in many countries. Frank Warmerdam placed
-everything under the following MIT style license because he believed it is
-effectively the same as public domain, allowing anyone to use the code as
-they wish, including making proprietary derivatives.
-
-Initial PROJ 4.3 public domain code was put as Frank Warmerdam as copyright
-holder, but he didn't mean to imply he did the work. Essentially all work was
-done by Gerald Evenden.
-
-Copyright information can be found in source files.
-
- --------------
-
- Permission is hereby granted, free of charge, to any person obtaining a
- copy of this software and associated documentation files (the "Software"),
- to deal in the Software without restriction, including without limitation
- the rights to use, copy, modify, merge, publish, distribute, sublicense,
- and/or sell copies of the Software, and to permit persons to whom the
- Software is furnished to do so, subject to the following conditions:
-
- The above copyright notice and this permission notice shall be included
- in all copies or substantial portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- DEALINGS IN THE SOFTWARE.
-
-====================================================================================================
 Where a label goes in an area (pole_of_inaccessibility), after polylabel 1.x
 (https://github.com/mapbox/polylabel).
 In rustgis-tiles: crates/tiles/src/symbols.rs
@@ -10346,10 +10611,46 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ====================================================================================================
 ESRI coordinate system codes: Esri's projected coordinate systems from projection-engine-db-doc
 (https://github.com/Esri/projection-engine-db-doc), as imported into the PROJ 9.7.1 database and
-written as PROJ definitions by PROJ 9.7.1 (PROJ's licence is above). The notice below is the
-licensing section of the project's README, at commit aa34139.
+written as PROJ definitions by PROJ 9.7.1 (https://proj.org). The notices below are PROJ's licence
+and the licensing section of the project's README, at commit aa34139.
 In rustgis-data: crates/data/src/raster/esri.rs
 ====================================================================================================
+
+All source, data files and other contents of the PROJ package are
+available under the following terms.  Note that the PROJ 4.3 and earlier
+was "public domain" as is common with US government work, but apparently
+this is not a well defined legal term in many countries. Frank Warmerdam placed
+everything under the following MIT style license because he believed it is
+effectively the same as public domain, allowing anyone to use the code as
+they wish, including making proprietary derivatives.
+
+Initial PROJ 4.3 public domain code was put as Frank Warmerdam as copyright
+holder, but he didn't mean to imply he did the work. Essentially all work was
+done by Gerald Evenden.
+
+Copyright information can be found in source files.
+
+ --------------
+
+ Permission is hereby granted, free of charge, to any person obtaining a
+ copy of this software and associated documentation files (the "Software"),
+ to deal in the Software without restriction, including without limitation
+ the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ and/or sell copies of the Software, and to permit persons to whom the
+ Software is furnished to do so, subject to the following conditions:
+
+ The above copyright notice and this permission notice shall be included
+ in all copies or substantial portions of the Software.
+
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ DEALINGS IN THE SOFTWARE.
+
+----------------------------------------------------------------------------------------------------
 
 Copyright © 2010-2026 Esri
 

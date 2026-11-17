@@ -19,7 +19,6 @@ use crate::paint;
 /// start angle, or bars rising from a baseline, each category's share of the total. With
 /// `opacity`, the layer's transparency; `ppp`, pixels per point; `paused`, that the label
 /// display is paused, which draws no value labels.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw(
     pm: &mut Canvas,
     x: f32,
@@ -119,7 +118,6 @@ fn interior(rings: &[Vec<Coord>]) -> Option<Coord> {
 
 /// A pie at (`x`, `y`) of radius `size` pixels: its background disc, then a slice per category,
 /// each clockwise from `start_angle` (degrees from north) by its share of `total`, each outlined.
-#[allow(clippy::too_many_arguments)]
 fn pie(
     pm: &mut Canvas,
     x: f32,
@@ -173,7 +171,6 @@ fn pie(
 
 /// Bars at (`x`, `y`), `size` pixels high (a category's full share): a bar per category rising
 /// from a baseline under the anchor, the chart as wide as a bar each plus a gap, outlined as one.
-#[allow(clippy::too_many_arguments)]
 fn bars(
     pm: &mut Canvas,
     x: f32,
@@ -221,7 +218,6 @@ fn bars(
 
 /// Says a category's value, its percent of the total, or both, at (`x`, `y`) aligned as `align`
 /// says, in a small haloed dark text (7 pt, as the map's finest labels are).
-#[allow(clippy::too_many_arguments)]
 fn label_at(pm: &mut Canvas, x: f32, y: f32, mode: DiagramLabel, v: f64, total: f64, ppp: f32, align: crate::text::Align) {
     if !(x.is_finite() && y.is_finite()) {
         return;

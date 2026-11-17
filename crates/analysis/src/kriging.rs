@@ -324,7 +324,6 @@ pub fn kriging(
 }
 
 /// [`kriging`] on `threads` threads, or as many as its work calls for.
-#[allow(clippy::too_many_arguments)]
 fn kriging_on(
     threads: Option<usize>,
     points: &[(Coord, f64)],

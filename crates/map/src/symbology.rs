@@ -1589,6 +1589,18 @@ impl Renderer {
         rustgis_data::value::numeric_classes(classes.iter().map(|(k, _)| k.as_str()))
     }
 
+    /// The existing Graduated Colors fallback, for an optional layout legend row. With `rows`,
+    /// include it only when a kept feature lacks a numeric value; `None` lists it unconditionally
+    /// for an all-classes legend. Other renderer kinds keep their own legend semantics.
+    pub fn no_data_legend(&self, ds: &Dataset, rows: Option<&[bool]>) -> Option<LegendEntry> {
+        let Renderer::Graduated { field, .. } = self else { return None };
+        let fi = ds.field_index(field);
+        let used = rows.is_none_or(|rows| {
+            (0..ds.features.len()).any(|r| rows.get(r).copied().unwrap_or(true) && fi.and_then(|fi| ds.value(r, fi).as_f64()).is_none())
+        });
+        used.then(|| LegendEntry { label: "No data".into(), symbol: self.symbol_in(ds, 0, None), strokes: Vec::new(), fallback: false })
+    }
+
     /// Every row of its legend, whatever the features: the classes, then a Unique Values'
     /// `<all other values>`; none for a single symbol.
     pub fn legend(&self) -> Vec<LegendEntry> {
@@ -3006,12 +3018,13 @@ impl Labeling {
     }
 
     /// Turns the labels off and starts the Default class again on `ds`'s first name-like field
-    /// (`LabelClass::default_for`), keeping its name, clause and visibility: its field was
-    /// deleted. (A service refresh keeps Default's text symbol instead, and clears its field.)
+    /// (`LabelClass::default_for`), keeping its name, clause, visibility and expressions by
+    /// feature (#2147; those reading the deleted field are removed before): its field was deleted.
+    /// (A service refresh keeps Default's text symbol instead, and clears its field.)
     pub fn restart_default(&mut self, ds: &Dataset) {
         self.enabled = false;
         let old = std::mem::replace(&mut self.default, LabelClass::default_for(ds));
-        (self.default.name, self.default.visible, self.default.where_) = (old.name, old.visible, old.where_);
+        (self.default.name, self.default.visible, self.default.where_, self.default.by) = (old.name, old.visible, old.where_, old.by);
     }
 
     /// Points every class on a field `ds` doesn't have at the Default class's field, or the first
@@ -3377,12 +3390,14 @@ mod tests {
         // Default on a field that's gone starts again on a name-like one, keeping its own settings.
         (l.enabled, l.default.name, l.default.visible, l.default.where_) = (true, "Rest".into(), false, Some("name = 'x'".into()));
         l.default.field = "gone".into();
+        l.default.by.size = Some("10".into());
         l.restart_default(&ds);
         assert!(!l.enabled);
         assert_eq!(
             (l.default.field.as_str(), l.default.name.as_str(), l.default.visible, l.default.where_.as_deref()),
             ("name", "Rest", false, Some("name = 'x'"))
         );
+        assert_eq!(l.default.by.size.as_deref(), Some("10"), "its expressions by feature are kept");
     }
 
     #[test]

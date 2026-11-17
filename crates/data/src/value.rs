@@ -4,6 +4,7 @@ use crate::date::{Date, DateTime};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum FieldType {
     Integer,
     Double,
@@ -40,6 +41,7 @@ impl FieldType {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Field {
     pub name: String,
     pub ty: FieldType,
@@ -120,6 +122,7 @@ impl ImageValue {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Value {
     #[default]
     Null,
@@ -259,6 +262,22 @@ impl Value {
         match (ty, Value::parse(text, ty)) {
             (FieldType::Date, Value::Null) => DateTime::parse(text).filter(|t| t.is_date()).map_or(Value::Null, |t| Value::Date(t.date())),
             (_, v) => v,
+        }
+    }
+
+    /// [`parse_stored`](Value::parse_stored), but digits past the microsecond of a date-time are
+    /// rounded off, and the boolean says they were ([`DateTime::parse_rounding`]), for a reader to count.
+    pub fn parse_stored_counted(text: &str, ty: FieldType) -> (Value, bool) {
+        let t = text.trim();
+        match ty {
+            FieldType::DateTime => DateTime::parse_rounding(t).map_or((Value::Null, false), |(d, r)| (Value::DateTime(d), r)),
+            FieldType::Date => match Date::parse(t) {
+                Some(d) => (Value::Date(d), false),
+                // Only a midnight as written is a date: digits past the microsecond never round
+                // into the next day.
+                None => DateTime::parse(t).filter(|d| d.is_date()).map_or((Value::Null, false), |d| (Value::Date(d.date()), false)),
+            },
+            _ => (Value::parse(text, ty), false),
         }
     }
 
@@ -592,6 +611,18 @@ mod tests {
         assert!(d > Value::Null);
         assert_eq!(Value::parse("2026-02-30", FieldType::Date), Value::Null);
         assert_eq!(d.to_json(), serde_json::json!("2026-03-05"));
+    }
+
+    /// A date field takes a date-time only when it is a midnight as written: digits past the
+    /// microsecond never round it into the next day.
+    #[test]
+    fn a_stored_date_is_not_rounded_into_the_next_day() {
+        assert_eq!(Value::parse_stored_counted("2026-03-05T23:59:59.9999999", FieldType::Date), (Value::Null, false));
+        assert_eq!(Value::parse_stored_counted("2026-03-05T00:00:00.0000001", FieldType::Date), (Value::Null, false));
+        let midnight = Value::parse_stored_counted("2026-03-05T00:00:00.000000000", FieldType::Date);
+        assert_eq!(midnight, (Value::parse("2026-03-05", FieldType::Date), false));
+        let (moment, rounded) = Value::parse_stored_counted("2026-03-05T23:59:59.9999999", FieldType::DateTime);
+        assert_eq!((moment.to_string(), rounded), ("2026-03-06T00:00:00".to_string(), true));
     }
 
     #[test]

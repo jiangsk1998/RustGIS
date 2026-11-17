@@ -151,7 +151,6 @@ pub(crate) fn placement_rank(layer_index: usize) -> f64 {
 
 /// Collects the labels `layer` puts on the features of `it` into `out`, for a `view`-sized
 /// pixmap (device pixels) at `frame`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect(
     out: &mut Vec<Label>,
     it: &Item,

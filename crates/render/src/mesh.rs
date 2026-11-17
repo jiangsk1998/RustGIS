@@ -224,7 +224,6 @@ const STROKE_TOLERANCE: f32 = 0.005;
 /// vertex shader applies the real width. Ring outlines take no width floor (`Ctx::polygon`),
 /// line parts floor at half a physical pixel (`Ctx::line`). `Err(TooDense)` once the vertices
 /// would pass `limit`, as soon as one doesn't fit.
-#[allow(clippy::too_many_arguments)]
 fn stroke(
     rings: &[Vec<Coord>],
     origin: [f64; 2],
@@ -347,7 +346,6 @@ fn extend_mesh(
 /// no-ops, and not emitting them is identical output for less work. `Err` when lyon refuses
 /// the geometry, or once the mesh passes `limit` vertices — the layer then falls back to the
 /// CPU path entirely.
-#[allow(clippy::too_many_arguments)]
 fn append_geometry(
     v: &mut Vec<MeshVertex>,
     i: &mut Vec<u32>,
@@ -448,7 +446,6 @@ fn estimate_vertices(g: &Geometry, s: &Symbol, wireframe: bool) -> usize {
 /// lyon refused a feature, `Err(TooDense)` when the mesh would pass `limit`, `Err(Imprecise)` when
 /// the features reach too far for f32 at this zoom — the caller then draws the layer
 /// (or batch) with tiny-skia instead (nothing is pushed part-way).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_layer(
     cmds: &mut Vec<DrawCmd>,
     layer: &Layer,

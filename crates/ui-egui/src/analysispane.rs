@@ -28,6 +28,8 @@ pub struct Workflow {
     pub bilinear: bool,
     pub text: String,
     pub function: String,
+    /// Slope output is degrees unless the user chooses percent rise.
+    pub slope_percent: bool,
     pub chain: Vec<String>,
     pub format: String,
     pub pick: Option<Pick>,
@@ -186,6 +188,30 @@ fn combo(ui: &mut Ui, id: &str, name: &str, value: &mut String, options: &[Strin
         .on_hover_text(tl!(name));
 }
 
+/// Asks where a desktop conversion goes before starting its export worker. Browser downloads
+/// retain the text-returning command; that command refuses a streamed layer's partial view.
+fn convert_layer(app: &mut RustGisApp) -> Result<(), String> {
+    let format = app.workflow.format.clone();
+    let ext = if format == "wkt" { "csv" } else { &format };
+    let name = format!("{}.{ext}", app.workflow.layer);
+    let mut params = json!({"layer": app.workflow.layer, "format": format});
+    if app.services.download.is_some() {
+        let answer = app.session.run("data.convert", &params)?;
+        app.download_bytes(&name, answer["text"].as_str().unwrap_or("").as_bytes().to_vec());
+    } else if let Some(path) = crate::dialogs::pick_save(&name, &[ext], tl!("Converted data")) {
+        params["path"] = json!(path);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::exportjob::start(app, "data.convert", params)?;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            app.session.run("data.convert", &params)?;
+        }
+    }
+    Ok(())
+}
+
 /// Runs a workflow's command: on the desktop the slow ones on a thread of their own
 /// ([`background`]), the rest here.
 fn run(app: &mut RustGisApp, id: &str, p: Value) {
@@ -201,7 +227,7 @@ fn run(app: &mut RustGisApp, id: &str, p: Value) {
 /// in the background, the pane opened at `section` to show its progress, Cancel and result; one
 /// that can't start (another is under way) is said in the status bar too. The rest run here, a
 /// failure said in the status bar.
-#[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+#[cfg_attr(target_arch = "wasm32", expect(unused_variables, reason = "the browser has no background runs"))]
 pub fn run_elsewhere(app: &mut RustGisApp, section: &str, id: &str, p: Value) {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some((command, name)) = background(id) {
@@ -513,6 +539,8 @@ fn picked(app: &mut RustGisApp, purpose: &str) -> Option<Vec<rustgis_engine::geo
     if done { app.workflow.pick.take().map(|p| p.points) } else { None }
 }
 
+/// Draws the active workflow form; raster functions share their step parameters with the
+/// Function Editor so Apply and Add Step honor the same choices.
 pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     // A section whose extension was turned off while it was open: back to the first.
     if app.workflow.section.is_empty() || !section_shown(&app.session, app.workflow.section) {
@@ -594,7 +622,24 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     _ => {}
                 }
             });
-            let step = json!({"function": app.workflow.function, "expression": app.workflow.text, "value": num(&app.workflow.number, 0.0)});
+            if app.workflow.function == "slope" {
+                ui.horizontal(|ui| {
+                    let label = ui.label(tl!("Slope units"));
+                    egui::ComboBox::from_id_salt("wf_slope_units")
+                        .selected_text(if app.workflow.slope_percent { tl!("Percent") } else { tl!("Degrees (0–90)") })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut app.workflow.slope_percent, false, tl!("Degrees (0–90)"));
+                            ui.selectable_value(&mut app.workflow.slope_percent, true, tl!("Percent"));
+                        })
+                        .response
+                        .labelled_by(label.id);
+                });
+            }
+            let mut step =
+                json!({"function": app.workflow.function, "expression": app.workflow.text, "value": num(&app.workflow.number, 0.0)});
+            if app.workflow.function == "slope" {
+                step["units"] = json!(if app.workflow.slope_percent { "percent" } else { "degrees" });
+            }
             if app.workflow.section == "rasterFunctions" {
                 if ui.button(tl!("Apply")).clicked() {
                     let mut p = step;
@@ -643,11 +688,12 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                         .map(|b| (b.stats.min, b.stats.max))
                         .unwrap_or((0.0, 1.0));
                     let step = (st.1 - st.0) / 10.0;
+                    // A constant raster gives empty middle ranges: they match nothing, so leave them out.
                     let ranges: Vec<Value> = (0..10)
-                        .map(|i| {
-                            let lo = st.0 + step * i as f64;
-                            let hi = if i == 9 { f64::MAX } else { lo + step };
-                            json!([if i == 0 { f64::MIN } else { lo }, hi, if high { i + 1 } else { 10 - i }])
+                        .filter_map(|i| {
+                            let lo = if i == 0 { f64::MIN } else { st.0 + step * i as f64 };
+                            let hi = if i == 9 { f64::MAX } else { st.0 + step * (i + 1) as f64 };
+                            (lo < hi).then(|| json!([lo, hi, if high { i + 1 } else { 10 - i }]))
                         })
                         .collect();
                     json!({"layer": n, "ranges": ranges, "weight": w})
@@ -886,20 +932,7 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             }
             combo(ui, "wf_xf", "Format", &mut app.workflow.format, &formats);
             if ui.button(tl!("Convert…")).clicked() {
-                match app.session.run("data.convert", &json!({"layer": app.workflow.layer, "format": app.workflow.format})) {
-                    Ok(v) => {
-                        let ext = if app.workflow.format == "wkt" { "csv".to_string() } else { app.workflow.format.clone() };
-                        let name = format!("{}.{ext}", app.workflow.layer);
-                        let bytes = v["text"].as_str().unwrap_or("").as_bytes().to_vec();
-                        if app.services.download.is_some() {
-                            app.download_bytes(&name, bytes);
-                        } else if let Some(path) = crate::dialogs::pick_save(&name, &[ext.as_str()], tl!("Converted data")) {
-                            let r = rustgis_engine::data::io::write_atomic(std::path::Path::new(&path), &bytes).map_err(|e| e.to_string());
-                            app.workflow.error = r.err();
-                        }
-                    }
-                    Err(e) => app.workflow.error = Some(e),
-                }
+                app.workflow.error = convert_layer(app).err();
             }
         }
         "environments" => {
@@ -1963,7 +1996,7 @@ fn script(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, fit: bool) {
     }
     // Braces, brackets and quotes closing themselves (#662): what the box does with the keys,
     // followed through after it.
-    let before = crate::scriptcomplete::before(ui, box_id, &app.workflow.script);
+    let before = crate::completion::before(ui, box_id, &app.workflow.script);
     let out = egui::ScrollArea::vertical().id_salt("script_box").max_height(room).auto_shrink([false, true]).show(ui, |ui| {
         egui::TextEdit::multiline(&mut app.workflow.script)
             .id(box_id)
@@ -2291,7 +2324,7 @@ mod tests {
             let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
             while crate::readjob::land(app) {
                 assert!(std::time::Instant::now() < end, "the script never landed");
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                std::thread::sleep(std::time::Duration::from_millis(5)); // test-wait: legacy polling for script completion
             }
         };
         // The results say Running… until it lands, then each line's result, as Run #1.
@@ -2601,7 +2634,7 @@ mod tests {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while land_job(&mut app) {
             assert!(std::time::Instant::now() < end, "the run never landed");
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(5)); // test-wait: legacy polling for workflow completion
         }
         assert!(app.workflow.job.is_none() && app.workflow.error.is_none(), "{:?}", app.workflow.error);
         assert!(app.workflow.result.as_ref().is_some_and(|r| r["layer"].is_u64()), "{:?}", app.workflow.result);
@@ -2627,8 +2660,59 @@ mod tests {
         assert!(app.session.notices.iter().any(|n| n.text.contains("still running")));
         while land_job(&mut app) {
             assert!(std::time::Instant::now() < end, "the run never landed");
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(5)); // test-wait: legacy polling for workflow completion
         }
+    }
+
+    /// The real Convert button asks for a destination first, starts the export job and lands
+    /// its file; dismissing the picker never starts a conversion.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn interop_button_starts_an_export_after_picking_a_file() {
+        let mut app = RustGisApp::with_sample();
+        app.ui.right = Some(crate::RightPane::Workflows);
+        app.workflow.section = "interop";
+        app.workflow.layer = "Cities".into();
+        app.workflow.format = "wkt".into();
+        let dir = std::env::temp_dir().join(format!("rustgis-interop-button-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cities.csv");
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1480.0, 900.0)).with_pixels_per_point(1.3).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run();
+        let logged = h.state().session.log.entries().len();
+        crate::dialogs::PICKED.with(|c| *c.borrow_mut() = None);
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Convert…").click();
+        h.run();
+        assert!(h.state().export_job.is_none());
+        assert_eq!(h.state().session.log.entries().len(), logged, "dismissing the picker does no conversion");
+        assert!(h.state().workflow.error.is_none());
+        crate::dialogs::PICKED.with(|c| *c.borrow_mut() = Some(path.display().to_string()));
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Convert…").click();
+        h.step();
+        assert!(h.state().export_job.is_some(), "{:?}", h.state().workflow.error);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while h.state().export_job.is_some() {
+            assert!(std::time::Instant::now() < end, "conversion never landed");
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(5)); // test-wait: legacy polling for the export result
+        }
+        h.run();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("wkt,"));
+        assert_eq!(text.lines().count() - 1, h.state().session.map().layer_by_name("Cities").unwrap().dataset.features.len());
+        assert_eq!(h.state().session.log.entries().last().unwrap().command, "data.convert");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Every workflow has named inputs, including both weights sharing a row (#790).

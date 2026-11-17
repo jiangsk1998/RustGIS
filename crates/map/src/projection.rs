@@ -18,8 +18,8 @@ pub const PRESETS: &[(&str, &str, &str)] = &[
     ("robinson", "Robinson", "+proj=robin +lon_0=0 +datum=WGS84 +units=m +no_defs"),
     ("equalEarth", "Equal Earth", "+proj=eqearth +lon_0=0 +datum=WGS84 +units=m +no_defs"),
     ("naturalEarth", "Natural Earth", "+proj=natearth +lon_0=0 +datum=WGS84 +units=m +no_defs"),
-    // At Winkel's own standard parallel, acos(2/π) (`rustgis_geom::world::winkel_parallel`):
-    // PROJ, and RustGIS's readers, take 0 for a definition without one.
+    // At Winkel's own standard parallel, acos(2/π): PROJ, and RustGIS's readers, take 0 for a
+    // definition without one.
     ("winkelTripel", "Winkel Tripel", "+proj=wintri +lon_0=0 +lat_1=50.459776252189805 +datum=WGS84 +units=m +no_defs"),
     ("eckertIV", "Eckert IV (equal-area world)", "+proj=eck4 +lon_0=0 +datum=WGS84 +units=m +no_defs"),
     ("northPolar", "North Polar Stereographic", "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=0 +datum=WGS84 +units=m +no_defs"),
@@ -274,14 +274,6 @@ fn with_params(def: &str, params: &[(&str, f64)]) -> String {
         .join(" ")
 }
 
-/// Whether local views (`local:lon,lat`, azimuthal equidistant) can be drawn in this build. They
-/// need proj4rs' `aeqd`, which the browser build leaves out (Cargo.toml); asking the projection
-/// itself, rather than the target, keeps the command, the ribbon and the tests in step with it.
-pub fn local_views_supported() -> bool {
-    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *SUPPORTED.get_or_init(|| Projector::new("local:0,0").is_ok())
-}
-
 /// Strips Vietnamese diacritics and converts to lowercase alphanumeric ASCII.
 pub fn normalize_vietnamese(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -423,7 +415,7 @@ pub enum Domain {
 
 impl Domain {
     /// The area of use for a regional preset, or one worked out from the PROJ parameters.
-    /// `(lon0, lat0)` is the projection's centre (`lon0` east of Greenwich), as proj4rs reads it,
+    /// `(lon0, lat0)` is the projection's centre (`lon0` east of Greenwich), as terrio-crs reads it,
     /// and `pm` the prime meridian the definition's other longitudes (a UTM zone's) are counted from.
     fn of(id: Option<&str>, def: &str, (lon0, lat0): (f64, f64), pm: f64) -> Domain {
         match id {
@@ -440,7 +432,7 @@ impl Domain {
                 let lon0 = if proj == "utm" { param("zone").map(|z| z * 6.0 - 183.0 + pm).unwrap_or(lon0) } else { lon0 };
                 Domain::Band { lon0, half: 30.0 }
             }
-            "stere" | "sterea" | "somerc" | "krovak" | "cass" | "poly" | "omerc" => {
+            "stere" | "sterea" | "somerc" | "krovak" | "cass" | "poly" | "omerc" | "labrd" => {
                 Domain::Cap { center: Coord::new(lon0, lat0), radius: 60.0 }
             }
             "laea" | "aeqd" => Domain::Cap { center: Coord::new(lon0, lat0), radius: 120.0 },
@@ -465,48 +457,12 @@ impl Domain {
     }
 }
 
-/// The prime meridian of a definition (`+pm=`: a name such as `paris`, or degrees), in degrees
-/// east of Greenwich: `lon_0` and the definition's other longitudes are counted from it. 0 when
-/// there is none, or when it can't be read (proj4rs then refuses the definition anyway).
-fn prime_meridian(def: &str) -> f64 {
-    angle(def, "pm").unwrap_or(0.0)
-}
-
-/// A definition's `+lon_0`, `+lat_0` or `+pm` in degrees, read the way proj4rs reads it (degrees,
-/// DMS, or a prime meridian's name), so the world projections computed here and the areas of use
-/// agree with it. `None` when it is missing or can't be read.
-fn angle(def: &str, key: &str) -> Option<f64> {
-    let v = def.split_whitespace().find_map(|t| t.strip_prefix(&format!("+{key}=")))?;
-    let p = proj4rs::Proj::from_proj_string(&format!("+proj=longlat +ellps=WGS84 +{key}={v}")).ok()?;
-    let d = match key {
-        "pm" => p.from_greenwich(),
-        "lat_0" => p.latitude_of_origin(),
-        _ => p.longitude_of_origin(),
-    }
-    .to_degrees();
-    d.is_finite().then_some(d)
-}
-
-/// How a projection is computed: by the PROJ port, or here (world projections it lacks).
-#[derive(Clone)]
-enum Engine {
-    Proj {
-        native: Box<proj4rs::Proj>,
-        wgs84: Box<proj4rs::Proj>,
-    },
-    World(crate::world::World),
-    /// Sinusoidal (MODIS's grid, ESRI:54008), which proj4rs lacks.
-    Sinusoidal(rustgis_geom::Sinusoidal),
-    /// Equidistant cylindrical on an ellipsoid (EPSG:4087), which proj4rs computes on a sphere:
-    /// as rustgis-data computes it, so a raster in the system, drawn in its own coordinates,
-    /// lands where the map puts the same longitude/latitude.
-    Eqc(Box<rustgis_data::raster::Transformer>),
-}
-
 /// Converts between longitude/latitude and the coordinates of a custom projection.
 #[derive(Clone)]
 pub struct Projector {
-    engine: Engine,
+    /// Computed by terrio-crs, as rustgis-data computes the same system, so a raster drawn in its
+    /// own coordinates lands where the map puts the same longitude/latitude.
+    engine: rustgis_data::raster::Transformer,
     /// Metres per map unit.
     to_meter: f64,
     domain: Domain,
@@ -576,13 +532,18 @@ fn fill_strays(measured: &[Option<f64>], lats: &[f64], shown: &[bool]) -> [f64; 
 
 impl std::fmt::Debug for Projector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match &self.engine {
-            Engine::Proj { native, .. } => native.projname(),
-            Engine::World(w) => w.kind.proj_name(),
-            Engine::Sinusoidal(_) => "sinu",
-            Engine::Eqc(_) => "eqc",
-        };
+        let name = self.engine.params().map_or("?", |p| p.method.as_str());
         write!(f, "Projector({name})")
+    }
+}
+
+/// Why a projection can't be drawn: its method, when terrio-crs doesn't compute it (named, without
+/// terrio-crs's advice to build it with another feature), else what terrio-crs said.
+fn refusal(code: &str, proj: &str, e: &str) -> String {
+    if e.contains("unsupported projection") {
+        format!("{code}: its projection method (+proj={proj}) isn't supported")
+    } else {
+        format!("{code}: {e}")
     }
 }
 
@@ -591,67 +552,34 @@ const LIMIT: f64 = 4.0e7;
 
 impl Projector {
     /// The projector for a code `lookup` accepts: a preset id or name, `EPSG:<n>` or
-    /// `local:lon,lat`. World projections proj4rs lacks are computed here; the rest go to
-    /// proj4rs. Fails when the code is unknown, or when its method can't be computed (its
-    /// `+proj=` name is in the message), so a map is never drawn in another projection than the
-    /// one it names.
+    /// `local:lon,lat`, computed by terrio-crs as rustgis-data computes data in the same system.
+    /// Fails when the code is unknown, or when its method can't be computed (its `+proj=` name is
+    /// in the message), so a map is never drawn in another projection than the one it names.
     pub fn new(code: &str) -> Result<Projector, String> {
-        let (def, _) = lookup(code)?;
+        let (def, label) = lookup(code)?;
         let preset = parse_preset(code)?.map(|(id, _)| id);
         let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
-        // Sinusoidal, computed here on the sphere or ellipsoid the definition gives.
-        if let Some(sinu) = rustgis_geom::Sinusoidal::from_proj4(&def) {
-            let sinu = sinu.map_err(|e| format!("{code}: {e}"))?;
-            let domain = Domain::of(preset, &def, (sinu.lon0, 0.0), 0.0);
-            let lon0 = sinu.lon0;
-            return Ok(Projector { engine: Engine::Sinusoidal(sinu), to_meter: 1.0, domain, lon0, edge: std::sync::OnceLock::new() });
+        // Computed as rustgis-data computes the same definition, so data in the system lands
+        // where the map puts it.
+        // Noted as used, so a background export of a map drawn in it says its missing grid.
+        rustgis_data::raster::crs::note_used(&def, || label.to_string());
+        let t = rustgis_data::raster::crs::transformer_of(&def).map_err(|e| refusal(code, proj, &e))?;
+        let params = t.params().cloned();
+        // Whether an EPSG code needs a datum grid RustGIS doesn't have, asked in its area of use
+        // (the session says so, `Session::say_grid_notes`).
+        if let Some(epsg) = label.strip_prefix("EPSG:").and_then(|n| n.parse::<u16>().ok()) {
+            rustgis_data::raster::crs::probe_grid(&def, || rustgis_data::raster::crs::area_centre(epsg));
         }
-        if let Some(kind) = crate::world::Kind::from_proj_name(proj) {
-            // Computed here: the centre is read from the definition as proj4rs would read it.
-            let pm = prime_meridian(&def);
-            let lon0 = angle(&def, "lon_0").unwrap_or(0.0) + pm;
-            let lat0 = angle(&def, "lat_0").unwrap_or(0.0);
-            let domain = Domain::of(preset, &def, (lon0, lat0), pm);
-            // A sphere's radius when the definition gives one (ESRI's Sphere_* systems), else WGS 84's.
-            let radius = def
-                .split_whitespace()
-                .find_map(|t| t.strip_prefix("+R=")?.parse::<f64>().ok())
-                .filter(|r| r.is_finite() && *r > 0.0)
-                .unwrap_or(rustgis_geom::MERCATOR_R);
-            // Winkel Tripel's standard parallel as the definition gives it (the preset gives
-            // Winkel's own), else 0, as PROJ and RustGIS's readers take it, so the map draws a
-            // definition where its data is read. The other projections have no standard parallel
-            // and ignore one, as the reader and PROJ do.
-            let lat1 = match def.split_whitespace().find_map(|t| t.strip_prefix("+lat_1=")) {
-                Some(v) if kind == crate::world::Kind::WinkelTripel => v
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|v| v.is_finite() && v.abs() < 90.0)
-                    .ok_or_else(|| format!("{code}: +lat_1={v} isn't a latitude short of a pole"))?,
-                _ => 0.0,
-            };
-            let engine = Engine::World(crate::world::World { lat1, ..crate::world::World::new(kind, lon0, radius) });
-            return Ok(Projector { engine, to_meter: 1.0, domain, lon0, edge: std::sync::OnceLock::new() });
-        }
-        let native = proj4rs::Proj::from_proj_string(&def).map_err(|e| match e {
-            // A known code whose method isn't implemented (EPSG:8441's +proj=labrd, say): name it.
-            proj4rs::errors::Error::ProjectionNotFound => format!("{code}: its projection method (+proj={proj}) isn't supported"),
-            e => format!("{code}: {e}"),
-        })?;
-        let wgs84 = proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())?;
-        let to_meter = native.to_meter();
-        // The prime and central meridians proj4rs itself projects with, so the area of use, the
-        // edge and the projection all agree (it reads degrees, DMS, radians and names alike).
+        let to_meter = params.as_ref().map_or(1.0, |p| p.to_meter);
+        // The prime and central meridians the projection is computed with, so the area of use,
+        // the edge and the projection all agree.
         let finite = |d: f64| if d.is_finite() { d } else { 0.0 };
-        let pm = finite(native.from_greenwich().to_degrees());
-        let lon0 = finite(native.longitude_of_origin().to_degrees()) + pm;
-        let lat0 = finite(native.latitude_of_origin().to_degrees());
+        let pm = params.as_ref().map_or(0.0, |p| finite(p.prime_meridian));
+        let lon0 = params.as_ref().map_or(0.0, |p| finite(p.lon_0)) + pm;
+        let lat0 = params.as_ref().map_or(0.0, |p| finite(p.lat_0));
         let domain = Domain::of(preset, &def, (lon0, lat0), pm);
-        let engine = match rustgis_data::raster::crs::ellipsoidal_eqc(&def) {
-            Some(eqc) => Engine::Eqc(Box::new(eqc.map_err(|e| format!("{code}: {e}"))?)),
-            None => Engine::Proj { native: Box::new(native), wgs84: Box::new(wgs84) },
-        };
-        let to_meter = if to_meter > 0.0 { to_meter } else { 1.0 };
+        let engine = t;
+        let to_meter = if to_meter.is_finite() && to_meter > 0.0 { to_meter } else { 1.0 };
         Ok(Projector { engine, to_meter, domain, lon0, edge: std::sync::OnceLock::new() })
     }
 
@@ -677,9 +605,6 @@ impl Projector {
         }
         Some(self.edge.get_or_init(|| {
             let exact = Edge { lon: self.lon0 + 180.0, strays: [0.0; EDGE_SAMPLES] };
-            if let Engine::World(_) | Engine::Sinusoidal(_) = self.engine {
-                return exact;
-            }
             let shifted = [0.0, 60.0, -60.0].iter().any(|lat| self.edge_at(*lat, exact.lon).is_none_or(|x| (x - exact.lon).abs() > 1e-9));
             if shifted { self.find_edge(exact.lon).unwrap_or(exact) } else { exact }
         }))
@@ -722,17 +647,8 @@ impl Projector {
         if !c.is_finite() {
             return None;
         }
-        let (native, wgs84) = match &self.engine {
-            Engine::Proj { native, wgs84 } => (native, wgs84),
-            Engine::World(w) => return w.forward(c),
-            Engine::Sinusoidal(s) => return s.forward(c).filter(|m| m.x.abs() < LIMIT && m.y.abs() < LIMIT),
-            Engine::Eqc(t) => {
-                return t.from_lonlat(Coord::new(c.x, c.y.clamp(-90.0, 90.0))).filter(|m| m.x.abs() < LIMIT && m.y.abs() < LIMIT);
-            }
-        };
-        let mut p = (c.x.to_radians(), c.y.clamp(-90.0, 90.0).to_radians(), 0.0);
-        proj4rs::transform::transform(wgs84, native, &mut p).ok()?;
-        (p.0.is_finite() && p.1.is_finite() && p.0.abs() < LIMIT && p.1.abs() < LIMIT).then(|| Coord::new(p.0, p.1))
+        let m = self.engine.from_lonlat_unchecked(Coord::new(c.x, c.y.clamp(-90.0, 90.0)))?;
+        (m.is_finite() && m.x.abs() < LIMIT && m.y.abs() < LIMIT).then_some(m)
     }
 
     /// Like [`Projector::forward`], but also rejects points that don't map back to themselves
@@ -759,16 +675,7 @@ impl Projector {
         if !m.is_finite() {
             return None;
         }
-        let (native, wgs84) = match &self.engine {
-            Engine::Proj { native, wgs84 } => (native, wgs84),
-            Engine::World(w) => return w.inverse(m),
-            Engine::Sinusoidal(s) => return s.inverse(m),
-            Engine::Eqc(t) => return t.to_lonlat(m).filter(|c| c.y.abs() <= 90.0 + 1e-9),
-        };
-        let mut p = (m.x, m.y, 0.0);
-        proj4rs::transform::transform(native, wgs84, &mut p).ok()?;
-        let c = Coord::new(p.0.to_degrees(), p.1.to_degrees());
-        (c.is_finite() && c.y.abs() <= 90.0 + 1e-9).then_some(c)
+        self.engine.to_lonlat(m).filter(|c| c.y.abs() <= 90.0 + 1e-9)
     }
 
     pub fn to_meter(&self) -> f64 {
@@ -1066,8 +973,8 @@ mod tests {
         assert!(p.domain.contains(Coord::new(-50.0, -15.0)) && !p.domain.contains(Coord::new(-55.0, 60.0)));
     }
 
-    /// Sinusoidal (opengeos/RustGIS#563), computed here before proj4rs 0.3 grew one: Esri's
-    /// systems draw, against pyproj 3.7.1 (PROJ 9.5.1), and wrap opposite their central meridian.
+    /// Sinusoidal (opengeos/RustGIS#563): Esri's systems draw, against pyproj 3.7.1 (PROJ 9.5.1),
+    /// and wrap opposite their central meridian.
     #[test]
     fn sinusoidal_codes_draw() {
         let check = |code: &str, (lon, lat): (f64, f64), (x, y): (f64, f64), lon0: f64| {
@@ -1089,15 +996,14 @@ mod tests {
     }
 
     /// A map in EPSG:4087 (and the Equirectangular preset, its definition) uses the same
-    /// PROJ-compatible spherical formula as the data crate: a raster in
-    /// EPSG:4087 is drawn in its own coordinates on such a map, so both must put a place at the
-    /// same point. PROJ 9.7.1: 55°N 10°E in EPSG:4087 is E 1 113 194.91, N 6 122 571.99.
+    /// ellipsoidal formula as the data crate: a raster in EPSG:4087 is drawn in its own
+    /// coordinates on such a map, so both must put a place at the same point. PROJ 9.8.1 (pyproj
+    /// 3.8.0): 55°N 10°E in EPSG:4087 is E 1 113 194.91, N 6 097 230.31.
     #[test]
     fn ellipsoidal_equidistant_cylindrical_draws_as_its_data_reads() {
         let data = rustgis_data::raster::Crs::from_epsg(4087).unwrap().transformer().unwrap();
         for code in ["EPSG:4087", "equirectangular", "ESRI:54002"] {
             let p = Projector::new(code).unwrap_or_else(|e| panic!("{code}: {e}"));
-            assert!(matches!(p.engine, Engine::Eqc(_)), "{code}");
             assert_eq!(format!("{p:?}"), "Projector(eqc)", "{code}");
             assert_eq!(p.domain(), Domain::World, "{code}");
             assert!((p.central_meridian().unwrap() - 0.0).abs() < 1e-9, "{code}");
@@ -1113,16 +1019,15 @@ mod tests {
             }
         }
         let m = Projector::new("EPSG:4087").unwrap().forward(Coord::new(10.0, 55.0)).unwrap();
-        assert!((m.x - 1_113_194.907_932_735_7).abs() < 1e-6 && (m.y - 6_122_571.993_630_046).abs() < 1e-6, "{m:?}");
+        assert!((m.x - 1_113_194.907_932_735_7).abs() < 1e-6 && (m.y - 6_097_230.313_124_184).abs() < 1e-6, "{m:?}");
         // ESRI:54002 is true to scale at 60°: half the easting per degree, the same northing.
         let (a, b) = (
             Projector::new("ESRI:54002").unwrap().forward(Coord::new(1.0, 45.0)).unwrap(),
             data.from_lonlat(Coord::new(1.0, 45.0)).unwrap(),
         );
         assert!((a.x / b.x - 0.5).abs() < 0.01 && (a.y - b.y).abs() < 1e-6, "{a:?} {b:?}");
-        // On a sphere (ESRI's Sphere_Plate_Carree) it stays proj4rs's.
+        // On a sphere (ESRI's Sphere_Plate_Carree) too.
         let sphere = Projector::new("ESRI:53001").unwrap();
-        assert!(matches!(sphere.engine, Engine::Proj { .. }));
         let sphere = sphere.forward(Coord::new(0.0, 45.0)).unwrap();
         assert!((sphere.y - 6_371_000.0 * std::f64::consts::FRAC_PI_4).abs() < 1e-6, "{sphere:?}");
     }
@@ -1144,12 +1049,13 @@ mod tests {
             let m = p.forward(Coord::new(lon, lat)).unwrap_or_else(|| panic!("{code}"));
             assert!((m.x - x).abs() < tolerance && (m.y - y).abs() < tolerance, "{code}: {m:?}, want ({x}, {y})");
             let back = p.inverse(m).unwrap_or_else(|| panic!("{code}"));
-            assert!((back.x - lon).abs() < 1e-6 && (back.y - lat).abs() < 1e-6, "{code}: {back:?}");
+            let within = round_trip(&format!("{p:?}"));
+            assert!((back.x - lon).abs() < within && (back.y - lat).abs() < within, "{code}: {back:?}");
         };
         // South America Albers Equal Area Conic, with its datum shift (South American 1969: the
         // first Helmert PROJ lists, 7 m from the regional one PROJ picks for this point).
         check("ESRI:102033", (-60.0, -15.0), (46.993, 1_977_375.429), 0.01);
-        // World Robinson, and Sphere Robinson on its own 6371 km sphere (+R), computed here.
+        // World Robinson, and Sphere Robinson on its own 6371 km sphere (+R).
         check("ESRI:54030", (20.0, 30.0), (1_813_955.515, 3_208_557.612), 1.0);
         check("esri:53030", (20.0, 30.0), (1_811_925.737, 3_204_967.304), 1.0);
         // A state plane in US survey feet (deprecated, but what ArcGIS writes): Manhattan.
@@ -1166,7 +1072,8 @@ mod tests {
         for web in ["ESRI:102100", "esri:102113", "ESRI 102100", "esri:0102100", "EPSG:3857", "3857", "epsg 3857", "EPSG:900913"] {
             assert_eq!(crate::Projection::from_code(web), Ok(crate::Projection::WebMercator), "{web}");
         }
-        // Not in the table (World Miller is kilometres off in proj4rs), not a number, too big.
+        // Not in the table (World Miller was kilometres off in proj4rs, so left out), not a
+        // number, too big.
         for bad in ["ESRI:54003", "ESRI:", "ESRI:abc", "ESRI:-1", "ESRI:99999999999", "ESRI:1e5"] {
             let e = lookup(bad).unwrap_err();
             assert!(e.contains("unknown coordinate system") && e.contains("ESRI:"), "{bad}: {e}");
@@ -1177,13 +1084,19 @@ mod tests {
         assert_eq!(lookup("esri:00054003").unwrap_err(), "unknown coordinate system ESRI:54003");
         // Any other name starting with "esri" isn't read as a code.
         assert_eq!(lookup("esrifoo").unwrap_err(), "unknown projection 'esrifoo'");
-        // Every code in the table draws (local azimuthal ones only where aeqd is built in).
+        // Every code in the table draws, azimuthal equidistant ones too.
         for n in rustgis_data::raster::crs::esri_codes() {
             let code = format!("ESRI:{n}");
-            let aeqd = lookup(&code).is_ok_and(|(def, _)| def.contains("+proj=aeqd"));
             let p = Projector::new(&code);
-            assert!(p.is_ok() || (aeqd && !local_views_supported()), "{code}: {:?}", p.err());
+            assert!(p.is_ok(), "{code}: {:?}", p.err());
         }
+    }
+
+    /// How closely a projection brings a place back, in degrees: Robinson's inverse settles
+    /// within about 1.5e-5° (1.6 m; PROJ 9.8.1 gives 30.0000145° for ESRI:54030's 30°N, 20°E),
+    /// the others within 1e-6°.
+    fn round_trip(projector: &str) -> f64 {
+        if projector == "Projector(robin)" { 2e-5 } else { 1e-6 }
     }
 
     #[test]
@@ -1196,7 +1109,8 @@ mod tests {
             };
             let m = p.forward(c).unwrap_or_else(|| panic!("{id}"));
             let back = p.inverse(m).unwrap();
-            assert!((back.x - c.x).abs() < 1e-6 && (back.y - c.y).abs() < 1e-6, "{id}: {back:?}");
+            let within = round_trip(&format!("{p:?}"));
+            assert!((back.x - c.x).abs() < within && (back.y - c.y).abs() < within, "{id}: {back:?}");
         }
         assert_eq!(preset_params("vn2000tm3"), &[LON_0]);
         assert_eq!(preset_params("vn2000"), &[]);
@@ -1231,16 +1145,27 @@ mod tests {
     }
 
     #[test]
-    fn codes_whose_method_cannot_be_drawn_are_refused() {
-        // EPSG:8441 (Laborde) is in the EPSG table, but its method (+proj=labrd) has no
-        // implementation: refuse it rather than accept it and draw the map in Web Mercator while
-        // naming EPSG:8441 (opengeos/RustGIS#208).
-        assert!(lookup("EPSG:8441").is_ok(), "the code itself is known");
-        let e = Projector::new("EPSG:8441").unwrap_err();
-        assert!(e.contains("EPSG:8441") && e.contains("labrd"), "{e}");
-        let e = crate::Projection::from_code("EPSG:8441").unwrap_err();
-        assert!(e.contains("labrd"), "{e}");
-        // proj4rs 0.3 added Cassini, the polyconic, Equal Earth and the oblique Mercator: their
+    fn codes_whose_method_was_refused_draw_or_are_named() {
+        // EPSG:8441 (Laborde, Madagascar), refused while its method had no implementation
+        // (opengeos/RustGIS#208), draws where PROJ does: pyproj 3.8.0 (PROJ 9.8.1) puts 47°E 19°S
+        // at (459 248.289, 788 988.914).
+        let laborde = Projector::new("EPSG:8441").unwrap_or_else(|e| panic!("{e}"));
+        // Noted as used on the thread that built it, as a background export's map is.
+        let used = std::thread::spawn(|| {
+            Projector::new("EPSG:26717").unwrap();
+            rustgis_data::raster::crs::take_used()
+        })
+        .join()
+        .unwrap();
+        assert!(used.iter().any(|(_, label)| label == "EPSG:26717"), "{used:?}");
+        let m = laborde.forward(Coord::new(47.0, -19.0)).unwrap();
+        assert!((m.x - 459_248.289).abs() < 0.01 && (m.y - 788_988.914).abs() < 0.01, "{m:?}");
+        // A regional projection: places far from Madagascar aren't drawn, and its round trip is
+        // checked.
+        assert!(matches!(laborde.domain(), Domain::Cap { radius: 60.0, .. }), "{:?}", laborde.domain());
+        assert!(laborde.domain().contains(Coord::new(47.0, -19.0)));
+        assert!(!laborde.domain().contains(Coord::new(-120.0, 40.0)));
+        // Cassini, the polyconic, Equal Earth and the oblique Mercator: their
         // codes are accepted (EPSG:5880's polyconic, whose refusal was #208), and draw where PROJ
         // does: 54°W 10°S lands at (5 000 000, 8 894 145.167) in pyproj 3.8.0's EPSG:5880. On the
         // central meridian x is the false easting itself; y is the false northing (10 000 000)
@@ -1255,18 +1180,21 @@ mod tests {
         for ok in ["EPSG:3035", "epsg:32633", "EPSG:8858", "equalEarth", "usaAlbers", "mercator", "globe"] {
             crate::Projection::from_code(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
         }
-        // Local views are accepted exactly where they can be drawn (`aeqd` is native-only, Cargo.toml).
-        let local = crate::Projection::from_code("local:12.5,41.9");
-        assert_eq!(local.is_ok(), local_views_supported(), "{local:?}");
-        // Pinned to the target on purpose, so the probe can't drift from the Cargo.toml split unnoticed.
-        assert_eq!(local_views_supported(), !cfg!(target_arch = "wasm32"), "aeqd on native targets only");
+        // Local views are accepted in every build.
+        crate::Projection::from_code("local:12.5,41.9").unwrap();
+    }
+
+    /// A method terrio-crs doesn't compute (the International Map of the World polyconic) is
+    /// refused by name, rather than drawn in another projection under the code's name.
+    #[test]
+    fn a_method_that_cant_be_computed_is_named() {
+        let e = rustgis_data::raster::crs::transformer_of("+proj=imw_p +lat_1=10 +lat_2=20 +datum=WGS84").unwrap_err();
+        assert_eq!(refusal("ESRI:1", "imw_p", &e), "ESRI:1: its projection method (+proj=imw_p) isn't supported");
+        assert_eq!(refusal("EPSG:1", "tmerc", "a unit of 0"), "EPSG:1: a unit of 0");
     }
 
     #[test]
     fn local_views_are_azimuthal_equidistant() {
-        if !local_views_supported() {
-            return; // the browser build (see codes_whose_method_cannot_be_drawn_are_refused)
-        }
         // map.viewMode "local" relies on +proj=aeqd: it must build (not fall back to Web Mercator)
         // and keep true distances from its centre.
         let p = Projector::new("local:12.5,41.9").unwrap_or_else(|e| panic!("{e}"));
@@ -1333,16 +1261,6 @@ mod tests {
         assert!(gk.forward_checked(Coord::new(13.0, 47.5)).is_some(), "Austria");
         assert!(gk.forward_checked(Coord::new(-8.0, 53.0)).is_some(), "Ireland");
         assert!(gk.forward_checked(Coord::new(50.0, 42.0)).is_none(), "the Caspian");
-        // Names, degrees and nothing at all.
-        assert!((prime_meridian("+proj=lcc +pm=paris") - 2.337229166667).abs() < 1e-9);
-        assert!((prime_meridian("+proj=merc +pm=-17.5") + 17.5).abs() < 1e-9);
-        assert_eq!(prime_meridian("+proj=merc +lon_0=10"), 0.0);
-        assert_eq!(prime_meridian("+proj=merc +pm=nowhere"), 0.0);
-        // lon_0 in DMS, read as proj4rs reads it, for the world projections computed here too.
-        assert!(angle("+proj=eqearth +lon_0=90d30'W", "lon_0").is_some_and(|d| (d + 90.5).abs() < 1e-9));
-        assert_eq!(angle("+proj=eqearth", "lon_0"), None);
-        assert!(angle("+proj=stere +lat_0=-90 +lon_0=0", "lat_0").is_some_and(|d| (d + 90.0).abs() < 1e-9));
-        assert!(angle("+proj=laea +lat_0=52d30'N", "lat_0").is_some_and(|d| (d - 52.5).abs() < 1e-9));
     }
 
     #[test]
@@ -1360,9 +1278,7 @@ mod tests {
             assert!(west > centre && centre > east, "{n}: lon_0 {lon0}: {west} / {centre} / {east}");
             // With a datum shift the edge is found by search, which must not fall back to the
             // nominal edge (no margin) for any of them.
-            if let Engine::Proj { .. } | Engine::Eqc(_) = p.engine {
-                assert!(p.find_edge(p.lon0 + 180.0).is_some(), "{n}: the edge search fell back");
-            }
+            assert!(p.find_edge(p.lon0 + 180.0).is_some(), "{n}: the edge search fell back");
             checked += 1;
         }
         // 31 in crs-definitions 0.6 (Mercator, equirectangular, cylindrical equal-area, Equal Earth),
@@ -1370,7 +1286,7 @@ mod tests {
         assert!(checked >= 31, "only {checked} world projections checked");
     }
 
-    /// The world presets RustGIS computes draw where its readers place their definitions (a map
+    /// The world presets draw where RustGIS's readers place their definitions (a map
     /// exported in one, say): Winkel Tripel at Winkel's own parallel, which its preset gives, as
     /// PROJ 9.8.1 places it (#1701).
     #[test]
@@ -1415,8 +1331,8 @@ mod tests {
     #[test]
     fn features_across_the_map_edge_are_cut_there() {
         use rustgis_data::Geometry;
-        // #209: Equal Earth Americas (computed here, edge at 90°E) and PDC Mercator (proj4rs,
-        // lon_0 = 150°, edge at 30°W). Before, these drew as bands across the whole map.
+        // #209: Equal Earth Americas (edge at 90°E) and PDC Mercator (lon_0 = 150°, edge at
+        // 30°W). Before, these drew as bands across the whole map.
         // EPSG:5329 is centred on 110°E through its prime meridian (+pm=jakarta), with a datum shift.
         for (code, edge) in [("EPSG:8858", 90.0), ("EPSG:3832", -30.0), ("EPSG:5329", -70.0)] {
             let flat = Flat::of(&crate::Projection::Custom(code.into()));

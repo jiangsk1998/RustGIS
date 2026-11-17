@@ -100,7 +100,7 @@ fn name_of(p: &Value) -> Result<Option<String>, String> {
     }
     match ps(p, "name") {
         Some(n) => {
-            let n: String = n.trim().chars().take(200).collect();
+            let n = super::within("name", "a group's name", n.trim(), 200)?;
             if n.is_empty() { Err("name is required".into()) } else { Ok(Some(n)) }
         }
         None => Ok(None),

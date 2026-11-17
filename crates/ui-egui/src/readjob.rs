@@ -1,4 +1,4 @@
-//! Add Data's whole-file reads, layer reload, Load All Features, Convert To Annotation's read of a
+//! Add Data's whole-file reads, layer repair/reload, Load All Features, Convert To Annotation's read of a
 //! layer read in place, local archive validation and model/script tools on the desktop run on a
 //! thread of their own (#1291 step 3), so large reads
 //! and tools don't hold the window: the status bar shows the run under way,
@@ -24,6 +24,8 @@ pub struct Reads {
     job: Option<ReadJob>,
     /// The commands waiting for the read before, in order.
     waiting: VecDeque<Asked>,
+    #[cfg(test)]
+    fail_spawn: bool,
 }
 
 /// A command asked for, with where it was asked: the project, map and layer then open.
@@ -67,7 +69,7 @@ struct ReadJob {
     seen: Option<(crate::diskwatch::Target, crate::Slot<crate::diskwatch::Seen>)>,
 }
 
-/// Runs Add Data, Load All, Reload Data, Convert To Annotation, archive reload/repair, model/script
+/// Runs Add Data, Load All, Repair/Reload Data, Convert To Annotation, archive reload/repair, model/script
 /// tools or the topology check with `p`: its read on a thread of its own when the desktop app makes it
 /// so ([`reads::read_ahead`]), after any under way; here and now otherwise. While one is under way or
 /// waiting it answers that, not what the command installs, which comes as it lands.
@@ -78,14 +80,19 @@ pub fn run(app: &mut RustGisApp, command: &'static str, p: Value) -> Result<Valu
 /// [`run`], then `then` with what the command answered once it ran, here or as it lands, or why
 /// it never ran.
 pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Option<Then>) -> Result<Value, String> {
-    run_presented(app, command, p, then, None)
+    run_presented(app, command, p, then, None, None)
 }
 
 /// Keeps a service layer's title and connection display name outside recorded parameters
 /// until its admitted discovery lands. The ordinary read queue owns progress and Cancel.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn run_service(app: &mut RustGisApp, p: Value, name: &str, origin: Option<&str>) -> Result<Value, String> {
-    run_presented(app, "service.add", p, None, Some((name.to_string(), origin.map(str::to_string))))
+    run_presented(app, "service.add", p, None, Some((name.to_string(), origin.map(str::to_string))), None)
+}
+
+/// Converts only the rows whose date interpretation the user previewed.
+pub(crate) fn run_date_preview(app: &mut RustGisApp, p: Value, dataset: rustgis_engine::data::Dataset) -> Result<Value, String> {
+    run_presented(app, "edit.convertField", p, None, None, Some(dataset))
 }
 
 /// Queues the admitted read with optional presentation supplied by the service dialog/tree.
@@ -95,6 +102,7 @@ fn run_presented(
     mut p: Value,
     then: Option<Then>,
     presentation: Option<(String, Option<String>)>,
+    preview: Option<rustgis_engine::data::Dataset>,
 ) -> Result<Value, String> {
     if !app.reads_off_frame {
         // Read here and now: what its file holds now is what it reads.
@@ -104,9 +112,12 @@ fn run_presented(
         let r = app.run(command, p);
         return answered(app, then, r);
     }
-    let layer = matches!(command, "layer.loadAll" | "layer.reloadData" | "labels.convert" | "source.syncState")
-        .then(|| app.session.layer_id(&p).ok().and_then(|id| app.session.map().layer(id)).map(|l| (l.instance_id(), l.name.clone())))
-        .flatten();
+    let layer = matches!(
+        command,
+        "layer.loadAll" | "layer.reloadData" | "layer.repairSource" | "labels.convert" | "source.syncState" | "table.statistics"
+    )
+    .then(|| app.session.layer_id(&p).ok().and_then(|id| app.session.map().layer(id)).map(|l| (l.instance_id(), l.name.clone())))
+    .flatten();
     let notice_mark = app.session.notice_mark();
     if layer.is_some() {
         let id = app.session.layer_id(&p)?;
@@ -121,7 +132,7 @@ fn run_presented(
         };
         params.insert("layer".into(), json!(id));
     }
-    let ahead = match reads::read_ahead(&mut app.session, command, &p) {
+    let mut ahead = match reads::read_ahead(&mut app.session, command, &p) {
         Ok(ahead) => ahead,
         Err(error) => {
             app.command_failed(command, &error, notice_mark);
@@ -129,6 +140,9 @@ fn run_presented(
             return Err(error);
         }
     };
+    if let Some(dataset) = preview {
+        ahead.keep_preview(dataset);
+    }
     // Load All asked again for a layer it is reading already.
     if command == "layer.loadAll"
         && let Some((instance, _)) = &layer
@@ -195,15 +209,19 @@ fn run_presented(
     }
 }
 
-/// Queues an archive read already admitted by the relay, without dispatching another command.
+/// Queues an archive or statistics read already admitted by the relay, without dispatching another command.
 pub fn admitted(app: &mut RustGisApp, ahead: reads::ReadAhead, relay: rustgis_assistant::relay::Relay) {
     let Some((command, params)) = ahead.command() else {
         finish_relay(app, &relay, Err(tl!("This read was already started").to_string()));
         return;
     };
     let params = params.clone();
-    let archive = reads::archive_target(&app.session, &params);
-    let what = archive.as_ref().map(|(_, tile)| tile.name.clone()).unwrap_or_default();
+    let archive = matches!(command, "map.reloadTiles" | "map.repairTiles").then(|| reads::archive_target(&app.session, &params)).flatten();
+    let layer = (command == "table.statistics")
+        .then(|| app.session.layer_id(&params).ok().and_then(|id| app.session.map().layer(id)).map(|l| (l.instance_id(), l.name.clone())))
+        .flatten();
+    let what =
+        layer.as_ref().map(|(_, name)| name.clone()).or_else(|| archive.as_ref().map(|(_, tile)| tile.name.clone())).unwrap_or_default();
     let asked = Asked {
         command,
         params,
@@ -211,7 +229,7 @@ pub fn admitted(app: &mut RustGisApp, ahead: reads::ReadAhead, relay: rustgis_as
         what,
         opened: app.session.opened,
         map: app.session.map().instance_id(),
-        layer: None,
+        layer: layer.map(|(instance, _)| instance),
         archive,
         reload: None,
         origin: None,
@@ -293,6 +311,7 @@ fn called<'a>(command: &str, what: &'a str) -> &'a str {
         (false, _) => what,
         (true, "script.run") => tl_raw!("Run Script"),
         (true, "topology.validate") => tl_raw!("Error Inspector"),
+        (true, "table.statistics") => tl_raw!("Column Statistics"),
         (true, "service.add") => tl_raw!("Add Service Layer"),
         (true, _) => tl_raw!("Run Model"),
     }
@@ -366,6 +385,10 @@ fn start(app: &mut RustGisApp, mut asked: Asked, p: Value) -> Result<Value, Stri
     let Some(ahead) = asked.ahead.take() else {
         return complete_here(app, asked, p, Err(tl!("This read was already started").to_string()));
     };
+    let ahead = match ahead.refresh_table_input(&app.session) {
+        Ok(ahead) => ahead,
+        Err(why) => return complete_here(app, asked, p, Err(why)),
+    };
     let name = ahead.name;
     let reload = matches!(asked.command, "layer.reloadData" | "map.reloadTiles");
     let control = Control::stoppable();
@@ -391,17 +414,24 @@ fn start(app: &mut RustGisApp, mut asked: Asked, p: Value) -> Result<Value, Stri
     *held.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ahead);
     let work = held.clone();
     let diagnostics = app.session.diagnostics.capture();
-    let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
-        let _diagnostics = diagnostics.enter();
-        if let Some(path) = look_path {
-            *look_out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(crate::diskwatch::observe(&path));
-        }
-        let ahead = work.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-        let read = ahead.ok_or_else(|| tl!("This read was already started").to_string()).and_then(|ahead| ahead.run(&ctl));
-        *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read);
-    });
+    let spawn = || {
+        std::thread::Builder::new().name(name.into()).spawn(move || {
+            let _diagnostics = diagnostics.enter();
+            if let Some(path) = look_path {
+                *look_out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(crate::diskwatch::observe(&path));
+            }
+            let ahead = work.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            let read = ahead.ok_or_else(|| tl!("This read was already started").to_string()).and_then(|ahead| ahead.run(&ctl));
+            *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read);
+        })
+    };
+    #[cfg(test)]
+    let spawn = || if app.reads.fail_spawn { Err(std::io::Error::other("worker start refused for test")) } else { spawn() };
+    let spawned = spawn();
     if let Err(e) = spawned {
-        if matches!(asked.command, "map.reloadTiles" | "map.repairTiles" | "service.add" | "service.layers") {
+        if matches!(asked.command, "map.reloadTiles" | "map.repairTiles" | "service.add" | "service.layers" | "script.run")
+            || rustgis_engine::cmd::edit::table_edit_in_background(asked.command).is_some()
+        {
             let why = crate::i18n::fmt("The background worker could not start ({error}). Retry the command.", &[("error", &e.to_string())]);
             app.session.notify(why.clone(), true);
             not_run_asked(app, &asked, why.clone());
@@ -628,7 +658,6 @@ pub fn status(app: &RustGisApp, ui: &mut Ui, t: &Tokens) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::time::Duration;
@@ -638,7 +667,7 @@ mod tests {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
         while land(app) {
             assert!(std::time::Instant::now() < end, "the reads never landed");
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(5)); // test-wait: legacy polling for background read completion
         }
     }
 
@@ -668,7 +697,7 @@ mod tests {
                 return (relay, grant, client, ahead);
             }
             assert!(std::time::Instant::now() < end, "relay never paused at its archive read");
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(5)); // test-wait: legacy polling for the relay archive barrier
         }
     }
 
@@ -707,7 +736,7 @@ mod tests {
                 break at;
             }
             assert!(std::time::Instant::now() < end, "the label was never drawn");
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(Duration::from_millis(2)); // test-wait: legacy polling for the draggable label
         };
         label_pointer(&mut h, at, None);
         label_pointer(&mut h, at, Some(true));
@@ -763,7 +792,7 @@ mod tests {
                     let end = std::time::Instant::now() + Duration::from_secs(10);
                     while job.slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_none() {
                         assert!(std::time::Instant::now() < end, "cancelled worker did not stop");
-                        std::thread::sleep(Duration::from_millis(2));
+                        std::thread::sleep(Duration::from_millis(2)); // test-wait: legacy polling for cancelled worker completion
                     }
                 }
                 landed(h.state_mut(), 60);
@@ -855,7 +884,7 @@ mod tests {
                 let end = std::time::Instant::now() + Duration::from_secs(5);
                 while app.reads.job.as_ref().unwrap().slot.lock().unwrap().is_none() {
                     assert!(std::time::Instant::now() < end);
-                    std::thread::sleep(Duration::from_millis(1));
+                    std::thread::sleep(Duration::from_millis(1)); // test-wait: legacy polling for the dataset result slot
                 }
                 app.reads.cancel_for_tests();
             }
@@ -939,6 +968,27 @@ mod tests {
         stop(&mut app, std::time::Duration::from_secs(60));
         assert!(!busy(&app));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Scripted Delimited Text picks join the same background queue as ordinary file picks.
+    #[test]
+    fn scripted_delimited_picks_run_in_background() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let gzip = base64::engine::general_purpose::STANDARD.decode("H4sIAAAAAAAC/8tMqUlNLC6pycsvKsngcqwxNKgxMuACACT4xC0WAAAA").unwrap();
+        for (name, bytes) in [("scripted.dat", b"id|east|north\nA|10|20\n".as_slice()), ("scripted.csv.gz", gzip.as_slice())] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+            app.reads_off_frame = true;
+            crate::dialogs::PICKED.with(|p| *p.borrow_mut() = Some(path.display().to_string()));
+            let result = app.run("ui.addDelimited", json!({"x":"east", "y":"north", "delimiter":"|"})).unwrap();
+            assert_eq!(result["started"], "Add Data");
+            assert!(app.session.map().layers.is_empty());
+            landed(&mut app, 30);
+            let point = app.session.map().layers[0].dataset.features[0].geometry.as_ref().unwrap().label_point().unwrap();
+            assert_eq!((point.x, point.y), (10.0, 20.0));
+        }
     }
 
     /// The Error Inspector's check runs on a thread of its own (#1291), and its errors are kept as
@@ -1042,7 +1092,7 @@ mod tests {
                 break;
             }
             assert!(std::time::Instant::now() < end, "relay never admitted the archive");
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(5)); // test-wait: legacy polling for relay archive admission
         }
         assert_eq!(app.reads.waiting.len(), 1, "the relay must reuse the one existing worker queue");
         assert_eq!(app.session.map().tiles[0].url, original.to_str().unwrap());
@@ -1246,6 +1296,268 @@ mod tests {
         assert!(l.is_streamed() && !l.labels.enabled);
     }
 
+    /// Task steps cannot bypass the worker through direct or scripted table writes.
+    #[test]
+    fn a_task_refuses_table_writes_before_scanning_rows() {
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        let csv = format!("n\n{}", "1\n".repeat(20_000));
+        app.run("layer.addDataText", json!({"fileName": "records.csv", "text": csv})).unwrap();
+        app.run("edit.enable", json!({"on": true})).unwrap();
+        app.reads_off_frame = true;
+        for (command, params) in [
+            ("edit.calculateField", json!({"table": "records", "field": "n", "expression": "n + 1"})),
+            ("edit.deleteField", json!({"table": "records", "field": "n"})),
+            ("script.run", json!({"script": "edit.calculateField {\"table\":\"records\",\"field\":\"n\",\"expression\":\"n + 1\"}"})),
+        ] {
+            app.run("task.new", json!({"name": "Edit records", "steps": [{"title": "Write table", "command": command, "params": params}]}))
+                .unwrap();
+            let before = serde_json::to_value(&app.session.project.tables).unwrap();
+            let depth = app.session.undo_depth();
+            let error = app.run_by_user("task.run", json!({"task": "Edit records"})).unwrap_err();
+            assert!(error.contains("run the table edit directly"), "{error}");
+            assert_eq!(serde_json::to_value(&app.session.project.tables).unwrap(), before);
+            assert_eq!(app.session.undo_depth(), depth);
+            app.run("task.remove", json!({"task": "Edit records"})).unwrap();
+        }
+    }
+
+    /// The actual app dispatch schedules a table calculation and installs it once with Undo.
+    /// A cell edited while it runs prevents stale results from overwriting the new value.
+    #[test]
+    fn table_calculation_runs_off_frame_and_refuses_changed_input() {
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.run("layer.addDataText", json!({"fileName": "calc.csv", "text": "n\n1\n2\n"})).unwrap();
+        app.run("edit.enable", json!({"on": true})).unwrap();
+        app.reads_off_frame = true;
+        let p = json!({"table": "calc", "field": "n", "expression": "n / 2"});
+        let depth = app.session.undo_depth();
+        assert_eq!(app.run_by_user("edit.calculateField", p.clone()).unwrap()["started"], "Calculate Field");
+        assert_eq!(app.session.undo_depth(), depth);
+        assert_eq!(app.session.project.tables[0].dataset.value(0, 0).as_f64(), Some(1.0));
+        landed(&mut app, 60);
+        assert_eq!(app.session.project.tables[0].dataset.value(0, 0).as_f64(), Some(0.0));
+        assert_eq!(app.session.undo_depth(), depth + 1);
+        assert!(app.session.notices.iter().any(|n| n.text.contains("fraction")));
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(app.session.project.tables[0].dataset.value(0, 0).as_f64(), Some(1.0));
+        app.run_by_user("edit.calculateField", p).unwrap();
+        app.session.run("edit.setValue", &json!({"table": "calc", "row": 0, "field": "n", "value": 9})).unwrap();
+        let depth = app.session.undo_depth();
+        landed(&mut app, 60);
+        assert_eq!(app.session.project.tables[0].dataset.value(0, 0).as_f64(), Some(9.0));
+        assert_eq!(app.session.undo_depth(), depth);
+        assert!(app.session.notices.iter().any(|n| n.text.contains("table changed")));
+    }
+
+    /// The Script pane dispatch prepares table writes off frame and lands them as one undo step.
+    #[test]
+    fn a_table_script_runs_off_frame() {
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.run("layer.addDataText", json!({"fileName": "records.csv", "text": "n\n1\n2\n"})).unwrap();
+        app.reads_off_frame = true;
+        let before = serde_json::to_value(&app.session.project.tables).unwrap();
+        let depth = app.session.undo_depth();
+        let p = json!({"script": "edit.addField {\"table\":\"records\",\"name\":\"result\",\"type\":\"long\"}\nedit.enable {\"on\":true}\nedit.calculateField {\"table\":\"records\",\"field\":\"result\",\"expression\":\"n + 1\"}"});
+        assert_eq!(run(&mut app, "script.run", p.clone()).unwrap()["started"], "Run Script");
+        assert_eq!(serde_json::to_value(&app.session.project.tables).unwrap(), before);
+        landed(&mut app, 60);
+        let data = &app.session.project.tables[0].dataset;
+        assert_eq!(data.value(1, data.field_index("result").unwrap()).as_f64(), Some(3.0));
+        assert_eq!(app.session.undo_depth(), depth + 1);
+        app.run("edit.undo", Value::Null).unwrap();
+        assert_eq!(serde_json::to_value(&app.session.project.tables).unwrap(), before);
+        // A live edit invalidates the prepared script rather than rerunning its calculation.
+        app.run("edit.enable", json!({"on": true})).unwrap();
+        run(&mut app, "script.run", p.clone()).unwrap();
+        app.session.run("edit.setValue", &json!({"table": "records", "row": 0, "field": "n", "value": 9})).unwrap();
+        let current = (serde_json::to_value(&app.session.project.tables).unwrap(), app.session.undo_depth());
+        landed(&mut app, 60);
+        assert_eq!((serde_json::to_value(&app.session.project.tables).unwrap(), app.session.undo_depth()), current);
+        assert!(app.session.notices.iter().any(|n| n.text.contains("table changed")));
+        // An unsafe prefix is refused before the desktop script can reach a table write.
+        let mixed = json!({"script": "project.new {}\nedit.addField {\"table\":\"records\",\"name\":\"extra\",\"type\":\"long\"}"});
+        assert!(run(&mut app, "script.run", mixed).unwrap_err().contains("separate scripts"));
+        assert_eq!((serde_json::to_value(&app.session.project.tables).unwrap(), app.session.undo_depth()), current);
+        app.reads.fail_spawn = true;
+        assert!(run(&mut app, "script.run", p).unwrap_err().contains("worker could not start"));
+        assert_eq!((serde_json::to_value(&app.session.project.tables).unwrap(), app.session.undo_depth()), current);
+    }
+
+    /// A file-producing model before a table write must be refused before its file is written.
+    #[test]
+    fn a_table_script_refuses_a_file_model_before_any_live_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("model.pmtiles");
+        let mut app = RustGisApp::with_sample();
+        app.run("layer.addDataText", json!({"fileName": "records.csv", "text": "n\n1\n2\n"})).unwrap();
+        app.run("model.new", json!({"name": "File", "steps": [{"tool": "vectorToPmtiles", "params": {"input": "Cities", "minZoom": 0, "maxZoom": 0, "output": output}}]})).unwrap();
+        app.reads_off_frame = true;
+        let before = (serde_json::to_value(&app.session.project.tables).unwrap(), app.session.undo_depth());
+        let p = json!({"script": "model.run {\"name\":\"File\"}\nedit.addField {\"table\":\"records\",\"name\":\"extra\"}"});
+        let result = run(&mut app, "script.run", p);
+        if result.is_ok() {
+            landed(&mut app, 60);
+        }
+        assert!(!output.exists(), "the model must not write before a missing table result is refused");
+        assert_eq!((serde_json::to_value(&app.session.project.tables).unwrap(), app.session.undo_depth()), before);
+        assert!(result.is_err() || app.session.notices.iter().any(|n| n.text.contains("separate scripts")));
+    }
+
+    /// A failed worker start refuses every registered table write without installing or undoing data.
+    #[test]
+    fn a_table_worker_failure_does_not_run_on_the_frame() {
+        for (command, p) in [
+            ("edit.setValue", json!({"table": "records", "row": 0, "field": "n", "value": 9})),
+            ("edit.addFeature", json!({"table": "records", "attributes": {"n": 3}})),
+            ("edit.addField", json!({"table": "records", "name": "extra", "type": "text"})),
+            ("edit.deleteField", json!({"table": "records", "field": "day"})),
+            ("edit.convertField", json!({"table": "records", "field": "day", "type": "date"})),
+            ("edit.calculateField", json!({"table": "records", "field": "n", "expression": "n + 1"})),
+        ] {
+            let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+            app.run("layer.addDataText", json!({"fileName": "records.csv", "text": "n,day\n1,2026-01-01\n2,2026-01-02\n"})).unwrap();
+            app.run("edit.enable", json!({"on": true})).unwrap();
+            app.reads_off_frame = true;
+            app.reads.fail_spawn = true;
+            let before = (serde_json::to_value(&app.session.project.tables).unwrap(), app.session.undo_depth());
+            let error = app.run_by_user(command, p).unwrap_err();
+            assert!(error.contains("worker could not start"), "{command}: {error}");
+            assert_eq!((serde_json::to_value(&app.session.project.tables).unwrap(), app.session.undo_depth()), before, "{command}");
+            assert!(!showing(&app));
+        }
+    }
+
+    /// Waiting writes consume their predecessor's output, with one undo step per command.
+    #[test]
+    fn queued_table_writes_land_in_order() {
+        let fixture = || {
+            let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+            app.run("layer.addDataText", json!({"fileName": "records.csv", "text": "n\n1\n2\n"})).unwrap();
+            app.run("edit.enable", json!({"on": true})).unwrap();
+            app
+        };
+        let (mut app, mut expected) = (fixture(), fixture());
+        app.reads_off_frame = true;
+        let before = serde_json::to_value(&app.session.project.tables).unwrap();
+        let depth = app.session.undo_depth();
+        let commands = [
+            ("edit.addFeature", json!({"table": "records", "attributes": {"n": 3}})),
+            ("edit.addFeature", json!({"table": "records", "attributes": {"n": 4}})),
+            ("edit.setValue", json!({"table": "records", "row": 3, "field": "n", "value": 9})),
+            ("edit.addField", json!({"table": "records", "name": "extra", "type": "long"})),
+            ("edit.calculateField", json!({"table": "records", "field": "extra", "expression": "n + 1"})),
+        ];
+        for (i, (command, p)) in commands.iter().enumerate() {
+            expected.session.run(command, p).unwrap();
+            let answer = app.run_by_user(command, p.clone()).unwrap();
+            if i == 0 {
+                assert!(answer.get("started").is_some());
+            } else {
+                assert_eq!(answer["waiting"], i);
+            }
+        }
+        landed(&mut app, 60);
+        assert_eq!(
+            serde_json::to_value(&app.session.project.tables).unwrap(),
+            serde_json::to_value(&expected.session.project.tables).unwrap()
+        );
+        assert_eq!(app.session.undo_depth(), depth + commands.len());
+        assert!(app.session.notices.is_empty(), "{:?}", app.session.notices);
+        for _ in commands {
+            app.run("edit.undo", Value::Null).unwrap();
+        }
+        assert_eq!(serde_json::to_value(&app.session.project.tables).unwrap(), before);
+        // Refreshing input must not retarget a waiting command, even if put_table keeps its id.
+        for keeps_id in [false, true] {
+            let mut app = fixture();
+            app.reads_off_frame = true;
+            let p = json!({"table": "records", "attributes": {"n": 3}});
+            app.run_by_user("edit.addFeature", p.clone()).unwrap();
+            app.run_by_user("edit.addFeature", p).unwrap();
+            if keeps_id {
+                let mut data = app.session.project.tables[0].dataset.clone();
+                data.features[0].attrs[0] = rustgis_engine::data::Value::Int(7);
+                app.session.project.put_table(data);
+            } else {
+                app.session.run("table.remove", &json!({"table": "records"})).unwrap();
+                app.session.run("layer.addDataText", &json!({"fileName": "records.csv", "text": "n\n7\n"})).unwrap();
+            }
+            let replacement = (serde_json::to_value(&app.session.project.tables).unwrap(), app.session.undo_depth());
+            landed(&mut app, 60);
+            assert_eq!((serde_json::to_value(&app.session.project.tables).unwrap(), app.session.undo_depth()), replacement);
+            assert!(app.session.notices.iter().any(|n| n.text.contains("table changed while the edit was waiting")));
+        }
+    }
+
+    /// Landing rechecks the current editing setting before installing any queued row edit.
+    #[test]
+    fn table_row_writes_are_refused_if_editing_is_turned_off_before_landing() {
+        for (command, p) in [
+            ("edit.setValue", json!({"table": "records", "row": 0, "field": "n", "value": 9})),
+            ("edit.addFeature", json!({"table": "records", "attributes": {"n": 3}})),
+            ("edit.calculateField", json!({"table": "records", "field": "n", "expression": "n + 1"})),
+        ] {
+            let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+            app.run("layer.addDataText", json!({"fileName": "records.csv", "text": "n\n1\n2\n"})).unwrap();
+            app.run("edit.enable", json!({"on": true})).unwrap();
+            app.reads_off_frame = true;
+            let before = serde_json::to_value(&app.session.project.tables).unwrap();
+            assert!(app.run_by_user(command, p).unwrap().get("started").is_some(), "{command}");
+            app.run("edit.enable", json!({"on": false})).unwrap();
+            let depth = app.session.undo_depth();
+            let mark = app.session.notice_mark();
+            landed(&mut app, 60);
+            assert_eq!(serde_json::to_value(&app.session.project.tables).unwrap(), before, "{command}");
+            assert_eq!(app.session.undo_depth(), depth, "{command}");
+            assert!(app.session.notices_since(mark).iter().any(|n| n.text.contains("editing is turned off")), "{command}");
+        }
+    }
+
+    /// Every table write uses the actual app worker path and lands the same fields, rows and
+    /// notices as synchronous dispatch, as one undo step. Field edits still work with editing off.
+    #[test]
+    fn table_writes_run_off_frame_with_undo_and_notices() {
+        use rustgis_engine::data::{Dataset, Field, FieldType, GeometryType, Value as Attr};
+        let fixture = || {
+            let mut data =
+                Dataset::new("records", GeometryType::None, vec![Field::new("n", FieldType::Integer), Field::new("day", FieldType::Text)]);
+            data.push(None, vec![Attr::Int(1), Attr::Text("2026-01-02".into())]);
+            data.push(None, vec![Attr::Int(2), Attr::Text("bad date".into())]);
+            let mut project = rustgis_engine::Project::default();
+            project.add_table(data);
+            RustGisApp::new(rustgis_engine::Session::new(project))
+        };
+        for (command, p, editing) in [
+            ("edit.setValue", json!({"table": "records", "row": 0, "field": "n", "value": 9.5}), true),
+            ("edit.addFeature", json!({"table": "records", "attributes": {"n": 3}}), true),
+            ("edit.addField", json!({"table": "records", "name": "extra", "type": "text"}), false),
+            ("edit.deleteField", json!({"table": "records", "field": "day"}), false),
+            ("edit.convertField", json!({"table": "records", "field": "day", "type": "date"}), false),
+            ("edit.calculateField", json!({"table": "records", "field": "n", "expression": "n / 2"}), true),
+        ] {
+            let (mut app, mut expected) = (fixture(), fixture());
+            for app in [&mut app, &mut expected] {
+                app.run("edit.enable", json!({"on": editing})).unwrap();
+            }
+            let before = serde_json::to_value(&app.session.project.tables).unwrap();
+            let depth = app.session.undo_depth();
+            expected.session.run(command, &p).unwrap();
+            app.reads_off_frame = true;
+            assert!(app.run_by_user(command, p).unwrap().get("started").is_some(), "{command}");
+            assert_eq!(serde_json::to_value(&app.session.project.tables).unwrap(), before, "not installed on this frame: {command}");
+            landed(&mut app, 60);
+            assert_eq!(
+                serde_json::to_value(&app.session.project.tables).unwrap(),
+                serde_json::to_value(&expected.session.project.tables).unwrap(),
+                "{command}"
+            );
+            assert_eq!(app.session.notices, expected.session.notices, "{command}");
+            assert_eq!(app.session.undo_depth(), depth + 1, "{command}");
+            app.run("edit.undo", json!({})).unwrap();
+            assert_eq!(serde_json::to_value(&app.session.project.tables).unwrap(), before, "{command}");
+        }
+    }
+
     /// Source File State hashes the file on a thread of its own and says what it found once
     /// it lands: Command Search shows no answer.
     #[test]
@@ -1261,6 +1573,68 @@ mod tests {
         landed(&mut app, 60);
         let said: Vec<String> = app.session.notices_since(mark).iter().map(|n| n.text.clone()).collect();
         assert!(said.iter().any(|t| t == "places is in step with places.geojson"), "{said:?}");
+    }
+
+    #[test]
+    fn relay_statistics_use_a_field_index_not_an_archive_index_while_queued() {
+        use rustgis_engine::data::{Dataset, Field, FieldType, GeometryType, Value as V};
+        use std::io::{BufRead, BufReader};
+        let dir = tempfile::tempdir().unwrap();
+        let tiles = dir.path().join("context.pmtiles");
+        archive(&tiles, "Context");
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.run("map.addTiles", json!({"url":tiles,"name":"Context","overlay":true})).unwrap();
+        let mut ds = Dataset::new("numbers", GeometryType::Point, vec![Field::new("n", FieldType::Integer)]);
+        for n in [1, 2, 3] {
+            ds.push(None, vec![V::Int(n)]);
+        }
+        let layer = rustgis_engine::cmd::layer::add_dataset(&mut app.session, ds);
+        app.reads_off_frame = true;
+        app.run("table.statistics", json!({"layer":layer,"index":0})).unwrap();
+        let (relay, _grant, client, ahead) = paused_relay(&mut app, relay_command(1, "table.statistics", json!({"layer":layer,"index":0})));
+        admitted(&mut app, ahead, relay.clone());
+        assert_eq!(app.reads.waiting.len(), 1);
+        // The column index happens to match this unrelated tile archive's index. Removing the
+        // archive while the count waits must not invalidate the column statistics request.
+        app.session.map_mut().tiles.clear();
+        landed(&mut app, 60);
+        let mut text = String::new();
+        BufReader::new(client).read_line(&mut text).unwrap();
+        let answer: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        assert!(answer["result"]["content"][0]["text"].as_str().unwrap().contains("\"sum\":6"), "{answer}");
+        relay.stop();
+    }
+
+    /// Statistics… counts the column on a thread of its own and keeps the answer for its window
+    /// once it lands; a layer changed meanwhile is left, and nothing is kept.
+    #[test]
+    fn column_statistics_are_counted_on_a_thread_and_kept_for_the_window() {
+        use rustgis_engine::data::{Dataset, Field, FieldType, GeometryType, Value as V};
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        let mut ds = Dataset::new("big", GeometryType::Point, vec![Field::new("n", FieldType::Integer)]);
+        for i in [9_007_199_254_740_993_i64, 1, 2] {
+            ds.push(None, vec![V::Int(i)]);
+        }
+        let id = rustgis_engine::cmd::layer::add_dataset(&mut app.session, ds);
+        app.session.table_layer = Some(id);
+        app.reads_off_frame = true;
+        let asked = json!({"layer": id, "field": "n", "index": 0});
+        assert_eq!(app.run("table.statistics", asked.clone()).unwrap()["started"], "Column Statistics");
+        assert!(app.table_stats_kept().is_none(), "nothing shown before it lands");
+        landed(&mut app, 60);
+        let kept = app.table_stats_kept().expect("kept once landed");
+        assert_eq!(kept["sum"], 9_007_199_254_740_996_i64, "exact, not rounded");
+        // The layer edited while it counts: left for the user to ask again.
+        app.session.table_layer = Some(id);
+        assert_eq!(app.run("table.statistics", asked).unwrap()["started"], "Column Statistics");
+        app.session
+            .run("edit.addFeature", &json!({"layer": id, "geometry": {"type": "Point", "coordinates": [1.0, 2.0]}, "attributes": {"n": 5}}))
+            .unwrap();
+        let mark = app.session.notice_mark();
+        landed(&mut app, 60);
+        let said: Vec<String> = app.session.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        assert!(said.iter().any(|t| t.contains("changed while") || t.contains("left")), "{said:?}");
     }
 
     /// The desktop's Add Data reads a Shapefile (in a coordinate system given, as Import
@@ -1655,7 +2029,9 @@ mod tests {
         assert_eq!(app.run("ui.reloadData", json!({"layer": id})).unwrap()["waiting"], 1);
         let replacement = dir.path().join("replacement.geojson");
         publish_point(&replacement, 5.0);
-        app.run("layer.repairSource", json!({"layer": id, "path": replacement})).unwrap();
+        // A direct command can repair while the UI has old reads queued; UI repairs now
+        // join that queue themselves, so use the command API to exercise stale landing.
+        app.session.run("layer.repairSource", &json!({"layer": id, "path": replacement})).unwrap();
         let before = app.session.undo_label().map(str::to_string);
         landed(&mut app, 60);
         assert_eq!(source_x(&app, id), 5.0);
@@ -1687,5 +2063,56 @@ mod tests {
             layer.dataset.features[0].geometry,
             Some(rustgis_engine::data::Geometry::Point(rustgis_engine::data::Coord::new(9.0, 47.0)))
         );
+    }
+    /// Direct layer conversions use the desktop worker too, and stale rows cannot be replaced.
+    #[test]
+    fn date_conversion_runs_off_frame_for_layers() {
+        let mut app = RustGisApp::with_sample();
+        app.run("edit.addField", json!({"layer":"Cities", "name":"opened", "type":"text"})).unwrap();
+        app.run("edit.setValue", json!({"layer":"Cities", "row":0, "field":"opened", "value":"03/05/2026"})).unwrap();
+        app.reads_off_frame = true;
+        let p = json!({"field":"opened", "type":"date", "format":"%d/%m/%Y"});
+        app.session.active_layer = app.session.map().layer_by_name("Cities").map(|l| l.id);
+        let depth = app.session.undo_depth();
+        assert_eq!(app.run_by_user("edit.convertField", p.clone()).unwrap()["started"], "Convert Field");
+        assert_eq!(app.session.undo_depth(), depth);
+        app.session.active_layer = app.session.map().layers.iter().find(|l| l.name != "Cities").map(|l| l.id);
+        landed(&mut app, 60);
+        let ds = &app.session.map().layer_by_name("Cities").unwrap().dataset;
+        assert_eq!(ds.value(0, ds.field_index("opened").unwrap()).to_string(), "2026-05-03");
+        assert_eq!(app.session.undo_depth(), depth + 1);
+        app.run("edit.undo", json!({})).unwrap();
+        app.session.active_layer = app.session.map().layer_by_name("Cities").map(|l| l.id);
+        app.run_by_user("edit.convertField", p).unwrap();
+        app.session.run("edit.setValue", &json!({"layer":"Cities", "row":0, "field":"opened", "value":"new text"})).unwrap();
+        let depth = app.session.undo_depth();
+        landed(&mut app, 60);
+        assert_eq!(app.session.undo_depth(), depth);
+        assert!(app.session.notices.iter().any(|n| n.text.contains("layer changed")));
+    }
+    /// A queued preview cannot silently read rows edited after the user's format choice.
+    #[test]
+    fn date_preview_rejects_changed_queued_rows() {
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.run("layer.addDataText", json!({"fileName":"dates.csv", "text":"opened\n03/05/2026\n04/06/2026\n"})).unwrap();
+        app.run("edit.enable", json!({"on":true})).unwrap();
+        app.reads_off_frame = true;
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocked.geojson");
+        std::fs::write(&blocker, b"not GeoJSON").unwrap();
+        assert_eq!(run(&mut app, "layer.addData", json!({"path":blocker})).unwrap()["started"], "Add Data");
+        let dataset = app.session.project.tables[0].dataset.clone();
+        assert_eq!(
+            run_date_preview(&mut app, json!({"table":"dates", "field":"opened", "type":"date", "format":"%d/%m/%Y"}), dataset).unwrap()["waiting"],
+            1
+        );
+        app.session.run("edit.setValue", &json!({"table":"dates", "row":1, "field":"opened", "value":"not a date"})).unwrap();
+        let depth = app.session.undo_depth();
+        landed(&mut app, 60);
+        let dataset = &app.session.project.tables[0].dataset;
+        assert_eq!(dataset.fields[0].ty, rustgis_engine::data::FieldType::Text);
+        assert_eq!(dataset.value(1, 0).to_string(), "not a date");
+        assert_eq!(app.session.undo_depth(), depth);
+        assert!(app.session.notices.iter().any(|n| n.text.contains("changed after its date preview")));
     }
 }

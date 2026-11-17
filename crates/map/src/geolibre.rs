@@ -169,7 +169,6 @@ pub fn is_project_file(name: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -225,7 +224,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod style_tests {
     use super::*;
     use serde_json::json;
@@ -275,7 +273,6 @@ pub fn download_url(url: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod boundary_tests {
     use super::*;
     use serde_json::json;
@@ -302,7 +299,6 @@ mod boundary_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod review_regressions {
     use super::*;
     use serde_json::json;

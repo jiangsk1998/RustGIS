@@ -68,7 +68,12 @@ fn source(p: &Value) -> Result<Source, String> {
 
 fn keep(s: &mut Session, p: &Value, list: &str) -> CmdResult {
     let src = source(p)?;
+    let before = s.sources.secrets_left_out();
     let kept = s.sources.keep(list, src)?;
+    let left_out = s.sources.secrets_left_out().saturating_sub(before);
+    if left_out > 0 {
+        s.notify(crate::sources::secrets_notice(left_out), false);
+    }
     Ok(shown(&kept))
 }
 

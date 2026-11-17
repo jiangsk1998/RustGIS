@@ -22,6 +22,9 @@ fn max_file() -> u64 {
     crate::project::max_bytes()
 }
 
+/// The most steps a task takes (`task.new`).
+const MAX_TASK_STEPS: usize = 200;
+
 /// What an item past [`max_file`] is told.
 fn too_large() -> String {
     format!("the file is too large (maximum {})", crate::project::limit_said(max_file()))
@@ -79,11 +82,23 @@ pub fn commands() -> Vec<C> {
         C::new("style.new", "New Style", "Style › Styles", |s, p| {
             let id = s.layer_id(p)?;
             let l = s.map().layer(id).ok_or("no such layer")?;
-            let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(String::from).unwrap_or_else(|| l.name.clone());
+            // A name given past the limit is refused, not cut (#1972). Without one, the
+            // style takes the layer's name, the first of it when that's longer, and says so.
+            let given = ps(p, "name").map(str::trim).filter(|n| !n.is_empty());
+            if let Some(n) = given {
+                let length = n.chars().count();
+                if length > MAX_STYLE_NAME {
+                    return Err(format!("name is {length} characters: a style's name takes at most {MAX_STYLE_NAME}"));
+                }
+            }
+            let name = given.map(String::from).unwrap_or_else(|| l.name.clone());
             let (renderer, left_out) = super::layer::renderer_with_fills(l);
             let layer = l.name.clone();
-            let item = StyleItem { name: name.clone(), geometry: l.geometry_type(), renderer, labels: l.labels.clone(), transparency: l.transparency };
-            add_style(s, item);
+            let item = StyleItem { name, geometry: l.geometry_type(), renderer, labels: l.labels.clone(), transparency: l.transparency };
+            let (name, cut) = add_style(s, item);
+            if cut {
+                s.notify(format!("New Style: the style takes the first {MAX_STYLE_NAME} characters of the layer's name"), false);
+            }
             if left_out > 0 {
                 s.notify(format!("Style {name} from {layer}: {left_out} fill(s) No Fill hid couldn't be put back in it, as their classes have fills of their own now, are gone or their opacity wasn't kept; it draws them as the layer does now"), false);
             }
@@ -95,12 +110,7 @@ pub fn commands() -> Vec<C> {
             let text = read_text(p)?;
             crate::project::check_format(&text, "style file")?;
             let items: Vec<StyleItem> = serde_json::from_str(&text).map_err(|e| format!("not a RustGIS style file: {e}"))?;
-            let mut n = 0;
-            for it in items.into_iter().take(1000) {
-                add_style(s, it);
-                n += 1;
-            }
-            Ok(json!({"added": n}))
+            Ok(json!({"added": add_file_styles(s, "Add Style", items)}))
         }).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
         .params(r#"{"path"?: "*.rgisstyle", "text"?: style file JSON, "data"?: base64 file}"#),
         C::new("style.import", "Import Styles", "Style › Styles", import_styles).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(r#"{"path"?: "*.rgislyr|*.rgismap|*.rgis", "text"?: JSON, "data"?: base64 file}"#),
@@ -208,16 +218,18 @@ pub fn commands() -> Vec<C> {
         .view()
         .params(r#"{"path": "*.rgistemplate", "name"?: template name}"#),
         C::new("project.fromTemplate", "Open Custom Template", "Command Search", |s, p| {
+            let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Untitled");
+            let name = super::within("name", "a project's name", name, 200)?;
             let text = read_text(p)?;
             super::connections::clear_active();
             let mut proj = match Project::from_import_json(&text, None) {
                 Ok(proj) => proj,
                 Err(error) => {
                     super::connections::restore_active(s);
-                    return Err(error.replace("RustGIS project", "RustGIS template"));
+                    return Err(error.replace("RustGIS project", "RustGIS template").replace("this project ", "this template "));
                 }
             };
-            proj.name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Untitled").chars().take(200).collect();
+            proj.name = name;
             super::project::reset_to(s, proj);
             s.path = None;
             super::connections::resolve_project(s);
@@ -242,19 +254,27 @@ pub fn commands() -> Vec<C> {
         // Tasks.
         C::new("task.new", "New Task", "Analyze › Tasks", |s, p| {
             let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Task");
+            let name = super::within("name", "a task's name", name, 200)?;
+            let description = super::within("description", "a task's description", ps(p, "description").unwrap_or(""), 2000)?;
+            // The successful runs in the history left out for a tool that isn't available.
+            let mut unavailable = 0;
             let steps: Vec<TaskStep> = match p.get("steps") {
-                Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("steps: {e}"))?,
+                Some(v) => {
+                    let steps: Vec<TaskStep> = serde_json::from_value(v.clone()).map_err(|e| format!("steps: {e}"))?;
+                    super::at_most("steps", "a task", &steps, MAX_TASK_STEPS)?;
+                    steps
+                }
                 // A task can replay the geoprocessing history, one step per successful run.
-                None if b(p, "fromHistory").unwrap_or(false) => s
-                    .project
-                    .gp_history
-                    .iter()
-                    .filter(|r| r.ok)
-                    .filter_map(|r| {
-                        let tool = super::gp::tool_id(&r.tool)?;
-                        Some(TaskStep { title: r.tool.clone(), instructions: r.messages.first().cloned().unwrap_or_default(), command: "gp.run".into(), params: json!({"tool": tool, "params": r.params}) })
-                    })
-                    .collect(),
+                None if b(p, "fromHistory").unwrap_or(false) => {
+                    let mut steps = Vec::new();
+                    for r in s.project.gp_history.iter().filter(|r| r.ok) {
+                        match super::gp::tool_id(&r.tool) {
+                            Some(tool) => steps.push(TaskStep { title: r.tool.clone(), instructions: r.messages.first().cloned().unwrap_or_default(), command: "gp.run".into(), params: json!({"tool": tool, "params": r.params}) }),
+                            None => unavailable += 1,
+                        }
+                    }
+                    steps
+                }
                 None => Vec::new(),
             };
             for st in &steps {
@@ -262,14 +282,36 @@ pub fn commands() -> Vec<C> {
                     return Err(format!("step '{}' runs an unknown command '{}'", st.title, st.command));
                 }
             }
-            let mut name = name.chars().take(200).collect::<String>();
+            // A task from the history leaves out the runs it can't replay, and keeps its first
+            // runs when there are more than a task takes; each is said, with its count.
+            if unavailable > 0 {
+                let said = if unavailable == 1 {
+                    "1 successful run in the history uses a tool that isn't available, so it's left out".to_string()
+                } else {
+                    format!("{unavailable} successful runs in the history use a tool that isn't available, so they're left out")
+                };
+                s.notify(format!("{name}: {said}"), false);
+            }
+            let mut steps = steps;
+            if steps.len() > MAX_TASK_STEPS {
+                s.notify(format!("{name}: the task takes the first {MAX_TASK_STEPS} of the {} successful runs it can replay from the history", steps.len()), false);
+                steps.truncate(MAX_TASK_STEPS);
+            }
+            let mut name = name;
             let base = name.clone();
             let mut i = 1;
             while s.project.tasks.iter().any(|t| t.name.eq_ignore_ascii_case(&name)) {
                 i += 1;
-                name = format!("{base} {i}");
+                // The suffix that tells it apart fits within the name's 200 characters: the name
+                // given gives way to it, and that is said.
+                let suffix = format!(" {i}");
+                name = base.chars().take(200 - suffix.chars().count()).chain(suffix.chars()).collect();
             }
-            s.project.tasks.push(Task { name: name.clone(), description: ps(p, "description").unwrap_or("").chars().take(2000).collect(), steps: steps.into_iter().take(200).collect() });
+            let kept = name.chars().count() - if i > 1 { format!(" {i}").chars().count() } else { 0 };
+            if kept < base.chars().count() {
+                s.notify(format!("New Task: a task has that name already, so the name given is cut to {kept} characters to fit \" {i}\""), false);
+            }
+            s.project.tasks.push(Task { name: name.clone(), description, steps });
             Ok(json!({"task": name}))
         }).roles(&[crate::ParamRole { key: "steps", role: crate::Role::TaskSteps }]).effects(crate::policy::Effects::NONE)
         .params(r#"{"name"?: string, "description"?: string, "steps"?: [{"title", "instructions"?, "command": id, "params"?: {}}], "fromHistory"?: bool (one step per geoprocessing run), "imported"?: bool (from a file: its steps may not touch files)}"#),
@@ -293,6 +335,8 @@ pub fn commands() -> Vec<C> {
             if title.is_some_and(|t| t.trim().is_empty()) {
                 return Err("a step needs a title".into());
             }
+            let title = title.map(|t| super::within("title", "a step's title", t.trim(), 200)).transpose()?;
+            let instructions = instructions.map(|t| super::within("instructions", "a step's instructions", t, 4000)).transpose()?;
             if title.is_none() && instructions.is_none() {
                 return Err("title or instructions is required".into());
             }
@@ -300,8 +344,8 @@ pub fn commands() -> Vec<C> {
             let t = task_mut(s, p)?;
             let n = t.steps.len();
             let st = t.steps.get_mut(step).ok_or_else(|| format!("{} has {n} steps", t.name))?;
-            let title = title.map_or_else(|| st.title.clone(), |t| t.trim().chars().take(200).collect());
-            let instructions = instructions.map_or_else(|| st.instructions.clone(), |t| t.chars().take(4000).collect());
+            let title = title.unwrap_or_else(|| st.title.clone());
+            let instructions = instructions.unwrap_or_else(|| st.instructions.clone());
             // Changing nothing would still leave an undo step.
             if title == st.title && instructions == st.instructions {
                 return Err(format!("step {step} already reads so"));
@@ -532,13 +576,48 @@ fn not_a(error: String, kinds: &str) -> String {
     }
 }
 
-fn add_style(s: &mut Session, mut item: StyleItem) {
-    item.name = item.name.trim().chars().take(200).collect();
+/// The most characters a style's name takes.
+const MAX_STYLE_NAME: usize = 200;
+/// The most styles one file adds.
+const MAX_FILE_STYLES: usize = 1000;
+
+/// Keeps a style, in place of any of its name: its name as kept, and whether it was cut to fit.
+fn add_style(s: &mut Session, mut item: StyleItem) -> (String, bool) {
+    let name = item.name.trim();
+    let cut = name.chars().nth(MAX_STYLE_NAME).is_some();
+    item.name = name.chars().take(MAX_STYLE_NAME).collect();
     if item.name.is_empty() {
         item.name = "Style".into();
     }
+    let kept = item.name.clone();
     s.project.styles.retain(|t| !t.name.eq_ignore_ascii_case(&item.name));
     s.project.styles.push(item);
+    (kept, cut)
+}
+
+/// A file's styles, as many as one file adds. A file isn't refused for what it holds: what it
+/// loses is said, one notice a kind with its count (#1972). The number of styles the
+/// project gains or has replaced, one a name.
+fn add_file_styles(s: &mut Session, what: &str, items: Vec<StyleItem>) -> usize {
+    let total = items.len();
+    let mut names = std::collections::HashSet::new();
+    let (mut cut, mut replaced) = (0usize, 0usize);
+    for item in items.into_iter().take(MAX_FILE_STYLES) {
+        let (name, was_cut) = add_style(s, item);
+        cut += usize::from(was_cut);
+        // A later style of the same name takes the place of an earlier one from the file.
+        replaced += usize::from(!names.insert(name.to_ascii_lowercase()));
+    }
+    if total > MAX_FILE_STYLES {
+        s.notify(format!("{what}: the first {MAX_FILE_STYLES} of the file's {total} styles are added"), false);
+    }
+    if cut > 0 {
+        s.notify(format!("{what}: {cut} style name(s) cut to {MAX_STYLE_NAME} characters"), false);
+    }
+    if replaced > 0 {
+        s.notify(format!("{what}: {replaced} style(s) replaced by a later one of the same name in the file"), false);
+    }
+    names.len()
 }
 
 /// Styles from every feature layer of a layer file, map file or project.
@@ -567,24 +646,21 @@ fn import_styles(s: &mut Session, p: &Value) -> CmdResult {
         }
         project.maps.into_iter().flat_map(|m| m.layers).collect()
     };
-    let mut n = 0;
-    for l in layers.into_iter().filter(|l| !l.is_raster() && l.geometry_type() != GeometryType::None).take(1000) {
-        add_style(
-            s,
-            StyleItem {
-                name: l.name.clone(),
-                geometry: l.geometry_type(),
-                renderer: l.renderer,
-                labels: l.labels,
-                transparency: l.transparency,
-            },
-        );
-        n += 1;
-    }
-    if n == 0 {
+    let items: Vec<StyleItem> = layers
+        .into_iter()
+        .filter(|l| !l.is_raster() && l.geometry_type() != GeometryType::None)
+        .map(|l| StyleItem {
+            name: l.name.clone(),
+            geometry: l.geometry_type(),
+            renderer: l.renderer,
+            labels: l.labels,
+            transparency: l.transparency,
+        })
+        .collect();
+    if items.is_empty() {
         return Err("no feature layers to take styles from".into());
     }
-    Ok(json!({"imported": n}))
+    Ok(json!({"imported": add_file_styles(s, "Import Styles", items)}))
 }
 
 /// Copies `old`'s saved label moves into the class of the same name in `new` (Default into
@@ -707,33 +783,48 @@ fn package_project(s: &mut Session) -> Result<Vec<u8>, String> {
     ])
 }
 
-fn safe(name: &str) -> String {
+pub(crate) fn safe(name: &str) -> String {
     let s: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | ' ') { c } else { '_' }).collect();
     if s.trim().is_empty() { "project".into() } else { s }
+}
+
+/// Fold group visibility and keep exactly the layers a mobile package includes. The source
+/// used for construction notices must use this same rule before geometry is simplified.
+fn mobile_map(mut m: Map) -> Map {
+    // Groups folded into their layers: a hidden group's layers are dropped with the others.
+    m.bake_groups();
+    // A hidden DEM still gives the terrain its heights (it can stay hidden): it is kept.
+    let dem = match &m.view.terrain {
+        Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer(n), .. }) => Some(n.clone()),
+        _ => None,
+    };
+    let kept = |l: &rustgis_map::Layer| l.visible || (l.is_raster() && dem.as_deref().is_some_and(|d| l.name.eq_ignore_ascii_case(d)));
+    let hidden: Vec<u32> = m.layers.iter().filter(|l| !kept(l)).map(|l| l.id).collect();
+    m.release_tiles(&hidden);
+    m.layers.retain(|l| kept(l));
+    m
 }
 
 /// A package of the active map; `mobile` drops hidden layers and simplifies geometry.
 fn package_map(s: &mut Session, mobile: bool, tol: f64) -> Result<Vec<u8>, String> {
     let mut m = embedded_map(s.map(), &mut MAX_EMBED.clone());
     if mobile {
-        // Groups folded into their layers: a hidden group's layers are dropped with the others.
-        m.bake_groups();
-        // A hidden DEM still gives the terrain its heights (it can stay hidden): it is kept.
-        let dem = match &m.view.terrain {
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer(n), .. }) => Some(n.clone()),
-            _ => None,
-        };
-        let kept = |l: &rustgis_map::Layer| l.visible || (l.is_raster() && dem.as_deref().is_some_and(|d| l.name.eq_ignore_ascii_case(d)));
-        let hidden: Vec<u32> = m.layers.iter().filter(|l| !kept(l)).map(|l| l.id).collect();
-        m.release_tiles(&hidden);
-        m.layers.retain(|l| kept(l));
+        m = mobile_map(m);
+    }
+    // What Simplify left alone or changed beyond simplifying (a latitude past a pole taken as the
+    // pole, a one-vertex line part left out, a feature left as it was or too intricate), over all
+    // the layers: said once the package is made, one notice per kind (#1811).
+    let mut notes = rustgis_analysis::SimplifyNotes::default();
+    if mobile {
         for l in &mut m.layers {
             if l.is_raster() || tol <= 0.0 {
                 continue;
             }
             for f in &mut l.dataset.features {
                 if let Some(g) = &f.geometry {
-                    f.geometry = Some(rustgis_analysis::simplify_geometry(g, tol * 111_320.0));
+                    let (simple, said) = rustgis_analysis::simplify_geometry(g, tol * 111_320.0);
+                    notes.add(&said);
+                    f.geometry = Some(simple);
                 }
             }
             l.touch_geometry();
@@ -745,7 +836,12 @@ fn package_map(s: &mut Session, mobile: bool, tol: f64) -> Result<Vec<u8>, Strin
     crate::durable::notify(s, &report);
     let kind = if mobile { "mobile map package" } else { "map package" };
     let readme = format!("{} — a RustGIS {kind}.\nAdd it to a project with Data › Import.\n", name);
-    rustgis_data::zip::write(&[(format!("{}.rgismap", safe(&name)), text.into_bytes()), ("README.txt".into(), readme.into_bytes())])
+    let archive =
+        rustgis_data::zip::write(&[(format!("{}.rgismap", safe(&name)), text.into_bytes()), ("README.txt".into(), readme.into_bytes())])?;
+    for said in notes.without_polar().messages("Mobile map package, simplifying") {
+        s.notify(said, false);
+    }
+    Ok(archive)
 }
 
 /// The geoprocessing history with the layers its runs made, as GeoJSON.
@@ -869,15 +965,17 @@ fn run_task_steps(s: &mut Session, p: &Value) -> CmdResult {
                 st.command
             ));
         }
-        let spec = s.registry.get(&st.command).ok_or_else(|| format!("step {} runs an unknown command '{}'", i + 1, st.command))?;
-        let (enabled, mutates) = (spec.enabled, spec.mutates);
+        let spec = *s.registry.get(&st.command).ok_or_else(|| format!("step {} runs an unknown command '{}'", i + 1, st.command))?;
+        let mutates = spec.mutates;
         // As when run directly, a step naming a layer is checked against that layer.
         if st.params.get("layer").is_some()
             && let Ok(id) = s.layer_id(&st.params)
         {
             s.active_layer = Some(id);
         }
-        if let Some(why) = enabled(s) {
+        // And a step naming a standalone table, against that table.
+        let blocked = s.check_conditions(&spec, &st.params).0.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        if let Some(why) = blocked {
             return Err(format!("step {} ({}): {why}", i + 1, st.title));
         }
         // These handlers share the task's one outer transaction. A final request must not
@@ -985,19 +1083,28 @@ pub(crate) fn names_place(v: &Value, keys: &[&str], depth: usize) -> bool {
 /// are extruded to a height, lines are polylines (OBJ only), points are small cubes. Coordinates
 /// are metres east and north of the layer's south-west corner.
 fn export_3d(s: &mut Session, p: &Value) -> CmdResult {
+    let written = s.notice_mark();
     let path = ps(p, "path").ok_or("path is required")?.to_string();
     if path.to_ascii_lowercase().ends_with(".stl") {
-        let (bytes, report) = stl_bytes(s, p)?;
+        let (bytes, report, construction_notes) = stl_bytes(s, p)?;
         rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
-        s.notify(format!("Exported {path}"), false);
+        for note in construction_notes {
+            s.notify(note, false);
+        }
+        s.retain_written_notices(written);
+        s.notify_written(format!("Exported {path}"), false);
         return Ok(json!({
             "path": path, "bytes": bytes.len(), "triangles": report.triangles,
             "skippedDegenerate": report.degenerate, "linesDropped": report.lines, "capsFanned": report.fanned,
         }));
     }
-    let obj = obj_text(s, p)?;
+    let (obj, construction_notes) = obj_text(s, p)?;
     rustgis_data::io::write_atomic(Path::new(&path), obj.as_bytes()).map_err(|e| format!("{path}: {e}"))?;
-    s.notify(format!("Exported {path}"), false);
+    for note in construction_notes {
+        s.notify(note, false);
+    }
+    s.retain_written_notices(written);
+    s.notify_written(format!("Exported {path}"), false);
     Ok(json!({"path": path, "bytes": obj.len()}))
 }
 
@@ -1034,6 +1141,7 @@ enum Item {
 /// A layer's 3D mesh, shared by the OBJ and STL exports.
 #[derive(Default)]
 struct Mesh {
+    constructions: crate::construction::Counts,
     items: Vec<Item>,
     vertices: usize,
     /// Rough size of the file, to stop a runaway export early.
@@ -1124,6 +1232,9 @@ fn layer_mesh(s: &Session, p: &Value, keep_lines: bool) -> Result<Mesh, String> 
     let mut mesh = Mesh { keep_lines, ..Mesh::default() };
     let rows = l.visible_rows();
     for (row, ft) in l.dataset.features.iter().enumerate() {
+        if row.is_multiple_of(256) {
+            rustgis_data::progress::check().map_err(|e| e.to_string())?;
+        }
         // A feature with no geometry draws nothing, so its height is neither used nor reported.
         if rows.get(row) != Some(&true) || ft.geometry.is_none() {
             continue;
@@ -1149,6 +1260,7 @@ fn layer_mesh(s: &Session, p: &Value, keep_lines: bool) -> Result<Mesh, String> 
             mesh.flat += 1;
             continue;
         }
+        let before = mesh.vertices;
         match &ft.geometry {
             Some(Geometry::Polygon(polys)) => {
                 for rings in polys {
@@ -1259,6 +1371,9 @@ fn layer_mesh(s: &Session, p: &Value, keep_lines: bool) -> Result<Mesh, String> 
             }
             None => {}
         }
+        if mesh.vertices > before {
+            s.constructions.count_feature(s.map().instance_id(), l, ft, &mut mesh.constructions);
+        }
     }
     if mesh.vertices == 0 {
         if mesh.flat > 0 && !mesh.keep_lines {
@@ -1283,7 +1398,7 @@ fn ring_area(r: &[(f64, f64)]) -> f64 {
 }
 
 /// A feature layer as Wavefront OBJ text.
-fn obj_text(s: &mut Session, p: &Value) -> Result<String, String> {
+fn obj_text(s: &mut Session, p: &Value) -> Result<(String, Vec<String>), String> {
     let mesh = layer_mesh(s, p, true)?;
     mesh_notices(s, &mesh);
     let mut obj = String::new();
@@ -1320,7 +1435,7 @@ fn obj_text(s: &mut Session, p: &Value) -> Result<String, String> {
             return Err("the 3D file would be too large; export fewer features".into());
         }
     }
-    Ok(obj)
+    Ok((obj, mesh.constructions.notes()))
 }
 
 /// What an STL export left out or approximated.
@@ -1373,7 +1488,7 @@ pub(crate) fn fanned_caps_note(n: usize) -> String {
 }
 
 /// A feature layer as binary STL, noting what it leaves out.
-fn stl_bytes(s: &mut Session, p: &Value) -> Result<(Vec<u8>, StlReport), String> {
+fn stl_bytes(s: &mut Session, p: &Value) -> Result<(Vec<u8>, StlReport, Vec<String>), String> {
     let mesh = layer_mesh(s, p, false)?;
     let (bytes, report) = mesh_stl(&mesh, MAX_STL_TRIANGLES)?;
     mesh_notices(s, &mesh);
@@ -1394,7 +1509,7 @@ fn stl_bytes(s: &mut Session, p: &Value) -> Result<(Vec<u8>, StlReport), String>
         "STL has no units: coordinates are metres east and north of the model's south-west corner and up from the features' base (below 0 for a negative height), in 32-bit floats",
         false,
     );
-    Ok((bytes, report))
+    Ok((bytes, report, mesh.constructions.notes()))
 }
 
 /// A mesh as binary STL: an 80-byte header, the triangle count, then per triangle a normal and
@@ -1501,6 +1616,7 @@ pub const ITEMS: &[(&str, &str, &str)] = &[
     ("ramps", "rgisramp", "RustGIS colour ramps"),
     ("template", "rgistemplate", "RustGIS project template"),
     ("projectPackage", "rgispkg", "RustGIS project package"),
+    ("fieldPackage", "rgisfield", "RustGIS field package"),
     ("mapPackage", "rgismpk", "RustGIS map package"),
     ("mobilePackage", "rgismpk", "RustGIS mobile map package"),
     ("gpPackage", "rgisgpk", "RustGIS results package"),
@@ -1527,13 +1643,40 @@ pub const ITEMS: &[(&str, &str, &str)] = &[
 
 /// An item as file bytes, with a suggested file name.
 pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec<u8>), String> {
+    let (name, bytes, notes) = item_output(s, kind, p)?;
+    for note in notes {
+        s.notify(note, false);
+    }
+    Ok((name, bytes))
+}
+
+/// Builds an item and returns construction-loss notes for publication only after delivery.
+pub fn item_output(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec<u8>, Vec<String>), String> {
+    let mut construction_notes = match kind {
+        "map" => {
+            let m = saved_map(s, p)?;
+            s.constructions.output_notes(m.layers.iter().map(|l| (m.instance_id(), l)))?
+        }
+        "layer" => {
+            let id = s.layer_id(p)?;
+            s.constructions.export_notes(s.map().instance_id(), s.map().layer(id).ok_or("no such layer")?)?
+        }
+        "template" | "projectPackage" => s.construction_output_notes()?,
+        "mobilePackage" if s.constructions.len > 0 => {
+            let m = mobile_map(s.map().clone());
+            s.constructions.output_notes(m.layers.iter().map(|l| (m.instance_id(), l)))?
+        }
+        "mapPackage" | "fieldPackage" => s.constructions.output_notes(s.map().layers.iter().map(|l| (s.map().instance_id(), l)))?,
+        "gpPackage" => s.constructions.output_notes(gp_result_layers(s).into_iter().map(|(m, l)| (m.instance_id(), l)))?,
+        _ => Vec::new(),
+    };
     let (name, bytes) = match kind {
         "map" => {
             let map = saved_map(s, p)?;
             crate::project::ensure_map_imports_complete(map)?;
             let map = embedded_map(map, &mut MAX_EMBED.clone());
             let name = map.name.clone();
-            (name, durable_bytes(s, map)?)
+            (name, durable_bytes_with(s, map, crate::project::map_file_bytes)?)
         }
         "layer" => {
             let id = s.layer_id(p)?;
@@ -1543,7 +1686,7 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
             }
             let layer = embed_layer(l, &mut MAX_EMBED.clone());
             let name = layer.name.clone();
-            (name, durable_bytes(s, layer)?)
+            (name, durable_bytes_with(s, layer, crate::project::layer_file_bytes)?)
         }
         "styles" => {
             if s.project.styles.is_empty() {
@@ -1561,7 +1704,7 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
             s.project.ensure_imports_complete()?;
             let (mut t, TemplateLosses { label_moves, offline_areas, archived_edits, source_references }) = template(&s.project);
             if let Some(n) = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()) {
-                t.name = n.chars().take(200).collect();
+                t.name = super::within("name", "a template's name", n, 200)?;
             }
             let name = t.name.clone();
             let bytes = durable_bytes(s, t)?;
@@ -1580,6 +1723,11 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
             (name, bytes)
         }
         "projectPackage" => (s.project.name.clone(), package_project(s)?),
+        "fieldPackage" => {
+            let (name, bytes, notes) = super::field::package_output(s, p)?;
+            construction_notes.extend(notes);
+            (name, bytes)
+        }
         "mapPackage" | "mobilePackage" => {
             let tol = f(p, "tolerance").unwrap_or(0.001).clamp(0.0, 1.0);
             (s.map().name.clone(), package_map(s, kind == "mobilePackage", tol)?)
@@ -1596,12 +1744,16 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
         "obj" => {
             let id = s.layer_id(p)?;
             let name = s.map().layer(id).map(|l| l.name.clone()).unwrap_or_default();
-            (name, obj_text(s, p)?.into_bytes())
+            let (text, notes) = obj_text(s, p)?;
+            construction_notes = notes;
+            (name, text.into_bytes())
         }
         "stl" => {
             let id = s.layer_id(p)?;
             let name = s.map().layer(id).map(|l| l.name.clone()).unwrap_or_default();
-            (name, stl_bytes(s, p)?.0)
+            let (bytes, _, notes) = stl_bytes(s, p)?;
+            construction_notes = notes;
+            (name, bytes)
         }
         "report" | "reportTemplate" => {
             let i = super::report::index(s, p)?;
@@ -1630,7 +1782,8 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
             (format!("{name}_tiles"), super::deeplearning::hosted_bytes(s, p)?.0)
         }
         k if super::sharing::KINDS.iter().any(|x| x.0 == k) => {
-            let (name, bytes, _) = super::sharing::share_bytes(s, k, p)?;
+            let (name, bytes, _, notes) = super::sharing::share_output(s, k, p)?;
+            construction_notes = notes;
             super::sharing::note_label_classes(s, k, p);
             super::sharing::note_export(s, k, p, &name);
             (name, bytes)
@@ -1638,20 +1791,34 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
         k => return Err(format!("unknown item '{k}'")),
     };
     let ext = ITEMS.iter().find(|i| i.0 == kind).map_or("json", |i| i.1);
-    Ok((format!("{}.{ext}", safe(&name)), bytes))
+    Ok((format!("{}.{ext}", safe(&name)), bytes, construction_notes))
 }
 
 /// Writes an item to `path`.
 pub(crate) fn save_item(s: &mut Session, kind: &str, p: &Value) -> CmdResult {
+    let written = s.notice_mark();
     let path = ps(p, "path").ok_or("path is required")?.to_string();
-    let (_, bytes) = item_bytes(s, kind, p)?;
+    let (_, bytes, notes) = item_output(s, kind, p)?;
     rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
+    for note in notes {
+        s.notify(note, false);
+    }
+    s.retain_written_notices(written);
     Ok(json!({"path": path, "bytes": bytes.len()}))
 }
 
 /// Consumes the existing item draft, emitting losses after serialization has completed.
 fn durable_bytes<T: crate::durable::Durable + serde::Serialize>(s: &mut Session, value: T) -> Result<Vec<u8>, String> {
-    let (bytes, report) = crate::durable::output_owned(value, to_json)?;
+    durable_bytes_with(s, value, to_json)
+}
+
+/// Serializes an item through its document writer, after the same durable-field transaction.
+fn durable_bytes_with<T: crate::durable::Durable>(
+    s: &mut Session,
+    value: T,
+    write: impl FnOnce(&T) -> Result<Vec<u8>, String>,
+) -> Result<Vec<u8>, String> {
+    let (bytes, report) = crate::durable::output_owned(value, write)?;
     crate::durable::notify(s, &report);
     Ok(bytes)
 }

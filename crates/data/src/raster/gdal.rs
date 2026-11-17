@@ -73,11 +73,6 @@ pub fn available() -> bool {
     program("gdal_translate").is_some() && program("gdalinfo").is_some()
 }
 
-/// Whether a file's contents are JPEG 2000 (see [`super::jpeg2000_extension`]).
-pub fn is_jpeg2000(bytes: &[u8]) -> bool {
-    super::jpeg2000_extension(bytes).is_some()
-}
-
 /// What converting a file's contents made: the GeoTIFF's bytes, and whether the raster was taken
 /// as WGS 84 (see [`Converted::assumed_lonlat`]).
 pub struct ConvertedBytes {
@@ -114,7 +109,7 @@ pub fn convert_jpeg2000(bytes: Vec<u8>, crs: Option<&str>, max: u64) -> Result<C
     // Keep that working-space budget separate from the final GeoTIFF's size limit.
     let budget = (bytes.len() as u64).saturating_add(max.saturating_mul(3));
     drop(bytes);
-    let c = convert_in(dir.path(), &src, None, crs, Some(budget))?;
+    let c = crate::provenance::without(|| convert_in(dir.path(), &src, None, crs, Some(budget)))?;
     // A GeoTIFF is larger than the JPEG 2000 it came from (Sentinel-2's about twice).
     if std::fs::metadata(&c.path)?.len() > max {
         return Err(DataError::Format(format!(
@@ -126,10 +121,20 @@ pub fn convert_jpeg2000(bytes: Vec<u8>, crs: Option<&str>, max: u64) -> Result<C
 }
 
 fn missing() -> DataError {
-    DataError::Unsupported(
+    DataError::Unsupported(missing_text(crate::no_programs_here()))
+}
+
+/// Why a raster format read through GDAL can't be read: GDAL isn't installed, or (`here` names
+/// it) this build runs no programs, where installing it wouldn't help.
+fn missing_text(here: &str) -> String {
+    if here.is_empty() {
         "this raster format needs GDAL: install it (gdal_translate and gdalinfo on the PATH, or RUSTGIS_GDAL_BIN naming their folder) and add the file again"
-            .into(),
-    )
+            .into()
+    } else {
+        format!(
+            "this raster format is read through GDAL, a program {here} can't run: convert the file to a GeoTIFF on a computer and add that"
+        )
+    }
 }
 
 /// Refuses an ER Mapper header that would open more than its own data: any but an `ERStorage` one
@@ -150,7 +155,7 @@ fn plain_ers(src: &Path) -> Result<()> {
     if meta.len() > MAX_HEADER {
         return Err(DataError::Format("too large for an ER Mapper header".into()));
     }
-    let text = String::from_utf8_lossy(&std::fs::read(src)?).into_owned();
+    let text = String::from_utf8_lossy(&crate::provenance::read(src)?).into_owned();
     // Every line naming a key, so a second one can't hide behind the first.
     let values = |key: &str| {
         // GDAL ends a line at a carriage return too.
@@ -171,7 +176,64 @@ fn plain_ers(src: &Path) -> Result<()> {
     if values("DataFile").iter().any(|f| f.contains(['/', '\\', ':']) || f == "..") {
         return Err(DataError::Unsupported("an ER Mapper header whose data file isn't beside it isn't read".into()));
     }
+    for data in values("DataFile") {
+        crate::provenance::path(&src.with_file_name(data));
+    }
     Ok(())
+}
+
+/// Observes only plainly named local companions, without imposing a header validation on conversion.
+/// Failure to inspect this small header affects provenance alone, never whether GDAL can open it.
+fn observe_ers_companions(src: &Path) {
+    use std::io::Read;
+    if !crate::provenance::active() || !src.extension().is_some_and(|e| e.eq_ignore_ascii_case("ers")) {
+        return;
+    }
+    const MAX_HEADER: u64 = 1 << 20;
+    if !std::fs::metadata(src).is_ok_and(|m| m.is_file() && m.len() <= MAX_HEADER) {
+        return;
+    }
+    let Ok(file) = std::fs::File::open(src) else { return };
+    let mut bytes = Vec::new();
+    if (&file).take(MAX_HEADER + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_HEADER {
+        return;
+    }
+    crate::provenance::buffer(src, &file, &bytes);
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.split(['\r', '\n']) {
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("DataFile")
+        {
+            let name = value.trim().trim_matches('"');
+            if !name.is_empty() && !matches!(name, "." | "..") && !name.contains(['/', '\\', ':']) {
+                let companion = src.with_file_name(name);
+                if companion.is_file() {
+                    crate::provenance::path(&companion);
+                }
+            }
+        }
+    }
+}
+
+fn is_vsi(s: &str) -> bool {
+    s.trim_start().get(..4).is_some_and(|p| p.eq_ignore_ascii_case("/vsi"))
+}
+
+/// Checks that `src` is an existing regular file on disk, never a GDAL `/vsi…` handler, folder
+/// or pipe.
+fn local_regular_file(src: &Path) -> Result<PathBuf> {
+    if is_vsi(&src.to_string_lossy()) {
+        return Err(DataError::Format(format!("{}: not a local file", src.display())));
+    }
+    let full = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
+    if is_vsi(&full.to_string_lossy()) {
+        return Err(DataError::Format(format!("{}: not a local file", src.display())));
+    }
+    let meta = std::fs::metadata(&full)?;
+    if !meta.is_file() {
+        return Err(DataError::Format(format!("{}: not a file", src.display())));
+    }
+    Ok(full)
 }
 
 /// The subdatasets of a file (NetCDF variables, HDF datasets): GDAL's name for each, and its
@@ -182,7 +244,8 @@ pub fn subdatasets(src: &Path) -> Result<Vec<(String, String)>> {
 
 /// Lists subdatasets with the downloaded raster's optional workspace budget.
 fn subdatasets_with_budget(src: &Path, workspace: Option<(&Path, u64)>) -> Result<Vec<(String, String)>> {
-    let full = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
+    let full = local_regular_file(src)?;
+    crate::provenance::path(&full);
     // Its type and header first, so a file that isn't read says so whether GDAL is installed or not.
     let drivers = drivers(&full)?;
     plain_ers(&full)?;
@@ -291,6 +354,49 @@ pub fn convert(src: &Path, layer: Option<&str>, crs: Option<&str>) -> Result<Con
     convert_in(&dir, src, layer, crs, None)
 }
 
+/// Whether WKT text embeds a PROJ grid extension, grid file or pipeline directive that GDAL or
+/// PROJ would open or execute.
+fn wkt_embeds_proj_or_files(c: &str, up: &str) -> bool {
+    if up.contains("PROJ4_GRIDS") || up.contains("PARAMETERFILE") || up.contains("/VSI") {
+        return true;
+    }
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    for (i, &b) in c.as_bytes().iter().enumerate() {
+        if b == b'+'
+            && let Some(rest) = c.get(i + 1..)
+        {
+            let key_len = rest.bytes().take_while(|&x| is_ident(x)).count();
+            if key_len > 0 {
+                let key = rest.get(..key_len).unwrap_or("");
+                let after_key = rest.get(key_len..).unwrap_or("").trim_start();
+                let val = after_key
+                    .strip_prefix('=')
+                    .map(|v| {
+                        let v = v.trim_start();
+                        let n = v.bytes().take_while(|&x| is_ident(x)).count();
+                        v.get(..n).unwrap_or("")
+                    })
+                    .unwrap_or("");
+                if super::crs::proj_key_refused(key, val) {
+                    return true;
+                }
+            }
+        }
+        if b == b'=' {
+            let before = c.get(..i).unwrap_or("").trim_end();
+            let key_len = before.bytes().rev().take_while(|&x| is_ident(x)).count();
+            let key = before.get(before.len().saturating_sub(key_len)..).unwrap_or("");
+            let after = c.get(i + 1..).unwrap_or("").trim_start();
+            let val_len = after.bytes().take_while(|&x| is_ident(x)).count();
+            let val = after.get(..val_len).unwrap_or("");
+            if !key.is_empty() && super::crs::proj_key_refused(key, val) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Whether a coordinate system given for GDAL is one: an authority code (`EPSG:32633`), an OGC
 /// URN, a PROJ string or WKT — never a file path or address, which GDAL would open.
 fn valid_crs(c: &str) -> bool {
@@ -306,7 +412,8 @@ fn valid_crs(c: &str) -> bool {
     let wkt = ["PROJCS", "GEOGCS", "PROJCRS", "GEOGCRS", "GEODCRS", "COMPD_CS", "COMPOUNDCRS", "LOCAL_CS", "ENGCRS", "BOUNDCRS"]
         .iter()
         .any(|k| up.starts_with(k))
-        && c.contains('[');
+        && c.contains('[')
+        && !wkt_embeds_proj_or_files(c, &up);
     // PROJ parameters that name grid or definition files PROJ would look up, or build a
     // pipeline, are refused (the same check as for typed definitions).
     let proj = c.starts_with("+proj=")
@@ -319,14 +426,33 @@ fn valid_crs(c: &str) -> bool {
     !c.chars().any(char::is_control) && (code(&up) || wkt || proj || urn)
 }
 
+fn is_driver_tag(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// The file a GDAL subdataset name points into: its quoted path (`NETCDF:"/d/x.nc":air`,
 /// `HDF4_SDS:UNKNOWN:"/d/x.hdf":0`), else what lies between the driver and the last colon.
 fn subdataset_file(name: &str) -> Option<&str> {
-    if let Some((_, rest)) = name.split_once('"') {
-        return rest.split_once('"').map(|(p, _)| p);
-    }
-    let (_, rest) = name.split_once(':')?;
-    rest.rsplit_once(':').map(|(p, _)| p)
+    let path = if name.contains('"') {
+        let (prefix, rest) = name.split_once('"')?;
+        let tags = prefix.strip_suffix(':')?;
+        if tags.is_empty() || !tags.split(':').all(is_driver_tag) {
+            return None;
+        }
+        let (path, tail) = rest.split_once('"')?;
+        if !tail.is_empty() && !tail.starts_with(':') {
+            return None;
+        }
+        path
+    } else {
+        let (driver, rest) = name.split_once(':')?;
+        if !is_driver_tag(driver) {
+            return None;
+        }
+        let (path, _) = rest.rsplit_once(':')?;
+        path
+    };
+    (!path.is_empty() && !is_vsi(path)).then_some(path)
 }
 
 /// Separates a cache key file's key from what the conversion found (JSON).
@@ -356,7 +482,9 @@ fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>, bu
     {
         return Err(DataError::Format(format!("crs '{c}': give an EPSG code (EPSG:32633), a PROJ string or WKT")));
     }
-    let full = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
+    let full = local_regular_file(src)?;
+    crate::provenance::path(&full);
+    observe_ers_companions(&full);
     let layer = layer.map(str::trim).filter(|l| !l.is_empty());
     std::fs::create_dir_all(dir)?;
     external::prune(dir, ours, KEEP);
@@ -497,6 +625,13 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    fn where_programs_cant_run_the_message_says_so_instead_of_asking_for_an_install() {
+        assert!(missing_text("").contains("install it"));
+        let phone = missing_text("a phone");
+        assert!(phone.contains("a phone can't run") && !phone.contains("install"), "{phone}");
+    }
+
+    #[test]
     fn names() {
         assert!(is_gdal_raster_name("/d/N45E006.HGT"));
         assert!(is_gdal_raster_name("air.nc"));
@@ -520,6 +655,9 @@ mod tests {
             "+proj=utm +zone=33 +datum=WGS84",
             "urn:ogc:def:crs:EPSG::2263",
             "PROJCS[\"x\",GEOGCS[\"y\"]]",
+            "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563]]]",
+            "GEOGCS[\"WGS 84\",EXTENSION[\"PROJ4\",\"+proj=longlat +datum=WGS84 +no_defs\"]]",
+            "PROJCRS[\"OSGB 1936 / British National Grid\",BASEGEOGCRS[\"OSGB 1936\"]]",
         ] {
             assert!(valid_crs(good), "{good}");
         }
@@ -538,13 +676,48 @@ mod tests {
             "+proj=pipeline +step +proj=hgridshift +grids=ntv2.gsb",
             "+proj=utm +zone=33 +vgrids=egm96_15.gtx",
             "+proj=deformation +xy_grids=a.tif",
+            "GEOGCS[\"WGS 84\",EXTENSION[\"PROJ4\",\"+proj=longlat +nadgrids=/tmp/grid.gsb\"]]",
+            "GEOGCS[\"WGS 84\",extension[\"proj4_grids\",\"ntv2_0.gsb\"]]",
+            "PROJCS[\"x\",GEOGCS[\"y\"],\"+geoidgrids=egm96.gtx\"]",
+            "PROJCS[\"x\",GEOGCS[\"y\"],\"+init=epsg:4326\"]",
+            "PROJCS[\"x\",GEOGCS[\"y\"],\"+proj=pipeline +step\"]",
+            "PROJCS[\"x\",GEOGCS[\"y\"],\"nadgrids=/tmp/grid.gsb\"]",
+            "PROJCS[\"x\",GEOGCS[\"y\"],\"geoidgrids=egm96.gtx\"]",
+            "BOUNDCRS[SOURCECRS[GEOGCRS[\"x\"]],TARGETCRS[GEOGCRS[\"y\"]],ABRIDGEDTRANSFORMATION[\"t\",PARAMETERFILE[\"f\",\"a.gsb\"]]]",
         ] {
             assert!(!valid_crs(bad), "{bad}");
         }
         assert_eq!(subdataset_file("NETCDF:\"/d/air.nc\":air"), Some("/d/air.nc"));
         assert_eq!(subdataset_file("HDF4_SDS:UNKNOWN:\"/d/x.hdf\":0"), Some("/d/x.hdf"));
         assert_eq!(subdataset_file("NETCDF:/d/air.nc:air"), Some("/d/air.nc"));
+        assert_eq!(subdataset_file("NETCDF:\"/d/x.nc\""), Some("/d/x.nc"));
         assert_ne!(subdataset_file("NETCDF:\"/d/air.nc.evil\":air"), Some("/d/air.nc"), "a longer name isn't the file");
+        for bad_sub in [
+            "NETCDF:/other/target:foo=\"/d/x.nc\"",
+            "NETCDF:/other/target:\"/d/x.nc\":air",
+            "NETCDF:\"/d/x.nc\"extra:air",
+            "\"/d/x.nc\":air",
+            "/d/x.nc:air",
+            "NETCDF::\"/d/x.nc\":air",
+            "NETCDF:\"\":air",
+            "NETCDF:\"/vsicurl/https://example.com/x.nc\":air",
+            "NETCDF:/vsicurl/https://example.com/x.nc:air",
+        ] {
+            assert_eq!(subdataset_file(bad_sub), None, "{bad_sub}");
+        }
+        // Virtual filesystems, missing paths and folders are refused before GDAL is looked for.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing_nc = tmp.path().join("missing.nc");
+        let folder_nc = tmp.path().join("folder.nc");
+        std::fs::create_dir(&folder_nc).unwrap();
+        for p in
+            [Path::new("/vsicurl/https://example.com/x.nc"), Path::new("/VSIZIP/x.zip/x.nc"), missing_nc.as_path(), folder_nc.as_path()]
+        {
+            let err = subdatasets(p).unwrap_err().to_string();
+            assert!(!err.contains("needs GDAL"), "{}: {err}", p.display());
+            let err = convert_in(&tmp.path().join("cache"), p, None, None, None).unwrap_err().to_string();
+            assert!(!err.contains("needs GDAL"), "{}: {err}", p.display());
+        }
         // The same file however it is spelled; another isn't.
         let dir = std::env::temp_dir().join(format!("rustgis-same-file-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
@@ -568,7 +741,7 @@ mod tests {
     /// An ER Mapper header opens only its own data beside it: one linking to another file, or
     /// naming data elsewhere, is refused before GDAL runs (GDAL installed or not).
     #[test]
-    fn er_mapper_headers_open_only_their_own_data() {
+    fn er_mapper_provenance_includes_only_validated_companions() {
         let dir = tempfile::tempdir().unwrap();
         let header = |name: &str, lines: &str| {
             let p = dir.path().join(name);
@@ -576,7 +749,11 @@ mod tests {
             p
         };
         let plain = header("plain.ers", "\tDataSetType\t= ERStorage\n\tDataFile\t= \"plain.dat\"\n");
+        let captured = crate::provenance::Capture::start();
+        std::fs::write(dir.path().join("plain.dat"), b"cells").unwrap();
         assert!(plain_ers(&plain).is_ok());
+        assert!(captured.inputs().iter().any(|i| i.path == dir.path().join("plain.dat").display().to_string() && i.size == Some(5)));
+        drop(captured);
         let linked = header("linked.ers", "\tDataSetType\t= ERStorage\n\tdatasettype = Translated\n");
         assert!(plain_ers(&linked).is_err_and(|e| e.to_string().contains("ERStorage")));
         // Only raw data passes, whatever follows the type's word.
@@ -611,6 +788,35 @@ mod tests {
         assert!(plain_ers(Path::new("/nowhere/a.img")).is_ok());
     }
 
+    /// A reusable conversion must not acquire new ER Mapper validation through logging.
+    #[test]
+    fn er_mapper_provenance_keeps_conversion_cache_hits_compatible() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        std::fs::write(dir.path().join("plain.dat"), b"cells").unwrap();
+        for data in ["plain.dat", "../linked.dat"] {
+            let src = dir.path().join("linked.ers");
+            std::fs::write(&src, format!("DatasetHeader Begin\nDataSetType = Translated\nDataFile = \"{data}\"\nDatasetHeader End\n"))
+                .unwrap();
+            let (len, modified) = stamp(&src).unwrap();
+            let key = format!("raster {CONVERSION}\n{}\nNone\nNone\n{len}\n{modified}", src.display());
+            let tag = format!("{:016x}", fnv1a(key.as_bytes()));
+            std::fs::write(cache.join(format!("{tag}.tif")), b"cached conversion").unwrap();
+            std::fs::write(cache.join(format!("{tag}.rkey")), format!("{key}{FOUND}{{}}")).unwrap();
+            for enabled in [false, true] {
+                let capture = enabled.then(crate::provenance::Capture::start);
+                assert!(convert_in(&cache, &src, None, None, None).is_ok());
+                if let Some(capture) = capture {
+                    let inputs = capture.inputs();
+                    assert!(inputs.iter().any(|i| i.path == src.display().to_string()));
+                    assert_eq!(inputs.iter().any(|i| i.path.ends_with("plain.dat")), data == "plain.dat");
+                    assert!(!inputs.iter().any(|i| i.path.ends_with("linked.dat")));
+                }
+            }
+        }
+    }
+
     /// A VRT renamed `.img` isn't opened as a VRT, so the raster it names isn't read.
     #[test]
     fn a_renamed_vrt_isnt_read_when_gdal_is_installed() {
@@ -641,7 +847,7 @@ mod tests {
 
     /// Runs only where GDAL is installed: a NetCDF file's variables, an HGT tile.
     #[test]
-    fn converts_when_gdal_is_installed() {
+    fn raster_conversion_provenance_excludes_cache_files_when_gdal_is_installed() {
         let Some(translate) = program("gdal_translate") else { return };
         if program("gdalinfo").is_none() {
             return;
@@ -667,13 +873,17 @@ mod tests {
             return;
         }
         let cache = dir.join("cache");
+        let captured = crate::provenance::Capture::start();
         let c = convert_in(&cache, &img, None, None, None).unwrap();
         assert!(c.subdataset.is_none() && c.others.is_empty());
-        let r = crate::raster::read_path(&c.path).unwrap();
+        let r = crate::raster::read_converted(&img, &c).unwrap();
         assert_eq!((r.width, r.height), (4, 3));
         // The second time comes from the cache.
         let again = convert_in(&cache, &img, None, None, None).unwrap();
         assert_eq!(again.path, c.path);
+        crate::raster::read_converted(&img, &again).unwrap();
+        assert_eq!(captured.inputs().iter().map(|i| &i.path).collect::<Vec<_>>(), vec![&img.display().to_string()]);
+        drop(captured);
         assert!(convert_in(&cache, &img, Some("x"), None, None).is_err(), "no subdatasets");
         assert!(convert_in(&cache, &img, None, Some("-of"), None).is_err());
         let _ = std::fs::remove_dir_all(&dir);

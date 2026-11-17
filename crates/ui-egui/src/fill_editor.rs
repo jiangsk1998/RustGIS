@@ -554,7 +554,6 @@ fn along(pattern: &FillPattern, u: f32, v: f32, r: Rect) -> f32 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use egui_kittest::kittest::Queryable;
 

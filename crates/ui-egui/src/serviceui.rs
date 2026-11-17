@@ -163,7 +163,6 @@ pub(crate) fn add_layer(
 
 /// [`add_layer`] for a saved connection: `connection` is its id, recorded on the resulting layer;
 /// `origin` is its display name for Recent. Both survive deferred documents and downloads.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_layer_from(
     app: &mut RustGisApp,
     src: &ServiceSource,
@@ -516,15 +515,31 @@ pub(crate) fn read_pages(app: &mut RustGisApp, landed: Landed) {
     go_on(app, landed, rustgis_engine::render::rustgis_tiles::cache::MAX_DOWNLOAD, step);
 }
 
-/// An ArcGIS layer's description fetched in the background: at most `max` bytes, its download
-/// given up on natively after [`ogc::DESCRIPTION_TIMEOUT`].
-fn fetch_description(url: &str, max: usize) -> Slot<Result<Vec<u8>, String>> {
+/// How its ArcGIS service draws the layer being read, from its description, goes with it to be
+/// added (#2080); why it couldn't be read is said (#2152), also before anything is fetched for a
+/// query asking for a window of its own, which has no description.
+fn drawn(app: &mut RustGisApp, landed: &mut Landed, step: &mut Step) {
+    let Step::Fetch(pages) = step else { return };
+    match pages.take_drawing_info() {
+        Some(Ok(drawing)) => {
+            if let Some(params) = landed.params.as_object_mut() {
+                params.insert("drawingInfo".to_string(), drawing);
+            }
+        }
+        Some(Err(note)) => noted(app, landed, Some(note)),
+        None => {}
+    }
+}
+
+/// A bounded description or retryable feature page fetched off the frame. Native downloads
+/// end at the timeout; the browser's late answer is discarded by the polling read.
+fn fetch_within(url: &str, max: usize, timeout: std::time::Duration) -> Slot<Result<Vec<u8>, String>> {
     let slot: Slot<Result<Vec<u8>, String>> = Slot::default();
     let land = slot.clone();
     rustgis_engine::render::rustgis_tiles::cache::download_within(
         url,
         max,
-        ogc::DESCRIPTION_TIMEOUT,
+        timeout,
         Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)),
     );
     slot
@@ -546,13 +561,12 @@ pub fn poll_pages(app: &mut RustGisApp, ctx: &egui::Context) {
             continue;
         }
         let answer = read.slot.lock().unwrap_or_else(|e| e.into_inner()).take();
-        // A layer's description that doesn't come in time is given up on, and the layer's query
-        // fetched as it is (natively its download ends then too; the browser's fetch keeps its
-        // own time, and what it brings is dropped).
+        // A description that takes too long is given up on; a feature page can be retried at a
+        // smaller size. Native downloads end then too; a browser's late answer is dropped.
         let describing = read.pages.describing();
         let answer = answer.or_else(|| {
-            (describing && read.asked.elapsed() >= ogc::DESCRIPTION_TIMEOUT)
-                .then(|| Err("the layer's description took too long".to_string()))
+            let timeout = if describing { Some(ogc::DESCRIPTION_TIMEOUT) } else { read.pages.page_timeout() };
+            timeout.filter(|timeout| read.asked.elapsed() >= *timeout).map(|_| Err("timeout: service page".to_string()))
         });
         match answer {
             Some(answer) => {
@@ -582,13 +596,15 @@ fn next_request(app: &mut RustGisApp, params: &Value, pages: &Pages) -> Result<S
 
 /// The next answer fetched, or the collection added (with a note when some features were left
 /// unread), or why it couldn't be fetched said.
-pub(crate) fn go_on(app: &mut RustGisApp, landed: Landed, left: usize, step: Step) {
+pub(crate) fn go_on(app: &mut RustGisApp, mut landed: Landed, left: usize, mut step: Step) {
     if let Err(e) = app.session.download_continues(landed.id) {
         app.session.request_failed(&landed.params, &e);
         app.landed_in_dialog(&landed.params, Err(&e));
         app.session.notify(e, true);
         return;
     }
+    // Only for a download still going: one cancelled says nothing of how it would be drawn.
+    drawn(app, &mut landed, &mut step);
     let still = app.session.download_still(landed.id);
     rustgis_engine::render::rustgis_tiles::cache::with_optional_still(still, || {
         match step {
@@ -608,8 +624,11 @@ pub(crate) fn go_on(app: &mut RustGisApp, landed: Landed, left: usize, step: Ste
                 let next = next_request(app, &landed.params, &pages);
                 let slot = match next {
                     // A layer's description: small, and soon given up on.
-                    Ok(url) if pages.describing() => fetch_description(&url, left.min(ogc::DESCRIPTION_MAX)),
-                    Ok(url) => fetch_into_limited(&url, left),
+                    Ok(url) if pages.describing() => fetch_within(&url, left.min(ogc::DESCRIPTION_MAX), ogc::DESCRIPTION_TIMEOUT),
+                    Ok(url) => match pages.page_timeout() {
+                        Some(timeout) => fetch_within(&url, left, timeout),
+                        None => fetch_into_limited(&url, left),
+                    },
                     Err(e) => Slot::new(std::sync::Mutex::new(Some(Err(e)))),
                 };
                 app.ui.service_pages.push(PageRead { landed, pages, left, slot, asked: web_time::Instant::now() });

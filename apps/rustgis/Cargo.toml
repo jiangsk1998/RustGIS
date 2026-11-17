@@ -15,6 +15,9 @@ unsafe_code = "deny"
 [lints.clippy]
 dbg_macro = "warn"
 todo = "warn"
+# A suppression says why, and `expect` reports one that is no longer needed.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
 too_many_arguments = "allow"
 type_complexity = "allow"
 

@@ -43,7 +43,11 @@ pub fn commands() -> Vec<C> {
             ))
         }).roles(&[]).effects(crate::policy::Effects::NONE)
         .view(),
-        C::new("gp.geolibre", "GeoLibre Tools", "Analyze › Geoprocessing", |_, _| Ok(geolibre_status())).roles(&[]).effects(crate::policy::Effects::NONE).view(),
+        C::new("gp.geolibre", "GeoLibre Tools", "Analyze › Geoprocessing", |_, _| {
+            let mut status = geolibre_status();
+            status["passedOver"] = json!(geolibre_passed_over());
+            Ok(status)
+        }).roles(&[]).effects(crate::policy::Effects::NONE).view(),
         C::new("gp.installGeolibre", "Install GeoLibre Tools", "Analyze › Geoprocessing", |_, _| {
             let path = install_geolibre(&|_, _| {})?;
             #[cfg(all(feature = "geolibre", not(target_arch = "wasm32")))]
@@ -106,7 +110,7 @@ pub fn geolibre_status() -> Value {
             "path": found.as_ref().map(|(p, _)| p.display().to_string()),
             "version": found.map(|(_, v)| v),
             "tools": geolibre_tools().len(),
-            "download": rustgis_geolibre::runner::DOWNLOAD_URL,
+            "download": rustgis_geolibre::runner::download_url(),
         })
     }
     #[cfg(all(feature = "geolibre", target_arch = "wasm32"))]
@@ -118,9 +122,22 @@ pub fn geolibre_status() -> Value {
     json!({"supported": false, "available": false})
 }
 
-/// Downloads and installs the latest GeoLibre runner for this platform; returns the program's
-/// path. `progress` gets the bytes received and the expected total. Blocks: the app calls it
-/// from a background thread, then picks the runner with `gp.setGeolibre`. Native only.
+/// Why a GeoLibre runner found or chosen isn't used, its version being outside the range this
+/// RustGIS works with (what, and how to fix it), also while another runner is in use: `gp.geolibre`
+/// reports it as `passedOver`. Kept out of [`geolibre_status`], which a run's approval compares,
+/// so a refused Locate… doesn't change it. `None` in the browser and builds without the suite.
+pub fn geolibre_passed_over() -> Option<String> {
+    #[cfg(all(feature = "geolibre", not(target_arch = "wasm32")))]
+    {
+        rustgis_geolibre::runner::passed_over()
+    }
+    #[cfg(not(all(feature = "geolibre", not(target_arch = "wasm32"))))]
+    None
+}
+
+/// Downloads and installs the pinned GeoLibre runner release for this platform; returns the
+/// program's path. `progress` gets the bytes received and the expected total. Blocks: the app
+/// calls it from a background thread, then picks the runner with `gp.setGeolibre`. Native only.
 pub fn install_geolibre(progress: &dyn Fn(u64, Option<u64>)) -> Result<String, String> {
     #[cfg(all(feature = "geolibre", not(target_arch = "wasm32")))]
     {
@@ -296,6 +313,7 @@ pub fn external_complete(s: &mut Session, id: u64, ran: ExternalOutput) -> Resul
         });
         let tool_id = format!("{}{}", rustgis_geolibre::PREFIX, job.tool);
         s.pending.push(crate::PendingRun {
+            inputs: Vec::new(),
             id,
             continuation,
             tool: job.name.clone(),
@@ -497,6 +515,7 @@ fn complete(
     }
     fit_to_windows(s, &mut result, &full_ids);
     s.pending.push(crate::PendingRun {
+        inputs: Vec::new(),
         id,
         continuation: run.continuation,
         tool: run.name,
@@ -524,11 +543,13 @@ pub struct ToolRun {
     pub tool: &'static str,
     snap: Snapshot<'static>,
     params: Value,
+    capture_inputs: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 /// What a [`ToolRun`] made, for [`tool_complete`].
 pub struct ToolDone {
+    inputs: Vec<rustgis_data::provenance::Fingerprint>,
     result: Result<rustgis_analysis::ToolResult, String>,
     full_ids: FullIds,
 }
@@ -538,32 +559,43 @@ impl ToolRun {
     /// Reads the tool's inputs and runs it, blocking until it ends; `control` stops it and counts
     /// its progress (see [`rustgis_analysis::control`]).
     pub fn run(self, control: &std::sync::Arc<rustgis_analysis::control::Control>) -> ToolDone {
+        let captured = self.capture_inputs.then(rustgis_data::provenance::Capture::start);
         let ToolRun { pin, continuation, snap, params, .. } = self;
         let spec = pin.spec();
         let name = spec.name;
         if let Err(e) = continuation.check() {
-            return ToolDone { result: Err(e), full_ids: FullIds::new() };
+            return ToolDone { inputs: Vec::new(), result: Err(e), full_ids: FullIds::new() };
         }
         if control.is_cancelled() {
-            return ToolDone { result: Err(format!("{name} was cancelled before it started")), full_ids: FullIds::new() };
+            return ToolDone {
+                inputs: Vec::new(),
+                result: Err(format!("{name} was cancelled before it started")),
+                full_ids: FullIds::new(),
+            };
         }
         let current = continuation.clone();
         let still = std::sync::Arc::new(move || current.check().is_ok()) as crate::render::rustgis_tiles::cache::Still;
         // A bug in reading the inputs, like one in a tool, must not take the app down.
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::render::rustgis_tiles::cache::with_still(still, || {
                 let inputs = match inputs_of(snap, Some(spec), &params) {
                     Ok(inputs) => inputs,
-                    Err(e) => return ToolDone { result: Err(e), full_ids: FullIds::new() },
+                    Err(e) => return ToolDone { inputs: Vec::new(), result: Err(e), full_ids: FullIds::new() },
                 };
                 let mut result = pin.run(&inputs, &params, control, &|| continuation.check());
                 if let Ok(r) = &mut result {
                     r.messages.extend(inputs.messages.iter().cloned());
                 }
-                ToolDone { result, full_ids: full_ids(&inputs.loaded) }
+                ToolDone { inputs: Vec::new(), result, full_ids: full_ids(&inputs.loaded) }
             })
         }))
-        .unwrap_or_else(|_| ToolDone { result: Err(format!("{name} failed unexpectedly")), full_ids: FullIds::new() })
+        .unwrap_or_else(|_| ToolDone {
+            inputs: Vec::new(),
+            result: Err(format!("{name} failed unexpectedly")),
+            full_ids: FullIds::new(),
+        });
+        done.inputs = captured.as_ref().map_or_else(Vec::new, rustgis_data::provenance::Capture::inputs);
+        done
     }
 }
 
@@ -604,7 +636,7 @@ pub fn tool_start(s: &mut Session, tool: &str, params: &Value) -> Result<ToolRun
     if s.plugin_runs.len() > MAX_ASYNC_RUNS {
         s.plugin_runs.remove(0);
     }
-    Ok(ToolRun { id, tool: spec.id, snap: Snapshot::owned(s), params: resolved, pin, continuation })
+    Ok(ToolRun { id, tool: spec.id, snap: Snapshot::owned(s), params: resolved, pin, continuation, capture_inputs: s.log.on() })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -624,14 +656,18 @@ pub fn tool_abandon(s: &mut Session, id: u64) {
 /// Finishes a run from [`tool_start`] with what [`ToolRun::run`] made: `gp.finish {"id"}` then
 /// applies it like `gp.run` would, with undo and history.
 pub fn tool_complete(s: &mut Session, id: u64, done: ToolDone) -> Result<(), String> {
-    complete(s, id, done.result, Some(done.full_ids))
+    complete(s, id, done.result, Some(done.full_ids))?;
+    if let Some(run) = s.pending.iter_mut().find(|run| run.id == id) {
+        run.inputs = done.inputs;
+    }
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 /// A tool's run made ahead on a copy of the session, for a model or script the app runs on a
 /// thread of its own ([`super::workflows::ahead_on_copy`]): what it read and what it made, for
 /// the run here to take instead of running the tool again.
-pub(crate) struct RanAhead {
+pub(crate) struct ToolAhead {
     pin: crate::policy::ToolPin,
     params: Value,
     read: Snapshot<'static>,
@@ -640,6 +676,14 @@ pub(crate) struct RanAhead {
     result: Result<rustgis_analysis::ToolResult, String>,
     full_ids: FullIds,
     millis: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// A script's prepared operations in execution order. Table edits retain their output rows,
+/// so following tools see the same storage when the live script takes the edits.
+pub(crate) enum RanAhead {
+    Tool(Box<ToolAhead>),
+    Table(Box<super::edit::ScriptTableEdit>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -760,6 +804,10 @@ fn take_ahead(
 ) -> Option<(Result<rustgis_analysis::ToolResult, String>, FullIds, u64)> {
     let Some(Ahead::Taking(ran)) = &mut s.tools_ahead else { return None };
     let next = ran.pop_front()?;
+    let RanAhead::Tool(next) = next else {
+        s.tools_ahead = None;
+        return None;
+    };
     let now = Snapshot::of(s);
     let view = next.view.is_none_or(|v| v == view_extent(&now));
     if next.pin == *pin && next.params == *params && view && same_read(&next.read, &now) {
@@ -944,8 +992,10 @@ fn read_layers(s: &Session, spec: &rustgis_analysis::ToolSpec, resolved: &Value)
 }
 
 /// Fits a tool's result to the map: a selection made on the complete streamed source becomes
-/// rows of the current window. An update from a selection is still refused: it would replace
-/// the complete source with just those selected features.
+/// rows of the current window, and a selection leaves out the features the map doesn't draw at its
+/// scale (the layer's definition query, time window and display filters; the Select tools read the
+/// whole layer). An update from a selection is still
+/// refused: it would replace the complete source with just those selected features.
 fn fit_to_windows(s: &Session, res: &mut Result<rustgis_analysis::ToolResult, String>, full_ids: &FullIds) {
     if let Ok(r) = res
         && let Output::Selection { layer, rows } = &mut r.output
@@ -959,6 +1009,19 @@ fn fit_to_windows(s: &Session, res: &mut Result<rustgis_analysis::ToolResult, St
             // Still streamed: outside the window. Loaded whole since: deleted meanwhile.
             let place = if l.is_streamed() { "are outside the part of it read for the view" } else { "were deleted while it ran" };
             r.messages.push(format!("{gone} of the features selected in {layer} {place}, and aren't selected"));
+        }
+    }
+    if let Ok(r) = res
+        && let Output::Selection { layer, rows } = &mut r.output
+        && let Some(l) = s.map().layer_by_name(layer)
+    {
+        let drawn = l.drawn_rows(s.scale());
+        let before = rows.len();
+        rows.retain(|row| drawn.get(*row).is_none_or(|d| *d));
+        let hidden = before - rows.len();
+        if hidden > 0 {
+            r.messages
+                .push(format!("{hidden} of the features selected in {layer} aren't drawn (its definition query, time window or display filters hide them), and aren't selected"));
         }
     }
     if let Ok(r) = res
@@ -977,6 +1040,7 @@ fn finish(s: &mut Session, p: &Value) -> CmdResult {
     let i = s.pending.iter().position(|r| r.id == id).ok_or("no finished run with that id")?;
     s.check_gp_finish(&s.pending[i].continuation, landing(&s.pending[i].result))?;
     let r = s.pending.remove(i);
+    rustgis_data::provenance::record(r.inputs.clone());
     let c = r.continuation.clone();
     s.resume_gp(&c, landing(&r.result), |s| {
         apply(s, Ran { name: r.tool, id: r.tool_id, command: None, started: r.started }, r.params, r.result, r.millis)
@@ -1062,10 +1126,7 @@ fn map_inputs<'a>(s: &'a Session, spec: Option<&rustgis_analysis::ToolSpec>, par
 /// whole, and the rows of each layer it runs on. It reads, so a background run does this on its
 /// thread.
 fn inputs_of<'a>(snap: Snapshot<'a>, spec: Option<&rustgis_analysis::ToolSpec>, params: &Value) -> Result<MapInputs<'a>, String> {
-    let full = streamed_inputs(&snap.map, spec, params)?;
-    let messages = Vec::new();
-    #[cfg(not(target_arch = "wasm32"))]
-    let mut messages = messages;
+    let (full, mut messages) = streamed_inputs(&snap.map, spec, params)?;
     #[cfg(not(target_arch = "wasm32"))]
     let mut full = full;
     #[cfg(not(target_arch = "wasm32"))]
@@ -1101,27 +1162,116 @@ fn inputs_of<'a>(snap: Snapshot<'a>, spec: Option<&rustgis_analysis::ToolSpec>, 
             .collect::<Result<Vec<_>, _>>()?;
         rows.insert(name.clone(), selected);
     }
+    narrow_to_queries(&snap.map, spec, params, &full, &mut rows, &mut messages)?;
     Ok(MapInputs { snap, rows, loaded: full, messages, flat: std::cell::OnceCell::new(), view: std::cell::OnceCell::new() })
 }
 
+/// Narrows the rows a tool reads of each layer to the features its definition query keeps, as the
+/// map draws them (#1995): a selection is cut to its drawn features, and a layer without one (or
+/// with only the environment's extent) reads the kept features instead of every one. A layer whose
+/// query hides every feature the tool would read is refused, as an empty list of rows means all of
+/// them. A layer a tool reads whole whatever its selection ([`reads_whole`]) is read whole, and a
+/// notice says how many features its query hides. The query is evaluated in one pass over the
+/// layer's features, without a check for Cancel, as the map's own filter is.
+fn narrow_to_queries(
+    map: &rustgis_map::Map,
+    spec: Option<&rustgis_analysis::ToolSpec>,
+    params: &Value,
+    full: &std::collections::HashMap<String, Dataset>,
+    rows: &mut std::collections::HashMap<String, Vec<usize>>,
+    messages: &mut Vec<String>,
+) -> Result<(), String> {
+    let whole: Vec<&str> = spec
+        .iter()
+        .flat_map(|t| t.params.iter().filter(|p| reads_whole(t.id, p.name)).filter_map(|p| params.get(p.name)?.as_str()))
+        .collect();
+    let mut named = layer_names(spec, params);
+    // The layer a Select tool selects in is read whole, and its result is cut to the drawn
+    // features afterwards ([`fit_to_windows`]): not narrowed here, and never refused (it selects
+    // nothing then).
+    let selected_in: Vec<&str> = spec
+        .iter()
+        .flat_map(|t| t.params.iter().filter(|p| selects_in(t.id, p.name)).filter_map(|p| params.get(p.name)?.as_str()))
+        .collect();
+    for w in whole.iter().chain(&selected_in) {
+        if let Some(i) = named.iter().position(|n| n.eq_ignore_ascii_case(w)) {
+            named.remove(i);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for name in named {
+        let Some(layer) = map.layer_by_name(name) else { continue };
+        let key = layer.name.to_ascii_lowercase();
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let dataset = full.get(&key).unwrap_or(&layer.dataset);
+        let Some(keep) = layer.query_rows(dataset) else { continue };
+        let kept = |row: &usize| keep.get(*row).is_none_or(|k| *k);
+        let current = rows.get(&key).cloned().or_else(|| (!layer.selection.is_empty()).then(|| layer.selection.clone()));
+        let narrowed: Vec<usize> = match &current {
+            Some(rs) => rs.iter().copied().filter(kept).collect(),
+            None => (0..keep.len()).filter(kept).collect(),
+        };
+        if narrowed.is_empty() && !keep.is_empty() {
+            return Err(format!("{}: its definition query hides every feature the tool would read", layer.name));
+        }
+        if narrowed.len() < current.as_ref().map_or(keep.len(), Vec::len) {
+            rows.insert(key, narrowed);
+        }
+    }
+    let name = spec.map_or("", |t| t.name);
+    let mut told = std::collections::HashSet::new();
+    for layer in whole.iter().filter_map(|n| map.layer_by_name(n)).filter(|l| told.insert(l.name.to_ascii_lowercase())) {
+        let Some(keep) = layer.query_rows(full.get(&layer.name.to_ascii_lowercase()).unwrap_or(&layer.dataset)) else { continue };
+        let hidden = keep.iter().filter(|k| !**k).count();
+        if hidden > 0 {
+            messages.push(format!(
+                "{name}: reads all {} features of {}, including the {hidden} its definition query hides",
+                keep.len(),
+                layer.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The layer parameter a Select tool replaces the selection of: read whole, as the tool reads it.
+fn selects_in(tool: &str, param: &str) -> bool {
+    matches!((tool, param), ("selectByAttributes" | "selectByLocation", "input"))
+}
+
+/// The layer parameters a tool reads whole whatever the layer's selection or definition query:
+/// the one it updates in place, and the polygons it counts every point against (see the
+/// analysis guide). The Select tools read the whole layer too, and their selection is cut to the
+/// drawn features instead ([`selects_in`], [`fit_to_windows`]).
+fn reads_whole(tool: &str, param: &str) -> bool {
+    matches!((tool, param), ("calculateGeometry", "input") | ("countPoints", "polygons"))
+}
+
 /// Complete streamed inputs without selections, plus selected PMTiles inputs: that exporter
-/// requires the complete source. Their selected window rows are remapped in `map_inputs`.
+/// requires the complete source. Their selected window rows are remapped in `map_inputs`. With
+/// them, what each read couldn't read as it is (rows left out, dates read as null or rounded), for
+/// the tool's messages.
 fn streamed_inputs(
     map: &rustgis_map::Map,
     spec: Option<&rustgis_analysis::ToolSpec>,
     params: &Value,
-) -> Result<std::collections::HashMap<String, Dataset>, String> {
+) -> Result<(std::collections::HashMap<String, Dataset>, Vec<String>), String> {
     let mut full = std::collections::HashMap::new();
+    let mut said = Vec::new();
     for n in layer_names(spec, params) {
         let key = n.to_ascii_lowercase();
         if full.contains_key(&key) {
             continue;
         }
         if let Some(l) = map.layer_by_name(n).filter(|l| reads_full_source(l, spec)) {
-            full.insert(key, l.load_all().map_err(|e| format!("{}: {e}", l.name))?);
+            let (ds, unread) = l.load_all_counted().map_err(|e| format!("{}: {e}", l.name))?;
+            said.extend(super::whole::Unread::of(l.name.clone(), unread).lines());
+            full.insert(key, ds);
         }
     }
-    Ok(full)
+    Ok((full, said))
 }
 
 /// The executor's source-read choice, shared with pure permission planning.
@@ -1634,7 +1784,7 @@ pub fn run_batch_with(s: &mut Session, p: &Value, control: &std::sync::Arc<rustg
     let mut seen_outputs = std::collections::HashSet::new();
     let mut collisions = 0;
     let mut first_collision = None;
-    #[allow(unused_mut)]
+    #[cfg_attr(target_arch = "wasm32", expect(unused_mut, reason = "batch inputs are read from files on the desktop only"))]
     let mut reader_warnings: Vec<(String, String)> = Vec::new();
     let mut items_reporting_messages = 0;
     let mut distinct_tool_messages: Vec<(String, usize)> = Vec::new();
@@ -2311,7 +2461,7 @@ pub(crate) fn execute(
             let millis = now_ms().saturating_sub(t0);
             #[cfg(not(target_arch = "wasm32"))]
             if let (Some(read), Some(Ahead::Recording(ran))) = (read, &mut s.tools_ahead) {
-                ran.push(RanAhead {
+                ran.push(RanAhead::Tool(Box::new(ToolAhead {
                     pin: pin.clone(),
                     params: params.clone(),
                     read,
@@ -2319,7 +2469,7 @@ pub(crate) fn execute(
                     result: res.clone(),
                     full_ids: ids.clone(),
                     millis,
-                });
+                })));
             }
             (res, ids, millis)
         }
@@ -2412,7 +2562,11 @@ fn file_delivered(s: &mut Session, p: &Value) -> CmdResult {
         report.file_delivered(id, error);
     }
     for message in &file.record.messages {
-        s.notify(message.clone(), !file.record.ok);
+        if file.record.ok {
+            s.notify_written(message.clone(), false);
+        } else {
+            s.notify(message.clone(), true);
+        }
     }
     let out = json!({"file": file.file_name, "delivered": file.record.ok, "messages": file.record.messages});
     s.push_gp_record(file.record);
@@ -2559,6 +2713,9 @@ fn apply_with(
         }
         Ok(r) => r,
     };
+    // File outputs reach the message publication below only after the native atomic write.
+    // Pending browser downloads return above that point and are retained on delivery instead.
+    let wrote_file = matches!(&result.output, Output::File { .. });
     let out = match result.output {
         Output::File { file_name, bytes } => {
             #[cfg(test)]
@@ -2671,7 +2828,11 @@ fn apply_with(
     let messages = result.messages.clone();
     if !opts.quiet {
         for m in &messages {
-            s.notify(m.clone(), false);
+            if wrote_file {
+                s.notify_written(m.clone(), false);
+            } else {
+                s.notify(m.clone(), false);
+            }
         }
     }
     let ids: Vec<u32> = match (out.get("layer"), out.get("layers")) {
@@ -2688,7 +2849,6 @@ fn apply_with(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod file_tests {
     use super::*;
 
@@ -3561,7 +3721,6 @@ mod file_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 mod file_permission_tests {
     use super::*;
 
@@ -3610,7 +3769,6 @@ mod file_permission_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod batch_tests {
     use super::*;
 

@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use egui::{Key, accesskit::Role, pos2, vec2};
 use egui_kittest::{
     Harness,

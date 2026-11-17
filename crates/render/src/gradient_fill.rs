@@ -582,7 +582,6 @@ pub(crate) fn average(first: Rgba, last: Rgba, stops: &Stops, discrete: bool) ->
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use rustgis_map::fills::Stop;

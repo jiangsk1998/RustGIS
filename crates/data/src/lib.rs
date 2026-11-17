@@ -10,6 +10,7 @@ pub mod cityjson;
 mod citymodel;
 pub mod color;
 pub mod date;
+pub mod date_format;
 mod dbf;
 pub mod diagnostics;
 pub mod dirs;
@@ -38,6 +39,9 @@ pub mod osm;
 pub mod photo;
 pub mod pictures;
 pub mod progress;
+pub mod provenance;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod publish;
 pub mod query;
 pub mod raster;
 pub mod s3_address;
@@ -56,11 +60,29 @@ pub mod xml;
 pub mod zip;
 
 pub use date::{Date, DateTime};
-pub use geometry::{Geometry, GeometryType, Measure, VertexId, ambiguous_area_message};
+pub use geometry::{Geometry, GeometryType, Measure, VertexId, ambiguous_area_message, pole_loop_count, pole_loop_message};
 pub use rustgis_geom::{Coord, Extent};
 pub use value::{Field, FieldType, ImageValue, Value};
 
 use serde::{Deserialize, Serialize};
+
+/// Whether this build runs other programs: GDAL's (for the formats read through it), DuckDB (SQL
+/// queries and DuckDB databases) and the `geolibre` runner. Not in the browser, which runs none,
+/// nor on a phone (Android, iOS), whose apps can't start them (#1902): there, what would run one
+/// says so (see [`no_programs_here`]) instead of asking for an install that can't be made.
+pub const RUNS_PROGRAMS: bool = !cfg!(any(target_arch = "wasm32", target_os = "android", target_os = "ios"));
+
+/// What runs RustGIS where [`RUNS_PROGRAMS`] is false, for a message that says a program can't run
+/// there: "a phone" or "the browser". Empty where programs run.
+pub fn no_programs_here() -> &'static str {
+    if RUNS_PROGRAMS {
+        ""
+    } else if cfg!(target_arch = "wasm32") {
+        "the browser"
+    } else {
+        "a phone"
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DataError {
@@ -132,7 +154,6 @@ impl DataError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod secret_redaction_tests {
     use super::*;
 
@@ -177,6 +198,7 @@ mod secret_redaction_tests {
 
 /// One row: an optional geometry and one value per field.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Feature {
     pub id: u64,
     pub geometry: Option<Geometry>,
@@ -298,6 +320,17 @@ impl Serialize for Features {
     }
 }
 
+/// Features are saved as a list of [`Feature`]s.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for Features {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Features".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <Vec<Feature>>::json_schema(generator)
+    }
+}
+
 impl<'de> Deserialize<'de> for Features {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Features, D::Error> {
         Vec::<Feature>::deserialize(d).map(Features::from)
@@ -336,13 +369,23 @@ pub struct Dataset {
 
 impl Dataset {
     /// How many of its values a saved project holds as null, not as they are: numbers that aren't
-    /// finite (NaN, infinity), which JSON can't write ([`Value`]'s `Serialize`). None for a window
+    /// finite (NaN, infinity), which JSON can't write ([`Value`]'s `Serialize`). Zero for a window
     /// onto a source, whose rows aren't saved.
     pub fn unsaved_numbers(&self) -> usize {
         if self.windowed {
             return 0;
         }
         self.features.iter().flat_map(|f| &f.attrs).filter(|v| v.is_non_finite()).count()
+    }
+
+    /// How many of its features have a coordinate that isn't a number (NaN, infinity), which a
+    /// saved project would hold as null and couldn't open again ([`Geometry::is_finite`], #1985).
+    /// Zero for a window onto a source, whose rows aren't saved.
+    pub fn unsaved_coordinates(&self) -> usize {
+        if self.windowed {
+            return 0;
+        }
+        self.features.iter().filter(|f| f.geometry.as_ref().is_some_and(|g| !g.is_finite())).count()
     }
 }
 
@@ -388,6 +431,20 @@ pub struct ReadReport {
     /// What a read of a source says of values in date fields that weren't dates
     /// ([`source::unread_dates_note`]), also in `messages`: for a caller that says only this.
     pub unread_dates: Option<String>,
+    /// What it says of date-times it rounded to the microsecond ([`source::rounded_dates_note`]),
+    /// also in `messages`.
+    pub rounded_dates: Option<String>,
+    /// The extrusion the reader suggests for the layer (a city model's volumes): applied when the
+    /// layer is added, and only then; a reload keeps the layer's own.
+    pub extrusion: Option<SuggestedExtrusion>,
+}
+
+/// An extrusion a reader suggests for a layer of polygons: heights from one field, on a base from
+/// another.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SuggestedExtrusion {
+    pub height_field: String,
+    pub base_field: String,
 }
 
 /// What a read says when it drops Z or M values (see [`Dataset::zm_dropped`]): from `features` of

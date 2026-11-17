@@ -62,8 +62,8 @@ pub fn commands() -> Vec<C> {
         .params(r#"{"report"?}"#),
         // Report sections.
         C::new("report.supplementalPage", "Supplemental Page", "Publish › Report", |s, p| {
-            let title: String = ps(p, "title").unwrap_or("About this report").chars().take(500).collect();
-            let text: String = ps(p, "text").unwrap_or("").chars().take(100_000).collect();
+            let title = super::within("title", "a page's title", ps(p, "title").unwrap_or("About this report"), 500)?;
+            let text = super::within("text", "a page's text", ps(p, "text").unwrap_or(""), 100_000)?;
             add_section(s, p, Section::Page { title, text, end: b(p, "end").unwrap_or(false) })
         }).inputs(object_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
@@ -128,17 +128,28 @@ pub fn commands() -> Vec<C> {
         C::new("report.field", "Field", "Data › Data Design", |s, p| {
             let (i, field) = field_of(s, p, "field")?;
             let r = s.project.reports.get_mut(i).ok_or("no report")?;
-            toggle(&mut r.fields, field, b(p, "remove").unwrap_or(false));
+            let remove = b(p, "remove").unwrap_or(false);
+            if !remove && r.fields.len() >= MAX_ITEMS && !r.fields.iter().any(|f| f.eq_ignore_ascii_case(&field)) {
+                return Err(format!("a report lists at most {MAX_ITEMS} fields"));
+            }
+            toggle(&mut r.fields, field, remove);
             Ok(json!({"fields": r.fields}))
         }).inputs(layer_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?, "field": name, "remove"?: bool}"#),
         C::new("report.autofill", "Autofill Fields", "Data › Data Design", |s, p| {
             let i = index(s, p)?;
-            let names = layer_of(s, i)?.dataset.fields.iter().take(MAX_ITEMS).map(|f| f.name.clone()).collect::<Vec<_>>();
+            let fields = &layer_of(s, i)?.dataset.fields;
+            let all = fields.len();
+            let names = fields.iter().take(MAX_ITEMS).map(|f| f.name.clone()).collect::<Vec<_>>();
             let r = s.project.reports.get_mut(i).ok_or("no report")?;
             r.fields = names;
-            Ok(json!({"fields": r.fields}))
+            let (answer, report) = (json!({"fields": r.fields}), r.name.clone());
+            // A layer with more fields than a report takes: the first are filled in, and that is said (#1896).
+            if all > MAX_ITEMS {
+                s.notify(format!("{report}: the first {MAX_ITEMS} of the layer's {all} fields are filled in"), false);
+            }
+            Ok(answer)
         }).inputs(layer_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?}"#),
@@ -309,6 +320,8 @@ struct Fitted {
     settings: usize,
     filter_cleared: bool,
     columns_replaced: bool,
+    /// The layer's fields, when the default columns are its first `MAX_ITEMS` of more (#1896).
+    layer_fields: usize,
     subreports: usize,
     subreport_fields: usize,
 }
@@ -326,6 +339,7 @@ impl Fitted {
                 usize::from(self.columns_replaced),
                 "{name}: {n} report column set(s) replaced with the layer's default columns because none of the requested columns exist {when}",
             ),
+            (self.layer_fields, "{name}: the report's columns are the first 64 of the layer's {n} fields {when}"),
             (self.subreports, "{name}: {n} subreport(s) whose relationship no longer involves the layer removed {when}"),
             (self.subreport_fields, "{name}: {n} subreport field(s) missing from the related layer removed {when}"),
         ] {
@@ -374,6 +388,7 @@ fn fit_to_layer(r: &mut Report, ds: &rustgis_data::Dataset) -> Fitted {
         - usize::from(r.chart.is_some());
     if r.fields.is_empty() {
         fitted.columns_replaced = fitted.fields > 0;
+        fitted.layer_fields = if ds.fields.len() > MAX_ITEMS { ds.fields.len() } else { 0 };
         r.fields = ds.fields.iter().take(MAX_ITEMS).map(|f| f.name.clone()).collect();
     }
     fitted.filter_cleared = !r.where_clause.is_empty() && rustgis_data::query::parse_fields(&r.where_clause, ds).is_err();
@@ -391,17 +406,16 @@ fn join_key(ds: &rustgis_data::Dataset, row: usize, fi: Option<usize>) -> String
     }
 }
 
-fn unique_name(s: &Session, base: &str, skip: Option<usize>) -> String {
+/// A report's name told apart by a number (see [`super::numbered_saying`]), with the notice to
+/// give when the number cuts it. `whose` says where the name came from, as that notice puts it.
+fn unique_name(s: &Session, command: &str, whose: &str, base: &str, skip: Option<usize>) -> (String, Option<String>) {
+    // A name given was already checked by the command. A file's name was held to 200 characters
+    // when the report was read, and that is said then. A name made from a layer's name
+    // ("{layer} Report") may be longer and keeps its first 200 characters; `new_report` says so.
     let base: String = base.trim().chars().take(200).collect();
     let base = if base.is_empty() { "Report".to_string() } else { base };
     let taken = |n: &str| s.project.reports.iter().enumerate().any(|(j, r)| Some(j) != skip && r.name.eq_ignore_ascii_case(n));
-    let mut name = base.clone();
-    let mut k = 1;
-    while taken(&name) {
-        k += 1;
-        name = format!("{base} {k}");
-    }
-    name
+    super::numbered_saying(command, "a report", whose, &base, 200, taken)
 }
 
 /// Page size from `page`/`orientation`/`width`/`height`, portrait by default.
@@ -417,32 +431,53 @@ fn page(p: &Value, current: Option<(f64, f64)>) -> Result<Option<(f64, f64)>, St
 }
 
 fn new_report(s: &mut Session, p: &Value) -> CmdResult {
+    let given = ps(p, "name").map(|n| super::within("name", "a report's name", n.trim(), 200)).transpose()?;
+    let title = ps(p, "title").map(|t| super::within("title", "a report's title", t, 500)).transpose()?;
     let layer = new_layer(s, p)?;
     if layer.is_raster() {
         return Err("reports list a feature layer's records, not a raster's".into());
     }
-    let mut r = Report {
-        name: unique_name(s, ps(p, "name").unwrap_or(&format!("{} Report", layer.name)), None),
-        layer: layer.name.clone(),
-        ..Report::default()
-    };
-    r.title = ps(p, "title").unwrap_or(&layer.name).chars().take(500).collect();
+    let made = format!("{} Report", layer.name);
+    let whose = if given.is_some() { "the name given" } else { "the name made from the layer's name" };
+    let (name, mut cut) = unique_name(s, "New Report", whose, given.as_deref().unwrap_or(&made), None);
+    // A name made from a long layer name keeps its first 200 characters. One notice says how many
+    // are kept, with the number when one follows, so two notices don't give two different counts.
+    if given.is_none() && made.trim().chars().count() > 200 {
+        cut = Some(match name.rsplit_once(' ').filter(|_| cut.is_some()) {
+            Some((kept, number)) => format!(
+                "New Report: the report's name is made from the layer's name and keeps its first {} characters before \" {number}\"",
+                kept.chars().count()
+            ),
+            None => "New Report: the report's name is made from the layer's name and keeps its first 200 characters".to_string(),
+        });
+    }
+    let mut r = Report { name, layer: layer.name.clone(), ..Report::default() };
+    // A title made from a long layer name keeps its first 500 characters, as a title given must.
+    let title_cut = title.is_none() && layer.name.chars().count() > 500;
+    r.title = title.unwrap_or_else(|| layer.name.chars().take(500).collect());
     let ds = &layer.dataset;
-    let fields_of = |key: &str| -> Result<Vec<String>, String> {
+    // A list given is refused past its limit (#1896), not cut.
+    let fields_of = |key: &str, of: &str, limit: usize| -> Result<Vec<String>, String> {
+        let given = p.get(key).and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+        if given.len() > limit {
+            return Err(format!("{key} has {} entries: {of} at most {limit}", given.len()));
+        }
         let mut out = Vec::new();
-        for v in p.get(key).and_then(Value::as_array).into_iter().flatten().take(MAX_ITEMS) {
+        for v in given {
             let n = v.as_str().ok_or_else(|| format!("{key} are field names"))?;
             let fi = ds.field_index(n).ok_or_else(|| format!("'{}' has no field '{n}'", layer.name))?;
             out.extend(ds.fields.get(fi).map(|f| f.name.clone()));
         }
         Ok(out)
     };
-    r.fields = fields_of("fields")?;
+    r.fields = fields_of("fields", "a report lists", MAX_ITEMS)?;
+    // The layer's fields when none are given: the first of a wide layer, and that is said.
+    let all = ds.fields.len();
+    let first_of = r.fields.is_empty() && all > MAX_ITEMS;
     if r.fields.is_empty() {
         r.fields = ds.fields.iter().take(MAX_ITEMS).map(|f| f.name.clone()).collect();
     }
-    r.groups = fields_of("groups")?;
-    r.groups.truncate(MAX_GROUPS);
+    r.groups = fields_of("groups", "a report groups by", MAX_GROUPS)?;
     if let Some(w) = ps(p, "where").map(str::trim).filter(|w| !w.is_empty()) {
         rustgis_data::query::parse(w, ds)?;
         r.where_clause = w.to_string();
@@ -464,11 +499,22 @@ fn new_report(s: &mut Session, p: &Value) -> CmdResult {
     s.project.reports.push(r);
     let i = s.project.reports.len() - 1;
     s.active_report = Some(i);
+    if first_of {
+        s.notify(format!("{name}: the report lists the first {MAX_ITEMS} of the layer's {all} fields"), false);
+    }
+    if let Some(cut) = cut {
+        s.notify(cut, false);
+    }
+    if title_cut {
+        s.notify("New Report: the report's title is the layer's name and keeps its first 500 characters".to_string(), false);
+    }
     Ok(json!({"report": i, "name": name}))
 }
 
 fn update(s: &mut Session, p: &Value) -> CmdResult {
     let i = index(s, p)?;
+    let new_name = ps(p, "name").map(|n| super::within("name", "a report's name", n.trim(), 200)).transpose()?;
+    let new_title = ps(p, "title").map(|t| super::within("title", "a report's title", t, 500)).transpose()?;
     let mut r = s.project.reports.get(i).cloned().ok_or("no report")?;
     let old_name = r.name.clone();
     let mut renamed = None;
@@ -508,12 +554,13 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         let ds = &l.ok_or("the report's layer isn't in the project")?.dataset;
         ds.field_index(n).and_then(|fi| ds.fields.get(fi)).map(|f| f.name.clone()).ok_or_else(|| format!("no field '{n}'"))
     };
-    if let Some(n) = ps(p, "name") {
-        r.name = unique_name(s, n, Some(i));
+    let mut cut = None;
+    if let Some(n) = new_name {
+        (r.name, cut) = unique_name(s, "Report Properties", "the name given", &n, Some(i));
         renamed = Some(r.name.clone());
     }
-    if let Some(t) = ps(p, "title") {
-        r.title = t.chars().take(500).collect();
+    if let Some(t) = new_title {
+        r.title = t;
     }
     if let Some(w) = ps(p, "where") {
         let w = w.trim();
@@ -555,6 +602,9 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         fitted.filter_cleared = false;
     }
     fitted.notify(s, &name, "while changing the report layer");
+    if let Some(cut) = cut {
+        s.notify(cut, false);
+    }
     Ok(json!({"report": i, "name": name}))
 }
 
@@ -566,8 +616,12 @@ fn subreport(s: &mut Session, p: &Value) -> CmdResult {
     let other = opposite(r, &layer).ok_or_else(|| format!("the relationship '{}' doesn't involve '{layer}'", r.name))?.to_string();
     let name = r.name.clone();
     let ds = &find_layer(s, &other).ok_or_else(|| format!("no layer named '{other}'"))?.dataset;
+    let given = p.get("fields").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+    if given.len() > MAX_ITEMS {
+        return Err(format!("fields has {} entries: a subreport lists at most {MAX_ITEMS}", given.len()));
+    }
     let mut fields = Vec::new();
-    for v in p.get("fields").and_then(Value::as_array).into_iter().flatten().take(MAX_ITEMS) {
+    for v in given {
         let n = v.as_str().ok_or("fields are field names")?;
         let fi = ds.field_index(n).ok_or_else(|| format!("'{other}' has no field '{n}'"))?;
         fields.extend(ds.fields.get(fi).map(|f| f.name.clone()));
@@ -604,7 +658,8 @@ fn open(s: &mut Session, p: &Value) -> CmdResult {
     import_layer(s, p, &mut r)?;
     // Drop what the layer lacks, so the report still draws.
     let fitted = find_layer(s, &r.layer).map(|l| fit_to_layer(&mut r, &l.dataset)).unwrap_or_default();
-    r.name = unique_name(s, &r.name, None);
+    let (name, cut) = unique_name(s, "Import Report", "the name from the file", &r.name, None);
+    r.name = name;
     let name = r.name.clone();
     if s.project.reports.len() >= crate::project::MAX_ITEMS {
         return Err(format!("a project holds at most {} reports", crate::project::MAX_ITEMS));
@@ -616,6 +671,9 @@ fn open(s: &mut Session, p: &Value) -> CmdResult {
         s.notify_text(notice, false);
     }
     fitted.notify(s, &name, "while importing the report");
+    if let Some(cut) = cut {
+        s.notify(cut, false);
+    }
     Ok(json!({"report": i, "name": name}))
 }
 

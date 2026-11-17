@@ -33,9 +33,6 @@ struct Draft {
     check: Option<(String, u64, Result<(usize, usize), String>)>,
 }
 
-/// The longest list of fields offered as chips (a wider table is typed).
-const MAX_CHIPS: usize = 40;
-
 /// The box in `slot` for `owner`'s clause, `stored` in the project, over the fields of `ds`.
 /// `count` runs only on Check: how many features match a clause that reads, of how many; its
 /// answer shows while `version` (whatever the count depends on: the project's revision, the
@@ -109,7 +106,7 @@ fn editor(
     if std::mem::take(&mut d.focus) {
         r.request_focus();
     }
-    chips(ui, &mut d.text, ds);
+    crate::dialogs::field_chips(ui, &ds.fields, &mut d.text);
     let text = d.text.trim().to_string();
     // Live syntax and field checks must not scan geometry or invalidate a retained clause.
     // Check and the command handling Apply perform the full data validation.
@@ -171,54 +168,4 @@ fn editor(
         ui.label(RichText::new(tl!("Not applied yet.")).small().color(t.text_dim));
     }
     apply
-}
-
-/// The layer's fields and the common operators, each added to the clause where it ends.
-fn chips(ui: &mut Ui, text: &mut String, ds: &Dataset) {
-    let add = |text: &mut String, word: &str| {
-        if !text.is_empty() && !text.ends_with(' ') {
-            text.push(' ');
-        }
-        text.push_str(word);
-        text.push(' ');
-    };
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(tl!("Fields:")).small().weak());
-        for f in ds.fields.iter().take(MAX_CHIPS) {
-            if ui.small_button(&f.name).clicked() {
-                add(text, &field_ref(&f.name));
-            }
-        }
-    });
-    ui.horizontal_wrapped(|ui| {
-        for op in ["=", "<>", ">", "<", ">=", "<=", "LIKE", "IN", "IS NULL", "AND", "OR", "NOT"] {
-            if ui.small_button(op).clicked() {
-                add(text, op);
-            }
-        }
-    });
-}
-
-/// A field as a clause names it: as it is when it reads as a plain name, else in double quotes.
-fn field_ref(name: &str) -> String {
-    let plain = name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') && name.chars().all(|c| c.is_alphanumeric() || c == '_');
-    // The words the clause language reads itself (`rustgis_data::query`), values included.
-    let keyword = ["AND", "OR", "NOT", "LIKE", "IN", "IS", "NULL", "TRUE", "FALSE"].iter().any(|k| k.eq_ignore_ascii_case(name));
-    if plain && !keyword { name.to_string() } else { format!("\"{}\"", name.replace('"', "\"\"")) }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::field_ref;
-
-    #[test]
-    fn a_field_is_quoted_only_when_a_clause_needs_it() {
-        assert_eq!(field_ref("pop_max"), "pop_max");
-        assert_eq!(field_ref("Name 2"), "\"Name 2\"");
-        assert_eq!(field_ref("2020"), "\"2020\"");
-        assert_eq!(field_ref("in"), "\"in\"");
-        assert_eq!(field_ref("True"), "\"True\"");
-        assert_eq!(field_ref("año"), "año");
-        assert_eq!(field_ref("a\"b"), "\"a\"\"b\"");
-    }
 }

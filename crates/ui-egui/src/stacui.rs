@@ -11,6 +11,7 @@
 
 use egui::vec2;
 use rustgis_engine::render::rustgis_tiles::{
+    address::{self, Origin, Reach},
     cache,
     stac::{
         self, Item,
@@ -24,7 +25,8 @@ use rustgis_engine::cmd::stac_area::{Loaded, Prepared};
 use rustgis_engine::data::Geometry;
 use rustgis_engine::geom::Coord;
 
-type Answer = Slot<Result<Vec<u8>, String>>;
+type Answer = Slot<Result<cache::Fetched, String>>;
+type BytesAnswer = Slot<Result<Vec<u8>, String>>;
 
 /// What is being fetched.
 enum Asked {
@@ -34,11 +36,12 @@ enum Asked {
     /// search as a GET in the address when it went as a POST and fits in one: asked if the server
     /// refuses the POST.
     Search(String, Option<String>),
-    /// A token for an asset that needs signing: the token service's address, the asset's and the
-    /// layer's name and saved connection, captured when Add was requested.
-    Token { token_url: String, href: String, name: String, connection: Option<String> },
+    /// A token for an asset that needs signing: the token service's address, the asset's, the
+    /// layer's name, saved connection, supplying document origin and reach, captured when Add was
+    /// requested.
+    Token { token_url: String, href: String, name: String, connection: Option<String>, from: String, public: bool, opened: u64 },
     /// An item's or a collection's document (a `?stac=` link), by its address.
-    Link(String),
+    Link { url: String, opened: u64 },
     /// A static catalog's document, for its children, by its address.
     Children(String),
 }
@@ -160,6 +163,11 @@ pub struct State {
     /// search to send once it lands; Clear drops it.
     preparing: Option<Preparing>,
     pub max_cloud: String,
+    /// Whether the dates and the cloud limit are used in the search: off, the typed values stay
+    /// in their boxes but are not sent (a collection without `eo:cloud_cover` finds nothing
+    /// with a limit).
+    pub use_dates: bool,
+    pub use_cloud: bool,
     /// The order of an API's items (`eo:cloud_cover`…); empty for the API's own.
     pub sortby: String,
     /// The Web Data service the dialog was opened as.
@@ -169,6 +177,8 @@ pub struct State {
     pub node: String,
     pub node_title: String,
     pub trail: Vec<(String, String)>,
+    node_reach: Option<Reach>,
+    trail_reach: Vec<Option<Reach>>,
     pub children: Vec<Child>,
     /// `pre`, `post` or empty: an event's imagery before or after it.
     pub phase: String,
@@ -179,6 +189,11 @@ pub struct State {
     /// link), and the one the search under way asks for, which takes its place when its items land.
     searched_area: Option<[f64; 4]>,
     asked_area: Option<[f64; 4]>,
+    /// The sort the search under way was sent with (the dropdown may change while it waits).
+    asked_sort: Option<String>,
+    /// Whether `sortby` is the one a preset set up and the user has not touched the dropdown
+    /// since: only that sort goes with the preset (see [`drop_preset_sort`]).
+    sort_is_default: bool,
     /// The asset chosen for each item.
     pub chosen: Vec<String>,
     /// The item whose properties are shown.
@@ -195,6 +210,26 @@ pub struct State {
     api_from_document: bool,
     pub error: Option<String>,
     pub info: Option<String>,
+}
+
+impl State {
+    /// The typed dates (from, to), empty when the dates are switched off.
+    fn dates(&self) -> (&str, &str) {
+        if self.use_dates { (self.from.trim(), self.to.trim()) } else { ("", "") }
+    }
+
+    /// The cloud limit to send: none when it is switched off or left blank (any cloud cover), an
+    /// error when what is typed is not a number from 0 to 100.
+    fn cloud_limit(&self) -> Result<Option<f64>, String> {
+        let typed = self.max_cloud.trim();
+        if !self.use_cloud || typed.is_empty() {
+            return Ok(None);
+        }
+        match typed.parse::<f64>() {
+            Ok(c) if (0.0..=100.0).contains(&c) => Ok(Some(c)),
+            _ => Err(tl!("The most cloud cover is a number from 0 to 100").to_string()),
+        }
+    }
 }
 
 impl Default for State {
@@ -216,17 +251,23 @@ impl Default for State {
             loading: None,
             preparing: None,
             max_cloud: "20".into(),
+            use_dates: false,
+            use_cloud: true,
             sortby: String::new(),
             preset: None,
             node: String::new(),
             node_title: String::new(),
             trail: Vec::new(),
+            node_reach: None,
+            trail_reach: Vec::new(),
             children: Vec::new(),
             phase: String::new(),
             walk: None,
             items: Vec::new(),
             searched_area: None,
             asked_area: None,
+            asked_sort: None,
+            sort_is_default: false,
             chosen: Vec::new(),
             details: None,
             counted: false,
@@ -240,19 +281,25 @@ impl Default for State {
     }
 }
 
-fn fetch(url: &str) -> Answer {
+fn fetch(url: &str, from_document: bool) -> Answer {
     let slot: Answer = Slot::default();
     let land = slot.clone();
-    cache::download(url, Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)));
+    let done = Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r));
+    if from_document {
+        cache::download_public_with_origin(url, done);
+    } else {
+        cache::download_with_origin(url, done);
+    }
     slot
 }
 
 /// Reads with the selected API's login only; a catalog's foreign links stay anonymous.
-fn fetch_service(app: &mut RustGisApp, url: &str) -> Answer {
+fn fetch_service(app: &mut RustGisApp, url: &str, from_document: bool) -> Answer {
+    let from_document = from_document || app.ui.stac.api_from_document;
     let connection = selected_connection(app);
     let base = app.ui.stac.api.clone();
     match crate::serviceui::request_from(app, connection.as_deref(), &base, url) {
-        Ok(url) => fetch(&url),
+        Ok(url) => fetch(&url, from_document),
         Err(e) => Slot::new(std::sync::Mutex::new(Some(Err(crate::connectionui::translated(&e))))),
     }
 }
@@ -265,14 +312,11 @@ fn post_service(app: &mut RustGisApp, url: &str, body: String) -> Answer {
         Ok(url) => {
             let slot: Answer = Slot::default();
             let land = slot.clone();
-            let done = Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r));
-            // The API the user typed or picked may be on their own network; one that a document
-            // named (an opened item's or collection's root link) is internet only.
-            if app.ui.stac.api_from_document {
-                cache::post_json(&url, body, done);
-            } else {
-                cache::post_json_named(&url, body, done);
-            }
+            let public = app.ui.stac.api_from_document;
+            let done = Box::new(move |r| {
+                *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+            });
+            cache::post_json_with_origin(&url, body, public, done);
             slot
         }
         Err(e) => Slot::new(std::sync::Mutex::new(Some(Err(crate::connectionui::translated(&e))))),
@@ -281,7 +325,7 @@ fn post_service(app: &mut RustGisApp, url: &str, body: String) -> Answer {
 
 /// An item's preview picture: being fetched, shown, or not to be had.
 enum Thumb {
-    Loading(Answer),
+    Loading(BytesAnswer),
     Ready(egui::TextureHandle),
     Failed,
 }
@@ -336,17 +380,17 @@ fn want_thumbs(app: &mut RustGisApp) {
     if st.thumbs.len() > MAX_THUMBS {
         st.thumbs.clear();
     }
+    let mut refused = 0usize;
     for item in st.items.iter().take(MAX_THUMBS / 2) {
         let Some(a) = item.thumbnail() else { continue };
         if st.thumbs.contains_key(&a.href) {
             continue;
         }
-        let ok = !stac::needs_signing(&a.href)
-            && rustgis_engine::render::rustgis_tiles::address::check(
-                &a.href,
-                Some(item.origin.as_deref().unwrap_or("https://item.invalid/")),
-            )
-            .is_ok();
+        let allowed = item.check_href(&a.href).is_ok();
+        if !allowed {
+            refused += 1;
+        }
+        let ok = !stac::needs_signing(&a.href) && allowed;
         let address = if ok {
             use rustgis_engine::render::rustgis_tiles::logins;
             if logins::origin(&base).is_some_and(|origin| logins::origin(&a.href).as_deref() == Some(origin.as_str())) {
@@ -357,13 +401,22 @@ fn want_thumbs(app: &mut RustGisApp) {
         } else {
             None
         };
+        let public = item.origin_reach == Reach::Public;
         let picture = address.map(|address| {
-            let slot: Answer = Slot::default();
+            let slot: BytesAnswer = Slot::default();
             let land = slot.clone();
-            cache::download_limited(&address, THUMB_BYTES, Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)));
+            let done = Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r));
+            if public {
+                cache::download_public_limited(&address, THUMB_BYTES, done);
+            } else {
+                cache::download_limited(&address, THUMB_BYTES, done);
+            }
             Thumb::Loading(slot)
         });
         st.thumbs.insert(a.href.clone(), picture.unwrap_or(Thumb::Failed));
+    }
+    if refused > 0 {
+        session.notify(i18n::fmt("{n} preview links were refused by the document's network reach", &[("n", &refused.to_string())]), false);
     }
 }
 
@@ -374,6 +427,18 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
     poll_loading(app, ctx);
     poll_preparing(app, ctx);
     stop_stale_drawing(app);
+    let pending = match &app.ui.stac.waiting {
+        Some((Asked::Link { url, opened }, _)) => Some((*opened, url.clone())),
+        Some((Asked::Token { href, opened, .. }, _)) => Some((*opened, href.clone())),
+        _ => None,
+    };
+    if let Some((opened, address)) = pending
+        && !app.service_read_current(opened, &address, None)
+    {
+        app.ui.stac.waiting = None;
+        app.ui.stac.info = None;
+        return;
+    }
     let Some((_, slot)) = &app.ui.stac.waiting else { return };
     let Some(r) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else {
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -385,7 +450,7 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
         && r.is_err()
     {
         let get = get.clone();
-        let slot = fetch_service(app, &get);
+        let slot = fetch_service(app, &get, false);
         app.ui.stac.waiting = Some((Asked::Search(get, None), slot));
         return;
     }
@@ -393,7 +458,7 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
     st.error = None;
     let previous = st.info.take();
     match asked {
-        Asked::Collections(api) => match r.and_then(|b| stac::parse_collections(&b)) {
+        Asked::Collections(api) => match r.and_then(|f| stac::parse_collections(&f.bytes)) {
             Ok(c) => {
                 st.info = Some(i18n::fmt("{n} collections", &[("n", &c.len().to_string())]));
                 st.collections = c.into_iter().map(|c| (c.id, c.title)).collect();
@@ -401,47 +466,103 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
             }
             Err(e) => st.error = Some(e),
         },
-        Asked::Search(url, _) => match r.and_then(|b| Ok((stac::parse_items(&b, &url)?, stac::parse_matched(&b), stac::has_next(&b)))) {
-            Ok(((items, next), matched, has_next)) => {
-                let n = items.len().to_string();
-                st.info = Some(match matched.filter(|m| *m as usize > items.len()) {
-                    Some(m) => i18n::fmt("Showing {n} of {m} items (narrow the search for others)", &[("n", &n), ("m", &m.to_string())]),
-                    // A POST search's `next` link has no address to give, so `next` is none for it.
-                    None if next.is_some() || has_next => i18n::fmt("Showing {n} items (more match: narrow the search)", &[("n", &n)]),
-                    None => i18n::fmt("Showing {n} items", &[("n", &n)]),
-                });
-                st.details = None;
-                st.counted = true;
-                st.chosen = items.iter().map(|i| i.pick(None).map(|a| a.key.clone()).unwrap_or_default()).collect();
-                st.items = items;
-                st.searched_area = st.asked_area;
-                show_footprints(app);
-            }
-            Err(e) => st.error = Some(e),
-        },
-        Asked::Token { token_url, href, name, connection } => match r.and_then(|b| stac::parse_sas(&b)) {
-            Ok(token) => {
-                stac::remember_token(&token_url, &token);
-                add_url_from(app, &stac::sign(&href, &token), &name, connection.as_deref());
-            }
-            Err(e) => st.error = Some(e),
-        },
-        Asked::Link(url) => landed_link(app, &url, r),
-        Asked::Children(url) => match r.and_then(|b| catalog::parse_children(&b, &url)) {
-            // A search's count (or a walk's progress), landed first, is kept.
-            Ok(c) if st.walk.is_some() || (st.counted && !st.items.is_empty()) => {
-                st.info = previous;
-                st.children = c;
-                if url == st.api.trim() {
-                    st.listed = url.clone();
+        Asked::Search(url, _) => {
+            match r.and_then(|f| {
+                let origin = if f.origin.url().is_empty() { Origin::named(&url) } else { f.origin };
+                Ok((
+                    stac::parse_items_from_origin(&f.bytes, &origin)?,
+                    stac::parse_matched(&f.bytes),
+                    stac::has_next(&f.bytes),
+                    stac::next_refused(&f.bytes, &origin),
+                ))
+            }) {
+                Ok(((items, next), matched, has_next, refused)) => {
+                    let n = items.len().to_string();
+                    // Logical order until the line is whole: `fmt` puts a finished message in display
+                    // form, so it runs once, over the count and the note together.
+                    let count = match matched.filter(|m| !refused && *m as usize > items.len()) {
+                        Some(m) => {
+                            i18n::fmt_raw("Showing {n} of {m} items (narrow the search for others)", &[("n", &n), ("m", &m.to_string())])
+                        }
+                        // A POST search's `next` link has no address to give, so `next` is none for it.
+                        None if !refused && (next.is_some() || has_next) => {
+                            i18n::fmt_raw("Showing {n} items (more match: narrow the search)", &[("n", &n)])
+                        }
+                        None => i18n::fmt_raw("Showing {n} items", &[("n", &n)]),
+                    };
+                    // An API that can't sort may ignore the sort instead of refusing it: say so.
+                    // The sort that was sent, not the dropdown's value now.
+                    let asked = st.asked_sort.as_deref();
+                    st.info = Some(match sort_ignored_note(&items, asked).or_else(|| sort_unchecked_note(&items, asked)) {
+                        Some(note) => i18n::fmt("{count}. {note}", &[("count", &count), ("note", &note)]),
+                        None => i18n::fmt("{count}", &[("count", &count)]),
+                    });
+                    if refused {
+                        let note =
+                            tl!("The next page link was refused: it points where this search may not read, so only this page is loaded.");
+                        st.info = Some(i18n::fmt("{count}. {note}", &[("count", st.info.as_deref().unwrap_or(&count)), ("note", note)]));
+                    }
+                    st.details = None;
+                    st.counted = true;
+                    st.chosen = items.iter().map(|i| i.pick(None).map(|a| a.key.clone()).unwrap_or_default()).collect();
+                    st.items = items;
+                    st.searched_area = st.asked_area;
+                    show_footprints(app);
                 }
+                Err(e) => st.error = Some(e),
             }
-            Ok(c) => {
-                st.info = Some(if c.is_empty() {
-                    tl!("No catalogs below this one: Find Items lists its items").to_string()
+        }
+        Asked::Token { token_url, href, name, connection, from, public, .. } => {
+            let signed = r.and_then(|f| stac::parse_sas(&f.bytes)).and_then(|token| {
+                stac::remember_token(&token_url, &token);
+                let signed = stac::sign(&href, &token);
+                address::check_reach(&signed, rustgis_engine::cmd::layer::origin_ceiling(Some(&from), public))?;
+                Ok(signed)
+            });
+            match signed {
+                Ok(signed) => add_url_from(app, &signed, &name, connection.as_deref(), &from, public),
+                Err(e) => app.ui.stac.error = Some(e),
+            }
+        }
+        Asked::Link { url, .. } => landed_link(app, &url, r),
+        Asked::Children(url) => match r.and_then(|f| Ok((f.origin.reach(), catalog::parse_children_noted(&f.bytes, &f.origin)?))) {
+            Ok((reach, listing)) => {
+                if listing.refused > 0 {
+                    app.session.notify(
+                        i18n::fmt("{n} catalog links were refused by the document's network reach", &[("n", &listing.refused.to_string())]),
+                        false,
+                    );
+                }
+                if listing.skipped > 0 {
+                    app.session.notify(
+                        i18n::fmt(
+                            "{n} catalog links were left out because their addresses are missing, invalid or not HTTP(S)",
+                            &[("n", &listing.skipped.to_string())],
+                        ),
+                        false,
+                    );
+                }
+                if listing.omitted > 0 {
+                    app.session.notify(
+                        i18n::fmt(
+                            "{n} catalog links were left out because the listing limit was reached",
+                            &[("n", &listing.omitted.to_string())],
+                        ),
+                        false,
+                    );
+                }
+                let c = listing.links;
+                st.node_reach = Some(reach);
+                // A search's count (or a walk's progress), landed first, is kept.
+                st.info = if st.walk.is_some() || (st.counted && !st.items.is_empty()) {
+                    previous
                 } else {
-                    i18n::fmt("{n} catalogs and collections", &[("n", &c.len().to_string())])
-                });
+                    Some(if c.is_empty() {
+                        tl!("No catalogs below this one: Find Items lists its items").to_string()
+                    } else {
+                        i18n::fmt("{n} catalogs and collections", &[("n", &c.len().to_string())])
+                    })
+                };
                 st.children = c;
                 if url == st.api.trim() {
                     st.listed = url.clone();
@@ -464,15 +585,22 @@ fn poll_walk(app: &mut RustGisApp, ctx: &egui::Context) {
         let landed = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
         match landed {
             Some(r) => {
-                walk.land(url, r);
+                walk.land_fetched(url, r);
                 fetching.swap_remove(i);
             }
             None => i += 1,
         }
     }
+    let ancestor_public = app.ui.stac.trail_reach.iter().flatten().any(|r| *r == Reach::Public);
     while fetching.len() < catalog::AT_ONCE {
-        let Some(url) = walk.next_url() else { break };
-        let slot = fetch_service(app, &url);
+        let is_root = walk.reads == 0 && fetching.is_empty();
+        let Some((url, parent_public)) = walk.next_request() else { break };
+        let from_document = if is_root {
+            app.ui.stac.api_from_document || ancestor_public
+        } else {
+            app.ui.stac.api_from_document || ancestor_public || walk.root_reach() == Some(Reach::Public) || parent_public
+        };
+        let slot = fetch_service(app, &url, from_document);
         fetching.push((url, slot));
     }
     if !walk.finished() {
@@ -484,10 +612,29 @@ fn poll_walk(app: &mut RustGisApp, ctx: &egui::Context) {
         app.ui.stac.walk = Some((walk, fetching));
         return;
     }
+    if walk.refused() > 0 {
+        app.session.notify(
+            i18n::fmt("{n} catalog links were refused by the document's network reach", &[("n", &walk.refused().to_string())]),
+            false,
+        );
+    }
+    if walk.skipped() > 0 {
+        app.session.notify(
+            i18n::fmt(
+                "{n} catalog links were left out because their addresses are missing, invalid or not HTTP(S)",
+                &[("n", &walk.skipped().to_string())],
+            ),
+            false,
+        );
+    }
     let st = &mut app.ui.stac;
     let n = walk.items().len().to_string();
     st.info = Some(if walk.complete() {
         i18n::fmt("Showing {n} items", &[("n", &n)])
+    } else if walk.refused() > 0 {
+        i18n::fmt("Showing {n} items ({f} catalog links were refused)", &[("n", &n), ("f", &walk.refused().to_string())])
+    } else if walk.skipped() > 0 {
+        i18n::fmt("Showing {n} items ({s} catalog links were skipped)", &[("n", &n), ("s", &walk.skipped().to_string())])
     } else if walk.reads >= catalog::MAX_READS {
         i18n::fmt(
             "Showing {n} items (stopped after reading {r} documents: pick a catalog further down)",
@@ -528,8 +675,9 @@ pub fn open_preset(app: &mut RustGisApp, preset: Option<Preset>, p: &serde_json:
             }
             Preset::Sentinel2 => {
                 st.collection = "sentinel-2-c1-l2a".into();
-                st.sortby = "eo:cloud_cover".into();
+                (st.sortby, st.sort_is_default) = (PRESET_SORT.into(), true);
                 st.from = days_ago(90);
+                st.use_dates = true;
             }
             Preset::UsgsLidar => {
                 st.collection = "3dep-lidar-copc".into();
@@ -540,7 +688,11 @@ pub fn open_preset(app: &mut RustGisApp, preset: Option<Preset>, p: &serde_json:
             browse(app, None);
         }
     } else if preset.is_none() {
+        // A preset's own sort goes with the preset, unless a search is under way with it (its area
+        // being made, or sent and not answered): `keeps_preset_sort` is the one rule for that, so
+        // the dropdown and the next search follow it.
         app.ui.stac.preset = None;
+        keep_preset_sort_for_its_api(&mut app.ui.stac);
     }
     // A catalog or collection below the static catalog's top, by its address.
     if let Some(url) = p.get("catalog").and_then(serde_json::Value::as_str).map(str::trim).filter(|u| !u.is_empty()) {
@@ -567,42 +719,60 @@ pub fn open_preset(app: &mut RustGisApp, preset: Option<Preset>, p: &serde_json:
 fn days_ago(n: u64) -> String {
     let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let days = (now / 86_400).saturating_sub(n) as i64;
-    // Days to a civil date (proleptic Gregorian), after Howard Hinnant's algorithm.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
+    let (y, m, d) = rustgis_engine::data::date::civil_from_days(days);
     format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Adds an asset by its address, signing it first when it needs it (a token in hand is used; one
 /// still to fetch is fetched off the frame, and the asset added when it lands).
-fn add_signed(app: &mut RustGisApp, href: &str, name: &str) {
+fn add_signed(app: &mut RustGisApp, href: &str, name: &str, from: &str, public: bool) {
+    let ceiling = rustgis_engine::cmd::layer::origin_ceiling(Some(from), public);
+    if let Err(e) = address::check_reach(href, ceiling) {
+        app.ui.stac.error = Some(e);
+        return;
+    }
     if !stac::needs_signing(href) {
-        return add_url(app, href, name);
+        return add_url(app, href, name, from, public);
     }
     match stac::sas_token_url(href) {
         Ok(token_url) => match stac::cached_token(&token_url) {
-            Some(token) => add_url(app, &stac::sign(href, &token), name),
+            Some(token) => {
+                let signed = stac::sign(href, &token);
+                if let Err(e) = address::check_reach(&signed, ceiling) {
+                    app.ui.stac.error = Some(e);
+                    return;
+                }
+                add_url(app, &signed, name, from, public);
+            }
             None => {
-                let slot = fetch(&token_url);
+                if let Err(e) = address::check_reach(&token_url, ceiling) {
+                    app.ui.stac.error = Some(e);
+                    return;
+                }
+                let slot = fetch(&token_url, public);
                 app.ui.stac.info = Some(tl!("Signing the asset (Planetary Computer)…").to_string());
                 let connection = selected_connection(app);
-                app.ui.stac.waiting = Some((Asked::Token { token_url, href: href.to_string(), name: name.to_string(), connection }, slot));
+                app.ui.stac.waiting = Some((
+                    Asked::Token {
+                        token_url,
+                        href: href.to_string(),
+                        name: name.to_string(),
+                        connection,
+                        from: from.to_string(),
+                        public,
+                        opened: app.session.opened,
+                    },
+                    slot,
+                ));
             }
         },
         Err(e) => app.ui.stac.error = Some(e),
     }
 }
 
-fn add_url(app: &mut RustGisApp, href: &str, name: &str) {
+fn add_url(app: &mut RustGisApp, href: &str, name: &str, from: &str, public: bool) {
     let connection = selected_connection(app);
-    add_url_from(app, href, name, connection.as_deref());
+    add_url_from(app, href, name, connection.as_deref(), from, public);
 }
 
 fn selected_connection(app: &RustGisApp) -> Option<String> {
@@ -610,20 +780,40 @@ fn selected_connection(app: &RustGisApp) -> Option<String> {
         .map(|c| c.id.clone())
 }
 
-fn add_url_from(app: &mut RustGisApp, href: &str, name: &str, connection: Option<&str>) {
-    let mut p = json!({"url": href, "name": name, "zoom": true});
+fn add_url_from(app: &mut RustGisApp, href: &str, name: &str, connection: Option<&str>, from: &str, public: bool) {
+    let mut p = json!({"url": href, "name": name, "zoom": true, "from": from, "fromDocument": public});
     if let Some(connection) = connection {
         p["connection"] = json!(connection);
     }
-    if let Err(e) = app.run("ui.addUrl", p) {
+    let reach = if public { Reach::Public } else { Reach::Local };
+    let result = Origin::with_observed_reach(from, reach)
+        .and_then(|origin| app.session.remember_document_asset(href, origin))
+        .and_then(|()| app.run("ui.addUrl", p));
+    if let Err(e) = result {
         app.ui.stac.error = Some(e);
     }
 }
 
+/// The web document an item's asset links were read from, taking observed document provenance over
+/// self-reported links.
+fn item_document_origin(app: &RustGisApp, item: &Item) -> String {
+    item.origin
+        .as_deref()
+        .or(item.url.as_deref())
+        .or_else(|| {
+            let api = app.ui.stac.api.trim();
+            (!api.is_empty()).then_some(api)
+        })
+        .unwrap_or("https://item.invalid/")
+        .to_string()
+}
+
 /// Adds an item's asset (the one named, else the default) under the item's name.
 fn add_item_asset(app: &mut RustGisApp, item: &Item, key: Option<&str>) {
+    let from = item_document_origin(app, item);
+    let public = item.origin_reach == Reach::Public;
     match item.asset_href(key) {
-        Ok((key, href)) => add_signed(app, &href, &format!("{} {key}", item.id)),
+        Ok((key, href)) => add_signed(app, &href, &format!("{} {key}", item.id), &from, public),
         Err(e) => app.ui.stac.error = Some(e),
     }
 }
@@ -632,38 +822,40 @@ fn add_item_asset(app: &mut RustGisApp, item: &Item, key: Option<&str>) {
 /// the frame.
 pub fn open_link(app: &mut RustGisApp, url: &str) -> Result<(), String> {
     let url = url.trim();
-    rustgis_engine::render::rustgis_tiles::address::check(url, None)?;
+    address::check(url, None)?;
     app.run("ui.dialog", serde_json::json!({"name": "stac"}))?;
     let address = rustgis_engine::service_logins::request(&mut app.session, None, url)?;
-    let slot = fetch(&address);
+    let slot = fetch(&address, false);
     app.ui.stac.error = None;
     app.ui.stac.info = Some(i18n::fmt("Opening {url}…", &[("url", url)]));
-    app.ui.stac.waiting = Some((Asked::Link(url.to_string()), slot));
+    app.ui.stac.waiting = Some((Asked::Link { url: url.to_string(), opened: app.session.opened }, slot));
     Ok(())
 }
 
 /// A linked document: an item is shown and its default asset added; a collection is chosen in the
 /// dialog, with its API, ready to search.
-fn landed_link(app: &mut RustGisApp, url: &str, r: Result<Vec<u8>, String>) {
-    let bytes = match r {
-        Ok(b) => b,
+fn landed_link(app: &mut RustGisApp, requested_url: &str, r: Result<cache::Fetched, String>) {
+    let fetched = match r {
+        Ok(f) => f,
         Err(e) => {
             app.ui.stac.error = Some(e);
             return;
         }
     };
-    let kind = serde_json::from_slice::<serde_json::Value>(&bytes)
+    let effective_url = fetched.origin.url();
+    let bytes = &fetched.bytes;
+    let kind = serde_json::from_slice::<serde_json::Value>(bytes)
         .ok()
         .and_then(|v| Some((v.get("type")?.as_str()?.to_string(), v.get("id").and_then(|i| i.as_str()).map(str::to_string))));
     // The API: the address before `/collections/`, else the document's root (or parent) link.
-    let api = stac::api_of(&bytes, url);
+    let api = stac::api_of(bytes, effective_url);
     // Without one, the dialog keeps its API, and says which it is.
     let unknown =
         |app: &RustGisApp| i18n::fmt("The link doesn't say its STAC API: Find Items searches {api}", &[("api", &app.ui.stac.api)]);
     match kind {
-        Some((t, _)) if t == "Feature" => match stac::parse_item(&bytes, url) {
+        Some((t, _)) if t == "Feature" => match stac::parse_item_from_origin(bytes, &fetched.origin) {
             Ok(mut item) => {
-                item.url.get_or_insert_with(|| url.to_string());
+                item.url.get_or_insert_with(|| effective_url.to_string());
                 app.ui.stac.collection = item.collection.clone();
                 app.ui.stac.chosen = vec![item.pick(None).map(|a| a.key.clone()).unwrap_or_default()];
                 app.ui.stac.items = vec![item.clone()];
@@ -695,8 +887,10 @@ fn landed_link(app: &mut RustGisApp, url: &str, r: Result<Vec<u8>, String>) {
             }
         }
         _ => {
-            app.ui.stac.error =
-                Some(i18n::fmt("{url}: not a STAC item or collection", &[("url", &rustgis_engine::sources::address_in_message(url))]))
+            app.ui.stac.error = Some(i18n::fmt(
+                "{url}: not a STAC item or collection",
+                &[("url", &rustgis_engine::sources::address_in_message(requested_url))],
+            ))
         }
     }
 }
@@ -738,9 +932,15 @@ fn browse(app: &mut RustGisApp, to: Option<(String, String)>) {
         Some((title, url)) => {
             let above = std::mem::replace(&mut st.node_title, title);
             let above_url = std::mem::replace(&mut st.node, url);
+            let above_reach = st.node_reach.take();
             st.trail.push((above, above_url));
+            st.trail_reach.push(above_reach);
         }
-        None => (st.node, st.node_title, st.trail) = (String::new(), String::new(), Vec::new()),
+        None => {
+            (st.node, st.node_title, st.node_reach) = (String::new(), String::new(), None);
+            st.trail.clear();
+            st.trail_reach.clear();
+        }
     }
     fetch_children(app);
 }
@@ -750,8 +950,10 @@ fn browse_up(app: &mut RustGisApp, depth: usize) {
     let st = &mut app.ui.stac;
     st.walk = None;
     let Some((title, url)) = st.trail.get(depth).cloned() else { return };
+    let reach = st.trail_reach.get(depth).copied().flatten();
     st.trail.truncate(depth);
-    (st.node_title, st.node) = (title, url);
+    st.trail_reach.truncate(depth);
+    (st.node_title, st.node, st.node_reach) = (title, url, reach);
     fetch_children(app);
 }
 
@@ -760,15 +962,73 @@ fn fetch_children(app: &mut RustGisApp) {
     let st = &mut app.ui.stac;
     st.children.clear();
     st.error = None;
-    let url = if st.node.is_empty() { st.api.trim().to_string() } else { st.node.clone() };
-    if let Err(e) = rustgis_engine::render::rustgis_tiles::address::check(&url, None) {
+    let is_root = st.node.is_empty();
+    let url = if is_root { st.api.trim().to_string() } else { st.node.clone() };
+    let ancestor_public = st.trail_reach.iter().flatten().any(|r| *r == Reach::Public);
+    let from_document = if is_root { st.api_from_document } else { st.api_from_document || ancestor_public };
+    let ceiling = if from_document { Reach::Public } else { Reach::Local };
+    if let Err(e) = address::check_reach(&url, ceiling) {
         st.error = Some(e);
         return;
     }
     st.info = Some(tl!("Reading the catalog…").to_string());
     st.counted = false;
-    let slot = fetch_service(app, &url);
+    let slot = fetch_service(app, &url, from_document);
     app.ui.stac.waiting = Some((Asked::Children(url), slot));
+}
+
+/// The orders the dialog offers an API's items in: the sort field (`-` first for descending) and its label.
+const SORTS: [(&str, &str); 4] =
+    [("", "API's own order"), ("-datetime", "Newest first"), ("datetime", "Oldest first"), ("eo:cloud_cover", "Least cloud first")];
+
+/// The sort the Sentinel-2 preset starts with.
+const PRESET_SORT: &str = "eo:cloud_cover";
+
+/// Drops the sort a preset set up, if the user has not picked one since: a sort the user chose
+/// (even the same one) is theirs and stays.
+fn drop_preset_sort(st: &mut State) {
+    if std::mem::take(&mut st.sort_is_default) {
+        st.sortby.clear();
+    }
+}
+
+/// A preset's own sort goes only to the preset's API (another may reject it): dropped when the
+/// dialog is on another API. Typing in the API field doesn't call this, so deleting a character
+/// of the address and typing it back keeps the sort; it is judged when a search is sent and when
+/// another API is picked.
+fn keep_preset_sort_for_its_api(st: &mut State) {
+    if !keeps_preset_sort(st) {
+        drop_preset_sort(st);
+    }
+}
+
+/// Whether a preset's own sort still stands: the dialog is on the preset's API, or a search is
+/// having its area made and will go out with that sort, whatever the dialog is switched to
+/// meanwhile. The dropdown, and what drops the sort, follow this one rule so they never disagree.
+fn keeps_preset_sort(st: &State) -> bool {
+    shown_preset(st).is_some() || st.preparing.is_some() || matches!(st.waiting, Some((Asked::Search(..), _)))
+}
+
+/// The sort a search sends: the one picked, none for the API's own order or a static catalog.
+fn sort_of(st: &State, is_static: bool) -> Option<&str> {
+    Some(st.sortby.trim()).filter(|b| !b.is_empty() && !is_static)
+}
+
+/// What to say when the items an API answered are visibly not in the order asked for: an API
+/// without the sort extension may ignore a sort rather than refuse it. None when they are in
+/// order or it can't be told.
+fn sort_ignored_note(items: &[stac::Item], sortby: Option<&str>) -> Option<String> {
+    (stac::sort_followed(items, sortby) == Some(false))
+        .then(|| i18n::fmt_raw("The API did not sort them by {sort}: they are in its own order", &[("sort", sortby.unwrap_or("").trim())]))
+}
+
+/// What to say when a sort was asked for and the items can't show whether the API followed it
+/// (dates that can't be compared, or a field that isn't compared): the order is the API's, and
+/// not known to be the one asked for. None for a page of one, or no sort.
+fn sort_unchecked_note(items: &[stac::Item], sortby: Option<&str>) -> Option<String> {
+    stac::sort_unchecked(items, sortby).then(|| {
+        i18n::fmt_raw("The order by {sort} could not be checked: it is the API's own order", &[("sort", sortby.unwrap_or("").trim())])
+    })
 }
 
 /// The preset the dialog is showing, if it is still on its API or catalog.
@@ -787,6 +1047,7 @@ pub(crate) fn switch_api(st: &mut State, url: &str) {
     st.api = url.to_string();
     st.api_from_document = false;
     drop_listing(st);
+    keep_preset_sort_for_its_api(st);
 }
 
 /// Forgets what was listed for the last API or catalog, and what is still on its way from it: a
@@ -796,8 +1057,9 @@ fn drop_listing(st: &mut State) {
     st.collections.clear();
     st.items.clear();
     st.collection.clear();
-    (st.node, st.node_title) = (String::new(), String::new());
+    (st.node, st.node_title, st.node_reach) = (String::new(), String::new(), None);
     st.trail.clear();
+    st.trail_reach.clear();
     st.children.clear();
     // What Save as Connection would keep: listed again before it is offered.
     st.listed.clear();
@@ -814,9 +1076,15 @@ fn drop_listing(st: &mut State) {
     }
 }
 
+/// Whether a search is being made, sent or walked: what it asked for is fixed by then, so the
+/// buttons that ask again, and the sort that was sent, stay as they are until it is done.
+fn busy(st: &State) -> bool {
+    st.waiting.is_some() || st.walk.is_some() || st.preparing.is_some()
+}
+
 /// The dialog.
 pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
-    let busy = app.ui.stac.waiting.is_some() || app.ui.stac.walk.is_some() || app.ui.stac.preparing.is_some();
+    let busy = busy(&app.ui.stac);
     let is_static = catalog::is_static(&app.ui.stac.api);
     let mut list = false;
     let mut search = false;
@@ -930,22 +1198,50 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
             });
             ui.end_row();
         }
-        ui.label(tl!("Dates"));
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut st.from)
-                    .hint_text("2024-06-01")
-                    .desired_width(((ui.available_width() - 30.0) / 2.0).clamp(70.0, 110.0)),
-            );
-            let input_label = ui.label("–");
-            ui.add(egui::TextEdit::singleline(&mut st.to).hint_text("2024-06-30").desired_width(ui.available_width().clamp(70.0, 110.0)))
+        let dates_label = ui.checkbox(&mut st.use_dates, tl!("Dates")).on_hover_text(tl!("Search only items in these dates"));
+        ui.add_enabled_ui(st.use_dates, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut st.from)
+                        .hint_text("2024-06-01")
+                        .desired_width(((ui.available_width() - 30.0) / 2.0).clamp(70.0, 110.0)),
+                )
+                .labelled_by(dates_label.id);
+                let input_label = ui.label("–");
+                ui.add(
+                    egui::TextEdit::singleline(&mut st.to).hint_text("2024-06-30").desired_width(ui.available_width().clamp(70.0, 110.0)),
+                )
                 .labelled_by(input_label.id);
+            })
         });
         ui.end_row();
-        let input_label = ui.label(tl!("Most cloud cover (%)"));
-        ui.add(egui::TextEdit::singleline(&mut st.max_cloud).hint_text(tl!("any")).desired_width(ui.available_width().clamp(70.0, 110.0)))
-            .labelled_by(input_label.id);
+        let cloud_label = ui
+            .checkbox(&mut st.use_cloud, tl!("Most cloud cover (%)"))
+            .on_hover_text(tl!("Turn off for collections without eo:cloud_cover"));
+        ui.add_enabled(
+            st.use_cloud,
+            egui::TextEdit::singleline(&mut st.max_cloud).hint_text(tl!("any")).desired_width(ui.available_width().clamp(70.0, 110.0)),
+        )
+        .labelled_by(cloud_label.id);
         ui.end_row();
+        if !is_static {
+            // A static catalog is walked in its own order, so it has no sort.
+            ui.label(tl!("Sort by"));
+            let current = if st.sort_is_default && !keeps_preset_sort(st) { String::new() } else { st.sortby.trim().to_string() };
+            let shown = SORTS.iter().find(|(v, _)| *v == current).map_or(current.clone(), |(_, l)| tl!(l).to_string());
+            // Not while a search is being made: its sort is already chosen, and a pick now would
+            // show in the dropdown without being the one sent.
+            ui.add_enabled_ui(!busy, |ui| {
+                egui::ComboBox::from_id_salt("stac_sortby").selected_text(shown).show_ui(ui, |ui| {
+                    for (v, label) in SORTS {
+                        if ui.selectable_value(&mut st.sortby, v.to_string(), tl!(label)).clicked() {
+                            st.sort_is_default = false;
+                        }
+                    }
+                });
+            });
+            ui.end_row();
+        }
         if is_static && (st.preset == Some(Preset::Vantor) || !st.phase.is_empty()) {
             ui.label(tl!("Phase"));
             ui.horizontal(|ui| {
@@ -1001,7 +1297,7 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
         match stac::api(Some(app.ui.stac.api.as_str())) {
             Ok(api) => {
                 let typed = app.ui.stac.api.trim().to_string();
-                let slot = fetch_service(app, &stac::collections_url(&api));
+                let slot = fetch_service(app, &stac::collections_url(&api), false);
                 app.ui.stac.waiting = Some((Asked::Collections(typed), slot));
             }
             Err(e) => app.ui.stac.error = Some(e),
@@ -1107,10 +1403,11 @@ fn cube_row(app: &mut RustGisApp, ui: &mut egui::Ui, busy: bool) {
 /// dates the items span, used where no date is typed.
 #[cfg(not(target_arch = "wasm32"))]
 fn cube_params(st: &State, first: String, last: String, connection: Option<String>) -> Result<serde_json::Value, String> {
+    let (from, to) = st.dates();
     let mut p = json!({
         "url": st.api, "collection": st.collection.trim(), "asset": st.cube_asset,
-        "start": if st.from.trim().is_empty() { first } else { st.from.trim().to_string() },
-        "end": if st.to.trim().is_empty() { last } else { st.to.trim().to_string() },
+        "start": if from.is_empty() { first } else { from.to_string() },
+        "end": if to.is_empty() { last } else { to.to_string() },
     });
     if let Some(connection) = connection {
         p["connection"] = json!(connection);
@@ -1125,7 +1422,7 @@ fn cube_params(st: &State, first: String, last: String, connection: Option<Strin
     if let Some(b) = area {
         p["bbox"] = json!(b);
     }
-    if let Ok(c) = st.max_cloud.trim().parse::<f64>() {
+    if let Some(c) = st.cloud_limit()? {
         p["maxCloud"] = json!(c);
     }
     let typed: Vec<&str> = st.cube_range.split([',', ';', ' ']).map(str::trim).filter(|v| !v.is_empty()).collect();
@@ -1298,7 +1595,7 @@ fn rectangle([w, s, e, n]: [f64; 4]) -> Geometry {
 /// A file of features, read and merged on a thread of their own.
 #[cfg(not(target_arch = "wasm32"))]
 fn pick_file(app: &mut RustGisApp) {
-    let Some(path) = rfd::FileDialog::new().pick_file() else { return };
+    let Some(path) = crate::filedialog::FileDialog::new().pick_file() else { return };
     let path = path.display().to_string();
     let name = std::path::Path::new(&path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
     start_loading(app, name, move || rustgis_engine::cmd::stac_area::load_file(&path));
@@ -1471,8 +1768,36 @@ fn paint_dot(p: &egui::Painter, at: &[egui::Pos2], color: egui::Color32) {
     }
 }
 
+/// What the dialog's filters ask of a search, without the area: the collection, the dates and the
+/// cloud limit that are switched on (a switched-off filter sends nothing, a ticked blank one
+/// neither) and the sort. An error when the cloud limit typed is not a number from 0 to 100.
+fn search_params(st: &State, is_static: bool) -> Result<serde_json::Value, String> {
+    let datetime = match st.dates() {
+        ("", "") => None,
+        (a, "") => Some(format!("{a}/..")),
+        ("", b) => Some(format!("../{b}")),
+        (a, b) => Some(format!("{a}/{b}")),
+    };
+    let mut p = json!({"limit": 50});
+    if !is_static {
+        p["collections"] = json!(st.collection.trim());
+    }
+    if let Some(d) = datetime {
+        p["datetime"] = json!(d);
+    }
+    if let Some(c) = st.cloud_limit()? {
+        p["maxCloud"] = json!(c);
+    }
+    // The sort picked in the dialog (a preset starts with its own); a static catalog has none.
+    if let Some(by) = sort_of(st, is_static) {
+        p["sortby"] = json!(by);
+    }
+    Ok(p)
+}
+
 /// Finds items: an API's search, or a walk of a static catalog from the node picked.
 fn find_items(app: &mut RustGisApp) {
+    keep_preset_sort_for_its_api(&mut app.ui.stac);
     let st = &app.ui.stac;
     // A catalog's children still coming don't hold a search up.
     if st.walk.is_some() || st.preparing.is_some() || st.waiting.as_ref().is_some_and(|(a, _)| !matches!(a, Asked::Children(_))) {
@@ -1483,28 +1808,14 @@ fn find_items(app: &mut RustGisApp) {
         app.ui.stac.error = Some(tl!("The search area is still loading: search when it has finished").to_string());
         return;
     }
-    let datetime = match (st.from.trim(), st.to.trim()) {
-        ("", "") => None,
-        (a, "") => Some(format!("{a}/..")),
-        ("", b) => Some(format!("../{b}")),
-        (a, b) => Some(format!("{a}/{b}")),
-    };
     let is_static = catalog::is_static(&st.api);
-    let mut p = json!({"limit": 50});
-    if !is_static {
-        p["collections"] = json!(st.collection.trim());
-    }
-    if let Some(d) = datetime {
-        p["datetime"] = json!(d);
-    }
-    if let Ok(c) = st.max_cloud.trim().parse::<f64>() {
-        p["maxCloud"] = json!(c);
-    }
-    // A preset's sort order, only while the dialog is still on the preset's API (another API
-    // may not sort).
-    if !st.sortby.trim().is_empty() && shown_preset(st).is_some() {
-        p["sortby"] = json!(st.sortby.trim());
-    }
+    let mut p = match search_params(st, is_static) {
+        Ok(p) => p,
+        Err(e) => {
+            app.ui.stac.error = Some(e);
+            return;
+        }
+    };
     let buffer = st.buffer.trim().to_string();
     if !st.parts.is_empty() {
         // The area (merging, widening) takes as long as its shapes are many and detailed, so it is
@@ -1532,19 +1843,23 @@ fn find_items(app: &mut RustGisApp) {
     send_search(app, p, is_static);
 }
 
-/// An area being made for a search, and the search to send with it.
+/// An area being made for a search, and the search to send with it, built for `api` (the one
+/// the dialog was on): the API picker stays usable meanwhile, and the search (its collection and
+/// sort are that API's) must not go to another.
 struct Preparing {
     slot: Slot<Result<Option<Prepared>, String>>,
     params: serde_json::Value,
     is_static: bool,
+    api: String,
 }
 
 /// Makes the search area of `geometries` widened by `metres` on a thread of its own (here and now
 /// in the browser, which has one), then sends the search `params` describes with it.
 fn start_preparing(app: &mut RustGisApp, geometries: Vec<Geometry>, metres: f64, params: serde_json::Value, is_static: bool) {
     let job = move || rustgis_engine::cmd::stac_area::prepare(&geometries, metres);
+    let api = app.ui.stac.api.trim().to_string();
     if cfg!(target_arch = "wasm32") {
-        land_prepared(app, job(), params, is_static);
+        land_prepared(app, job(), params, is_static, &api);
         return;
     }
     let slot: Slot<Result<Option<Prepared>, String>> = Slot::default();
@@ -1557,7 +1872,7 @@ fn start_preparing(app: &mut RustGisApp, geometries: Vec<Geometry>, metres: f64,
         Ok(_) => {
             app.ui.stac.error = None;
             app.ui.stac.info = Some(tl!("Making the search area…").to_string());
-            app.ui.stac.preparing = Some(Preparing { slot, params, is_static });
+            app.ui.stac.preparing = Some(Preparing { slot, params, is_static, api });
         }
         Err(e) => app.ui.stac.error = Some(i18n::fmt("Couldn't start the search: {e}", &[("e", &e.to_string())])),
     }
@@ -1570,12 +1885,24 @@ fn poll_preparing(app: &mut RustGisApp, ctx: &egui::Context) {
         return;
     };
     let Some(preparing) = app.ui.stac.preparing.take() else { return };
-    land_prepared(app, answer, preparing.params, preparing.is_static);
+    land_prepared(app, answer, preparing.params, preparing.is_static, &preparing.api);
     ctx.request_repaint();
 }
 
-/// The area made: what it left out is said, and the search goes with it.
-fn land_prepared(app: &mut RustGisApp, answer: Result<Option<Prepared>, String>, mut params: serde_json::Value, is_static: bool) {
+/// The area made: what it left out is said, and the search goes with it, to the API it was built
+/// for (`api`): if the dialog is on another now, the search is dropped and that is said.
+fn land_prepared(
+    app: &mut RustGisApp,
+    answer: Result<Option<Prepared>, String>,
+    mut params: serde_json::Value,
+    is_static: bool,
+    api: &str,
+) {
+    if app.ui.stac.api.trim() != api {
+        app.ui.stac.error = None;
+        app.ui.stac.info = Some(tl!("The API changed while the search area was being made: press Find Items to search it").to_string());
+        return;
+    }
     match answer {
         Ok(Some(prepared)) => {
             for n in prepared.notices {
@@ -1602,7 +1929,9 @@ fn send_search(app: &mut RustGisApp, p: serde_json::Value, is_static: bool) {
     if is_static {
         let st = &app.ui.stac;
         let root = if st.node.is_empty() { st.api.trim().to_string() } else { st.node.clone() };
-        let walk = rustgis_engine::render::rustgis_tiles::address::check(&root, None)
+        let ancestor_public = !st.node.is_empty() && st.trail_reach.iter().flatten().any(|r| *r == Reach::Public);
+        let ceiling = if st.api_from_document || ancestor_public { Reach::Public } else { Reach::Local };
+        let walk = address::check_reach(&root, ceiling)
             .and(search)
             .and_then(|s| Ok(Walk::new(&root, catalog::Filter::from_search(&s, Some(st.phase.as_str()))?, s.limit)));
         match walk {
@@ -1631,8 +1960,9 @@ fn send_search(app: &mut RustGisApp, p: serde_json::Value, is_static: bool) {
         Ok((url, body, get)) => {
             let slot = match body {
                 Some(body) => post_service(app, &url, body),
-                None => fetch_service(app, &url),
+                None => fetch_service(app, &url, false),
             };
+            app.ui.stac.asked_sort = p["sortby"].as_str().map(str::to_string);
             app.ui.stac.waiting = Some((Asked::Search(url, get), slot));
         }
         Err(e) => app.ui.stac.error = Some(e),
@@ -1750,6 +2080,77 @@ mod tests {
     use crate::RustGisApp;
 
     #[test]
+    fn switched_off_dates_and_cloud_limit_are_not_sent() {
+        let mut st = State { from: "2024-06-01".into(), to: "2024-06-30".into(), ..State::default() };
+        // A fresh dialog leaves the dates out and sends the cloud limit.
+        assert_eq!((st.dates(), st.cloud_limit()), (("", ""), Ok(Some(20.0))));
+        (st.use_dates, st.use_cloud) = (true, true);
+        assert_eq!((st.dates(), st.cloud_limit()), (("2024-06-01", "2024-06-30"), Ok(Some(20.0))));
+        (st.use_dates, st.use_cloud) = (false, false);
+        // The typed values stay in their boxes, but none goes with the search.
+        assert_eq!((st.dates(), st.cloud_limit()), (("", ""), Ok(None)));
+        assert_eq!((st.from.as_str(), st.max_cloud.as_str()), ("2024-06-01", "20"));
+        // Switched off, even a value that is not a number is left alone.
+        st.max_cloud = "2O".into();
+        assert_eq!(st.cloud_limit(), Ok(None));
+    }
+
+    #[test]
+    fn a_ticked_blank_box_sends_nothing_and_a_bad_cloud_limit_is_refused() {
+        let mut st = State { use_dates: true, use_cloud: true, ..State::default() };
+        // Ticked and blank: no filter (any cloud cover, any date).
+        (st.from, st.to, st.max_cloud) = (String::new(), "  ".into(), " ".into());
+        assert_eq!((st.dates(), st.cloud_limit()), (("", ""), Ok(None)));
+        // A number from 0 to 100 goes, spaces around it don't matter.
+        for (typed, limit) in [("0", 0.0), (" 7.5 ", 7.5), ("100", 100.0)] {
+            st.max_cloud = typed.into();
+            assert_eq!(st.cloud_limit(), Ok(Some(limit)), "{typed}");
+        }
+        // Anything else is an error, not a search without the limit.
+        for typed in ["2O", "-5", "100.1", "500", "NaN", "inf", "20%"] {
+            st.max_cloud = typed.into();
+            assert!(st.cloud_limit().is_err(), "{typed}");
+        }
+        // The search is not sent with it, and the cube refuses it too.
+        let mut app = RustGisApp::with_sample();
+        app.ui.stac.max_cloud = "2O".into();
+        find_items(&mut app);
+        let said = app.ui.stac.error.clone().unwrap_or_default();
+        assert!(said.contains("0 to 100"), "{said}");
+        assert!(app.ui.stac.waiting.is_none() && app.ui.stac.preparing.is_none());
+        #[cfg(not(target_arch = "wasm32"))]
+        assert!(cube_params(&app.ui.stac, "2024-01-01".into(), "2024-02-01".into(), None).is_err());
+    }
+
+    /// The request a search is sent with carries only the filters that are switched on and filled.
+    #[test]
+    fn the_search_request_carries_only_the_filters_that_are_on_and_filled() {
+        let mut st = State { from: "2024-06-01".into(), to: "2024-06-30".into(), ..State::default() };
+        // As the dialog opens: no dates, the cloud limit.
+        let p = search_params(&st, false).unwrap_or_default();
+        assert_eq!((p.get("datetime"), p.get("maxCloud")), (None, Some(&json!(20.0))));
+        // Both on: the range and the limit.
+        (st.use_dates, st.use_cloud) = (true, true);
+        let p = search_params(&st, false).unwrap_or_default();
+        assert_eq!((p.get("datetime"), p.get("maxCloud")), (Some(&json!("2024-06-01/2024-06-30")), Some(&json!(20.0))));
+        // Both off: neither, though both are still typed.
+        (st.use_dates, st.use_cloud) = (false, false);
+        let p = search_params(&st, false).unwrap_or_default();
+        assert_eq!((p.get("datetime"), p.get("maxCloud")), (None, None));
+        // On and blank: neither.
+        (st.use_dates, st.use_cloud) = (true, true);
+        (st.from, st.to, st.max_cloud) = (String::new(), String::new(), String::new());
+        let p = search_params(&st, false).unwrap_or_default();
+        assert_eq!((p.get("datetime"), p.get("maxCloud")), (None, None));
+        // A limit that is not a number refuses the request.
+        st.max_cloud = "2O".into();
+        assert!(search_params(&st, false).is_err());
+        // Switched off, the same text is not looked at.
+        st.use_cloud = false;
+        assert!(search_params(&st, false).is_ok());
+    }
+
+    #[test]
     fn opening_a_stac_api_from_the_tree_drops_the_last_apis_catalog_walk() {
         let mut app = RustGisApp::with_sample();
         let old = "https://old-walk757.example.org/catalog.json";
@@ -1778,19 +2179,90 @@ mod tests {
         app.ui.stac.api = api.into();
         app.ui.stac.connection = one["id"].as_str().map(str::to_string);
         let asked = Asked::Token {
-            token_url: "https://snapshot-token.invalid/token".into(),
+            opened: app.session.opened,
+            token_url: "http://127.0.0.1:9/token".into(),
             href: "http://127.0.0.1:9/points.geojson".into(),
             name: "Original asset".into(),
             connection: selected_connection(&app),
+            from: api.into(),
+            public: false,
         };
         let slot = Slot::default();
-        *slot.lock().unwrap() = Some(Ok(br#"{"token":"sig=snapshot"}"#.to_vec()));
+        *slot.lock().unwrap() =
+            Some(Ok(cache::Fetched { bytes: br#"{"token":"sig=snapshot"}"#.to_vec(), origin: Origin::named("http://127.0.0.1:9/token") }));
         app.ui.stac.waiting = Some((asked, slot));
         app.ui.stac.connection = two["id"].as_str().map(str::to_string);
         poll(&mut app, &egui::Context::default());
         let params = &app.ui.downloads.last().unwrap().params;
         assert_eq!(params["connection"], one["id"], "token completion must not re-read the picker");
         assert_ne!(params["connection"], two["id"]);
+    }
+
+    #[test]
+    fn item_link_and_token_responses_cannot_add_to_a_replacement_project() {
+        let _turn = crate::fetching::turn();
+        for (case, (token, ready)) in [(false, false), (false, true), (true, false), (true, true)].into_iter().enumerate() {
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sent = seen.clone();
+            cache::set_fetcher(move |url, done| {
+                sent.lock().unwrap().push(url);
+                done(Err("unexpected stale asset request".into()));
+            });
+            let mut app = RustGisApp::with_sample();
+            let opened = app.session.opened;
+            let from = format!("https://late-project{case}.corp.example/item.json");
+            let href = if token {
+                format!("https://late-project{case}.blob.core.windows.net/assets/points.geojson")
+            } else {
+                format!("http://10.0.0.5/late-project{case}.geojson")
+            };
+            let token_url = token.then(|| stac::sas_token_url(&href).unwrap());
+            let asked = match &token_url {
+                Some(url) => Asked::Token {
+                    token_url: url.clone(),
+                    href: href.clone(),
+                    name: "Old asset".into(),
+                    connection: None,
+                    from: from.clone(),
+                    public: true,
+                    opened,
+                },
+                None => Asked::Link { url: from.clone(), opened },
+            };
+            let bytes = if token {
+                br#"{"token":"sig=late-project-synthetic"}"#.to_vec()
+            } else {
+                json!({"type":"Feature","id":"old","geometry":null,"properties":{},
+                    "assets":{"data":{"href":href,"type":"application/geo+json","roles":["data"]}},"links":[]})
+                .to_string()
+                .into_bytes()
+            };
+            let origin = Origin::connected(&from, "10.0.0.5".parse().unwrap()).unwrap();
+            let answer: Answer = Slot::default();
+            if ready {
+                *answer.lock().unwrap() = Some(Ok(cache::Fetched { bytes: bytes.clone(), origin: origin.clone() }));
+            }
+            app.ui.stac.waiting = Some((asked, answer.clone()));
+            app.session.run("project.new", &json!({})).unwrap();
+            let layers = app.session.map().layers.len();
+            let mark = app.session.notice_mark();
+            let ctx = egui::Context::default();
+            poll(&mut app, &ctx);
+            assert!(app.ui.stac.waiting.is_none());
+            if !ready {
+                *answer.lock().unwrap() = Some(Ok(cache::Fetched { bytes, origin }));
+            }
+            poll(&mut app, &ctx);
+            assert!(seen.lock().unwrap().is_empty());
+            assert!(app.ui.downloads.is_empty() && app.ui.cog_probes.is_empty());
+            assert_eq!(app.session.map().layers.len(), layers);
+            let params = json!({"url":href,"from":from,"fromDocument":false});
+            assert!(rustgis_engine::cmd::layer::request_origin_for(&app.session, &params).unwrap().1);
+            if let Some(url) = token_url {
+                assert!(stac::cached_token(&url).is_none());
+            }
+            assert_eq!(app.session.notices_since(mark).iter().filter(|n| n.text.contains("project was closed")).count(), 1);
+        }
     }
 
     /// The cube's request names the connection picked for the API, so it never falls back to the
@@ -1801,6 +2273,163 @@ mod tests {
         let p = cube_params(&st, "2024-01-01".into(), "2024-02-01".into(), Some("picked".into())).unwrap();
         assert_eq!(p["connection"], "picked");
         assert!(cube_params(&st, "a".into(), "b".into(), None).unwrap().get("connection").is_none());
+    }
+
+    #[test]
+    fn the_sort_picked_is_sent_to_an_api_only() {
+        let mut st = State::default();
+        assert_eq!(sort_of(&st, false), None);
+        for (v, _) in SORTS.iter().filter(|(v, _)| !v.is_empty()) {
+            st.sortby = format!(" {v} ");
+            assert_eq!(sort_of(&st, false), Some(*v));
+            assert_eq!(sort_of(&st, true), None);
+        }
+        // Newest first is a field the search can sort on.
+        assert!(SORTS.iter().any(|(v, _)| *v == "-datetime") && SORTS.iter().any(|(v, _)| *v == "datetime"));
+        // An API that ignored the sort is said so (and only then): the items tell.
+        let page = |dates: [&str; 3]| {
+            let f: Vec<_> = dates
+                .iter()
+                .enumerate()
+                .map(|(n, d)| json!({"type": "Feature", "id": format!("i{n}"), "bbox": [0, 0, 1, 1], "properties": {"datetime": d}}))
+                .collect();
+            stac::parse_items(json!({"type": "FeatureCollection", "features": f}).to_string().as_bytes(), "https://x.org/search").unwrap().0
+        };
+        let sorted = page(["2024-06-03T00:00:00Z", "2024-06-02T00:00:00Z", "2024-06-01T00:00:00Z"]);
+        assert_eq!(sort_ignored_note(&sorted, Some("-datetime")), None);
+        assert_eq!(sort_ignored_note(&sorted, None), None);
+        assert!(sort_ignored_note(&sorted, Some("datetime")).is_some_and(|n| n.contains("datetime")));
+        // A sort the items can't show is said so, and only then: not for one the items show, no
+        // sort, or a page of one.
+        assert!(sort_unchecked_note(&sorted, Some("platform")).is_some_and(|n| n.contains("platform")));
+        assert_eq!(sort_unchecked_note(&sorted, Some("-datetime")), None);
+        assert_eq!(sort_unchecked_note(&sorted, Some("datetime")), None, "ignored is the other note's to say");
+        assert_eq!(sort_unchecked_note(&sorted, None), None);
+        assert_eq!(sort_unchecked_note(&sorted[..1], Some("platform")), None);
+    }
+
+    #[test]
+    fn opening_stac_search_while_an_area_is_made_keeps_the_presets_sort() {
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.stac.sentinel2", serde_json::Value::Null).unwrap();
+        assert_eq!((app.ui.stac.sortby.as_str(), app.ui.stac.sort_is_default), (PRESET_SORT, true));
+        // The search is being made with the preset's sort, and the ribbon's STAC Search is opened.
+        let api = app.ui.stac.api.clone();
+        app.ui.stac.preparing = Some(Preparing { slot: Slot::default(), params: json!({"sortby": PRESET_SORT}), is_static: false, api });
+        open_preset(&mut app, None, &serde_json::Value::Null).unwrap();
+        assert!(app.ui.stac.preset.is_none());
+        assert_eq!((app.ui.stac.sortby.as_str(), app.ui.stac.sort_is_default), (PRESET_SORT, true), "it goes out with that sort");
+        assert!(keeps_preset_sort(&app.ui.stac), "and the dropdown keeps reading it");
+        keep_preset_sort_for_its_api(&mut app.ui.stac);
+        assert_eq!(app.ui.stac.sortby, PRESET_SORT);
+        // Once the area has landed the preset is gone, and so is its sort.
+        app.ui.stac.preparing = None;
+        assert!(!keeps_preset_sort(&app.ui.stac));
+        keep_preset_sort_for_its_api(&mut app.ui.stac);
+        assert_eq!((app.ui.stac.sortby.as_str(), app.ui.stac.sort_is_default), ("", false));
+    }
+
+    #[test]
+    fn opening_stac_search_while_a_search_is_in_flight_keeps_the_presets_sort() {
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.stac.sentinel2", serde_json::Value::Null).unwrap();
+        // The search went out with the preset's sort and is not answered yet.
+        app.ui.stac.waiting = Some((Asked::Search("https://x.org/search".into(), None), Slot::default()));
+        open_preset(&mut app, None, &serde_json::Value::Null).unwrap();
+        assert!(app.ui.stac.preset.is_none());
+        assert_eq!((app.ui.stac.sortby.as_str(), app.ui.stac.sort_is_default), (PRESET_SORT, true), "it went out with that sort");
+        assert!(keeps_preset_sort(&app.ui.stac), "and the dropdown keeps reading it");
+        // Answered: the preset is gone, and so is its sort.
+        app.ui.stac.waiting = None;
+        keep_preset_sort_for_its_api(&mut app.ui.stac);
+        assert_eq!((app.ui.stac.sortby.as_str(), app.ui.stac.sort_is_default), ("", false));
+        // Any other wait (a listing of collections) isn't a search with that sort.
+        app.run("ui.stac.sentinel2", serde_json::Value::Null).unwrap();
+        app.ui.stac.waiting = Some((Asked::Collections("https://x.org".into()), Slot::default()));
+        open_preset(&mut app, None, &serde_json::Value::Null).unwrap();
+        assert_eq!((app.ui.stac.sortby.as_str(), app.ui.stac.sort_is_default), ("", false));
+    }
+
+    #[test]
+    fn a_presets_sort_stays_with_the_presets_api() {
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.stac.sentinel2", serde_json::Value::Null).unwrap();
+        assert_eq!(app.ui.stac.sortby, PRESET_SORT);
+        // Staying on the preset's API keeps it; leaving for another drops it.
+        let api = app.ui.stac.api.clone();
+        switch_api(&mut app.ui.stac, &api);
+        assert_eq!(app.ui.stac.sortby, PRESET_SORT);
+        switch_api(&mut app.ui.stac, "https://example.org/stac/v1");
+        assert_eq!(app.ui.stac.sortby, "");
+        // A sort the user picked on another API is theirs: it stays when the API changes again.
+        app.ui.stac.sortby = "-datetime".into();
+        switch_api(&mut app.ui.stac, "https://other.example.org/stac/v1");
+        assert_eq!(app.ui.stac.sortby, "-datetime");
+        // The same sort picked by hand on the preset is the user's: it stays (a click in the
+        // dropdown clears `sort_is_default`).
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.stac.sentinel2", serde_json::Value::Null).unwrap();
+        (app.ui.stac.sortby, app.ui.stac.sort_is_default) = (PRESET_SORT.into(), false);
+        switch_api(&mut app.ui.stac, "https://example.org/stac/v1");
+        assert_eq!(app.ui.stac.sortby, PRESET_SORT);
+        // A sort picked on the USGS LiDAR preset (which sets none) stays too.
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.stac.usgsLidar", serde_json::Value::Null).unwrap();
+        app.ui.stac.sortby = PRESET_SORT.into();
+        switch_api(&mut app.ui.stac, "https://example.org/stac/v1");
+        assert_eq!(app.ui.stac.sortby, PRESET_SORT);
+    }
+
+    /// A search whose area was being made when another API was picked is not sent to that API
+    /// (its collection and sort were the first one's): it is dropped, and the pane says so.
+    #[test]
+    fn an_area_made_for_one_api_is_not_searched_on_another() {
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.stac.sentinel2", serde_json::Value::Null).unwrap();
+        let made_for = app.ui.stac.api.clone();
+        let params = json!({"limit": 50, "collections": "sentinel-2-c1-l2a", "sortby": PRESET_SORT});
+        let area = rustgis_engine::cmd::stac_area::prepare(&[rectangle([5.0, 45.0, 6.0, 46.0])], 0.0).unwrap();
+        // Another API was picked while the area was being made: nothing is sent, and it is said.
+        switch_api(&mut app.ui.stac, "https://example.org/stac/v1");
+        land_prepared(&mut app, Ok(area), params, false, &made_for);
+        assert!(app.ui.stac.waiting.is_none(), "the search went to the other API");
+        assert!(app.ui.stac.error.is_none());
+        assert!(app.ui.stac.info.as_deref().is_some_and(|i| i.contains("API changed")), "{:?}", app.ui.stac.info);
+    }
+
+    /// Typing in the API field doesn't touch the sort: deleting a character of the preset's
+    /// address and typing it back keeps the preset's default. It is dropped when a search is sent
+    /// (or another API is picked) while the dialog is on another API.
+    #[test]
+    fn editing_the_address_and_retyping_it_keeps_the_presets_sort() {
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.stac.sentinel2", serde_json::Value::Null).unwrap();
+        let address = app.ui.stac.api.clone();
+        // What the text field does on each keystroke: change the text and drop the listing.
+        app.ui.stac.api.pop();
+        drop_listing(&mut app.ui.stac);
+        assert_eq!((app.ui.stac.sortby.as_str(), app.ui.stac.sort_is_default), (PRESET_SORT, true));
+        app.ui.stac.api = address;
+        drop_listing(&mut app.ui.stac);
+        assert_eq!((app.ui.stac.sortby.as_str(), app.ui.stac.sort_is_default), (PRESET_SORT, true));
+        assert_eq!(shown_preset(&app.ui.stac), Some(Preset::Sentinel2));
+        // Left on another address, the check made when a search is sent drops it.
+        app.ui.stac.api = "https://example.org/stac/v1".into();
+        keep_preset_sort_for_its_api(&mut app.ui.stac);
+        assert_eq!((app.ui.stac.sortby.as_str(), app.ui.stac.sort_is_default), ("", false));
+    }
+
+    /// Reopening STAC Search from the ribbon (no preset) takes the preset's default sort with it,
+    /// so it can't go on to another API typed in afterwards.
+    #[test]
+    fn reopening_the_dialog_without_a_preset_drops_the_presets_sort() {
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.stac.sentinel2", serde_json::Value::Null).unwrap();
+        assert_eq!(app.ui.stac.sortby, PRESET_SORT);
+        app.run("ui.stac", serde_json::Value::Null).unwrap();
+        assert_eq!(app.ui.stac.sortby, "");
+        switch_api(&mut app.ui.stac, "https://example.org/stac/v1");
+        assert_eq!(app.ui.stac.sortby, "");
     }
 
     #[test]
@@ -1830,7 +2459,7 @@ mod tests {
         assert_eq!(app.ui.stac.preset, None);
         // A static catalog's search walks it; bad dates are refused before anything is read.
         app.ui.stac.api = VANTOR.into();
-        app.ui.stac.from = "soon".into();
+        (app.ui.stac.from, app.ui.stac.use_dates) = ("soon".into(), true);
         find_items(&mut app);
         assert!(app.ui.stac.walk.is_none() && app.ui.stac.error.is_some());
     }
@@ -1846,7 +2475,10 @@ mod tests {
         app.ui.stac.waiting = Some((Asked::Collections("https://one.example/stac".into()), late.clone()));
         switch_api(&mut app.ui.stac, "https://two.example/stac");
         assert!(app.ui.stac.waiting.is_none());
-        *late.lock().unwrap() = Some(Ok(br#"{"collections":[{"id":"old","title":"Old"}]}"#.to_vec()));
+        *late.lock().unwrap() = Some(Ok(cache::Fetched {
+            bytes: br#"{"collections":[{"id":"old","title":"Old"}]}"#.to_vec(),
+            origin: Origin::named("https://one.example/stac"),
+        }));
         poll(&mut app, &ctx);
         assert!(app.ui.stac.collections.is_empty());
         assert_eq!(app.ui.stac.api, "https://two.example/stac");
@@ -1860,9 +2492,10 @@ mod tests {
         assert!(app.ui.stac.listed.is_empty());
         assert_eq!(app.ui.stac.info, None);
 
-        app.ui.stac.waiting = Some((Asked::Link("https://two.example/item.json".into()), Slot::default()));
+        app.ui.stac.waiting =
+            Some((Asked::Link { url: "https://two.example/item.json".into(), opened: app.session.opened }, Slot::default()));
         switch_api(&mut app.ui.stac, "https://three.example/stac");
-        assert!(matches!(app.ui.stac.waiting, Some((Asked::Link(_), _))), "a link already asked for goes on");
+        assert!(matches!(app.ui.stac.waiting, Some((Asked::Link { .. }, _))), "a link already asked for goes on");
     }
 
     /// A static catalog picked while a listing of the last API is pending is browsed at once:
@@ -2104,7 +2737,12 @@ mod tests {
     #[test]
     fn a_post_search_with_a_next_link_says_more_match() {
         let ctx = egui::Context::default();
-        let answer = |body: &str| -> Answer { Slot::new(std::sync::Mutex::new(Some(Ok(body.as_bytes().to_vec())))) };
+        let answer = |body: &str| -> Answer {
+            Slot::new(std::sync::Mutex::new(Some(Ok(cache::Fetched {
+                bytes: body.as_bytes().to_vec(),
+                origin: Origin::named("http://127.0.0.1/search"),
+            }))))
+        };
         // A POST `next` link has no address, so the parser gives none; the pane still says so.
         let post_next = r#"{"type":"FeatureCollection","features":[],"links":[{"rel":"next","method":"POST","href":"http://127.0.0.1/search","body":{"token":"x"}}]}"#;
         let mut app = RustGisApp::with_sample();
@@ -2117,6 +2755,24 @@ mod tests {
         app.ui.stac.waiting = Some((Asked::Search("http://127.0.0.1/search".into(), None), answer(all)));
         poll(&mut app, &ctx);
         let said = app.ui.stac.info.clone().unwrap_or_default();
+        assert!(!said.contains("more match"), "{said}");
+    }
+
+    #[test]
+    fn a_next_link_the_reach_refuses_is_said_rather_than_read_as_more_matches() {
+        let ctx = egui::Context::default();
+        // A public document's next page on the local network is dropped by the parser: the pane says
+        // so, and does not ask the user to narrow a search whose next page it won't load.
+        let page = r#"{"type":"FeatureCollection","features":[],"links":[{"rel":"next","href":"http://127.0.0.1/search?page=2"}]}"#;
+        let answer: Answer = Slot::new(std::sync::Mutex::new(Some(Ok(cache::Fetched {
+            bytes: page.as_bytes().to_vec(),
+            origin: Origin::named("https://example.com/search"),
+        }))));
+        let mut app = RustGisApp::with_sample();
+        app.ui.stac.waiting = Some((Asked::Search("https://example.com/search".into(), None), answer));
+        poll(&mut app, &ctx);
+        let said = app.ui.stac.info.clone().unwrap_or_default();
+        assert!(said.contains("refused"), "{said}");
         assert!(!said.contains("more match"), "{said}");
     }
 
@@ -2142,7 +2798,7 @@ mod tests {
                 return;
             }
             poll_preparing(app, &ctx);
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10)); // test-wait: legacy polling for area preparation
         }
         panic!("the search area was not made in five seconds");
     }
@@ -2172,6 +2828,23 @@ mod tests {
         find_items(&mut app);
         clear_area(&mut app);
         assert!(app.ui.stac.preparing.is_none() && app.ui.stac.parts.is_empty());
+    }
+
+    #[test]
+    fn the_sort_is_fixed_while_the_area_is_made_and_the_search_goes_out_with_it() {
+        let mut app = RustGisApp::with_sample();
+        app.ui.stac.api = "http://127.0.0.1:1/stac".into();
+        app.ui.stac.collection = "c".into();
+        app.ui.stac.sortby = "-datetime".into();
+        app.ui.stac.parts.push(rectangle([7.0, 46.0, 8.0, 47.0]));
+        assert!(!busy(&app.ui.stac), "nothing is under way before Find Items");
+        find_items(&mut app);
+        // The dialog is busy while the area is made: the Sort by dropdown is off then, as Find
+        // Items is, so a pick can't show in it without being the one sent.
+        assert!(app.ui.stac.preparing.is_some() && busy(&app.ui.stac));
+        wait_for_the_area(&mut app);
+        assert_eq!(app.ui.stac.asked_sort.as_deref(), Some("-datetime"));
+        assert!(busy(&app.ui.stac) || app.ui.stac.error.is_some(), "the search is under way until it is answered");
     }
 
     #[test]
@@ -2229,5 +2902,363 @@ mod tests {
         app.ui.stac.api_from_document = true;
         switch_api(&mut app.ui.stac, "https://example.org/stac/v1");
         assert!(!app.ui.stac.api_from_document, "picking an API is the user's choice");
+    }
+
+    #[test]
+    fn stac_document_assets_and_links_enforce_public_reach() {
+        let _turn = crate::fetching::turn();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, rustgis_engine::render::rustgis_tiles::address::Reach)>>> =
+            std::sync::Arc::default();
+        let log = seen.clone();
+        cache::set_fetcher_with_origin(move |url, ceiling, done, _| {
+            let clean = cache::split_download_limit(&url).0.split("#rustgis-range=").next().unwrap_or(&url).to_string();
+            log.lock().unwrap().push((clean.clone(), ceiling));
+            let origin = rustgis_engine::render::rustgis_tiles::address::Origin::named(&clean);
+            done(Ok(cache::Fetched { bytes: br#"{"type":"FeatureCollection","features":[]}"#.to_vec(), origin }));
+        });
+
+        let mut app = RustGisApp::with_sample();
+        let doc = "https://example.com/stac/item.json";
+        for bad in [
+            "http://127.0.0.1:8080/internal.geojson",
+            "http://localhost:8080/internal.geojson",
+            "http://169.254.169.254/latest/meta-data",
+            "http://10.0.0.1/internal.tif",
+        ] {
+            let raw = json!({
+                "type": "Feature",
+                "id": "scene-1",
+                "bbox": [0.0, 0.0, 1.0, 1.0],
+                "properties": {"datetime": "2025-01-01T00:00:00Z"},
+                "links": [{"rel": "self", "href": "http://127.0.0.1:8080/spoofed-self.json"}],
+                "assets": {"data": {"href": bad, "type": "application/geo+json", "roles": ["data"]}}
+            });
+            app.ui.stac.error = None;
+            landed_link(&mut app, doc, Ok(cache::Fetched { bytes: raw.to_string().into_bytes(), origin: Origin::named(doc) }));
+            let err = app.ui.stac.error.as_deref().unwrap_or("");
+            assert!(
+                err.contains("local network") || err.contains("never fetched"),
+                "{bad} must be refused by address policy when linked from {doc}, got: {err:?}"
+            );
+            assert!(app.ui.downloads.is_empty() && app.ui.cog_probes.is_empty(), "{bad} must not start a download or probe");
+        }
+        assert!(seen.lock().unwrap().is_empty(), "refused private asset links must never reach the transport");
+
+        let public_item = json!({
+            "type": "Feature",
+            "id": "scene-ok",
+            "bbox": [0.0, 0.0, 1.0, 1.0],
+            "properties": {"datetime": "2025-01-01T00:00:00Z"},
+            "assets": {"data": {"href": "https://example.com/data/places.geojson", "type": "application/geo+json", "roles": ["data"]}}
+        });
+        app.ui.stac.error = None;
+        landed_link(&mut app, doc, Ok(cache::Fetched { bytes: public_item.to_string().into_bytes(), origin: Origin::named(doc) }));
+        assert_eq!(app.ui.stac.error, None);
+        assert_eq!(app.ui.downloads.last().map(|d| d.params["from"].as_str()), Some(Some(doc)));
+        assert_eq!(app.ui.downloads.last().and_then(|d| d.params["fromDocument"].as_bool()), Some(true));
+        assert_eq!(
+            seen.lock().unwrap().last().cloned(),
+            Some(("https://example.com/data/places.geojson".into(), rustgis_engine::render::rustgis_tiles::address::Reach::Public))
+        );
+    }
+
+    #[test]
+    fn local_origin_stac_item_fetches_local_thumbnail_with_local_reach() {
+        let _turn = crate::fetching::turn();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, Reach)>>> = std::sync::Arc::default();
+        let log = seen.clone();
+        cache::set_fetcher_with_origin(move |url, ceiling, done, _| {
+            let clean = cache::split_download_limit(&url).0.to_string();
+            log.lock().unwrap().push((clean.clone(), ceiling));
+            done(Ok(cache::Fetched { bytes: vec![0x89, b'P', b'N', b'G'], origin: Origin::named(&clean) }));
+        });
+
+        let mut app = RustGisApp::with_sample();
+        let local_doc = "http://localhost:8080/stac/item.json";
+        let local_thumb = "http://localhost:8080/stac/preview.png";
+        let raw = json!({
+            "type": "Feature",
+            "id": "local-scene",
+            "bbox": [0.0, 0.0, 1.0, 1.0],
+            "properties": {"datetime": "2025-01-01T00:00:00Z"},
+            "assets": {
+                "thumbnail": {"href": local_thumb, "type": "image/png", "roles": ["thumbnail"]}
+            }
+        });
+        let item = stac::parse_item_from_origin(raw.to_string().as_bytes(), &Origin::named(local_doc)).unwrap();
+        assert_eq!(item.origin_reach, Reach::Local);
+        app.ui.stac.api = "http://localhost:8080/stac".into();
+        app.ui.stac.items = vec![item];
+        want_thumbs(&mut app);
+        assert!(matches!(app.ui.stac.thumbs.get(local_thumb), Some(Thumb::Loading(_))));
+        assert_eq!(seen.lock().unwrap().as_slice(), &[(local_thumb.to_string(), Reach::Local)]);
+    }
+
+    #[test]
+    fn local_stac_link_redirecting_to_public_host_rejects_local_assets() {
+        let _turn = crate::fetching::turn();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, Reach)>>> = std::sync::Arc::default();
+        let log = seen.clone();
+        let redirected_doc = "https://public-redirect.example/stac/item.json";
+        cache::set_fetcher_with_origin(move |url, ceiling, done, _| {
+            let clean = cache::split_download_limit(&url).0.to_string();
+            log.lock().unwrap().push((clean.clone(), ceiling));
+            let body = json!({
+                "type": "Feature",
+                "id": "redirected-scene",
+                "bbox": [0.0, 0.0, 1.0, 1.0],
+                "properties": {"datetime": "2025-01-01T00:00:00Z"},
+                "assets": {
+                    "data": {"href": "http://127.0.0.1:8080/internal.geojson", "type": "application/geo+json", "roles": ["data"]},
+                    "thumbnail": {"href": "http://127.0.0.1:8080/preview.png", "type": "image/png", "roles": ["thumbnail"]}
+                }
+            });
+            done(Ok(cache::Fetched { bytes: body.to_string().into_bytes(), origin: Origin::named(redirected_doc) }));
+        });
+
+        let mut app = RustGisApp::with_sample();
+        open_link(&mut app, "http://127.0.0.1:8080/stac-redirect").unwrap();
+        poll(&mut app, &egui::Context::default());
+
+        assert_eq!(seen.lock().unwrap().as_slice(), &[("http://127.0.0.1:8080/stac-redirect".to_string(), Reach::Local)]);
+        assert_eq!(app.ui.stac.items.first().map(|i| i.origin_reach), Some(Reach::Public));
+        assert_eq!(app.ui.stac.items.first().and_then(|i| i.origin.as_deref()), Some(redirected_doc));
+        let err = app.ui.stac.error.as_deref().unwrap_or("");
+        assert!(err.contains("local network"), "redirected public STAC item must reject loopback assets, got: {err:?}");
+        assert!(app.ui.downloads.is_empty());
+
+        seen.lock().unwrap().clear();
+        want_thumbs(&mut app);
+        assert!(matches!(app.ui.stac.thumbs.get("http://127.0.0.1:8080/preview.png"), Some(Thumb::Failed)));
+        assert!(seen.lock().unwrap().is_empty(), "redirected public STAC item must not fetch loopback thumbnails");
+    }
+
+    #[test]
+    fn static_catalog_walk_uses_user_reach_for_root_and_observed_reach_for_descendants() {
+        let _turn = crate::fetching::turn();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, Reach)>>> = std::sync::Arc::default();
+
+        // Case 1: User-selected internal hostname whose DNS resolves to a private IP (Reach::Local).
+        // The initial root request uses Reach::Local, and once it lands with Reach::Local its local
+        // child/item links also use Reach::Local.
+        {
+            let log = seen.clone();
+            cache::set_fetcher_with_origin(move |url, ceiling, done, _| {
+                let clean = cache::split_download_limit(&url).0.to_string();
+                log.lock().unwrap().push((clean.clone(), ceiling));
+                let body = if clean.ends_with("/catalog.json") {
+                    json!({
+                        "type": "Catalog",
+                        "id": "corp",
+                        "links": [{"rel": "item", "href": "http://10.0.0.5/stac/item.json"}]
+                    })
+                } else {
+                    json!({
+                        "type": "Feature",
+                        "id": "corp-item",
+                        "bbox": [0.0, 0.0, 1.0, 1.0],
+                        "properties": {"datetime": "2025-01-01T00:00:00Z"},
+                        "assets": {"data": {"href": "http://10.0.0.5/stac/scene.geojson", "type": "application/geo+json"}}
+                    })
+                };
+                let origin = Origin::connected(&clean, "10.0.0.5".parse().unwrap()).unwrap().narrow_reach(ceiling);
+                done(Ok(cache::Fetched { bytes: body.to_string().into_bytes(), origin }));
+            });
+
+            let mut app = RustGisApp::with_sample();
+            app.ui.stac.api = "https://catalog.corp.example.com/catalog.json".into();
+            app.ui.stac.use_view = false;
+            app.ui.stac.max_cloud.clear();
+            find_items(&mut app);
+            let ctx = egui::Context::default();
+            poll(&mut app, &ctx);
+            poll(&mut app, &ctx);
+            poll(&mut app, &ctx);
+
+            assert_eq!(
+                seen.lock().unwrap().as_slice(),
+                &[
+                    ("https://catalog.corp.example.com/catalog.json".into(), Reach::Local),
+                    ("http://10.0.0.5/stac/item.json".into(), Reach::Local),
+                ]
+            );
+            assert_eq!(app.ui.stac.items.len(), 1);
+            assert_eq!(app.ui.stac.items[0].origin_reach, Reach::Local);
+        }
+
+        // Case 2: User-selected root resolves to a public peer (Reach::Public).
+        // The initial root request still uses Reach::Local (user-named), and once it lands with
+        // Reach::Public its descendant links switch to Reach::Public.
+        seen.lock().unwrap().clear();
+        {
+            let log = seen.clone();
+            cache::set_fetcher_with_origin(move |url, ceiling, done, _| {
+                let clean = cache::split_download_limit(&url).0.to_string();
+                log.lock().unwrap().push((clean.clone(), ceiling));
+                let body = if clean.ends_with("/catalog.json") {
+                    json!({
+                        "type": "Catalog",
+                        "id": "pub",
+                        "links": [{"rel": "item", "href": "https://public.example.com/stac/item.json"}]
+                    })
+                } else {
+                    json!({
+                        "type": "Feature",
+                        "id": "pub-item",
+                        "bbox": [0.0, 0.0, 1.0, 1.0],
+                        "properties": {"datetime": "2025-01-01T00:00:00Z"},
+                        "assets": {"data": {"href": "https://public.example.com/stac/scene.geojson", "type": "application/geo+json"}}
+                    })
+                };
+                let origin = Origin::connected(&clean, "93.184.216.34".parse().unwrap()).unwrap().narrow_reach(ceiling);
+                done(Ok(cache::Fetched { bytes: body.to_string().into_bytes(), origin }));
+            });
+
+            let mut app = RustGisApp::with_sample();
+            app.ui.stac.api = "https://public.example.com/catalog.json".into();
+            app.ui.stac.use_view = false;
+            app.ui.stac.max_cloud.clear();
+            find_items(&mut app);
+            let ctx = egui::Context::default();
+            poll(&mut app, &ctx);
+            poll(&mut app, &ctx);
+            poll(&mut app, &ctx);
+
+            assert_eq!(
+                seen.lock().unwrap().as_slice(),
+                &[
+                    ("https://public.example.com/catalog.json".into(), Reach::Local),
+                    ("https://public.example.com/stac/item.json".into(), Reach::Public),
+                ]
+            );
+            assert_eq!(app.ui.stac.items.len(), 1);
+            assert_eq!(app.ui.stac.items[0].origin_reach, Reach::Public);
+        }
+    }
+    #[test]
+    fn a_refused_next_link_is_reported_without_claiming_more_match() {
+        let mut app = RustGisApp::with_sample();
+        let body =
+            br#"{"type":"FeatureCollection","features":[],"numberMatched":100,"links":[{"rel":"next","href":"http://127.0.0.1/private"}]}"#;
+        let answer = Slot::new(std::sync::Mutex::new(Some(Ok(cache::Fetched {
+            bytes: body.to_vec(),
+            origin: Origin::named("https://public.example/search"),
+        }))));
+        app.ui.stac.waiting = Some((Asked::Search("http://127.0.0.1/start".into(), None), answer));
+        poll(&mut app, &egui::Context::default());
+        let said = app.ui.stac.info.as_deref().unwrap();
+        assert!(said.contains("next page link was refused"), "{said}");
+        assert!(!said.contains("more match") && !said.contains("narrow the search"), "{said}");
+    }
+    #[test]
+    fn observed_local_hostname_assets_reach_the_downloader() {
+        let _turn = crate::fetching::turn();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        cache::set_fetcher_with_origin(move |url, ceiling, done, _| {
+            log.lock().unwrap().push((url, ceiling));
+            done(Err("fixture stops after admission".into()));
+        });
+        let mut app = RustGisApp::with_sample();
+        let raw = json!({"type":"Feature","id":"intranet","geometry":null,"properties":{},"assets":{
+            "data":{"href":"http://10.0.0.5/scene.geojson","type":"application/geo+json","roles":["data"]}
+        }});
+        let origin = Origin::connected("https://catalog.corp.example/item.json", "10.0.0.5".parse().unwrap()).unwrap();
+        let item = stac::parse_item_from_origin(raw.to_string().as_bytes(), &origin).unwrap();
+        add_item_asset(&mut app, &item, None);
+        assert!(app.ui.stac.error.is_none(), "{:?}", app.ui.stac.error);
+        assert!(seen.lock().unwrap().iter().any(|(url, reach)| url.contains("10.0.0.5/scene.geojson") && *reach == Reach::Local));
+    }
+
+    #[test]
+    fn walk_notices_report_skipped_links_once_and_clean_walks_stay_quiet() {
+        for skipped in [false, true] {
+            let mut app = RustGisApp::with_sample();
+            let links = if skipped {
+                json!([
+                    {"rel":"child","href":"ftp://files.example/catalog.json"}, {"rel":"item","href":""}
+                ])
+            } else {
+                json!([])
+            };
+            let body = json!({"type":"Catalog","id":"test","links":links}).to_string();
+            let mut walk = catalog::Walk::new("https://public.example/catalog.json", catalog::Filter::default(), 50);
+            let url = walk.next_url().unwrap();
+            walk.land(&url, Ok(body.into_bytes()));
+            app.ui.stac.walk = Some((walk, Vec::new()));
+            let mark = app.session.notice_mark();
+            let ctx = egui::Context::default();
+            poll_walk(&mut app, &ctx);
+            assert_eq!(app.session.notices_since(mark).len(), usize::from(skipped));
+            if skipped {
+                assert!(app.session.notices_since(mark)[0].text.contains("2 catalog links were left out"));
+                assert!(app.ui.stac.info.as_deref().unwrap().contains("2 catalog links were skipped"));
+            }
+            let mark = app.session.notice_mark();
+            poll_walk(&mut app, &ctx);
+            assert!(app.session.notices_since(mark).is_empty());
+        }
+    }
+    #[test]
+    fn catalog_child_notices_count_refusals_and_stay_quiet_for_clean_documents() {
+        let mut app = RustGisApp::with_sample();
+        let ctx = egui::Context::default();
+        for (href, refused) in [("http://10.0.0.5/catalog.json", true), ("https://public.example/child.json", false)] {
+            let body = json!({"type":"Catalog","id":"test","links":[{"rel":"child","href":href}]});
+            let answer = Slot::new(std::sync::Mutex::new(Some(Ok(cache::Fetched {
+                bytes: body.to_string().into_bytes(),
+                origin: Origin::named("https://public.example/catalog.json"),
+            }))));
+            let mark = app.session.notice_mark();
+            app.ui.stac.waiting = Some((Asked::Children("https://public.example/catalog.json".into()), answer));
+            poll(&mut app, &ctx);
+            let notices = app.session.notices_since(mark);
+            assert_eq!(notices.len(), usize::from(refused));
+            if refused {
+                assert!(notices[0].text.contains("1 catalog links were refused"));
+            }
+        }
+    }
+
+    #[test]
+    fn preview_notices_report_refused_links_once_and_allow_local_documents() {
+        let _turn = crate::fetching::turn();
+        cache::set_fetcher(|_, done| done(Err("fixture stops after admission".into())));
+        for (from, refused) in [("https://public.example/item.json", true), ("http://localhost/item.json", false)] {
+            let mut app = RustGisApp::with_sample();
+            let body = json!({"type":"Feature","id":"test","properties":{},"assets":{
+                "thumbnail":{"href":"http://10.0.0.5/preview.png","type":"image/png","roles":["thumbnail"]}
+            }});
+            app.ui.stac.items = vec![stac::parse_item_from_origin(body.to_string().as_bytes(), &Origin::named(from)).unwrap()];
+            let mark = app.session.notice_mark();
+            want_thumbs(&mut app);
+            let notices = app.session.notices_since(mark);
+            assert_eq!(notices.len(), usize::from(refused));
+            if refused {
+                assert!(notices[0].text.contains("1 preview links were refused"));
+            }
+            let mark = app.session.notice_mark();
+            want_thumbs(&mut app);
+            assert!(app.session.notices_since(mark).is_empty());
+        }
+    }
+    #[test]
+    fn partial_catalog_children_remain_visible_with_counted_limit_and_reach_notices() {
+        let mut app = RustGisApp::with_sample();
+        let mut links: Vec<_> = (0..2001).map(|i| json!({"rel":"child","href":format!("https://public.example/{i}.json")})).collect();
+        links.push(json!({"rel":"child","href":"http://10.0.0.5/private.json"}));
+        links.push(json!({"rel":"child","href":"ftp://files.example/catalog.json"}));
+        let text = json!({"type":"Catalog","id":"test","links":links}).to_string();
+        let from = "https://public.example/catalog.json";
+        let answer = Slot::new(std::sync::Mutex::new(Some(Ok(cache::Fetched { bytes: text.into_bytes(), origin: Origin::named(from) }))));
+        app.ui.stac.waiting = Some((Asked::Children(from.into()), answer));
+        let mark = app.session.notice_mark();
+        poll(&mut app, &egui::Context::default());
+        assert!(app.ui.stac.error.is_none());
+        assert_eq!(app.ui.stac.children.len(), 2000);
+        let notices = app.session.notices_since(mark);
+        assert_eq!(notices.len(), 3);
+        assert!(notices.iter().any(|n| n.text.contains("1 catalog links were refused")));
+        assert!(notices.iter().any(|n| n.text.contains("1 catalog links were left out because their addresses")));
     }
 }

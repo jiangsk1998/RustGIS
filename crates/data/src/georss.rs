@@ -4,7 +4,7 @@
 //! points, lines and polygons layers with their title, link, description, date and id.
 //!
 //! The file is hostile: no DTD is read, the node count is capped, and items whose coordinates
-//! can't be read are skipped and counted.
+//! can't be read are skipped and counted; unreadable polygon holes are omitted and counted.
 
 use roxmltree::{Node, ParsingOptions};
 use rustgis_geom::Coord;
@@ -13,12 +13,6 @@ use crate::{DataError, Dataset, Field, FieldType, Geometry, GeometryType, ReadRe
 
 /// GeoRSS file types (feeds are often plain `.xml`, which is read when its contents say so).
 pub const EXTENSIONS: &[&str] = &["georss", "rss", "atom"];
-
-/// Whether a file name is a GeoRSS feed.
-pub fn is_georss_name(name: &str) -> bool {
-    let ext = std::path::Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    EXTENSIONS.contains(&ext.as_str())
-}
 
 /// Whether XML text looks like a feed with places in it.
 pub fn looks_like_georss(text: &str) -> bool {
@@ -71,7 +65,8 @@ fn bbox(ll: Coord, ur: Coord) -> Option<Geometry> {
 }
 
 /// An item's place, `Ok(None)` when it has none, `Err` when it has one that can't be read.
-fn place(item: &Node) -> std::result::Result<Option<Geometry>, ()> {
+/// Unreadable polygon holes are omitted and counted in `lost_holes`.
+fn place(item: &Node, lost_holes: &mut usize) -> std::result::Result<Option<Geometry>, ()> {
     let g = |name: &str| item.children().find(|c| c.is_element() && local(c) == name);
     let parse = |n: Node| lat_lons(&text_of(&n)).ok_or(());
     if let Some(n) = g("point") {
@@ -115,6 +110,8 @@ fn place(item: &Node) -> std::result::Result<Option<Geometry>, ()> {
                         .and_then(ring)
                     {
                         rings.push(r);
+                    } else {
+                        *lost_holes += 1;
                     }
                 }
                 Ok(Some(Geometry::Polygon(vec![rings])))
@@ -170,9 +167,9 @@ pub fn read(file_name: &str, bytes: &[u8]) -> Result<Vec<(Dataset, ReadReport)>>
         Dataset::new(format!("{name} lines"), GeometryType::Polyline, fields()),
         Dataset::new(format!("{name} polygons"), GeometryType::Polygon, fields()),
     ];
-    let (mut skipped, mut without) = (0usize, 0usize);
+    let (mut skipped, mut without, mut lost_holes) = (0usize, 0usize, 0usize);
     for item in root.descendants().filter(|n| n.is_element() && matches!(local(n), "item" | "entry")) {
-        match place(&item) {
+        match place(&item, &mut lost_holes) {
             Ok(Some(g)) => {
                 let i = match g.kind() {
                     GeometryType::Polyline => 1,
@@ -193,6 +190,14 @@ pub fn read(file_name: &str, bytes: &[u8]) -> Result<Vec<(Dataset, ReadReport)>>
     }
     if without > 0 {
         report.messages.push(format!("{without} items have no place and were left out"));
+    }
+    if lost_holes > 0 {
+        let what = if lost_holes == 1 {
+            "1 hole in a polygon was unreadable and left out".to_string()
+        } else {
+            format!("{lost_holes} holes in polygons were unreadable and left out")
+        };
+        report.messages.push(what);
     }
     // What the file as a whole said goes with its first layer only.
     let out: Vec<(Dataset, ReadReport)> = layers
@@ -267,5 +272,70 @@ mod tests {
         assert!(read("x.rss", &truncated).is_err());
         assert_eq!(lat_lons("1 2 3"), None);
         assert_eq!(lat_lons("nan 2"), None);
+    }
+
+    #[test]
+    fn unreadable_interior_ring_is_said() {
+        let feed = |hole: &str| {
+            format!(
+                r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:georss="http://www.georss.org/georss" xmlns:gml="http://www.opengis.net/gml">
+<channel><title>Zoning</title>
+<item><title>Park</title><georss:where><gml:Polygon>
+  <gml:exterior><gml:LinearRing><gml:posList>45 -110 46 -110 46 -111 45 -110</gml:posList></gml:LinearRing></gml:exterior>
+  <gml:interior><gml:LinearRing><gml:posList>{hole}</gml:posList></gml:LinearRing></gml:interior>
+</gml:Polygon></georss:where></item>
+</channel></rss>"#
+            )
+        };
+
+        let lossy = read("lossy.rss", feed("bad coords").as_bytes()).unwrap();
+        assert_eq!(lossy[0].0.features.len(), 1);
+        assert!(lossy[0].0.features[0].geometry.is_some());
+        assert!(
+            lossy[0].1.messages.iter().any(|m| m.contains("1 hole in a polygon was unreadable and left out")),
+            "{:?}",
+            lossy[0].1.messages
+        );
+
+        let clean = read("clean.rss", feed("45.2 -110.2 45.8 -110.2 45.8 -110.8 45.2 -110.2").as_bytes()).unwrap();
+        assert_eq!(clean[0].0.features.len(), 1);
+        assert!(!clean[0].1.messages.iter().any(|m| m.contains("hole")), "{:?}", clean[0].1.messages);
+
+        let multi = r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:georss="http://www.georss.org/georss" xmlns:gml="http://www.opengis.net/gml">
+<channel><title>Zoning</title>
+<item><title>Park</title><georss:where><gml:Polygon>
+  <gml:exterior><gml:LinearRing><gml:posList>45 -110 46 -110 46 -111 45 -110</gml:posList></gml:LinearRing></gml:exterior>
+  <gml:interior><gml:LinearRing><gml:posList>bad one</gml:posList></gml:LinearRing></gml:interior>
+  <gml:interior><gml:LinearRing><gml:posList>bad two</gml:posList></gml:LinearRing></gml:interior>
+</gml:Polygon></georss:where></item>
+</channel></rss>"#;
+        let lossy_multi = read("multi.rss", multi.as_bytes()).unwrap();
+        assert!(
+            lossy_multi[0].1.messages.iter().any(|m| m.contains("2 holes in polygons were unreadable and left out")),
+            "{:?}",
+            lossy_multi[0].1.messages
+        );
+
+        let mixed = r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:georss="http://www.georss.org/georss" xmlns:gml="http://www.opengis.net/gml">
+<channel><title>Zoning</title>
+<item><title>Park</title><georss:where><gml:Polygon>
+  <gml:exterior><gml:LinearRing><gml:posList>45 -110 46 -110 46 -111 45 -110</gml:posList></gml:LinearRing></gml:exterior>
+  <gml:interior><gml:LinearRing><gml:posList>45.2 -110.2 45.8 -110.2 45.8 -110.8 45.2 -110.2</gml:posList></gml:LinearRing></gml:interior>
+  <gml:interior><gml:LinearRing><gml:posList>corrupt hole</gml:posList></gml:LinearRing></gml:interior>
+</gml:Polygon></georss:where></item>
+</channel></rss>"#;
+        let mixed_lossy = read("mixed.rss", mixed.as_bytes()).unwrap();
+        assert!(
+            mixed_lossy[0].1.messages.iter().any(|m| m.contains("1 hole in a polygon was unreadable and left out")),
+            "{:?}",
+            mixed_lossy[0].1.messages
+        );
+        match &mixed_lossy[0].0.features[0].geometry {
+            Some(Geometry::Polygon(polys)) => assert_eq!(polys[0].len(), 2, "must keep exterior and valid interior ring"),
+            other => panic!("expected polygon, got {other:?}"),
+        }
     }
 }

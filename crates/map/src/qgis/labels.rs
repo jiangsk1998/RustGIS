@@ -120,7 +120,6 @@ struct Rule<'a, 'i> {
 
 /// The label rules under `node`, bounded in depth and number: the rules left out are counted in
 /// `left`. A rule under an else rule takes only what the else rule does (`else_of`).
-#[allow(clippy::too_many_arguments)]
 fn flatten<'a, 'i>(
     node: Node<'a, 'i>,
     filters: Vec<String>,

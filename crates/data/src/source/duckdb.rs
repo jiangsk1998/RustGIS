@@ -43,6 +43,11 @@ const KEEP: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600)
 /// The column added to sort rows into geometry families; never in a result.
 const DIM: &str = "__rustgis_dim";
 
+/// What a converted table is written as: raised when that changes (dates as dates in 2, nanosecond
+/// timestamps as timestamps in 3), so a table converted before is converted again rather than
+/// kept as it was.
+const CONVERSION: u32 = 3;
+
 /// A database named by commands: DuckDB files, PostgreSQL connections (also queryable through
 /// DuckDB's `postgres` extension), or live-only MySQL, MariaDB and SQL Server connections.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -277,10 +282,20 @@ fn live_not_here() -> DataError {
 }
 
 fn missing() -> DataError {
-    DataError::Unsupported(
+    DataError::Unsupported(missing_text(crate::no_programs_here()))
+}
+
+/// Why a query or a DuckDB database can't be read: DuckDB isn't installed, or (`here` names it)
+/// this build runs no programs, where installing it wouldn't help.
+fn missing_text(here: &str) -> String {
+    if here.is_empty() {
         "SQL queries and DuckDB databases need DuckDB: install it (the duckdb program on the PATH, or RUSTGIS_DUCKDB_BIN naming its folder) and try again"
-            .into(),
-    )
+            .into()
+    } else {
+        format!(
+            "SQL queries and DuckDB databases run through DuckDB, a program {here} can't run: open this project on a computer to use them"
+        )
+    }
 }
 
 /// Where results are kept: the platform's cache folder, or `RUSTGIS_DUCKDB_CACHE`.
@@ -355,6 +370,168 @@ fn check_crs(crs: Option<&str>) -> Result<()> {
     }
 }
 
+/// libpq parameters that read or write local files or inject server start-up options, refused when
+/// handing a connection string to DuckDB's `postgres` extension.
+const REFUSED_PG_PARAMS: &[&str] =
+    &["sslcert", "sslkey", "sslkeylogfile", "sslrootcert", "sslcrl", "sslcrldir", "passfile", "service", "servicefile", "options"];
+
+fn pg_param_named(raw_key: &str) -> bool {
+    let trimmed = raw_key.trim();
+    REFUSED_PG_PARAMS.iter().any(|p| trimmed.eq_ignore_ascii_case(p))
+        || crate::address::normalized_name(trimmed).is_some_and(|norm| REFUSED_PG_PARAMS.contains(&norm.as_str()))
+}
+
+fn pg_param_refused(raw_key: &str) -> bool {
+    pg_param_named(raw_key) || crate::address::normalized_name(raw_key.trim()).is_none()
+}
+
+fn check_pg_query(query: &str, strict: bool) -> Result<()> {
+    let refused = if strict { pg_param_refused } else { pg_param_named };
+    for kv in query.split(['&', ';']).filter(|kv| !kv.is_empty()) {
+        let (k, _) = kv.split_once('=').unwrap_or((kv, ""));
+        let decoded_kv = super::pgconn::percent_decode(kv);
+        let (dk, _) = decoded_kv.split_once('=').unwrap_or((&decoded_kv, ""));
+        if refused(k) || refused(dk) {
+            let shown = dk.trim();
+            return Err(DataError::Format(format!("the connection: parameter '{shown}' isn't allowed")));
+        }
+    }
+    Ok(())
+}
+
+/// Validates the host list of a PostgreSQL URI (including `[ipv6]` and comma-separated hosts) and
+/// returns the remainder starting at `/`, `?`, or the end of `s`.
+fn after_uri_hosts(mut s: &str) -> Result<&str> {
+    loop {
+        if let Some(after_open) = s.strip_prefix('[') {
+            let Some((inside, after_close)) = after_open.split_once(']') else {
+                return Err(DataError::Format("the connection: invalid connection string".into()));
+            };
+            if inside.is_empty() || inside.contains(['?', '/', '#', '&', '=', ';', '@', '[']) {
+                return Err(DataError::Format("the connection: invalid connection string".into()));
+            }
+            s = after_close;
+        }
+        let next = s.find([',', '/', '?', '[']).unwrap_or(s.len());
+        if s.get(..next).unwrap_or("").contains('@') {
+            return Err(DataError::Format("the connection: invalid connection string".into()));
+        }
+        match s.as_bytes().get(next).copied() {
+            Some(b'[') => {
+                return Err(DataError::Format("the connection: invalid connection string".into()));
+            }
+            Some(b',') => {
+                s = s.get(next + 1..).unwrap_or("");
+            }
+            _ => return Ok(s.get(next..).unwrap_or("")),
+        }
+    }
+}
+
+/// Checks a PostgreSQL connection string before handing it to DuckDB's `ATTACH … (TYPE postgres)`.
+fn check_postgres_attach(dsn: &str) -> Result<()> {
+    if dsn.contains('\0') {
+        return Err(DataError::Format("the connection: NUL character isn't allowed".into()));
+    }
+    let t = dsn.trim();
+    let lower = t.to_ascii_lowercase();
+    if lower.starts_with("postgresql://") || lower.starts_with("postgres://") {
+        let Some((_, rest)) = t.split_once("://") else {
+            return Err(DataError::Format("the connection: invalid connection string".into()));
+        };
+        let before_slash = rest.split('/').next().unwrap_or(rest);
+        if let Some(at) = before_slash.find('@') {
+            let user_part = before_slash.get(..at).unwrap_or("");
+            let after_at = before_slash.get(at + 1..).unwrap_or("");
+            let host_part = after_at.split('?').next().unwrap_or("");
+            if user_part.contains(['[', ']']) || host_part.contains('@') || (rest.contains('/') && after_at.contains('@')) {
+                return Err(DataError::Format("the connection: invalid connection string".into()));
+            }
+            if !rest.contains('/')
+                && let Some((_, after_last_at)) = after_at.rsplit_once('@')
+                && let Some((_, q2)) = after_last_at.split_once('?')
+            {
+                check_pg_query(q2, true)?;
+            }
+            let tail = after_uri_hosts(rest.get(at + 1..).unwrap_or(""))?;
+            if let Some((_, query)) = tail.split_once('?') {
+                check_pg_query(query, true)?;
+            }
+            if let Some((_, pre_q)) = user_part.split_once('?') {
+                check_pg_query(pre_q, false)?;
+                if !rest.contains('/')
+                    && let Some((_, full_q)) = rest.split_once('?')
+                {
+                    check_pg_query(full_q, false)?;
+                }
+            }
+        } else {
+            let tail = after_uri_hosts(rest)?;
+            if let Some((_, query)) = tail.split_once('?') {
+                check_pg_query(query, true)?;
+            }
+        }
+        return Ok(());
+    }
+    let mut chars = t.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        if chars.peek().is_none() {
+            break;
+        }
+        let mut key = String::new();
+        while let Some(c) = chars.next_if(|c| !c.is_whitespace() && *c != '=') {
+            key.push(c);
+        }
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        if key.is_empty() || chars.next() != Some('=') {
+            return Err(DataError::Format("the connection: invalid connection string".into()));
+        }
+        if pg_param_refused(&key) {
+            return Err(DataError::Format(format!("the connection: parameter '{key}' isn't allowed")));
+        }
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        let mut val = String::new();
+        if chars.next_if_eq(&'\'').is_some() {
+            let mut closed = false;
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => match chars.next() {
+                        Some(esc) => val.push(esc),
+                        None => return Err(DataError::Format("the connection: unterminated quote".into())),
+                    },
+                    '\'' => {
+                        closed = true;
+                        break;
+                    }
+                    other => val.push(other),
+                }
+            }
+            if !closed {
+                return Err(DataError::Format("the connection: unterminated quote".into()));
+            }
+        } else {
+            while let Some(c) = chars.next_if(|c| !c.is_whitespace()) {
+                if c == '\\' {
+                    if let Some(esc) = chars.next() {
+                        val.push(esc);
+                    }
+                } else {
+                    val.push(c);
+                }
+            }
+        }
+        if key.eq_ignore_ascii_case("dbname") {
+            let vt = val.trim();
+            let vl = vt.to_ascii_lowercase();
+            if vl.starts_with("postgresql://") || vl.starts_with("postgres://") || vt.contains('=') {
+                return Err(DataError::Format("the connection: dbname may not be a connection string".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The statements every run starts with: DuckDB Spatial (installed the first time), x/y axis
 /// order whatever the coordinate system, and the database, when there is one.
 ///
@@ -373,10 +550,12 @@ fn prelude(dir: &Path, database: Option<&Database>, confined: bool) -> Result<St
             if !full.is_file() {
                 return Err(DataError::Format(format!("{}: no such database", db.display())));
             }
+            crate::provenance::path(&full);
             s.push_str(&format!(" ATTACH {} AS src (READ_ONLY); USE src;", literal(&full.display().to_string())));
         }
         // PostGIS geometry columns come through as DuckDB geometries with their coordinate system.
         Some(Database::Postgres(dsn)) => {
+            check_postgres_attach(dsn)?;
             s.push_str(&format!(" INSTALL postgres; LOAD postgres; ATTACH {} AS src (TYPE postgres, READ_ONLY); USE src;", literal(dsn)));
         }
         Some(Database::Mysql(_) | Database::Sqlserver(_)) => return Err(live_not_here()),
@@ -461,11 +640,28 @@ struct Column {
     ty: String,
 }
 
-/// Column types the GeoParquet provider reads as they are; others are written as text.
+/// Column types the GeoParquet provider reads as they are; others are written as text. Dates and
+/// timestamps are written as Parquet's own (a `TIMESTAMPTZ` as a UTC instant); a `TIMESTAMP_NS`
+/// too, which is read rounded to the microsecond and said.
 fn kept_as_is(ty: &str) -> bool {
     matches!(
         ty,
-        "BOOLEAN" | "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "UTINYINT" | "USMALLINT" | "UINTEGER" | "FLOAT" | "DOUBLE" | "VARCHAR"
+        "BOOLEAN"
+            | "TINYINT"
+            | "SMALLINT"
+            | "INTEGER"
+            | "BIGINT"
+            | "UTINYINT"
+            | "USMALLINT"
+            | "UINTEGER"
+            | "FLOAT"
+            | "DOUBLE"
+            | "VARCHAR"
+            | "DATE"
+            | "TIMESTAMP"
+            | "TIMESTAMP_MS"
+            | "TIMESTAMP_NS"
+            | "TIMESTAMP WITH TIME ZONE"
     ) || ty.starts_with("DECIMAL(")
 }
 
@@ -505,6 +701,9 @@ fn select(columns: &[Column], crs: Option<&str>, from: &str) -> Result<(String, 
                 format!("ST_AsText({n}) AS {n}")
             } else if kept_as_is(&c.ty) {
                 n
+            } else if c.ty == "TIMESTAMP_S" {
+                // Parquet has no seconds: an infinite one can't be written as one, but can as microseconds.
+                format!("CAST({n} AS TIMESTAMP) AS {n}")
             } else {
                 format!("CAST({n} AS VARCHAR) AS {n}")
             }
@@ -859,13 +1058,19 @@ fn convert_table_fresh_in(dir: &Path, database: &Path, table: &Table, family: Fa
 fn convert_table_in(dir: &Path, database: &Path, table: &Table, crs: Option<&str>) -> Result<Output> {
     let full = std::path::absolute(database).unwrap_or_else(|_| database.to_path_buf());
     let (len, modified) = stamp(&full)?;
+    crate::provenance::path(&full);
     // Changes not yet checkpointed are in the write-ahead log beside the file.
     let mut wal = full.clone().into_os_string();
     wal.push(".wal");
     let (wal_len, wal_modified) = stamp(Path::new(&wal)).unwrap_or((0, 0));
     // The cache key, spelled out: kept beside the conversion and checked, so a hash collision
     // can't hand back another table.
-    let key = format!("{}\n{}\n{}\n{crs:?}\n{len}\n{modified}\n{wal_len}\n{wal_modified}", full.display(), table.schema, table.name);
+    let key = format!(
+        "{}\n{}\n{}\n{crs:?}\n{len}\n{modified}\n{wal_len}\n{wal_modified}\nconversion {CONVERSION}",
+        full.display(),
+        table.schema,
+        table.name
+    );
     let tag = format!("{:016x}", fnv1a(key.as_bytes()));
     let keyfile = dir.join(format!("{tag}.key"));
     if let Some(hit) = std::fs::read_to_string(&keyfile).ok().and_then(|s| cached(dir, &key, &s)) {
@@ -937,6 +1142,13 @@ fn ours(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn where_programs_cant_run_the_message_says_so_instead_of_asking_for_an_install() {
+        assert!(missing_text("").contains("install it"));
+        let phone = missing_text("a phone");
+        assert!(phone.contains("a phone can't run") && !phone.contains("install"), "{phone}");
+    }
 
     /// Each kind reads only its own client's variable, and an empty one is none (a fake
     /// environment: the process's is never changed).
@@ -1041,6 +1253,62 @@ mod tests {
         let dir = std::env::temp_dir();
         let p = prelude(&dir, Some(&d), true).unwrap();
         assert!(p.contains("ATTACH 'host=db.example dbname=gis user=me' AS src (TYPE postgres, READ_ONLY)") && !p.contains("pw1"), "{p}");
+        let p = prelude(&dir, Some(&u), true).unwrap();
+        assert!(p.contains("ATTACH 'postgresql://me@db.example:5433/osm?sslmode=require' AS src (TYPE postgres, READ_ONLY)"), "{p}");
+
+        // libpq local-file and option parameters are refused before DuckDB `ATTACH` runs.
+        for bad in [
+            "postgres:host=db.example dbname=gis passfile=/tmp/pgpass",
+            "postgres:host=db.example dbname=gis sslrootcert=/tmp/root.crt",
+            "postgres:host=db.example dbname=gis sslcert=/tmp/c.pem",
+            "postgres:host=db.example dbname=gis sslkey=/tmp/k.pem",
+            "postgres:host=db.example dbname=gis sslkeylogfile=/tmp/keys.log",
+            "postgres:host=db.example dbname=gis sslcrl=/tmp/r.pem",
+            "postgres:host=db.example dbname=gis service=prod",
+            "postgres:host=db.example dbname=gis servicefile=/tmp/pg_service.conf",
+            "postgres:host=db.example dbname=gis options='-c log_statement=all'",
+            "postgresql://me@db.example/gis?passfile=/tmp/pgpass",
+            "postgresql://me@db.example/gis?sslkeylogfile=/tmp/keys.log",
+            "postgresql://me@db.example/gis?SSLROOTCERT=/tmp/root.crt",
+            "postgresql://me@db.example/gis?%70assfile=/tmp/pgpass",
+            "postgresql://me@db.example/gis?sslmode=require;servicefile=/tmp/pg_service.conf",
+            "postgres:host=db.example dbname='postgresql://me@db.example/gis?passfile=/tmp/pgpass'",
+        ] {
+            let db = Database::parse(bad);
+            assert!(prelude(&dir, Some(&db), true).is_err(), "{bad}");
+        }
+        for bad in [
+            "postgresql://me@db.example/gis?application_name=x#&sslrootcert=/tmp/root.crt",
+            "postgresql://u?x@db.example/gis?sslrootcert=/tmp/root.crt",
+            "postgresql://db.example?options=-c%20foo@bar?sslmode=require",
+            "postgresql://me@db.example/gis?sslkeylogfile=/tmp/keys.log",
+            "postgresql://[fe80::1?x]/gis?sslrootcert=/tmp/root.crt",
+            "postgresql://[::1]?x@db.example/gis?sslrootcert=/tmp/root.crt",
+            "postgresql://[::1]?x=1@db.example/gis?sslkeylogfile=/tmp/keys.log",
+            "postgresql://[u]?x@db.example/gis?sslrootcert=/tmp/root.crt",
+            "postgresql://u1@u2?x@db.example/gis?sslrootcert=/tmp/root.crt",
+            "postgresql://u1@u2?x@db.example?sslrootcert=/tmp/root.crt",
+            "postgresql://u@[fe80::1?x]/gis?sslrootcert=/tmp/root.crt",
+            "postgresql://h1,[fe80::1?x]/gis?sslrootcert=/tmp/root.crt",
+            "postgresql://[::1]:5432/gis?sslrootcert=/tmp/root.crt",
+            "postgresql://[::1/gis",
+            "postgresql://u@[::1/gis",
+            "host=db.example dbname=gis sslkeylogfile=/tmp/keys.log",
+            "host=db.example bare passfile=/tmp/pgpass",
+            "host='unterminated",
+        ] {
+            assert!(prelude(&dir, Some(&Database::Postgres(bad.into())), true).is_err(), "{bad}");
+        }
+        for good in [
+            "postgresql://u?x@db.example/gis?sslmode=require",
+            "postgresql://u@db.example?application_name=alice@team",
+            "postgresql://[::1]:5432/gis?sslmode=require",
+            "postgresql://[::1]/gis",
+            "postgresql://user@[fe80::1%25eth0]:5432/gis?sslmode=require",
+            "postgresql://[::1]:5432,[fe80::1%25eth0]:5433/gis?sslmode=require",
+        ] {
+            assert!(prelude(&dir, Some(&Database::Postgres(good.into())), true).is_ok(), "{good}");
+        }
     }
 
     #[test]
@@ -1088,12 +1356,27 @@ mod tests {
         // No geometry column.
         let e = select(&cols(&[("a", "INTEGER")]), None, "x").unwrap_err();
         assert!(e.to_string().contains("no geometry column"), "{e}");
-        // Types the provider doesn't read become text; a second geometry, WKT.
-        let (s, g) =
-            select(&cols(&[("d", "DATE"), ("geom", "GEOMETRY"), ("n", "DECIMAL(10,2)"), ("g2", "GEOMETRY('EPSG:3857')")]), None, "x")
-                .unwrap();
+        // Types the provider doesn't read become text; dates stay dates; a second geometry, WKT.
+        let (s, g) = select(
+            &cols(&[
+                ("d", "DATE"),
+                ("geom", "GEOMETRY"),
+                ("n", "DECIMAL(10,2)"),
+                ("g2", "GEOMETRY('EPSG:3857')"),
+                ("t", "TIMESTAMP WITH TIME ZONE"),
+                ("ns", "TIMESTAMP_NS"),
+                ("s", "TIMESTAMP_S"),
+                ("l", "INTEGER[]"),
+            ]),
+            None,
+            "x",
+        )
+        .unwrap();
         assert_eq!(g, "geom");
-        assert!(s.contains("CAST(\"d\" AS VARCHAR)") && s.contains("ST_Force2D(\"geom\") AS \"geom\""), "{s}");
+        assert!(s.contains("(SELECT \"d\", ") && s.contains(", \"t\", ") && s.contains("ST_Force2D(\"geom\") AS \"geom\""), "{s}");
+        assert!(s.contains("\"ns\",") && !s.contains("CAST(\"ns\""), "{s}");
+        assert!(s.contains("CAST(\"l\" AS VARCHAR)"), "{s}");
+        assert!(s.contains("CAST(\"s\" AS TIMESTAMP) AS \"s\""), "{s}");
         assert!(s.contains(", \"n\",") && s.contains("ST_AsText(\"g2\")"), "{s}");
         // A geometry that says its coordinate system is converted; one given is used.
         let (s, _) = select(&cols(&[("g", "GEOMETRY('EPSG:3857')")]), None, "x").unwrap();
@@ -1167,10 +1450,11 @@ mod tests {
         let open = |p: &Path| crate::source::open_path(p, None).unwrap();
 
         // Mixed geometry, a row without one, a projected column and types written as text.
-        let sql = "SELECT 1 AS id, 'a' AS name, DATE '2020-01-02' AS day, ST_Point(10, 20) AS geom \
-            UNION ALL SELECT 2, 'b', NULL, ST_GeomFromText('LINESTRING(0 0, 1 1)') \
-            UNION ALL SELECT 3, 'c', NULL, ST_GeomFromText('POINT(11 21)') \
-            UNION ALL SELECT 4, 'd', NULL, NULL;";
+        // An infinite time is written, and read as empty with a count.
+        let sql = "SELECT 1 AS id, 'a' AS name, DATE '2020-01-02' AS day, TIMESTAMP_S '2020-01-02 03:04:05' AS seen, ST_Point(10, 20) AS geom \
+            UNION ALL SELECT 2, 'b', NULL, NULL, ST_GeomFromText('LINESTRING(0 0, 1 1)') \
+            UNION ALL SELECT 3, 'c', NULL, TIMESTAMP_S 'infinity', ST_GeomFromText('POINT(11 21)') \
+            UNION ALL SELECT 4, 'd', NULL, NULL, NULL;";
         let out = run_in(&cache, &Query { sql, ..Query::default() }, false).unwrap();
         assert_eq!(out.skipped, 1);
         assert_eq!(out.parts.len(), 2);
@@ -1187,14 +1471,40 @@ mod tests {
         let info = pts.info();
         assert_eq!(info.count, Some(2));
         assert!(info.indexed, "the bbox covering is found");
-        assert_eq!(info.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["id", "name", "day"]);
-        assert_eq!(info.fields[2].ty, crate::FieldType::Text);
+        assert_eq!(info.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["id", "name", "day", "seen"]);
+        assert_eq!(info.fields[2].ty, crate::FieldType::Date);
+        assert_eq!(info.fields[3].ty, crate::FieldType::DateTime);
         let b = pts.read(&crate::source::Request { extent: Some(rustgis_geom::Extent::new(10.5, 20.5, 12.0, 22.0)), limit: 10 }).unwrap();
         assert_eq!(b.features.len(), 1, "the extent query reads the covering");
         assert_eq!(b.features[0].geometry.as_ref().unwrap().extent(), rustgis_geom::Extent::new(11.0, 21.0, 11.0, 21.0));
         let all_points = pts.read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
         assert_eq!(all_points.features.len(), 2);
         assert!(all_points.features.iter().all(|f| f.geometry.as_ref().unwrap().kind() == crate::GeometryType::Point));
+        let days: Vec<String> = all_points.features.iter().map(|f| f.attrs[2].to_string()).collect();
+        assert!(days.contains(&"2020-01-02".to_string()), "{days:?}");
+        assert_eq!(all_points.unread_dates.iter().sum::<usize>(), 1);
+        assert_eq!(all_points.unread_dates.get(3), Some(&1));
+        // Each date type passed through writes infinity, which is read as empty and counted.
+        let sql = "SELECT 1 AS id, DATE 'infinity' AS d, TIMESTAMP 'infinity' AS t, TIMESTAMP_S '-infinity' AS s, \
+            TIMESTAMP_MS 'infinity' AS ms, TIMESTAMPTZ 'infinity' AS tz, ST_Point(1, 2) AS geom";
+        let out = run_in(&cache, &Query { sql, ..Query::default() }, false).unwrap();
+        let infinite = open(&out.parts[0].path).read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
+        assert_eq!(infinite.features.len(), 1);
+        assert_eq!(infinite.unread_dates, [0, 1, 1, 1, 1, 1]);
+        // A nanosecond timestamp is a timestamp, rounded to the microsecond and counted.
+        let sql = "SELECT 1 AS id, TIMESTAMP_NS '2026-03-05 12:34:56.123456789' AS n, TIMESTAMP_NS '2026-03-05 12:34:56.123456' AS m, \
+            ST_Point(1, 2) AS geom";
+        let out = run_in(&cache, &Query { sql, ..Query::default() }, false).unwrap();
+        let nanos = open(&out.parts[0].path);
+        assert_eq!(
+            nanos.info().fields.iter().map(|f| f.ty).collect::<Vec<_>>(),
+            [crate::FieldType::Integer, crate::FieldType::DateTime, crate::FieldType::DateTime]
+        );
+        let batch = nanos.read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
+        assert!(batch.unread_dates.is_empty());
+        assert_eq!(batch.rounded_dates, [0, 1]);
+        assert_eq!(batch.features[0].attrs[1].to_string(), "2026-03-05T12:34:56.123457");
+        assert_eq!(batch.features[0].attrs[2].to_string(), "2026-03-05T12:34:56.123456");
         // No temporary files are left.
         let names: Vec<String> =
             std::fs::read_dir(&cache).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();

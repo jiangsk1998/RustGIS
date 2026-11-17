@@ -16,11 +16,10 @@
 //!   `omerc`, `cass`, `eqdc`, `poly`, `ortho`, `bonne`, `wink2` and more; 0.3 grew the oblique
 //!   Mercator, Cassini, the polyconic, the equidistant conic and the orthographic, whose ESRI
 //!   systems are candidates to add), and the NAD27 ones whose grids proj4rs can't load: 167;
-//! - six world systems RustGIS computes on a sphere where PROJ uses the ellipsoid or other
-//!   parameters, kilometres apart: World Miller (54003), the WGS 84 Equal Earths (54035–54037)
-//!   and the Winkel Tripel NGS pair (53042, 54042), whose `lat_1` the map didn't read then (it
-//!   does since #1701, so they are candidates to add). The presets, and EPSG:8857, stay the way
-//!   to draw these;
+//! - six world systems RustGIS computed on a sphere before terrio-crs, where PROJ uses the
+//!   ellipsoid or other parameters, kilometres apart: World Miller (54003), the WGS 84 Equal
+//!   Earths (54035–54037) and the Winkel Tripel NGS pair (53042, 54042). terrio-crs computes them
+//!   as PROJ does, so they are candidates to add;
 //! - 44 systems whose datum PROJ shifts to WGS 84 by something other than one Helmert step
 //!   (Molodensky–Badekas for Korean 1985, a chain of operations for NGO 1948 …), and the 11
 //!   planetary ones (Moon, Mars), whose bodies the map can't hold;
@@ -28,8 +27,8 @@
 //!   two two-point oblique Mercators (53025, 54025), which RustGIS refuses.
 //!
 //! The three Earth sinusoidal systems (Sphere and World Sinusoidal, 53008 and 54008, and Africa
-//! Sinusoidal, 102011) were added afterwards (opengeos/RustGIS#563): RustGIS computes the
-//! sinusoidal projection itself (`rustgis_geom::Sinusoidal`), checked against PROJ in its tests.
+//! Sinusoidal, 102011) were added afterwards (opengeos/RustGIS#563), checked against PROJ in
+//! the tests.
 //!
 //! Datum shifts follow `epsg_gap.rs`: where the definition has none and the first grid-free
 //! operation to WGS 84 that PROJ lists is a single non-zero Helmert step, it is written as

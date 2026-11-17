@@ -121,7 +121,6 @@ pub fn save(store: Store<'_>, c: &Connection, key: &str, secret: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -14,7 +14,7 @@ pub enum Target {
 }
 
 /// Captured source details and the replacement selected in Repair Data Source.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "the browser can't pick a replacement file, so it reads less of the form"))]
 pub struct Form {
     target: Target,
     opened: u64,
@@ -277,7 +277,6 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

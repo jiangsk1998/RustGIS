@@ -13,10 +13,10 @@ pub const SHOWS: [(&str, u32, u32, bool); 4] =
     [("step", 0, 1, false), ("wide", 1, 1, false), ("wider", 3, 3, false), ("cumulative", 0, 1, true)];
 
 /// The most frames an export makes.
-const MAX_FRAMES: usize = 2000;
+pub(super) const MAX_FRAMES: usize = 2000;
 /// The most pixels an export renders over all its frames (it blocks while it runs): 300 frames
 /// at 1280 × 720, or 2000 at about 500 × 300.
-const MAX_PIXELS: f64 = 3.0e8;
+pub(super) const MAX_PIXELS: f64 = 3.0e8;
 
 /// The map has a time slider.
 fn need_slider(s: &Session) -> Option<&'static str> {
@@ -103,7 +103,12 @@ pub fn info(s: &Session) -> Value {
             Some(json!({"layer": l.name, "field": t.field, "shown": in_window, "features": n}))
         })
         .collect();
-    let tiles: Vec<Value> = m.tiles.iter().filter(|t| t.time_url.is_some()).map(|t| json!({"name": t.name, "url": t.url})).collect();
+    let tiles: Vec<Value> = m
+        .tiles
+        .iter()
+        .filter(|t| t.time_url.is_some())
+        .map(|t| json!({"name": t.name, "url": crate::sources::redact_output(&t.url)}))
+        .collect();
     let Some(t) = &m.time else { return json!({"on": false, "layers": bound, "tiles": tiles}) };
     let steps = t.steps();
     let (from, to) = t.window();
@@ -310,6 +315,8 @@ fn export_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::In
         places.insert(crate::sources::redact(&tile.url));
         places.extend(tile.legends.iter().map(|legend| crate::sources::redact(&legend.url)));
     });
+    // The terrain's elevation tiles come from one address at every step.
+    places.extend(super::tiles::terrain_tiles(input.map()).map(crate::sources::redact));
     inputs.review_places = places.into_iter().collect();
     Ok(inputs)
 }
@@ -317,7 +324,8 @@ fn export_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::In
 /// A later selected frame can reveal another source even when the current frame draws none.
 pub(crate) fn export_reach(input: &super::InputContext<'_>, p: &Value) -> crate::policy::Effects {
     let Ok(frames) = export_frames(input.map(), p) else { return crate::policy::Effects::NONE };
-    let mut reach = crate::policy::Effects::NONE;
+    // The terrain's elevation tiles are the same at every step.
+    let mut reach = super::tiles::terrain_reach(input.map());
     frame_tiles(input.map(), &frames, |tile| {
         reach = reach.union(super::tiles::render_tile_reach(tile));
     });
@@ -326,6 +334,7 @@ pub(crate) fn export_reach(input: &super::InputContext<'_>, p: &Value) -> crate:
 
 /// Renders every step (or those from `from` to `to`) and writes them as a GIF or a zip of PNGs.
 fn export(s: &mut Session, p: &Value) -> CmdResult {
+    let written = s.notice_mark();
     // Files are written by the desktop app; the browser's go through its services.
     if cfg!(target_arch = "wasm32") {
         return Err("exporting time animations needs the desktop app".into());
@@ -340,28 +349,82 @@ fn export(s: &mut Session, p: &Value) -> CmdResult {
     let speed = f(p, "speed").map_or(saved.speed_ms, |x| x.clamp(16.0, 60_000.0) as u32);
     // Each frame shows the view's extent, as Export Map does. The slider comes back however the
     // frames end (an error, or a panic the session catches).
-    let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frames(s, &steps, w, h, gif.then_some(speed))));
+    let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        frames(s, "The time animation", steps.len(), (w, h, 96.0), gif.then_some(speed), |s, i| {
+            if let (Some(sl), Some(t)) = (s.map_mut().time.as_mut(), steps.get(i)) {
+                sl.current = *t;
+            }
+            s.map_mut().apply_time();
+            // Zarr layers that follow the slider read this step's slice, here: each frame draws
+            // its own step.
+            super::zarr::follow_time_now(s);
+        })
+    }));
     s.map_mut().time = Some(saved);
     s.map_mut().apply_time();
     // The step it is back at, read here: a command after the export may read the layer.
     super::zarr::follow_time_now(s);
     let bytes = made.map_err(|_| "exporting the time steps failed unexpectedly".to_string())??;
     rustgis_data::io::write_atomic(std::path::Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
+    s.retain_written_notices(written);
     Ok(json!({"path": path, "frames": steps.len(), "bytes": bytes.len()}))
 }
 
 /// The browser build doesn't export (files go through the app's services there), so it leaves
 /// the GIF encoder out.
 #[cfg(target_arch = "wasm32")]
-fn frames(_: &mut Session, _: &[f64], _: f64, _: f64, _: Option<u32>) -> Result<Vec<u8>, String> {
-    Err("exporting time animations needs the desktop app".into())
+pub(super) fn frames(
+    _: &mut Session,
+    _: &str,
+    _: usize,
+    _: (f64, f64, f64),
+    _: Option<u32>,
+    _: impl FnMut(&mut Session, usize),
+) -> Result<Vec<u8>, String> {
+    Err("exporting animations needs the desktop app".into())
 }
 
-/// Renders the map at each step: an animated GIF that loops, each frame shown for `gif`
-/// milliseconds, or (`None`) a zip of PNGs.
+/// See [`frames`]: the browser build leaves the GIF encoder out.
+#[cfg(target_arch = "wasm32")]
+pub(super) fn animate(_: usize, _: Option<u32>, _: impl FnMut(usize) -> Result<Vec<u8>, String>) -> Result<Vec<u8>, String> {
+    Err("exporting animations needs the desktop app".into())
+}
+
+/// Renders the map `n` times at `(width, height, dpi)`, after `go` set the session up for each
+/// frame (a time step): the animation [`animate`] writes. What the frames said of their cast
+/// shadows is said once, about `what`, not once a frame.
 #[cfg(not(target_arch = "wasm32"))]
-fn frames(s: &mut Session, steps: &[f64], w: f64, h: f64, gif: Option<u32>) -> Result<Vec<u8>, String> {
+pub(super) fn frames(
+    s: &mut Session,
+    what: &str,
+    n: usize,
+    (w, h, dpi): (f64, f64, f64),
+    gif: Option<u32>,
+    mut go: impl FnMut(&mut Session, usize),
+) -> Result<Vec<u8>, String> {
+    super::share::saying_shadows(s, what, |s| {
+        animate(n, gif, |i| {
+            go(s, i);
+            // Natively the frame (through rustgis_render::render_complete) fetches the tiles it
+            // lacks and waits for them before it draws: dated tile layers have this step's
+            // address by now, so each frame shows its own date's imagery.
+            let png = super::share::map_png_unsaid(s, Some(w), Some(h), Some(dpi))?;
+            // What this frame's file left out, said while its header is surely in (a cleared
+            // tile cache could drop it before the export ends): the slider moves on before the
+            // command's own landing check.
+            s.notice_landed_rasters();
+            Ok(png)
+        })
+    })
+}
+
+/// The `n` PNGs `frame` draws, one a call, as an animated GIF that loops, each frame shown for
+/// `gif` milliseconds, or (`None`) a zip of PNGs. The frames are its progress
+/// (`rustgis_data::progress`), and a run asked to stop stops between them with nothing made.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn animate(n: usize, gif: Option<u32>, mut frame: impl FnMut(usize) -> Result<Vec<u8>, String>) -> Result<Vec<u8>, String> {
     use image::codecs::gif::{GifEncoder, Repeat};
+    let stop = || rustgis_data::progress::check().map_err(|e| e.to_string());
     let mut out = Vec::new();
     let mut pngs = Vec::new();
     {
@@ -373,18 +436,13 @@ fn frames(s: &mut Session, steps: &[f64], w: f64, h: f64, gif: Option<u32>) -> R
             }
             None => None,
         };
-        for (i, t) in steps.iter().enumerate() {
-            if let Some(sl) = s.map_mut().time.as_mut() {
-                sl.current = *t;
-            }
-            s.map_mut().apply_time();
-            // Zarr layers that follow the slider read this step's slice, here: each frame draws
-            // its own step.
-            super::zarr::follow_time_now(s);
-            // Dated tile layers have this step's address now: natively, map_png (through
-            // rustgis_render::render_complete) fetches the tiles it lacks and waits for them
-            // before it draws, so each frame shows its own date's imagery.
-            let png = super::share::map_png(s, Some(w), Some(h), Some(96.0))?;
+        rustgis_data::progress::begin(n);
+        for i in 0..n {
+            // Before the frame, so a run already asked to stop draws nothing.
+            stop()?;
+            let png = frame(i)?;
+            // After the frame, so one whose wait for tiles was cut short is never kept.
+            stop()?;
             match (&mut enc, gif) {
                 (Some(e), Some(ms)) => {
                     let img = image::load_from_memory_with_format(&png, image::ImageFormat::Png).map_err(|e| e.to_string())?.to_rgba8();
@@ -393,6 +451,7 @@ fn frames(s: &mut Session, steps: &[f64], w: f64, h: f64, gif: Option<u32>) -> R
                 }
                 _ => pngs.push((format!("frame_{:04}.png", i + 1), png)),
             }
+            rustgis_data::progress::step(1).map_err(|e| e.to_string())?;
         }
     }
     if gif.is_some() { Ok(out) } else { rustgis_data::zip::write(&pngs) }

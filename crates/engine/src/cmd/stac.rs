@@ -129,17 +129,38 @@ pub(super) fn collections(s: &mut Session, p: &Value) -> CmdResult {
         } else {
             stac::collections_url(&api)
         };
-        let bytes = crate::render::rustgis_tiles::cache::download_blocking(&url)?;
-        collections_json(&api, &bytes)
+        let fetched = crate::render::rustgis_tiles::cache::download_blocking_with_origin(&url)?;
+        collections_json_from_origin(s, &api, &fetched.bytes, &fetched.origin)
     }
 }
 
-pub(super) fn collections_json(api: &str, bytes: &[u8]) -> CmdResult {
+pub(super) fn collections_json(s: &mut Session, api: &str, bytes: &[u8]) -> CmdResult {
+    collections_json_from_origin(s, api, bytes, &crate::render::rustgis_tiles::address::Origin::named(api))
+}
+
+fn collections_json_from_origin(
+    s: &mut Session,
+    api: &str,
+    bytes: &[u8],
+    origin: &crate::render::rustgis_tiles::address::Origin,
+) -> CmdResult {
     if stac::catalog::is_static(api) {
-        let c = stac::catalog::parse_children(bytes, api)?;
-        return Ok(
-            json!({"count": c.len(), "static": true, "collections": c.iter().map(|c| json!({"id": c.url, "title": c.title})).collect::<Vec<_>>()}),
-        );
+        let listing = stac::catalog::parse_children_noted(bytes, origin)?;
+        if listing.refused > 0 {
+            s.warn(format!("{} catalog links were refused by the document's network reach", listing.refused));
+        }
+        if listing.skipped > 0 {
+            s.warn(format!("{} catalog links were left out because their addresses are missing, invalid or not HTTP(S)", listing.skipped));
+        }
+        if listing.omitted > 0 {
+            s.warn(format!("{} catalog links were left out because the listing limit was reached", listing.omitted));
+        }
+        let c = listing.links;
+        let mut out = json!({"count": c.len(), "static": true, "collections": c.iter().map(|c| json!({"id": c.url, "title": c.title})).collect::<Vec<_>>()});
+        if listing.refused > 0 || listing.omitted > 0 || listing.skipped > 0 {
+            out["truncated"] = json!(true);
+        }
+        return Ok(out);
     }
     let c = stac::parse_collections(bytes)?;
     Ok(json!({"count": c.len(), "collections": c.iter().map(|c| json!({"id": c.id, "title": c.title})).collect::<Vec<_>>()}))
@@ -177,21 +198,23 @@ fn search(s: &mut Session, p: &Value) -> CmdResult {
     {
         // A shape goes in the body of a POST, which has no limit that matters; a server that
         // refuses it is asked again in the query, when the shape is short enough for one.
-        let (bytes, url, posted) = if search.intersects.is_some() {
+        let (fetched, posted) = if search.intersects.is_some() {
             let post = stac::search_post_url(&api);
             let body = stac::search_body(&search)?.to_string();
-            match crate::render::rustgis_tiles::cache::post_json_named_blocking(&post, &body) {
-                Ok(bytes) => (bytes, post, true),
+            match crate::render::rustgis_tiles::cache::post_json_named_blocking_with_origin(&post, &body) {
+                Ok(fetched) => (fetched, true),
                 Err(e) => {
                     let url = stac::search_url(&api, &search).map_err(|_| e.clone())?;
-                    (crate::render::rustgis_tiles::cache::download_blocking(&url).map_err(|_| e)?, url, false)
+                    (crate::render::rustgis_tiles::cache::download_blocking_with_origin(&url).map_err(|_| e)?, false)
                 }
             }
         } else {
             let url = stac::search_url(&api, &search)?;
-            (crate::render::rustgis_tiles::cache::download_blocking(&url)?, url, false)
+            (crate::render::rustgis_tiles::cache::download_blocking_with_origin(&url)?, false)
         };
-        let (items, next) = stac::parse_items(&bytes, &url)?;
+        let bytes = fetched.bytes;
+        let origin = fetched.origin;
+        let (items, next) = stac::parse_items_from_origin(&bytes, &origin)?;
         // A POST's next link is a request with a body, which is not an address to give back.
         let next = if posted {
             // `parse_items` drops a POST link, so the answer itself says whether there are more.
@@ -201,8 +224,16 @@ fn search(s: &mut Session, p: &Value) -> CmdResult {
             }
             None
         } else {
+            // `parse_items` drops a next link the reach refuses: said, so the missing page isn't taken for none.
+            if stac::next_refused(&bytes, &origin) {
+                s.warn("the answer's next page link is refused (it points where this search may not read), so only this page is loaded");
+            }
             next
         };
+        // An API without the sort extension may ignore a sort instead of refusing it.
+        if let Some(note) = sort_ignored(&items, search.sortby.as_deref()).or_else(|| sort_unchecked(&items, search.sortby.as_deref())) {
+            s.warn(note);
+        }
         let all = b(p, "properties").unwrap_or(false);
         let mut out =
             json!({"count": items.len(), "items": items.iter().map(|i| stac::item_json_with(i, all)).collect::<Vec<_>>(), "next": next});
@@ -219,6 +250,33 @@ fn search(s: &mut Session, p: &Value) -> CmdResult {
         }
         Ok(out)
     }
+}
+
+/// What to warn when the items an API answered are visibly not in the order asked for (an API
+/// without the sort extension may ignore a sort rather than refuse it); none when they are in
+/// order or it can't be told. Only the desktop searches here (the web app searches from its pane).
+#[cfg(not(target_arch = "wasm32"))]
+fn sort_ignored(items: &[Item], sortby: Option<&str>) -> Option<String> {
+    (stac::sort_followed(items, sortby) == Some(false)).then(|| {
+        format!(
+            "sortby {} was not followed: the items are not in that order, so this API may not sort (its first {} items are shown in its own order)",
+            sortby.unwrap_or("").trim(),
+            items.len()
+        )
+    })
+}
+
+/// What to say when a sort was asked for and the items can't show whether the API followed it
+/// (the sort is on a field that isn't compared, or the dates can't be compared): the order is
+/// the API's, and not known to be the one asked for.
+#[cfg(not(target_arch = "wasm32"))]
+fn sort_unchecked(items: &[Item], sortby: Option<&str>) -> Option<String> {
+    stac::sort_unchecked(items, sortby).then(|| {
+        format!(
+            "sortby {} could not be checked: the items' order can't be told, so it is not known whether this API sorted them",
+            sortby.unwrap_or("").trim()
+        )
+    })
 }
 
 /// A search of a static catalog: a walk from its document, keeping the items that match.
@@ -251,10 +309,18 @@ fn search_static(s: &mut Session, p: &Value, root: &str) -> CmdResult {
         let walk = stac::catalog::walk_blocking(root, filter, search.limit);
         let complete = walk.complete();
         let (read, failed) = (walk.reads, walk.failed);
+        let refused = walk.refused();
+        if refused > 0 {
+            s.warn(format!("{refused} catalog links were refused by the document's network reach"));
+        }
+        let skipped = walk.skipped();
+        if skipped > 0 {
+            s.warn(format!("{skipped} catalog links were left out because their addresses are missing, invalid or not HTTP(S)"));
+        }
         let items = walk.into_items();
         let all = b(p, "properties").unwrap_or(false);
         let mut out = json!({"count": items.len(), "items": items.iter().map(|i| stac::item_json_with(i, all)).collect::<Vec<_>>(),
-            "complete": complete, "read": read, "failed": failed});
+            "complete": complete, "read": read, "failed": failed, "refused": refused, "skipped": skipped});
         if let Some(n) = note {
             out["note"] = json!(n);
         }
@@ -288,11 +354,16 @@ fn item(p: &Value) -> Result<Item, String> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let bytes = crate::render::rustgis_tiles::cache::download_blocking(url)?;
-        let mut i = stac::parse_item(&bytes, url)?;
-        i.url.get_or_insert_with(|| url.to_string());
-        Ok(i)
+        item_downloaded(crate::render::rustgis_tiles::cache::download_blocking_fetched(url)?, url)
     }
+}
+
+/// Revalidates the item at its fresh transport-observed origin, including any redirects.
+#[cfg(not(target_arch = "wasm32"))]
+fn item_downloaded(fetched: crate::render::rustgis_tiles::cache::Fetched, requested: &str) -> Result<Item, String> {
+    let mut item = stac::parse_item_from_origin(&fetched.bytes, &fetched.origin)?;
+    item.url.get_or_insert_with(|| requested.to_string());
+    Ok(item)
 }
 
 fn add_asset(s: &mut Session, p: &Value) -> CmdResult {
@@ -308,6 +379,10 @@ fn add_asset(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(not(target_arch = "wasm32"))]
     let href = stac::sign_blocking(&href)?;
     let mut add = json!({"url": href, "name": name});
+    // This value comes from the freshly fetched item (or a conservative JSON parser), never a caller's reach claim.
+    if i.origin_reach == crate::render::rustgis_tiles::address::Reach::Public {
+        add["fromDocument"] = json!(true);
+    }
     if let Some(connection) = p.get("connection") {
         add["connection"] = connection.clone();
     }
@@ -800,16 +875,18 @@ pub fn stac_cube(s: &mut Session, p: &Value) -> Result<StacCube, String> {
     };
     let read_tile_rows = layout.levels.get(read).map_or(1, |l| l.tile_height).div_ceil(factor).max(1);
     // The area, in the files' coordinates: the box's edges, each at 32 points, as a curved grid
-    // (MODIS's sinusoidal) bends them.
+    // (MODIS's sinusoidal) bends them. A point the system refuses (one it can't bring back,
+    // #1925) is an error: the points left would bound less than the box.
     let tr = layout.crs.transformer()?;
     let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
     let [w, so, e, n] = bbox;
     for k in 0..=32 {
         let t = f64::from(k) / 32.0;
         for (lon, lat) in [(w + (e - w) * t, so), (w + (e - w) * t, n), (w, so + (n - so) * t), (e, so + (n - so) * t)] {
-            if let Some(c) = tr.from_lonlat(rustgis_geom::Coord::new(lon, lat)) {
-                (x0, y0, x1, y1) = (x0.min(c.x), y0.min(c.y), x1.max(c.x), y1.max(c.y));
-            }
+            let c = tr.from_lonlat(rustgis_geom::Coord::new(lon, lat)).ok_or_else(|| {
+                format!("the area reaches ({lon:.3}, {lat:.3}), which {} can't hold; choose a smaller area", layout.crs.label())
+            })?;
+            (x0, y0, x1, y1) = (x0.min(c.x), y0.min(c.y), x1.max(c.x), y1.max(c.y));
         }
     }
     if !(x0 < x1 && y0 < y1) {
@@ -1362,6 +1439,34 @@ enum Sample {
 mod tests {
     use rustgis_data::raster::GeoTransform;
 
+    /// A search sorted by date warns when the API's items are not in that order, and only then.
+    #[test]
+    fn a_sort_the_api_ignored_is_warned_and_one_it_followed_is_not() {
+        let features: Vec<_> = ["2024-06-03T00:00:00Z", "2024-06-02T00:00:00Z", "2024-06-01T00:00:00Z"]
+            .iter()
+            .enumerate()
+            .map(
+                |(n, d)| serde_json::json!({"type": "Feature", "id": format!("i{n}"), "bbox": [0, 0, 1, 1], "properties": {"datetime": d}}),
+            )
+            .collect();
+        let body = serde_json::json!({"type": "FeatureCollection", "features": features}).to_string();
+        let items = crate::render::rustgis_tiles::stac::parse_items(body.as_bytes(), "https://x.org/v1/search").unwrap().0;
+        // Newest first, as answered: nothing to say. Asked oldest first: the API did not sort.
+        assert_eq!(super::sort_ignored(&items, Some("-datetime")), None);
+        assert_eq!(super::sort_ignored(&items, None), None);
+        assert_eq!(super::sort_ignored(&items, Some("platform")), None);
+        let note = super::sort_ignored(&items, Some(" datetime ")).unwrap();
+        assert!(note.contains("sortby datetime was not followed") && note.contains("3 items"), "{note}");
+        // A sort the items can't show is said so, and only then: not for one the items show, no
+        // sort, or one item.
+        let unknown = super::sort_unchecked(&items, Some(" platform ")).unwrap();
+        assert!(unknown.contains("sortby platform could not be checked"), "{unknown}");
+        assert_eq!(super::sort_unchecked(&items, Some("-datetime")), None);
+        assert_eq!(super::sort_unchecked(&items, Some("datetime")), None, "ignored is the other note's to say");
+        assert_eq!(super::sort_unchecked(&items, None), None);
+        assert_eq!(super::sort_unchecked(&items[..1], Some("platform")), None);
+    }
+
     /// A piece's rows: as many as fit, whole tiles of rows when one fits, at least one; none when
     /// a single row is too many. Piauí at ~1 km over 25 years of 16-day composites (645 × 984
     /// cells, 576 dates) takes about a sixth of the rows a piece.
@@ -1391,7 +1496,6 @@ mod tests {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[allow(clippy::unwrap_used)]
 mod deferred_asset_tests {
     use super::*;
 
@@ -1430,6 +1534,7 @@ mod deferred_asset_tests {
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         let mut params = request.params().clone();
+        assert_eq!(params["fromDocument"], true);
         let download = s.download_started_for(&request).unwrap();
         assert!(
             s.download_landed(
@@ -1450,5 +1555,46 @@ mod deferred_asset_tests {
         assert_eq!(layer.connection, connection);
         assert_eq!(layer.name, "Downloaded asset");
         assert_eq!(layer.dataset.features.len(), 1);
+    }
+    #[test]
+    fn refetched_assets_use_the_observed_item_origin_instead_of_its_hostname() {
+        use crate::render::rustgis_tiles::{address::Origin, cache::Fetched};
+        let requested = "https://catalog.corp.example/item.json";
+        let bytes = json!({"type":"Feature","id":"scene","geometry":null,"properties":{},
+            "assets":{"data":{"href":"http://10.0.0.5/scene.geojson","roles":["data"]}},"links":[]})
+        .to_string()
+        .into_bytes();
+        let local = Origin::connected(requested, "10.0.0.5".parse().unwrap()).unwrap();
+        let item = item_downloaded(Fetched { bytes: bytes.clone(), origin: local }, requested).unwrap();
+        assert_eq!(item.asset_href(Some("data")).unwrap().1, "http://10.0.0.5/scene.geojson");
+        let public = Origin::connected("https://redirected.example/item.json", "93.184.216.34".parse().unwrap()).unwrap();
+        let item = item_downloaded(Fetched { bytes, origin: public }, requested).unwrap();
+        assert!(item.asset_href(Some("data")).is_err());
+    }
+
+    #[test]
+    fn partial_collection_listings_report_omissions_and_duplicates_stay_quiet() {
+        let api = "https://public.example/catalog.json";
+        let mut session = Session::new(crate::Project::default());
+        for (count, refused) in [(1999, false), (2001, true)] {
+            let mut links: Vec<Value> =
+                (0..count).map(|i| json!({"rel":"child","href":format!("https://public.example/{i}.json")})).collect();
+            links.extend([links[0].clone(), links[1].clone()]);
+            if refused {
+                links.push(json!({"rel":"child","href":"http://10.0.0.5/private.json"}));
+                links.push(json!({"rel":"child","href":"ftp://files.example/catalog.json"}));
+            }
+            let text = json!({"type":"Catalog","id":"test","links":links}).to_string();
+            let mark = session.notice_mark();
+            let result = collections_json(&mut session, api, text.as_bytes()).unwrap();
+            assert_eq!(result["count"], count.min(2000));
+            assert_eq!(result.get("truncated").and_then(Value::as_bool).unwrap_or(false), refused);
+            let notices = session.notices_since(mark);
+            assert_eq!(notices.len(), if refused { 3 } else { 0 });
+            if refused {
+                assert!(notices.iter().any(|n| n.text.contains("1 catalog links were refused")));
+                assert!(notices.iter().any(|n| n.text.contains("1 catalog links were left out because their addresses")));
+            }
+        }
     }
 }

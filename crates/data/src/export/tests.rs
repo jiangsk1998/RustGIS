@@ -92,6 +92,7 @@ impl FeatureSource for Runs {
             complete: true,
             skipped: 0,
             unread_dates: Vec::new(),
+            rounded_dates: Vec::new(),
         })
     }
     fn visits_chunks(&self) -> bool {
@@ -107,6 +108,27 @@ impl FeatureSource for Runs {
         }
         Ok(Batch { complete: true, matched: self.features.len() as u64, skipped: self.unreadable, ..Batch::default() })
     }
+}
+
+/// An explicit mixed-case format selects its text writer even when the path says otherwise.
+#[test]
+fn an_explicit_export_format_ignores_case_and_the_filename() {
+    let d = folder("explicit-format");
+    let mut ds = Dataset::new("places", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+    ds.push_next(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Text("place".into())]);
+    let src = Runs::new(&ds, 1);
+    for format in ["CSV", "GeOjSoN"] {
+        let path = d.join(format!("{format}.bin"));
+        assert_eq!(write_source_as_in(&src, &ds, &path, Crs::LonLat, format).unwrap().written, 1);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("place"), "{format}: {text}");
+        if format == "GeOjSoN" {
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["features"].as_array().unwrap().len(), 1);
+        } else {
+            assert_eq!(text, crate::io::to_csv(&ds).unwrap());
+        }
+    }
+    std::fs::remove_dir_all(d).unwrap();
 }
 
 /// An export in Web Mercator written a chunk at a time counts the vertices beyond 85.05° it
@@ -182,7 +204,11 @@ fn a_streamed_export_writes_what_a_whole_export_writes() {
                     // Counted over the chunks as the whole layer counts it.
                     csv: if ext == "csv" { crate::io::CsvLosses::of(&whole.features, whole.geometry_type) } else { Default::default() },
                     unread_dates: Vec::new(),
+                    rounded_dates: Vec::new(),
                     utc_dates,
+                    fine_dates: if ext == "gpkg" { crate::io::fine_dates(whole.features.iter(), &whole.fields) } else { Vec::new() },
+                    written_values: if ext == "fgb" { crate::io::written_values(whole.features.iter(), &whole.fields) } else { Vec::new() },
+                    date_messages: Vec::new(),
                 };
                 assert_eq!(streamed, expected, "{what}");
                 let (a, b) = (read_back(&a), read_back(&b));

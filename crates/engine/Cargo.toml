@@ -26,26 +26,42 @@ iana-time-zone = { version = "0.1", features = ["fallback"] }
 sys-locale = { version = "0.3", features = ["js"] }
 # The GeoLibre tool suite (native only: its tools read and write files).
 rustgis-geolibre = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
 
 [features]
 geolibre = ["dep:rustgis-geolibre"]
 # Existing in-tree Wasm fixtures for adapter tests; no guest or production interface change.
 testing = ["rustgis-plugins/testing"]
+# The JSON Schema of the project file (`cargo xtask schema`).
+schema = ["dep:schemars", "rustgis-data/schema", "rustgis-geom/schema"]
 
 [dev-dependencies]
 miniz_oxide = { workspace = true }
 # Writing sample GeoPackages.
 rusqlite = { workspace = true }
 rustgis-plugins = { workspace = true, features = ["testing"] }
+# Cancelling a command at each of its checks in turn.
+rustgis-analysis = { workspace = true, features = ["testing"] }
 tiny-skia = { workspace = true }
 # Parsing the addresses commands ask for in tests.
 url = { workspace = true }
+# Generated layers for the never-silent round trip (tests/never_silent_roundtrip.rs).
+proptest = { workspace = true }
 
 # Time slider animations as GIFs (exported by the desktop app only).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom = "0.4"
 image = { workspace = true, features = ["gif"] }
 
 # The live PostGIS tests make their own tables, and change rows as someone else would.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 postgres = { workspace = true }
 rustls = { workspace = true }
+
+# The project file's JSON Schema (`cargo xtask schema [--check]`).
+[[example]]
+name = "project_schema"
+required-features = ["schema"]

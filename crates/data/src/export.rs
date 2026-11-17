@@ -47,9 +47,20 @@ pub struct Exported {
     /// written as null ([`crate::source::Batch::unread_dates`], said by
     /// [`crate::source::unread_dates_note`]).
     pub unread_dates: Vec<usize>,
+    /// Per field of the layer, date-times of the source rounded to the microsecond as it was read
+    /// ([`crate::source::Batch::rounded_dates`], said by [`crate::source::rounded_dates_note`]).
+    pub rounded_dates: Vec<usize>,
     /// Per field of the layer, date-times a GeoPackage holds in UTC rather than at their own
     /// offset ([`crate::io::offset_dates`]; empty for the other formats).
     pub utc_dates: Vec<usize>,
+    /// Per field of the layer, date-times a GeoPackage holds rounded to the millisecond
+    /// ([`crate::io::fine_dates`]; empty for the other formats).
+    pub fine_dates: Vec<usize>,
+    /// Per field of the layer, the values a FlatGeobuf export wrote ([`crate::io::written_values`];
+    /// empty for the other formats).
+    pub written_values: Vec<usize>,
+    /// GeoParquet timestamp representation changes counted during export.
+    pub date_messages: Vec<String>,
 }
 
 /// Writes every feature of `src` to `path` in the format of its extension, in `crs` (see
@@ -88,17 +99,37 @@ fn write_chunks_to(
     bytes: usize,
 ) -> Result<(Exported, Option<GpkgWritten>)> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    if !streams(&ext) {
+    write_chunks_as(src, layer, path, crs, gpkg, bytes, &ext)
+}
+
+/// Writes a source in the explicitly chosen format (ignoring case), regardless of the destination's
+/// extension. Used by Data Interop, whose format parameter is independent of its path.
+pub fn write_source_as_in(src: &dyn FeatureSource, layer: &Dataset, path: &Path, crs: Crs, format: &str) -> Result<Exported> {
+    let format = format.to_ascii_lowercase();
+    write_chunks_as(src, layer, path, crs, &GpkgTable::default(), CHUNK_BYTES, &format).map(|(e, _)| e)
+}
+
+/// Shared chunk writer for extension-based exports and explicit-format conversion.
+fn write_chunks_as(
+    src: &dyn FeatureSource,
+    layer: &Dataset,
+    path: &Path,
+    crs: Crs,
+    gpkg: &GpkgTable,
+    bytes: usize,
+    ext: &str,
+) -> Result<(Exported, Option<GpkgWritten>)> {
+    if !streams(ext) {
         return Err(DataError::Unsupported(format!(".{ext} written a chunk at a time")));
     }
     if !src.visits_chunks() {
         return Err(DataError::Unsupported("a source that can't be read a chunk at a time".into()));
     }
     if crs != Crs::LonLat {
-        if !PROJECTED_FORMATS.contains(&ext.as_str()) {
+        if !PROJECTED_FORMATS.contains(&ext) {
             return Err(DataError::Unsupported(format!(".{ext} in {} (it holds longitude/latitude only)", crs.label())));
         }
-        check_projected(&ext, crs)?;
+        check_projected(ext, crs)?;
     }
     // A layer that declares no geometry type takes its first geometry's, as a whole read does.
     let geometry_type = match layer.geometry_type {
@@ -118,7 +149,10 @@ fn write_chunks_to(
     let mut null_numbers = 0usize;
     let mut csv = crate::io::CsvLosses::default();
     let mut unread_dates = Vec::new();
+    let mut rounded_dates = Vec::new();
     let mut utc_dates = Vec::new();
+    let mut fine_dates = Vec::new();
+    let mut written_values = Vec::new();
     let mut feed = |add: &mut dyn FnMut(&[Feature]) -> Result<()>| -> Result<()> {
         // A GeoPackage export that starts again feeds the features again, and counts them again.
         total = 0;
@@ -126,7 +160,9 @@ fn write_chunks_to(
         null_numbers = 0;
         csv = crate::io::CsvLosses::default();
         utc_dates.clear();
-        // The writers count the features; a source that doesn't know how many leaves the total at 0.
+        fine_dates.clear();
+        written_values.clear();
+        // The source counts scanned rows; nested writers only check Cancel, so rows count once.
         crate::progress::begin(src.info().count.map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX)));
         let batch = src.visit_chunks(None, bytes, &mut |mut chunk| {
             if keep.iter().any(|k| !*k) {
@@ -143,26 +179,32 @@ fn write_chunks_to(
                 }
             }
             if let Some(t) = &t {
-                // Counted as the writer writes them, so only stopped on a cancel here.
+                // Counted by the source scan, so only stopped on a cancel here.
                 project_each(&mut chunk, t, crs, false)?;
             }
             total = total.saturating_add(chunk.len());
-            null_numbers = null_numbers.saturating_add(numbers_written_as_null(&chunk, &layer.fields, &ext));
+            null_numbers = null_numbers.saturating_add(numbers_written_as_null(&chunk, &layer.fields, ext));
             if ext == "csv" {
                 csv += crate::io::CsvLosses::of(&chunk, geometry_type);
             }
             if ext == "gpkg" {
                 crate::source::add_unread_dates(&mut utc_dates, &crate::io::offset_dates(chunk.iter(), &layer.fields));
+                crate::source::add_unread_dates(&mut fine_dates, &crate::io::fine_dates(chunk.iter(), &layer.fields));
             }
-            add(&chunk)
+            if ext == "fgb" {
+                crate::source::add_unread_dates(&mut written_values, &crate::io::written_values(chunk.iter(), &layer.fields));
+            }
+            crate::progress::without_counting(|| add(&chunk))
         })?;
         skipped = batch.skipped;
         unread_dates = batch.unread_dates;
+        rounded_dates = batch.rounded_dates;
         Ok(())
     };
     let mut table = None;
     let mut unfit = Vec::new();
-    let left_out = match ext.as_str() {
+    let mut date_messages = Vec::new();
+    let left_out = match ext {
         #[cfg(not(target_arch = "wasm32"))]
         "gpkg" => {
             // Every feature is written: one of another kind makes the column GEOMETRY.
@@ -190,13 +232,31 @@ fn write_chunks_to(
             crate::source::fgb::write_features(&layer.name, geometry_type, &layer.fields, crs, out, &mut feed)
         })?,
         _ => write_atomic_with(path, |out| {
-            let (_, counts) = crate::source::parquet::write_features(geometry_type, &layer.fields, out, &mut feed)?;
+            let (_, counts, messages) = crate::source::parquet::write_features(geometry_type, &layer.fields, out, &mut feed)?;
             unfit = counts;
+            date_messages = messages;
             Ok::<_, DataError>(0)
         })?,
     };
     let written = total.saturating_sub(left_out);
-    Ok((Exported { written, left_out, skipped, null_numbers, unfit, beyond_web_mercator, csv, unread_dates, utc_dates }, table))
+    Ok((
+        Exported {
+            written,
+            left_out,
+            skipped,
+            null_numbers,
+            unfit,
+            beyond_web_mercator,
+            csv,
+            unread_dates,
+            rounded_dates,
+            utc_dates,
+            fine_dates,
+            written_values,
+            date_messages,
+        },
+        table,
+    ))
 }
 
 /// Counts attributes a GeoJSON or GeoPackage writer replaces with null. Other formats have

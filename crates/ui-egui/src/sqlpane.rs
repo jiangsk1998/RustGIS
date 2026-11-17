@@ -3,7 +3,7 @@
 //! Queries run off the frame (a thread); DuckDB is a desktop program, so the web app says so.
 
 // The web app shows the pane's explanation only: what runs queries is the desktop's.
-#![cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports))]
+#![cfg_attr(target_arch = "wasm32", expect(dead_code, unused_imports, reason = "the browser shows the explanation only"))]
 
 use egui::{RichText, Ui};
 use serde_json::{Value, json};
@@ -310,6 +310,14 @@ fn body(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 "SQL queries run through DuckDB, a program the desktop app calls: open this project in the desktop app to query it."
             ))
             .weak(),
+        );
+        return;
+    }
+    // A phone's apps can't start another program (#1902).
+    if !rustgis_engine::data::RUNS_PROGRAMS {
+        ui.label(
+            RichText::new(tl!("SQL queries run through DuckDB, a program a phone can't run: open this project on a computer to query it."))
+                .weak(),
         );
         return;
     }

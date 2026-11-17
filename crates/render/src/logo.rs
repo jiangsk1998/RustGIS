@@ -9,6 +9,17 @@ const LOGO: &[u8] = include_bytes!("../assets/huagis-logo.png");
 /// The logo as a premultiplied RGBA pixmap of `size`×`size` pixels (16..=1024), fitted into
 /// the square canvas keeping its aspect ratio.
 pub fn pixmap(size: u32) -> Option<Pixmap> {
+    draw(size, false)
+}
+
+/// The logo as one opaque white shape on a transparent background, `size`×`size` pixels
+/// (16..=1024), each pixel taking the picture's alpha. For the icons a phone tints itself:
+/// Android's themed icons (the adaptive icon's monochrome layer) and iOS's tinted app icons.
+pub fn monochrome(size: u32) -> Option<Pixmap> {
+    draw(size, true)
+}
+
+fn draw(size: u32, mono: bool) -> Option<Pixmap> {
     let size = size.clamp(16, 1024);
     let src = Pixmap::decode_png(LOGO).ok()?;
     let k = f32::min(size as f32 / src.width() as f32, size as f32 / src.height() as f32);
@@ -16,6 +27,13 @@ pub fn pixmap(size: u32) -> Option<Pixmap> {
     let y = (size as f32 - src.height() as f32 * k) / 2.0;
     let mut pm = Pixmap::new(size, size)?;
     pm.draw_pixmap(x as i32, y as i32, src.as_ref(), &PixmapPaint::default(), Transform::from_scale(k, k), None);
+    if mono {
+        // One opaque white shape: each pixel takes the picture's alpha.
+        for p in pm.pixels_mut() {
+            let a = p.alpha();
+            *p = tiny_skia::PremultipliedColorU8::from_rgba(a, a, a, a)?;
+        }
+    }
     Some(pm)
 }
 

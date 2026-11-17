@@ -88,10 +88,9 @@ when they are installed, RustGIS calls them to read [more formats](user-guide/da
 run DuckDB queries and run the [GeoLibre tools](user-guide/analysis.md#geolibre-tools). In the web
 app the GeoLibre tools run in the browser instead, through geolibre-rust's WASI runner. Some
 dependencies do compile C code into the build: the Zstandard decoder (`zstd-sys`,
-desktop and browser), SQLite (`libsqlite3-sys` through `rusqlite`, desktop), the TLS cryptography
-libraries (`aws-lc-sys` and `ring`, desktop) and GeographicLib's geodesic routines for the
-azimuthal equidistant projection (`proj4rs-geodesic`, desktop). Building them needs a C
-compiler; building the web app needs clang for Zstandard.
+desktop and browser), SQLite (`libsqlite3-sys` through `rusqlite`, desktop) and the TLS
+cryptography libraries (`aws-lc-sys` and `ring`, desktop). Building them needs a C compiler;
+building the web app needs clang for Zstandard.
 
 ## Secrets
 

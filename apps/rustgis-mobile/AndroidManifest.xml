@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- RustGIS on Android (#1902): a NativeActivity that loads librustgis_mobile.so. Its one Java
+     class (java/org/rustgis/mobile/MainActivity.java) is what reaches the system's file picker. Its
+     launcher icon (@mipmap/ic_launcher) is drawn by build.rs from the logo's code. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.rustgis.mobile"
+    android:versionCode="1"
+    android:versionName="0.0.0">
+    <!-- The version and version code are set by build-apk.sh (the workspace's, the commits). -->
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
+
+    <!-- Basemap tiles and web layers. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- The device's position on the map, asked for when the user turns it on. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- A track recorded while the app is out of sight: a foreground service of the location type,
+         with its notification (TrackService). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- The camera apps that can take a photo for RustGIS (Android 11 and later list only those named). -->
+    <queries>
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
+    </queries>
+
+    <application
+        android:label="RustGIS"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:hasCode="true"
+        android:allowBackup="false"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+        <!-- configChanges: a rotation or a resize reaches the running app instead of restarting it. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|density|fontScale|locale|layoutDirection|navigation">
+            <meta-data android:name="android.app.lib_name" android:value="rustgis_mobile" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- Where the camera app writes a photo for RustGIS (MainActivity.takePhoto). -->
+        <provider
+            android:name=".PhotoProvider"
+            android:authorities="org.rustgis.mobile.photos"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+        <service
+            android:name=".TrackService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+    </application>
+</manifest>

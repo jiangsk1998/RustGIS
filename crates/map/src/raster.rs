@@ -59,7 +59,8 @@ pub struct RasterLayer {
     /// Statistics of the pixels the style's mask leaves, worked out on the first draw.
     #[serde(skip)]
     masked: MaskedStats,
-    /// The light its cast shadows leave, worked out off the frame (see [`RasterLayer::cast_shadows`]).
+    /// The light its cast shadows leave and the sky it sees, worked out off the frame (see
+    /// [`RasterLayer::cast_shadows`] and [`RasterLayer::sky_view`]).
     #[serde(skip)]
     cast: CastLight,
     /// A remote reload shared with render snapshots, never serialized.
@@ -205,7 +206,7 @@ fn pixel_reads() -> &'static Mutex<HashMap<ReadKey, RasterRead>> {
     READS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Reads the pixels several layers share once (see [`ReadKey`]).
+/// Reads the pixels several layers share once (see [`ReadKey`]), a layer reopening its own file.
 fn read_shared(path: &str, subdataset: Option<&str>, crs: Option<&str>, placement: Option<[f64; 4]>) -> Result<Arc<Raster>, String> {
     let key = ReadKey {
         path: path.into(),
@@ -216,17 +217,31 @@ fn read_shared(path: &str, subdataset: Option<&str>, crs: Option<&str>, placemen
     if let Some(raster) = pixel_cache().lock().ok().and_then(|c| c.get(&key).and_then(Weak::upgrade)) {
         return Ok(raster);
     }
-    read_fresh(path, subdataset, crs, placement)
+    read_fresh(path, subdataset, crs, placement, true)
 }
 
 /// Reads a file as it is now (a repair must see its current contents), and lets later reads of it
-/// share the pixels.
-fn read_fresh(path: &str, subdataset: Option<&str>, crs: Option<&str>, placement: Option<[f64; 4]>) -> Result<Arc<Raster>, String> {
-    let raster = Arc::new(
-        rustgis_data::raster::read_path_with(std::path::Path::new(path), subdataset, crs)
-            .and_then(|r| placed(r, placement))
-            .map_err(|e| e.to_string())?,
-    );
+/// share the pixels. A scan is read without the world file beside it and laid where it was; a
+/// layer reopening its own file that has lost its coordinates still opens, and says so.
+fn read_fresh(
+    path: &str,
+    subdataset: Option<&str>,
+    crs: Option<&str>,
+    placement: Option<[f64; 4]>,
+    reopening: bool,
+) -> Result<Arc<Raster>, String> {
+    let p = std::path::Path::new(path);
+    let raster = if placement.is_some() {
+        rustgis_data::raster::read_path_unplaced(p, subdataset, crs).and_then(|r| placed(r, placement))
+    } else {
+        rustgis_data::raster::read_path_with(p, subdataset, crs).map(|mut r| {
+            if reopening && !r.georeferenced {
+                r.lost.push("it has no coordinates now, though it had them when added: it is drawn at a stand-in place".into());
+            }
+            r
+        })
+    };
+    let raster = Arc::new(raster.map_err(|e| e.to_string())?);
     if let Ok(mut cache) = pixel_cache().lock() {
         cache.retain(|_, weak| weak.strong_count() > 0);
         let key = ReadKey {
@@ -287,7 +302,7 @@ impl RasterLayer {
         }
         let sub = subdataset.or(self.subdataset.as_deref());
         // The repaired file's pixels are shared with the layers reading it the same way.
-        let r = read_fresh(path, sub, self.crs.as_deref(), self.placement).map_err(|e| format!("{path}: {e}"))?;
+        let r = read_fresh(path, sub, self.crs.as_deref(), self.placement, false).map_err(|e| format!("{path}: {e}"))?;
         self.validate_replacement(&r, path)?;
         let mut style = self.style.clone();
         style.repair(&r);
@@ -617,6 +632,8 @@ impl RasterLayer {
             );
             return Ok(());
         }
+        // A scan goes back where it was laid (a GeoTIFF opened `as` a scan is one again), and
+        // layers naming one file share the read.
         match self.read_pixels() {
             Ok(r) => {
                 self.style.repair(&r);
@@ -940,14 +957,14 @@ impl RasterLayer {
         Some(stats)
     }
 
-    /// Whether it is drawn with cast shadows (Shaded Relief with a shadow above 0): its frames are
-    /// drawn again as they land (see [`RasterLayer::cast_shadows`]).
+    /// Whether it is drawn with cast shadows or sky visibility (Shaded Relief with a shadow or a
+    /// sky above 0): its frames are drawn again as they land (see [`RasterLayer::cast_shadows`]).
     pub fn casts_shadows(&self) -> bool {
-        matches!(self.style.renderer, RasterRenderer::ShadedRelief { shadow, .. } if shadow > 0.0)
+        matches!(self.style.renderer, RasterRenderer::ShadedRelief { shadow, sky, .. } if shadow > 0.0 || sky > 0.0)
     }
 
-    /// How many wait for its cast shadows now (exports), its copies' too: for tests of what an
-    /// export waits for.
+    /// How many wait for its cast shadows or sky now (exports), its copies' too: for tests of what
+    /// an export waits for.
     #[doc(hidden)]
     pub fn cast_shadow_waiters(&self) -> usize {
         let Ok(jobs) = self.cast.0.lock() else { return 0 };
@@ -965,35 +982,55 @@ impl RasterLayer {
     /// export does, this waits for it. The browser, which has one thread, works it out here, for
     /// at most [`crate::shadow::MAX_BROWSER_CELLS`] cells.
     pub fn cast_shadows(&self, wait: bool, owner: (u64, u64), landed: impl FnOnce() + Send + 'static) -> CastShadows {
-        let RasterRenderer::ShadedRelief { band, azimuth, altitude, z_factor, shadow, .. } = self.style.renderer else {
+        let RasterRenderer::ShadedRelief { azimuth, altitude, shadow, .. } = self.style.renderer else {
             return CastShadows::None;
         };
-        let finite = [azimuth, altitude, z_factor].iter().all(|v| v.is_finite());
-        let Some(r) = self.data.as_ref().filter(|_| shadow > 0.0 && finite) else { return CastShadows::None };
+        let finite = azimuth.is_finite() && altitude.is_finite();
+        self.light_grid(Grid::Shadows { azimuth, altitude }, shadow > 0.0 && finite, wait, owner, landed)
+    }
+
+    /// The share of the sky each cell sees (see [`crate::shadow::sky`]), when it is drawn as
+    /// Shaded Relief with a sky above 0: worked out once per pixels, band, Z factor and mask, then
+    /// kept, waited for and said as [`RasterLayer::cast_shadows`] has its light (each owner's
+    /// latest is kept, whatever its sun).
+    pub fn sky_view(&self, wait: bool, owner: (u64, u64), landed: impl FnOnce() + Send + 'static) -> CastShadows {
+        let RasterRenderer::ShadedRelief { sky, .. } = self.style.renderer else {
+            return CastShadows::None;
+        };
+        self.light_grid(Grid::Sky, sky > 0.0, wait, owner, landed)
+    }
+
+    /// The `grid` of [`RasterLayer::cast_shadows`] or [`RasterLayer::sky_view`], when `on`.
+    fn light_grid(&self, grid: Grid, on: bool, wait: bool, owner: (u64, u64), landed: impl FnOnce() + Send + 'static) -> CastShadows {
+        let RasterRenderer::ShadedRelief { band, z_factor, .. } = self.style.renderer else {
+            return CastShadows::None;
+        };
+        let Some(r) = self.data.as_ref().filter(|_| on && z_factor.is_finite()) else { return CastShadows::None };
+        let not_drawn = grid.not_drawn();
         // Read in place, the layer holds an overview; the part in view is read as the map draws.
         if self.in_place && r.overview.is_some_and(|(w, _)| w > r.width) {
-            return CastShadows::Unavailable("its cast shadows aren't drawn: it is read in place, and only its overview is held".into());
+            return CastShadows::Unavailable(format!("{not_drawn}: it is read in place, and only its overview is held"));
         }
         let cells = r.width as usize * r.height as usize;
         if cfg!(target_arch = "wasm32") && cells > crate::shadow::MAX_BROWSER_CELLS {
             return CastShadows::Unavailable(format!(
-                "its cast shadows aren't drawn: in the browser they are worked out for rasters of at most {} cells, and it has {cells}",
+                "{not_drawn}: in the browser it is worked out for rasters of at most {} cells, and it has {cells}",
                 crate::shadow::MAX_BROWSER_CELLS
             ));
         }
-        let key = LightKey { band, azimuth, altitude, z_factor, mask: self.style.mask.clone() };
+        let key = LightKey { band, grid, z_factor, mask: self.style.mask.clone() };
         let mut start = None;
         let work = {
             let Ok(mut jobs) = self.cast.0.lock() else { return CastShadows::None };
             // Grids of pixels no longer held go (their work stops as it is dropped), and so does
             // work stopped part-way (a cancelled run), to be started again.
-            jobs.retain(|j| j.pixels.strong_count() > 0 && !j.work.was_stopped());
+            jobs.retain(|j| j.pixels.strong_count() > 0 && !j.work.was_stopped(j.key.grid.stopped()));
             let pixels = Arc::downgrade(r);
             let same = |j: &LightJob| j.key == key && Weak::ptr_eq(&j.pixels, &pixels);
             // The same owner's work for another sun, not done and not waited for, is superseded
             // (going back to a sun kept too): it stops, as it is dropped. Grids done are kept, for
-            // going back.
-            jobs.retain(|j| same(j) || j.owner != owner || j.work.is_done() || j.work.waited());
+            // going back. Its other kind of grid (its sky, or its shadows) is left alone.
+            jobs.retain(|j| same(j) || !j.rivals(owner, &key) || j.work.is_done() || j.work.waited());
             match jobs.iter().position(same) {
                 Some(i) => {
                     // The latest used last, so the oldest goes first.
@@ -1015,7 +1052,7 @@ impl RasterLayer {
                     let left: Vec<usize> = (0..jobs.len())
                         .filter(|i| {
                             jobs.get(*i).is_some_and(|j| {
-                                j.work.is_done() && !j.work.waited() && jobs.iter().skip(i + 1).any(|later| later.owner == j.owner)
+                                j.work.is_done() && !j.work.waited() && jobs.iter().skip(i + 1).any(|later| later.rivals(j.owner, &j.key))
                             })
                         })
                         .collect();
@@ -1040,12 +1077,13 @@ impl RasterLayer {
     }
 }
 
-/// [`RasterLayer::cast_shadows`]: what the map draws its cast shadows with.
+/// [`RasterLayer::cast_shadows`] and [`RasterLayer::sky_view`]: what the map draws its cast
+/// shadows, or its sky, with.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CastShadows {
-    /// It casts none (another renderer, or a shadow of 0).
+    /// It casts none (another renderer, or a shadow or sky of 0).
     None,
-    /// The light left on each cell (0–255), row by row as the pixels are.
+    /// The light left on each cell, or the sky it sees (0–255), row by row as the pixels are.
     Ready(Arc<Vec<u8>>),
     /// Being worked out: drawn without, and again once it has landed.
     Pending,
@@ -1057,10 +1095,34 @@ pub enum CastShadows {
 #[derive(Clone, Debug, PartialEq)]
 struct LightKey {
     band: usize,
-    azimuth: f64,
-    altitude: f64,
+    grid: Grid,
     z_factor: f64,
     mask: RasterMask,
+}
+
+/// Which grid: the light cast shadows leave for a sun, or the sky seen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Grid {
+    Shadows { azimuth: f64, altitude: f64 },
+    Sky,
+}
+
+impl Grid {
+    /// What the relief is drawn without when there is no grid.
+    fn not_drawn(self) -> &'static str {
+        match self {
+            Grid::Shadows { .. } => "its cast shadows aren't drawn",
+            Grid::Sky => "its sky visibility isn't drawn",
+        }
+    }
+
+    /// Why a grid stopped part-way has none: superseded, or its run cancelled.
+    fn stopped(self) -> &'static str {
+        match self {
+            Grid::Shadows { .. } => "its cast shadows were stopped",
+            Grid::Sky => "its sky visibility was stopped",
+        }
+    }
 }
 
 /// A light grid's work, shared with the thread doing it.
@@ -1103,9 +1165,9 @@ impl LightWork {
         self.done.lock().is_ok_and(|d| d.is_some())
     }
 
-    /// Whether it was stopped part-way, rather than done.
-    fn was_stopped(&self) -> bool {
-        self.done.lock().is_ok_and(|d| matches!(d.as_ref(), Some(Err(e)) if e == STOPPED))
+    /// Whether it was stopped part-way, rather than done (`stopped` is why, see [`Grid::stopped`]).
+    fn was_stopped(&self, stopped: &str) -> bool {
+        self.done.lock().is_ok_and(|d| matches!(d.as_ref(), Some(Err(e)) if e == stopped))
     }
 
     fn waited(&self) -> bool {
@@ -1168,6 +1230,13 @@ struct LightJob {
     work: Arc<LightWork>,
 }
 
+impl LightJob {
+    /// Whether it is `owner`'s grid of the kind `key` is: a sun's light, or the sky.
+    fn rivals(&self, owner: (u64, u64), key: &LightKey) -> bool {
+        self.owner == owner && std::mem::discriminant(&self.key.grid) == std::mem::discriminant(&key.grid)
+    }
+}
+
 impl Drop for LightJob {
     /// Replaced, or its layer gone: the work for it stops.
     fn drop(&mut self) {
@@ -1179,11 +1248,8 @@ impl Drop for LightJob {
 #[derive(Clone, Default)]
 struct CastLight(Arc<Mutex<Vec<LightJob>>>);
 
-/// Why a light grid stopped part-way has none: superseded, or its run cancelled.
-const STOPPED: &str = "its cast shadows were stopped";
-
 /// The most grids of suns their owners have left that a layer and its copies keep, besides
-/// each owner's latest.
+/// each owner's latest of each kind.
 const KEPT_LIGHTS: usize = 3;
 
 /// Held by [`hold_cast_shadows`]: light work waits for it before it traces.
@@ -1202,26 +1268,30 @@ fn start_light(r: Arc<Raster>, key: LightKey, work: Arc<LightWork>) {
     let run = move || {
         drop(LIGHT_HOLD.read().unwrap_or_else(|e| e.into_inner()));
         let threads = rustgis_data::threads::max();
-        let traced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::shadow::light(&r, key.band, &key.mask, key.azimuth, key.altitude, key.z_factor, threads, &work.stop)
+        let traced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match key.grid {
+            Grid::Shadows { azimuth, altitude } => {
+                crate::shadow::light(&r, key.band, &key.mask, azimuth, altitude, key.z_factor, threads, &work.stop)
+            }
+            Grid::Sky => crate::shadow::sky(&r, key.band, &key.mask, key.z_factor, threads, &work.stop),
         }));
+        let not_drawn = key.grid.not_drawn();
         match traced {
             // Stopped (superseded, or its export cancelled): a frame or page drawn while it was
             // to come is drawn again, and asks for what it draws now.
             Ok(Err(crate::shadow::Unlit::Stopped)) => {
-                work.finish(Err(STOPPED.into()));
+                work.finish(Err(key.grid.stopped().into()));
                 work.land();
             }
             Ok(out) => {
                 work.finish(out.map(Arc::new).map_err(|e| match e {
-                    crate::shadow::Unlit::Failed => "its cast shadows aren't drawn: working them out failed".into(),
-                    _ => "its cast shadows aren't drawn: there isn't the memory for them".into(),
+                    crate::shadow::Unlit::Failed => format!("{not_drawn}: working it out failed"),
+                    _ => format!("{not_drawn}: there isn't the memory for it"),
                 }));
                 work.land();
             }
             // Said, rather than leaving an export waiting.
             Err(_) => {
-                work.finish(Err("its cast shadows aren't drawn: working them out failed".into()));
+                work.finish(Err(format!("{not_drawn}: working it out failed")));
                 work.land();
             }
         }
@@ -1230,7 +1300,7 @@ fn start_light(r: Arc<Raster>, key: LightKey, work: Arc<LightWork>) {
     {
         let run = std::sync::Arc::new(Mutex::new(Some(run)));
         let on_thread = run.clone();
-        let spawned = std::thread::Builder::new().name("cast shadows".into()).spawn(move || {
+        let spawned = std::thread::Builder::new().name("relief light".into()).spawn(move || {
             if let Some(f) = on_thread.lock().ok().and_then(|mut f| f.take()) {
                 f();
             }
@@ -1310,7 +1380,33 @@ impl Default for ZarrTime {
     }
 }
 
-fn is_no_shadow(v: &f64) -> bool {
+/// Shaded Relief's rock colour on steep slopes (#1913): below `from` degrees of slope the ramp's
+/// colour is kept, above `to` it is `color`, and between them the two are blended on a smooth
+/// step. The slope is the ground's own, without the Z factor (see [`slope`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Rock {
+    pub from: f64,
+    pub to: f64,
+    pub color: Rgba,
+}
+
+impl Rock {
+    /// What a rock turned on without settings is: a light warm grey from 25° to 40°, which a 30 m
+    /// DEM reaches on its real scarps (it averages a cliff with its foot).
+    pub const DEFAULT: Rock = Rock { from: 25.0, to: 40.0, color: Rgba::rgb(0xB2, 0xAC, 0xA4) };
+
+    /// The share of rock (0 to 1) on a slope of `degrees`: 0 up to `from`, 1 from `to` on, and a
+    /// smooth step between them, so no hard outline follows a contour of slope.
+    pub fn share(&self, degrees: f64) -> f64 {
+        if self.to - self.from <= 0.0 {
+            return if degrees >= self.to { 1.0 } else { 0.0 };
+        }
+        let t = ((degrees - self.from) / (self.to - self.from)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+}
+
+fn is_no_light(v: &f64) -> bool {
     *v == 0.0
 }
 
@@ -1514,15 +1610,26 @@ pub enum RasterRenderer {
     /// The file's own colour table.
     Colormap,
     /// Hillshade, optionally tinted by elevation. `shadow` (0 to 1) is how dark the shadows the
-    /// terrain casts are drawn (see [`crate::shadow`]); 0, the default, casts none.
+    /// terrain casts are drawn (see [`crate::shadow`]); 0, the default, casts none. `sky` (0 to 1)
+    /// is how much the share of the sky each cell sees scales its ambient light
+    /// ([`crate::shadow::sky`]); 0, the default, leaves it whole. `fill` (0 to 1) is a fill light
+    /// from the side opposite the sun, 55° up, that lightens only the slopes turned toward it; 0,
+    /// the default, has none. `rock` tints steep slopes toward a rock colour before the lights
+    /// shade them (see [`Rock`]); none, the default, keeps the ramp.
     ShadedRelief {
         band: usize,
         ramp: Option<Ramp>,
         azimuth: f64,
         altitude: f64,
         z_factor: f64,
-        #[serde(default, skip_serializing_if = "is_no_shadow")]
+        #[serde(default, skip_serializing_if = "is_no_light")]
         shadow: f64,
+        #[serde(default, skip_serializing_if = "is_no_light")]
+        sky: f64,
+        #[serde(default, skip_serializing_if = "is_no_light")]
+        fill: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rock: Option<Rock>,
     },
 }
 
@@ -1702,10 +1809,22 @@ impl RasterMask {
     }
 
     /// Statistics of `band`'s valid pixels that the mask leaves, from a sample of a large band.
+    /// A colour band's cells its alpha draws see-through are left out, as the band's own
+    /// statistics leave them out (#1810).
     pub fn stats(&self, r: &Raster, band: usize) -> BandStats {
         let Some(b) = r.bands.get(band) else { return BandStats::default() };
         let step = b.data.len().div_ceil(MASK_STATS_SAMPLE).max(1);
-        let kept: Vec<f32> = b.data.iter().step_by(step).map(|v| if r.is_valid(*v) && !self.hides(*v) { *v } else { f32::NAN }).collect();
+        let hidden = r.see_through_cells(band);
+        let kept: Vec<f32> = b
+            .data
+            .iter()
+            .enumerate()
+            .step_by(step)
+            .map(|(i, v)| {
+                let shown = r.is_valid(*v) && !self.hides(*v) && !hidden.as_ref().is_some_and(|h| h(i));
+                if shown { *v } else { f32::NAN }
+            })
+            .collect();
         BandStats::from_values(&kept)
     }
 
@@ -1899,11 +2018,6 @@ impl RasterStyle {
     }
 }
 
-/// Valid values of a band, sorted, sampled down to about `max` of them.
-pub fn sorted_sample(r: &Raster, band: usize, max: usize) -> Vec<f64> {
-    sorted_sample_masked(r, band, max, &RasterMask::default())
-}
-
 fn sorted_sample_masked(r: &Raster, band: usize, max: usize, mask: &RasterMask) -> Vec<f64> {
     let Some(b) = r.bands.get(band) else { return Vec::new() };
     let step = (b.data.len() / max.max(1)).max(1);
@@ -2069,10 +2183,25 @@ impl<'a> Colorizer<'a> {
     /// The colour of a pixel from its renderer band values (`NaN` = no data), or `None` for
     /// transparent. `hillshade` (0–255) is used by Shaded Relief.
     pub fn color(&self, vals: &[f32], hillshade: Option<u8>) -> Option<[u8; 4]> {
+        self.color_lit(vals, hillshade, None, None, None)
+    }
+
+    /// [`Colorizer::color`], with Shaded Relief's ambient light scaled by `ambient` (0–255, the
+    /// share of it the sky a cell sees leaves, see [`RasterRenderer::ShadedRelief`]'s `sky`),
+    /// `fill` (0–255, a share of the colour) added for its fill light (its `fill`), and its colour
+    /// moved `rock` (0–255) of the way to its rock colour (its `rock`, see [`Rock::share`]).
+    pub fn color_lit(
+        &self,
+        vals: &[f32],
+        hillshade: Option<u8>,
+        ambient: Option<u8>,
+        fill: Option<u8>,
+        rock: Option<u8>,
+    ) -> Option<[u8; 4]> {
         // The renderer masks values as it samples them (they arrive as NaN); this is for other callers.
         let mask = &self.style.mask;
         if mask.is_empty() || !vals.iter().any(|v| mask.hides(*v)) {
-            return self.paint(vals, hillshade);
+            return self.paint(vals, hillshade, ambient, fill, rock);
         }
         // Masked values are no data. The renderer bands are at most three.
         let mut kept = [f32::NAN; 3];
@@ -2081,10 +2210,10 @@ impl<'a> Colorizer<'a> {
                 *k = *v;
             }
         }
-        self.paint(kept.get(..vals.len().min(3)).unwrap_or(&kept), hillshade)
+        self.paint(kept.get(..vals.len().min(3)).unwrap_or(&kept), hillshade, ambient, fill, rock)
     }
 
-    fn paint(&self, vals: &[f32], hillshade: Option<u8>) -> Option<[u8; 4]> {
+    fn paint(&self, vals: &[f32], hillshade: Option<u8>, ambient: Option<u8>, fill: Option<u8>, rock: Option<u8>) -> Option<[u8; 4]> {
         let v0 = *vals.first()?;
         let c = match &self.style.renderer {
             RasterRenderer::Rgb { .. } => {
@@ -2111,11 +2240,19 @@ impl<'a> Colorizer<'a> {
                 }
                 *self.palette.get(i as usize)?
             }
-            RasterRenderer::ShadedRelief { ramp, .. } => {
+            RasterRenderer::ShadedRelief { ramp, rock: steep, .. } => {
                 let h = hillshade.unwrap_or(180) as f64 / 255.0;
                 let base = if ramp.is_some() { *self.ramp_lut.get(self.byte(0, v0) as usize)? } else { [255, 255, 255, 255] };
-                // Multiply the tint by the hillshade, keeping some ambient light.
-                let m = |c: u8| (c as f64 * (0.25 + 0.75 * h)).round().clamp(0.0, 255.0) as u8;
+                // Steep ground first takes on the rock colour; the light then shades either.
+                let base = match (steep, rock) {
+                    (Some(steep), Some(share)) if share > 0 => Rgba(base).lerp(steep.color.with_alpha(255), f64::from(share) / 255.0).0,
+                    _ => base,
+                };
+                // Multiply the tint by the hillshade, keeping some ambient light (less of it where
+                // the terrain hides part of the sky), and adding the fill light on its own.
+                let a = 0.25 * ambient.map_or(1.0, |a| f64::from(a) / 255.0);
+                let f = fill.map_or(0.0, |f| f64::from(f) / 255.0);
+                let m = |c: u8| (c as f64 * (a + 0.75 * h + f)).round().clamp(0.0, 255.0) as u8;
                 [m(base[0]), m(base[1]), m(base[2]), 255]
             }
         };
@@ -2123,16 +2260,29 @@ impl<'a> Colorizer<'a> {
     }
 }
 
-/// Hillshade (0–255) from a 3×3 window of elevations (row by row), Horn's method.
-pub fn hillshade(z: &[f64; 9], cell_x: f64, cell_y: f64, azimuth: f64, altitude: f64, z_factor: f64) -> u8 {
+/// The slope (degrees) of a 3×3 window of elevations (row by row), from the gradient
+/// [`hillshade`] uses: the ground's own, with no Z factor.
+pub fn slope(z: &[f64; 9], cell_x: f64, cell_y: f64) -> f64 {
+    let (dzdx, dzdy) = horn(z, cell_x, cell_y);
+    dzdx.hypot(dzdy).atan().to_degrees()
+}
+
+/// The east and south gradients of a 3×3 window of elevations, Horn's method.
+fn horn(z: &[f64; 9], cell_x: f64, cell_y: f64) -> (f64, f64) {
     let [a, b, c, d, _, f, g, h, i] = *z;
     let dzdx = ((c + 2.0 * f + i) - (a + 2.0 * d + g)) / (8.0 * cell_x.max(1e-9));
     let dzdy = ((g + 2.0 * h + i) - (a + 2.0 * b + c)) / (8.0 * cell_y.max(1e-9));
-    let slope = (z_factor * (dzdx * dzdx + dzdy * dzdy).sqrt()).atan();
+    (dzdx, dzdy)
+}
+
+/// Hillshade (0–255) from a 3×3 window of elevations (row by row), Horn's method.
+pub fn hillshade(z: &[f64; 9], cell_x: f64, cell_y: f64, azimuth: f64, altitude: f64, z_factor: f64) -> u8 {
+    let (dzdx, dzdy) = horn(z, cell_x, cell_y);
+    let tilt = (z_factor * (dzdx * dzdx + dzdy * dzdy).sqrt()).atan();
     let aspect = if dzdx != 0.0 || dzdy != 0.0 { dzdy.atan2(-dzdx) } else { 0.0 };
     let zenith = (90.0 - altitude.clamp(0.0, 90.0)).to_radians();
     let az = (360.0 - azimuth + 90.0).rem_euclid(360.0).to_radians();
-    let v = zenith.cos() * slope.cos() + zenith.sin() * slope.sin() * (az - aspect).cos();
+    let v = zenith.cos() * tilt.cos() + zenith.sin() * tilt.sin() * (az - aspect).cos();
     (v.max(0.0) * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
@@ -2225,12 +2375,30 @@ impl RasterLayer {
         self.masked_stats().is_some_and(|m| m.first().is_some_and(|s| s.count == 0))
     }
 
+    /// Unique Values without an enumerated statistics list shows every configured value, just
+    /// as an explicit request for all classes does. None of those classes can be missed.
+    fn lists_every_class(&self, all_classes: bool) -> bool {
+        match &self.style.renderer {
+            RasterRenderer::UniqueValues { band, .. } => {
+                if all_classes {
+                    return true;
+                }
+                let masked = self.masked_stats();
+                let stats = masked.as_ref().and_then(|m| m.first()).or_else(|| self.data.as_ref()?.bands.get(*band).map(|b| &b.stats));
+                stats.is_none_or(|s| s.categories.is_none())
+            }
+            RasterRenderer::Classify { .. } => all_classes,
+            _ => false,
+        }
+    }
+
     /// Whether the classes a legend lists for it ([`RasterLayer::legend_classes`]) come from a
     /// sample of its pixels: under a mask, a band of more than [`MASK_STATS_SAMPLE`] cells has its
     /// statistics read from every few cells ([`RasterMask::stats`]), so a class too rare for the
     /// sample can be missing (#1679). Not with `all_classes` for Unique Values or Classify, nor when
-    /// no class can be listed (a mask hiding every pixel included); a colour table's come from the sample only when its own statistics,
-    /// read whole, can't list its values.
+    /// no class can be listed (a mask hiding every pixel included). Unique Values without an
+    /// enumerated statistics list shows every class. A colour table's come from the sample only
+    /// when its own statistics, read whole, can't list its values.
     pub fn classes_from_sample(&self, all_classes: bool) -> bool {
         let Some(r) = &self.data else { return false };
         if !self.style.renderer.draws_classes() || self.style.mask.is_empty() || self.classes_unknown() || self.mask_hides_all() {
@@ -2240,7 +2408,7 @@ impl RasterLayer {
         let sampled = r.bands.get(band).is_some_and(|b| b.data.len() > MASK_STATS_SAMPLE);
         let from_sample = match &self.style.renderer {
             RasterRenderer::Colormap => r.bands.first().is_some_and(|b| b.stats.categories.is_none()),
-            _ => !all_classes,
+            _ => !self.lists_every_class(all_classes),
         };
         sampled && from_sample
     }
@@ -2250,10 +2418,11 @@ impl RasterLayer {
     /// while the map draws the full resolution: a class too rare for the overview can be missing
     /// (#1679). Not with `all_classes` for Unique Values or Classify, whose every class is listed
     /// whatever the statistics, nor when no class can be listed ([`RasterLayer::classes_unknown`],
-    /// or a mask hiding every pixel).
+    /// or a mask hiding every pixel), or when Unique Values lists every configured class because
+    /// its statistics have no enumerated values.
     pub fn classes_from_overview(&self, all_classes: bool) -> bool {
         let Some(r) = &self.data else { return false };
-        let every = all_classes && !matches!(self.style.renderer, RasterRenderer::Colormap);
+        let every = self.lists_every_class(all_classes);
         self.style.renderer.draws_classes()
             && (self.in_place || r.overview.is_some())
             && !every
@@ -2432,6 +2601,11 @@ mod tests {
 
     use super::*;
 
+    /// A Shaded Relief without a ramp or rock, lit from `azimuth` and `altitude`.
+    fn grey_relief(azimuth: f64, altitude: f64, z_factor: f64, shadow: f64, sky: f64) -> RasterRenderer {
+        RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth, altitude, z_factor, shadow, sky, fill: 0.0, rock: None }
+    }
+
     /// The legend names a class as the file does (#889), and gives the value of one it doesn't.
     #[test]
     fn legend_labels_classes_with_their_names() {
@@ -2522,6 +2696,35 @@ mod tests {
         assert_eq!(rl.legend_classes(false), None);
         rl.style.renderer = RasterRenderer::Rgb { red: 0, green: 0, blue: 0 };
         assert_eq!(rl.legend_classes(true), None);
+    }
+
+    /// Without an enumerated statistics list, Unique Values lists all configured classes; neither
+    /// an overview nor masked sampling can then hide a class from the legend.
+    #[test]
+    fn unique_values_listing_every_class_has_no_missing_class_warning() {
+        let side = 2049u32;
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 0.01, pixel_height: -0.01 };
+        let cells = (0..side * side).map(|i| (i % 1000) as f32).collect();
+        let raster = Raster::new("many", side, side, vec![cells], gt, Crs::LonLat, None, ColorHint::Gray, "UInt16").unwrap();
+        assert!(raster.bands[0].stats.categories.is_none());
+        let mut layer = RasterLayer::from_path(raster, "many.tif");
+        layer.style.renderer = RasterRenderer::UniqueValues {
+            band: 0,
+            ramp: Ramp::Harbour,
+            values: (0..1000).map(|v| (f64::from(v), Rgba::rgb(30, 100, 200))).collect(),
+        };
+        layer.in_place = true;
+        assert_eq!(layer.legend_classes(false).unwrap().len(), 1000);
+        assert!(!layer.classes_from_overview(false));
+        layer.style.mask = RasterMask { values: vec![999.0], ..RasterMask::default() };
+        assert_eq!(layer.legend_classes(false).unwrap().len(), 999);
+        assert!(!layer.classes_from_sample(false) && !layer.classes_from_overview(false));
+        // Once a sampled subset supplies the legend, the rare-class warning applies again.
+        layer.style.mask = RasterMask { min: Some(0.0), max: Some(3.0), ..RasterMask::default() };
+        // Sampling every second cell sees 0 and 2, missing the configured odd values.
+        assert_eq!(layer.legend_classes(false).unwrap().len(), 2);
+        assert!(layer.classes_from_sample(false) && layer.classes_from_overview(false));
+        assert!(!layer.classes_from_sample(true) && !layer.classes_from_overview(true));
     }
 
     /// A colour table has no entry for a negative value, and the map draws none: neither the
@@ -2710,6 +2913,35 @@ mod tests {
         assert_eq!(c.color(&[3.5], None), None);
         let k = RasterStyle { renderer: classify(&r, 0, 3, ClassMethod::EqualInterval, Ramp::Ember), ..s };
         assert!(Colorizer::new(&k, &r, None).color(&[5.0], None).is_some());
+    }
+
+    /// A style mask's statistics leave out the cells a colour band's alpha draws see-through, as
+    /// the band's own leave them out (#1810).
+    #[test]
+    fn a_masks_statistics_leave_out_see_through_cells() {
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform};
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 4.0, pixel_width: 1.0, pixel_height: -1.0 };
+        // The bottom row see-through, holding −3.4e38; 200 elsewhere, and a black first cell.
+        let colour: Vec<f32> = (0..16)
+            .map(|i| {
+                if i >= 12 {
+                    -3.4e38
+                } else if i == 0 {
+                    0.0
+                } else {
+                    200.0
+                }
+            })
+            .collect();
+        let alpha: Vec<f32> = (0..16).map(|i| if i >= 12 { 0.0 } else { 1.0 }).collect();
+        let bands = vec![colour.clone(), colour.clone(), colour, alpha];
+        let r = Raster::new("rgba", 4, 4, bands, gt, Crs::LonLat, None, ColorHint::Rgb { alpha: true }, "Float32").unwrap();
+        let mask = RasterMask { values: vec![200.0], ..RasterMask::default() };
+        // 200 hidden by the mask, the bottom row by the alpha: the black cell alone.
+        let st = mask.stats(&r, 0);
+        assert_eq!((st.count, st.min, st.max), (1, 0.0, 0.0));
+        // The alpha band itself: every cell the mask leaves.
+        assert_eq!(mask.stats(&r, 3).count, 16);
     }
 
     /// #348: values a mask lists, or outside (or inside) its range, are no data.
@@ -2938,10 +3170,73 @@ mod tests {
         assert!(layer.start_reload(false), "read on a thread");
         let start = std::time::Instant::now();
         while layer.poll_reload() && start.elapsed() < std::time::Duration::from_secs(10) {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(5)); // test-wait: legacy polling until the background reload lands
         }
         assert!(layer.data.is_some(), "{:?}", layer.error);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Rock on steep slopes (#1913): the ramp's colour up to `from`, the rock's from `to` on, and a
+    /// smooth step between them; the slope is the ground's own, which no Z factor changes; and the
+    /// rock is saved only when set.
+    #[test]
+    fn rock_tints_steep_slopes_by_the_grounds_own_slope() {
+        let rock = Rock { from: 20.0, to: 40.0, color: Rgba::rgb(200, 100, 50) };
+        assert_eq!((rock.share(0.0), rock.share(20.0), rock.share(40.0), rock.share(70.0)), (0.0, 0.0, 1.0, 1.0));
+        assert!((rock.share(30.0) - 0.5).abs() < 1e-12);
+        let (a, b) = (rock.share(22.0), rock.share(25.0));
+        assert!(0.0 < a && a < b && b < 0.5, "a smooth step, slow at its ends: {a}, {b}");
+        // A plane rising one metre a metre eastward is 45 degrees, whatever the light's Z factor.
+        let z = [0.0, 10.0, 20.0, 0.0, 10.0, 20.0, 0.0, 10.0, 20.0];
+        assert!((slope(&z, 10.0, 10.0) - 45.0).abs() < 1e-9);
+        assert_ne!(hillshade(&z, 10.0, 10.0, 270.0, 45.0, 1.0), hillshade(&z, 10.0, 10.0, 270.0, 45.0, 3.0));
+
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 10.0, pixel_width: 1.0, pixel_height: -1.0 };
+        let r =
+            Raster::new("dem", 10, 10, vec![(0..100).map(|v| v as f32).collect()], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32")
+                .unwrap();
+        let relief = |rock| RasterRenderer::ShadedRelief {
+            band: 0,
+            ramp: Some(Ramp::Terrain),
+            azimuth: 315.0,
+            altitude: 45.0,
+            z_factor: 1.0,
+            shadow: 0.0,
+            sky: 0.0,
+            fill: 0.0,
+            rock,
+        };
+        let (mut rocky, mut plain) = (RasterStyle::default_for(&r), RasterStyle::default_for(&r));
+        (rocky.renderer, plain.renderer) = (relief(Some(rock)), relief(None));
+        let (with, without) = (Colorizer::new(&rocky, &r, None), Colorizer::new(&plain, &r, None));
+        for (v, h) in [(10.0, 0), (50.0, 128), (90.0, 255)] {
+            let plain = without.color_lit(&[v], Some(h), None, None, None);
+            assert_eq!(with.color_lit(&[v], Some(h), None, None, None), plain, "no share of rock: the ramp");
+            assert_eq!(with.color_lit(&[v], Some(h), None, None, Some(0)), plain, "flat ground: the ramp");
+            assert_eq!(without.color_lit(&[v], Some(h), None, None, Some(255)), plain, "no rock set: the ramp");
+            // All rock: the rock colour, lit as the ramp is (a quarter ambient, the rest the sun).
+            let lit = |c: u8| (f64::from(c) * (0.25 + 0.75 * f64::from(h) / 255.0)).round() as u8;
+            assert_eq!(with.color_lit(&[v], Some(h), None, None, Some(255)), Some([lit(200), lit(100), lit(50), 255]));
+            // Half way: half way between the two colours.
+            let half = with.color_lit(&[v], Some(255), None, None, Some(128)).unwrap();
+            let ramp = without.color_lit(&[v], Some(255), None, None, None).unwrap();
+            for (k, end) in [200u8, 100, 50].into_iter().enumerate() {
+                let mid = (f64::from(ramp[k]) + f64::from(end)) / 2.0;
+                assert!((f64::from(half[k]) - mid).abs() <= 1.5, "{v}: channel {k} {} not near {mid}", half[k]);
+            }
+            // With the sky and the fill light (#1912) too: the rock colour first, then every light
+            // shades it, as they shade the ramp.
+            let all = |c: u8| (f64::from(c) * (0.25 * 128.0 / 255.0 + 0.75 * f64::from(h) / 255.0 + 40.0 / 255.0)).round() as u8;
+            assert_eq!(with.color_lit(&[v], Some(h), Some(128), Some(40), Some(255)), Some([all(200), all(100), all(50), 255]));
+            let filled = without.color_lit(&[v], Some(h), Some(128), Some(40), None);
+            assert_eq!(with.color_lit(&[v], Some(h), Some(128), Some(40), Some(0)), filled, "flat ground: the filled ramp");
+        }
+
+        // Saved only when set, and read back as it was.
+        let saved = serde_json::to_string(&relief(None)).unwrap();
+        assert!(!saved.contains("rock"), "{saved}");
+        let saved = serde_json::to_string(&relief(Some(rock))).unwrap();
+        assert_eq!(serde_json::from_str::<RasterRenderer>(&saved).unwrap(), relief(Some(rock)));
     }
 
     /// A tower lit from the east, drawn as Shaded Relief with `shadow`.
@@ -2950,7 +3245,7 @@ mod tests {
         let data: Vec<f32> = (0..400).map(|i| if i == 10 * 20 + 10 { 900.0 } else { 0.0 }).collect();
         let r = Raster::new("tower", 20, 20, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
         let mut rl = RasterLayer::from_path(r, "tower.tif");
-        rl.style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 90.0, altitude: 30.0, z_factor: 1.0, shadow };
+        rl.style.renderer = grey_relief(90.0, 30.0, 1.0, shadow, 0.0);
         rl
     }
 
@@ -3008,15 +3303,22 @@ mod tests {
         let r = Raster::new("hills", 1200, 1200, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
         let mut rl = RasterLayer::from_path(r, "hills.tif");
         let lit = |rl: &mut RasterLayer, az: f64| {
-            rl.style.renderer =
-                RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: az, altitude: 10.0, z_factor: 1.0, shadow: 1.0 };
+            rl.style.renderer = grey_relief(az, 10.0, 1.0, 1.0, 0.0);
         };
         let other = |az: f64, rl: &RasterLayer| {
             let mut c = rl.clone();
             lit(&mut c, az);
             c
         };
-        let work_of = |rl: &RasterLayer, az: f64| rl.cast.0.lock().unwrap().iter().find(|j| j.key.azimuth == az).map(|j| j.work.clone());
+        let work_of = |rl: &RasterLayer, az: f64| {
+            rl.cast
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|j| matches!(j.key.grid, Grid::Shadows { azimuth, .. } if azimuth == az))
+                .map(|j| j.work.clone())
+        };
         lit(&mut rl, 10.0);
         rl.cast_shadows(false, (0, 1), || {});
         let copy = other(20.0, &rl);
@@ -3060,7 +3362,7 @@ mod tests {
         let data: Vec<f32> = (0..2000 * 2000).map(|i| ((i % 2000) as f32 * 0.01) + ((i / 2000) as f32 * 0.01)).collect();
         let r = Raster::new("plain", 2000, 2000, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
         let mut rl = RasterLayer::from_path(r, "plain.tif");
-        rl.style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 135.0, altitude: 2.0, z_factor: 1.0, shadow: 1.0 };
+        rl.style.renderer = grey_relief(135.0, 2.0, 1.0, 1.0, 0.0);
         let (sent, landings) = std::sync::mpsc::channel::<()>();
         {
             let _cancelled = rustgis_data::progress::install(Some(std::sync::Arc::new(Cancelled)));
@@ -3073,7 +3375,7 @@ mod tests {
         // The worker stops and says so (the map draws again), with no grid.
         assert!(landings.recv_timeout(std::time::Duration::from_secs(60)).is_ok(), "landed");
         let work = rl.cast.0.lock().unwrap().first().map(|j| j.work.clone()).unwrap();
-        assert!(work.was_stopped());
+        assert!(work.was_stopped(Grid::Shadows { azimuth: 0.0, altitude: 0.0 }.stopped()));
         // Asked again, it starts over.
         rl.cast_shadows(false, (0, 1), || {});
         let again = rl.cast.0.lock().unwrap().first().map(|j| j.work.clone()).unwrap();
@@ -3088,7 +3390,7 @@ mod tests {
         let data: Vec<f32> = (0..800 * 800).map(|i| ((i % 800) as f32 * 0.01) + ((i / 800) as f32 * 0.01)).collect();
         let r = Raster::new("plain", 800, 800, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
         let mut rl = RasterLayer::from_path(r, "plain.tif");
-        rl.style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 135.0, altitude: 3.0, z_factor: 1.0, shadow: 1.0 };
+        rl.style.renderer = grey_relief(135.0, 3.0, 1.0, 1.0, 0.0);
         let (sent, landings) = std::sync::mpsc::channel::<&'static str>();
         let told = |who: &'static str| {
             let tx = sent.clone();
@@ -3121,5 +3423,41 @@ mod tests {
         rl.data = Some(Arc::new(r));
         let CastShadows::Unavailable(why) = rl.cast_shadows(true, (0, 1), || {}) else { panic!("said") };
         assert!(why.contains("read in place"), "{why}");
+    }
+
+    /// The sky is worked out once whatever the sun, beside the owner's shadows (neither stops the
+    /// other's work); read in place with only its overview held, it is drawn without, and said.
+    #[test]
+    fn the_sky_is_kept_whatever_the_sun() {
+        let mut rl = tower(1.0);
+        assert_eq!(rl.sky_view(true, (0, 1), || {}), CastShadows::None, "a sky of 0 has none");
+        if let RasterRenderer::ShadedRelief { sky, .. } = &mut rl.style.renderer {
+            *sky = 1.0;
+        }
+        let hold = hold_cast_shadows();
+        assert_eq!(rl.sky_view(false, (0, 1), || {}), CastShadows::Pending);
+        assert_eq!(rl.cast_shadows(false, (0, 1), || {}), CastShadows::Pending);
+        {
+            let jobs = rl.cast.0.lock().unwrap();
+            assert_eq!(jobs.len(), 2, "both kept");
+            assert!(jobs.iter().all(|j| !j.work.stop.load(std::sync::atomic::Ordering::SeqCst)), "neither stopped");
+        }
+        drop(hold);
+        let CastShadows::Ready(sky) = rl.sky_view(true, (0, 1), || {}) else { panic!("waited for") };
+        assert!(matches!(rl.cast_shadows(true, (0, 1), || {}), CastShadows::Ready(_)));
+        // Beside the tower, the directions toward it are hidden (about 3 of 16); its top sees all.
+        assert!((160..240).contains(&sky[10 * 20 + 9]), "{}", sky[10 * 20 + 9]);
+        assert_eq!(sky[10 * 20 + 10], 255);
+        // Another sun, or another strength: the same sky.
+        if let RasterRenderer::ShadedRelief { azimuth, sky, .. } = &mut rl.style.renderer {
+            (*azimuth, *sky) = (200.0, 0.4);
+        }
+        assert!(matches!(rl.sky_view(false, (0, 1), || {}), CastShadows::Ready(g) if Arc::ptr_eq(&g, &sky)));
+        let mut r = (**rl.data.as_ref().unwrap()).clone();
+        r.overview = Some((80, 80));
+        rl.in_place = true;
+        rl.data = Some(Arc::new(r));
+        let CastShadows::Unavailable(why) = rl.sky_view(true, (0, 1), || {}) else { panic!("said") };
+        assert!(why.contains("sky visibility") && why.contains("read in place"), "{why}");
     }
 }

@@ -16,14 +16,20 @@ on:
 permissions:
   contents: read
 
+# A pull request's runs are grouped by its number, not by github.ref: a run GitHub creates after
+# the pull request has merged gets the base branch's ref (refs/heads/main), and would otherwise
+# join main's group and cancel main's run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
   cancel-in-progress: true
 
 jobs:
   check:
     name: Reference answers match generate.py
-    runs-on: ubuntu-latest
+    # The answers' last digits depend on the system's maths library (glibc's libm, which PROJ
+    # uses), so the check runs on a fixed image: one whose answers match what generate.py writes
+    # there. Moving to a new image means regenerating the answers on it.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3

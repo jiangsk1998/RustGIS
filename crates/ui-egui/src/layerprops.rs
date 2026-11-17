@@ -1,13 +1,14 @@
 //! The Layer Properties pane (#1803): the selected layer's settings in one place, opened from a
-//! layer's right-click menu (Properties…) or View › Windows › Layer Properties, and on its Query
-//! tab from Data › Definition Query. As the Labeling pane, it keeps no layer settings of its own:
-//! it reads the layer each frame and runs the same commands as the ribbon and the layer's menu, so
-//! every change undoes on its own. Only what it shows is kept: the tab chosen
+//! layer's right-click menu (Properties…) or View › Windows › Layer Properties; on its Query tab
+//! from Data › Definition Query; on its Source tab from View › Windows › Details and, for a raster,
+//! Data › Raster Information (`ui.pane.details`). As the Labeling pane, it keeps no layer settings
+//! of its own: it reads the layer each frame and runs the same commands as the ribbon and the
+//! layer's menu, so every change undoes on its own. Only what it shows is kept: the tab chosen
 //! (`UiState::layer_properties_tab`), and in egui's memory the header's light and a name or query
 //! being typed. A tab per topic shows one part at a time: General, Source, Display and, for a
-//! feature layer, Query and Time. The pane follows the selected layer, as the Symbology and Labeling panes
-//! do; its header (the layer's type and name, also on the pane's tab) lights up for a moment when
-//! the layer changes, so a change made next isn't made on another layer unawares.
+//! feature layer, Query and Time. The pane follows the selected layer, as the Symbology and
+//! Labeling panes do; its header (the layer's type and name, also on the pane's tab) lights up for
+//! a moment when the layer changes, so a change made next isn't made on another layer unawares.
 
 use egui::{CornerRadius, RichText, Ui, vec2};
 use rustgis_engine::data::GeometryType;
@@ -142,6 +143,12 @@ impl Topic {
     }
 }
 
+/// Whether the pane is in view on its Source tab: what `ui.pane.details` shows, and what lights
+/// the ribbon's Details and Raster Information.
+pub(crate) fn source_in_view(ui: &crate::UiState) -> bool {
+    ui.right == Some(crate::RightPane::LayerProperties) && ui.layer_properties_tab == Topic::Source
+}
+
 /// The tab row, and the tab chosen in it. It is the pane's, not a layer's: choosing another layer
 /// keeps the topic in view. A raster has no Query or Time tab: it shows General, and the tab comes
 /// back with the next feature layer.
@@ -210,9 +217,9 @@ fn name_key(instance: u64) -> egui::Id {
     egui::Id::unique(("layer_properties_name", instance))
 }
 
-/// The most characters `layer.rename` keeps of a name: the box takes no more (a longer paste is
-/// cut to fit, and a note under the box says so), so the command cuts none.
-const NAME_LIMIT: usize = 200;
+/// The most characters `layer.rename` takes of a name: the box takes no more (a longer paste is
+/// cut to fit, and a note under the box says so), so the command refuses none.
+const NAME_LIMIT: usize = rustgis_engine::cmd::layer::MAX_LAYER_NAME;
 
 /// The layer's name, renamed (`layer.rename`) when the box is left (a click elsewhere, another
 /// layer's included) or Enter is pressed, and put back as it was with Escape or when left empty. A
@@ -267,8 +274,8 @@ fn name_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer) {
     }
 }
 
-/// What the Details pane shows of the layer, and the actions on its source the layer's menu has,
-/// each where the menu shows it.
+/// What the layer is read from, and the actions on its source: those the layer's menu has, each
+/// where the menu shows it, and Define Projection…, which is here only (#1803).
 fn source(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
     crate::panes::source_details(ui, l, t);
     ui.add_space(8.0);
@@ -293,8 +300,8 @@ fn source(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
     });
 }
 
-/// When and how the layer draws: its visibility range, transparency, masking, and a raster's
-/// blend or a feature layer's reference scale.
+/// When and how the layer draws: its visibility range, transparency, masking, a raster's blend or
+/// a feature layer's reference scale, its depth priority and, for a polygon layer, its extrusion.
 fn display(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
     heading(ui, "Visibility Range", t);
     crate::ribbon::scale_range_rows(app, ui, l, "layer_properties_scale", 12.5);
@@ -313,6 +320,96 @@ fn display(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
         crate::panes::reference_scale_row(app, ui, l);
     }
     priority_row(app, ui, l);
+    if !l.is_raster() && l.geometry_type() == GeometryType::Polygon {
+        heading(ui, "Extrusion", t);
+        extrusion(app, ui, l);
+    }
+}
+
+/// A polygon layer's extrusion, as the ribbon's Style › Extrusion, Faces and Light and Shadow
+/// groups set it, for the layer the pane shows: its Type, then once extruded the constant Height
+/// or the field, Factor, Base, Face Culling, Lighting (the ribbon has it in both of its groups:
+/// it is one setting) and Cast Shadow. The Type and Base lists and the Factor and Base (m) rows
+/// are the ribbon's own.
+fn extrusion(app: &mut RustGisApp, ui: &mut Ui, l: &Layer) {
+    let x = l.extrusion.as_ref();
+    let fields = crate::ribbon::numeric_fields(l);
+    ui.horizontal(|ui| {
+        let input_label = ui.label(tl!("Type"));
+        let shown = match x {
+            None => tl!("None").to_string(),
+            Some(x) => match &x.field {
+                None => tl!("Constant height").to_string(),
+                Some(f) => crate::i18n::fmt("By {field}", &[("field", f)]),
+            },
+        };
+        egui::ComboBox::from_id_salt(("layer_properties_extrusion", l.instance_id()))
+            .selected_text(shown)
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                crate::ribbon::extrusion_type_choices(ui, app, l.id, x, &fields);
+            })
+            .response
+            .labelled_by(input_label.id);
+    });
+    let Some(x) = x else { return };
+    if x.field.is_none() {
+        height_row(app, ui, l, x);
+    }
+    crate::ribbon::extrusion_factor_row(app, ui, l.id, x, "layer_properties", 12.5);
+    ui.horizontal(|ui| {
+        let input_label = ui.label(tl!("Base"));
+        let shown = match &x.base_field {
+            Some(f) => crate::i18n::fmt("By {field}", &[("field", f)]),
+            None if x.base > 0.0 => crate::i18n::fmt("Constant ({m} m)", &[("m", &x.base.to_string())]),
+            None => tl!("Ground").to_string(),
+        };
+        egui::ComboBox::from_id_salt(("layer_properties_extrusion_base", l.instance_id()))
+            .selected_text(shown)
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                crate::ribbon::extrusion_base_choices(ui, app, l.id, x, &fields);
+            })
+            .response
+            .labelled_by(input_label.id)
+            .on_hover_text(tl!("What the walls stand on: the ground, a field or the constant Base (m)."));
+    });
+    crate::ribbon::extrusion_base_row(app, ui, l.id, x, "layer_properties", 12.5);
+    let mut culling = x.face_culling;
+    if ui.checkbox(&mut culling, tl!("Face Culling")).on_hover_text(tl!("Hide walls facing away from you.")).changed() {
+        run(app, "layer.faces", json!({"layer": l.id, "culling": culling}));
+    }
+    let mut lighting = x.lighting;
+    if ui.checkbox(&mut lighting, tl!("Lighting")).on_hover_text(tl!("Shade walls by the way they face the light.")).changed() {
+        run(app, "layer.faces", json!({"layer": l.id, "lighting": lighting}));
+    }
+    let mut shadows = x.shadows;
+    if ui.checkbox(&mut shadows, tl!("Cast Shadow")).on_hover_text(tl!("Extruded shapes cast shadows on the map.")).changed() {
+        run(app, "layer.lightShadow", json!({"layer": l.id, "shadows": shadows}));
+    }
+}
+
+/// The constant height of `l`'s extrusion, in metres before the Factor (`layer.extrusion`),
+/// which the ribbon sets only by choosing Constant height. A drag is one step, set when let go; a
+/// saved height out of range is shown, not written back.
+fn height_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, x: &rustgis_engine::map::effects::Extrusion) {
+    let mut h = if x.height.is_finite() { x.height } else { 0.0 };
+    ui.horizontal(|ui| {
+        let input_label = ui.label(tl!("Height (m)"));
+        let drag = crate::widgets::Dragged::lend(ui, egui::Id::unique(("layer_properties_extrusion_height", l.instance_id())), &mut h);
+        let r = ui
+            .add(
+                egui::DragValue::new(&mut h)
+                    .update_while_editing(false)
+                    .range(0.0..=1e7)
+                    .clamp_existing_to_range(false)
+                    .speed(x.height.max(10.0) * 0.02),
+            )
+            .labelled_by(input_label.id);
+        if drag.settled(ui, &r, &mut h) && h != x.height {
+            run(app, "layer.extrusion", json!({"layer": l.id, "type": "height", "height": h}));
+        }
+    });
 }
 
 /// The layer's depth priority (`layer.priority`), as the ribbon's Raise and Lower Priority set it:
@@ -498,7 +595,6 @@ fn query(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use egui::accesskit::Role;
     use egui_kittest::kittest::Queryable;
@@ -564,6 +660,150 @@ mod tests {
         assert!(!app.ui.right_open.contains(&RightPane::LayerProperties));
     }
 
+    /// `ui.pane.details` (the ribbon's Details and Raster Information) shows the Source tab, and
+    /// hides the pane when it is in view on it; `close` hides it, and `layer` shows that layer's.
+    #[test]
+    fn details_shows_the_source_tab() {
+        let mut app = RustGisApp::with_sample();
+        app.session.active_layer = None;
+        assert!(app.run("ui.pane.details", json!(null)).is_err(), "no layer selected");
+        let cities = layer_id(&app, "Cities");
+        app.session.run("layer.select", &json!({"layer": cities})).unwrap();
+        app.run("ui.pane.layerProperties", json!({"tab": "query"})).unwrap();
+        app.run("ui.pane.details", json!(null)).unwrap();
+        assert!(super::source_in_view(&app.ui), "from another tab, Source is shown");
+        app.run("ui.pane.details", json!(null)).unwrap();
+        assert!(!app.ui.right_open.contains(&RightPane::LayerProperties), "a second press hides it");
+        app.run("ui.pane.details", json!(null)).unwrap();
+        app.run("ui.pane.details", json!({"close": true})).unwrap();
+        assert!(!app.ui.right_open.contains(&RightPane::LayerProperties), "close hides it");
+        // A 2 × 2 ASCII grid.
+        let grid = "bmNvbHMgMgpucm93cyAyCnhsbGNvcm5lciAwCnlsbGNvcm5lciAwCmNlbGxzaXplIDEKTk9EQVRBX3ZhbHVlIC05OTk5CjEgMgozIDQK";
+        app.session.run("layer.addDataBytes", &json!({"fileName": "grid.asc", "data": grid})).unwrap();
+        let raster = app.session.map().layers.iter().find(|l| l.is_raster()).map(|l| l.id).unwrap();
+        app.session.run("layer.select", &json!({"layer": cities})).unwrap();
+        app.run("ui.pane.details", json!({"layer": raster})).unwrap();
+        assert_eq!(app.session.active_layer, Some(raster), "the layer given is selected");
+        assert!(super::source_in_view(&app.ui), "a raster's information is on Source too");
+        app.run("ui.pane.details", json!({"layer": raster})).unwrap();
+        assert!(super::source_in_view(&app.ui), "naming a layer shows it, even when in view");
+    }
+
+    /// A polygon layer's Display tab sets its extrusion with the ribbon's commands, for the layer
+    /// the pane shows, each change a step of its own; choosing the type it has changes nothing. A
+    /// point layer has no Extrusion part.
+    #[test]
+    fn the_display_tab_sets_a_polygon_layers_extrusion() {
+        let app = with_cities();
+        let countries = layer_id(&app, "Countries");
+        let mut h = harness(app);
+        h.run();
+        open_tab(&mut h, "Display");
+        assert!(h.query_by_role_and_label(Role::ComboBox, "Type").is_none(), "no extrusion for points");
+        h.state_mut().session.run("layer.select", &json!({"layer": countries})).unwrap();
+        h.run_steps(2);
+        let x = |h: &egui_kittest::Harness<'static, RustGisApp>| h.state().session.map().layer(countries).unwrap().extrusion.clone();
+        assert!(h.query_by_role_and_label(Role::ComboBox, "Base").is_none(), "nothing more until extruded");
+        let steps = h.state().session.undo_depth();
+        for _ in 0..2 {
+            h.get_by_role_and_label(Role::ComboBox, "Type").click();
+            h.run();
+            h.get_by_role_and_label(Role::RadioButton, "Constant height").click();
+            h.run();
+        }
+        let set = x(&h).unwrap();
+        assert!(set.field.is_none() && set.height == 50_000.0, "{set:?}");
+        assert_eq!(h.state().session.undo_depth(), steps + 1, "choosing it again changes nothing");
+        for label in ["Height (m)", "Factor", "Base (m)"] {
+            assert!(h.query_by_role_and_label(Role::SpinButton, label).is_some(), "missing input: {label}");
+        }
+        // Dragged right over several frames, then let go: one step.
+        let at = h.get_by_role_and_label(Role::SpinButton, "Height (m)").rect().center();
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        h.event(egui::Event::PointerMoved(at));
+        h.step();
+        h.event(button(at, true));
+        h.step();
+        for i in 1..=4 {
+            h.event(egui::Event::PointerMoved(at + egui::vec2(10.0 * i as f32, 0.0)));
+            h.step();
+        }
+        h.event(button(at + egui::vec2(40.0, 0.0), false));
+        h.step();
+        h.run();
+        assert!(x(&h).unwrap().height > 50_000.0, "{:?}", x(&h));
+        assert_eq!(h.state().session.undo_depth(), steps + 2, "a drag is one step");
+        h.get_by_role_and_label(Role::ComboBox, "Base").click();
+        h.run();
+        h.get_by_role_and_label(Role::RadioButton, "By pop_est").click();
+        h.run();
+        assert_eq!(x(&h).unwrap().base_field.as_deref(), Some("pop_est"));
+        h.get_by_role_and_label(Role::ComboBox, "Base").click();
+        h.run();
+        h.get_by_role_and_label(Role::RadioButton, "By pop_est").click();
+        h.run();
+        assert_eq!(h.state().session.undo_depth(), steps + 3, "choosing the base it has changes nothing");
+        h.get_by_role_and_label(Role::CheckBox, "Cast Shadow").click();
+        h.run();
+        h.get_by_role_and_label(Role::CheckBox, "Lighting").click();
+        h.run();
+        let set = x(&h).unwrap();
+        assert!(set.shadows && !set.lighting && set.face_culling, "{set:?}");
+        assert_eq!(h.state().session.undo_depth(), steps + 5, "each change a step of its own");
+        h.get_by_role_and_label(Role::ComboBox, "Type").click();
+        h.run();
+        h.get_by_role_and_label(Role::RadioButton, "None").click();
+        h.run();
+        assert!(x(&h).is_none());
+        assert!(h.query_by_role_and_label(Role::CheckBox, "Cast Shadow").is_none(), "nothing more once flat");
+    }
+
+    /// Changing the Factor keeps a height below 1,000 m as it is, constant or the fallback of a
+    /// field extrusion (used where the field holds no number): left out of the command, the
+    /// height would be raised to 1,000 m.
+    #[test]
+    fn the_factor_keeps_a_low_constant_height() {
+        for kind in [json!({"type": "height", "height": 200}), json!({"type": "field", "field": "pop_est", "height": 200})] {
+            factor_keeps_the_height(kind);
+        }
+    }
+
+    fn factor_keeps_the_height(kind: serde_json::Value) {
+        let mut app = with_cities();
+        let countries = layer_id(&app, "Countries");
+        app.session.run("layer.select", &json!({"layer": countries})).unwrap();
+        app.session.run("layer.extrusion", &kind).unwrap();
+        let mut h = harness(app);
+        h.run();
+        open_tab(&mut h, "Display");
+        let at = h.get_by_role_and_label(Role::SpinButton, "Factor").rect().center();
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        h.event(egui::Event::PointerMoved(at));
+        h.step();
+        h.event(button(at, true));
+        h.step();
+        for i in 1..=4 {
+            h.event(egui::Event::PointerMoved(at + egui::vec2(10.0 * i as f32, 0.0)));
+            h.step();
+        }
+        h.event(button(at + egui::vec2(40.0, 0.0), false));
+        h.step();
+        h.run();
+        let x = h.state().session.map().layer(countries).unwrap().extrusion.clone().unwrap();
+        assert!(x.factor > 1.0, "the factor changed: {x:?}");
+        assert_eq!(x.height, 200.0, "the height is kept: {kind} {x:?}");
+    }
+
     /// Each tab's inputs are reachable by their row labels.
     #[test]
     fn inputs_are_reachable_by_their_row_labels() {
@@ -580,6 +820,7 @@ mod tests {
         assert!(h.query_by_role_and_label(Role::ComboBox, "Layer Blend").is_none(), "blend is a raster's");
         open_tab(&mut h, "Source");
         assert!(h.query_by_label("Geometry").is_some(), "the Details rows");
+        assert!(h.query_by_role_and_label(Role::Button, "Define Projection…").is_some(), "here, not in the layer menu");
         open_tab(&mut h, "Query");
         assert!(h.query_by_role_and_label(Role::MultilineTextInput, "Where").is_some());
     }
@@ -799,6 +1040,31 @@ mod tests {
         h.get_by_role_and_label(Role::Button, "LIKE").click();
         h.run();
         assert_eq!(query_box(&h), "name LIKE ");
+    }
+
+    /// The Functions and Variables menus list the language's catalogs: a function is added open
+    /// for its arguments, and what follows it goes inside, not set apart from the bracket.
+    #[test]
+    fn the_functions_and_variables_menus_add_from_the_catalogs() {
+        use rustgis_engine::data::query::{VARS, functions};
+        let app = with_cities();
+        let mut h = harness(app);
+        h.run();
+        open_tab(&mut h, "Query");
+        type_query(&mut h, "name =");
+        // One that takes arguments, so it is added open.
+        let first = functions().find(|f| f.max > 0).unwrap();
+        h.get_by_role_and_label(Role::Button, "Functions ▾").click();
+        h.run();
+        h.get_by_role_and_label(Role::Button, first.signature).click();
+        h.run();
+        assert_eq!(query_box(&h), format!("name = {}(", first.name));
+        let var = VARS[0].names[0];
+        h.get_by_role_and_label(Role::Button, "Variables ▾").click();
+        h.run();
+        h.get_by_role_and_label(Role::Button, var).click();
+        h.run();
+        assert_eq!(query_box(&h), format!("name = {}({var} ", first.name));
     }
 
     /// Ctrl+Enter applies the clause without breaking the line; Escape drops what was typed.

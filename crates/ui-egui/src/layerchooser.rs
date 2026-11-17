@@ -53,6 +53,10 @@ pub fn add_file(app: &mut RustGisApp, path: &str) -> Result<Value, String> {
     if command != "layer.addData" {
         return app.run_by_user(command, json!({"path": path}));
     }
+    // A drawing asks for its coordinate system and whether its blocks are drawn first.
+    if rustgis_engine::data::dxf::is_dxf_name(path) {
+        return crate::dialogs::open_dxf_path(app, path);
+    }
     if !(app.ui.ask_layers && lists_layers(path)) {
         return add(app, json!({"path": path}));
     }

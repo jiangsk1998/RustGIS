@@ -326,12 +326,9 @@ impl SqliteEditTable {
                     .fields
                     .iter()
                     .zip(&attrs)
-                    .map(|(f, &i)| row.get_ref(i + 1).map(|v| value(v, f.ty)))
-                    .collect::<rusqlite::Result<Vec<Option<Value>>>>()
-                    .map_err(err)?
-                    .into_iter()
-                    .map(|v| v.unwrap_or(Value::Null))
-                    .collect();
+                    .map(|(f, &i)| row.get_ref(i + 1).map(|v| value(v, f.ty, &mut Vec::new(), Some(&mut Vec::new()), 0)))
+                    .collect::<rusqlite::Result<Vec<Value>>>()
+                    .map_err(err)?;
                 out.versions.push((id, hash.cast_signed()));
                 out.features.push(Feature { id, geometry, attrs });
             }
@@ -472,7 +469,7 @@ impl SqliteEditTable {
                 }
                 let old = row.get(c + 1).ok_or_else(|| self.shape_error())?;
                 let attr = f.attrs.get(i).unwrap_or(&Value::Null);
-                if value(ValueRef::from(old), field.ty).as_ref() != Some(attr) {
+                if value(ValueRef::from(old), field.ty, &mut Vec::new(), Some(&mut Vec::new()), 0) != *attr {
                     sets.push(format!("{} = ?", quote(names.get(c).ok_or_else(|| self.shape_error())?)));
                     args.push(sql_value(attr, field.ty));
                 }
@@ -614,7 +611,13 @@ impl SqliteEditTable {
             for &(i, c) in &snapshot_columns {
                 let field = fields.get(i).ok_or_else(|| self.shape_error())?;
                 let attr = feature.attrs.get_mut(i).ok_or_else(|| self.shape_error())?;
-                *attr = value(ValueRef::from(row.get(c + 1).ok_or_else(|| self.shape_error())?), field.ty).unwrap_or(Value::Null);
+                *attr = value(
+                    ValueRef::from(row.get(c + 1).ok_or_else(|| self.shape_error())?),
+                    field.ty,
+                    &mut Vec::new(),
+                    Some(&mut Vec::new()),
+                    0,
+                );
             }
             saved.versions.push((k.cast_unsigned(), fingerprint(row.iter().map(ValueRef::from))));
             features.push(feature);
@@ -1106,7 +1109,7 @@ mod tests {
         let fields = table.info().fields.clone();
         let read = table.read_editable(MAX_EDITABLE).unwrap();
         let insert = Feature { id: 100, geometry: None, attrs: vec![Value::Text("new".into()), Value::Null, Value::Null] };
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(5)); // test-wait: the revision is the file's timestamp; it needs the clock to move on
         Connection::open(&path).unwrap().execute("UPDATE places SET name = 'other' WHERE id = 1", []).unwrap();
         let error =
             table.save(&Edits { inserts: vec![insert], ..Default::default() }, &fields, std::iter::empty(), &read.revision).unwrap_err();

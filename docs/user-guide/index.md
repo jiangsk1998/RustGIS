@@ -15,6 +15,7 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
 | [Layouts and Reports](layouts.md) | Page layouts, map series, reports, presentations and notebooks |
 | [Sharing](sharing.md) | Exports, packages and open-format web maps, layers, styles and scenes |
 | [Workspace](workspace.md) | Linked views, the Browser view, animation, profiles, offline areas, customizing the ribbon |
+| [Field Work](field-work.md) | The phone apps: capturing and editing by touch, the device's position and tracks, photos, offline basemaps and field packages |
 | [AI Assistant](assistant.md) | A chat pane that answers questions and acts on the map through commands |
 
 <figure markdown="span">
@@ -31,10 +32,11 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
 - **Layers pane** (left): the map's layers in drawing order, with their legends. A new layer goes
   on top, whatever its kind (a feature, raster or web layer, an analysis result). Tick a layer to
   show or hide it; drag it up or down to change the drawing order; right-click it to zoom to it,
-  rename or remove it and more. The entire layer block, including its expanded legend and
-  classes, is split 50/50: drop in its upper half to insert above, or its lower half to insert
-  below. The insertion line shows the destination. Drop inside the first block's upper half
-  to move to the top, or inside the final block's lower half to move to the bottom.
+  rename it (or press ++f2++) or remove it and more. The entire layer block, including its
+  expanded legend and classes, is split 50/50: drop in its upper half to insert above, or its
+  lower half to insert below. The insertion line shows the destination. Drop inside the first
+  block's upper half to move to the top, or inside the final block's lower half to move to the
+  bottom.
   Type in the box at the top to show only the layers and tables
   whose names contain the text (++escape++ clears it); a selected layer it hides is no longer
   selected, and layers can be reordered again once it is cleared. The buttons beside the list's
@@ -49,7 +51,8 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
   outlined, is the one the Style and Data tabs act on. Right-click one of them to zoom to them
   all, show or hide them, allow or block selecting their features on the map, move them to the top
   or bottom of the drawing order (one in a group, to the top or bottom of its group), put them in
-  a group or take them out of one, or remove them; a layer the filter hides is left out.
+  a group or take them out of one, raise or flatten their polygons together
+  ([Extrusion](cartography.md#layer-effects)), or remove them; a layer the filter hides is left out.
   A new group made from the menu asks for its name. In scripts, `layer.select` takes
   a list and a `mode` (`replace`, `toggle` or `extend`), and the commands that remove, show, move,
   group or zoom to a layer take a list in `layer`, or the picked layers when it is left out.
@@ -87,8 +90,8 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
 - **Map view**: one tab per map and layout. The buttons at the top right zoom in, zoom out and go
   to the full extent; the north arrow and scale bar sit in the corners (on a rotated or tilted
   map, click the north arrow to face north and look straight down); tile credits at the bottom right.
-- **Panes** (right): Tools (geoprocessing), Symbology, Labeling, History, Details, Bookmarks,
-  Editing, Workflows, Script, SQL, the AI Assistant and more. Open them from **View › Windows** or the commands that use
+- **Panes** (right): Tools (geoprocessing), Symbology, Labeling, Layer Properties, History,
+  Bookmarks, Editing, Workflows, Script, SQL, the AI Assistant and more. Open them from **View › Windows** or the commands that use
   them. Each pane opened gets a tab at the top, in the order opened: click a tab to show its pane,
   and its **✕** to close it (the next tab shows; closing the last hides the side). Right-click a
   tab to close it, the others or all; the **✕** at the header's end closes every pane. Tabs that
@@ -116,7 +119,7 @@ end, by double-clicking a tab, or with ++ctrl+f1++ (++cmd+f1++ on macOS, where F
 key). Click a tab to peek at its commands while collapsed. When the window is narrower than the
 ribbon, arrows at its ends scroll it.
 
-### Diagnostics
+### Messages
 
 Open **View › Windows › Messages**, click the status-bar notice or **Messages** button,
 or search for **Messages** in Command Search (`ui.pane.diagnosticLog`). This troubleshooting
@@ -242,6 +245,12 @@ Exports and other files already written are not undone.
 
 ### Repair Data Source
 
+When drawing cannot read a linked vector file, the error names the layer and its file path.
+If the file was moved or deleted, restore it or repair the source. Newly failing layers share
+one counted notice, listing up to five layers and their files. Screen redraws report each failure
+once per layer; a successful read allows a later failure to be reported again. Every export that
+succeeds without a layer reports the read failure for that output, including repeated exports.
+
 If a linked file moved or was renamed, right-click its layer or local PMTiles/MBTiles tile
 archive and choose **Repair Data Source…**. For the selected layer, use **Data › Data Source ›
 Repair Source**, or find **Repair Data Source** (or **Repair Tile Archive**) in Command Search.
@@ -271,7 +280,7 @@ in Command Search. Reload rereads the same local source, table or raster subdata
 adding other tables from its container. It retains the layer's name, identity, drawing order,
 group, visibility, opacity, styling, labels, filters and map camera. Local PMTiles and MBTiles
 tile archives have their own **Reload Data** on their Layers row; see
-[Maps › Reloading a local tile archive](maps.md).
+[Maps › Reloading a local tile archive](maps.md#reloading-a-local-tile-archive-desktop).
 
 Supported targets are linked vectors, rasters (including time-following Zarr variables),
 GDAL/DuckDB file-backed layers and editable local GeoPackage tables. GDAL-linked File
@@ -396,6 +405,123 @@ can't check it.
 On the desktop, make the layer active and choose **Source File State** in Command Search; what it
 found shows in the status bar. CLI and Python: `source.syncState` with `{"layer":"parcels"}`.
 
+The desktop's Layers pane also marks such a layer as it goes: **(edits not published)** once it
+holds rows its file lacks (its rows are hashed in the background while the pane shows the layer,
+once after the project opens and again after each edit), and **(changed on disk)** when the file changes, by the same look at its
+metadata as for linked files, never its data. A file whose length differs from the record, or
+that gained or lost a part, is marked even when it changed while the project was closed; one
+changed then without a change of length is found by Source File State or Publish. The row's
+tooltip says what to do; no notification offers Reload Data, which can't read such a layer.
+
+### Publish to source
+
+`source.publish` writes a layer's edits back over the Shapefile or `.geojson` file it was read
+from, so the file that other people and programs read holds them. Use **Source File State** in
+Command Search (`source.syncState`) to compare the layer and its file before publishing.
+
+#### Shapefile
+
+A Shapefile can't change one row in place, so
+the whole file is written again, and RustGIS first makes sure that only the edits change. It
+refuses, with nothing written, when:
+
+- the file changed since the layer was read (`source.syncState` would say `sourceChanged` or
+  `both`): writing would overwrite that change;
+- the layer was read otherwise than the file reads now (by an older RustGIS), so rows that
+  weren't edited could change;
+- the file, read and written again, wouldn't be the same file: shapes with Z or M values, records
+  without a shape, multipatches, records marked deleted, text with spaces before it, numbers with
+  more digits than RustGIS holds exactly, columns of a type RustGIS doesn't write (memo, binary),
+  text in a code page RustGIS can't write. The message names what would change and where;
+- the file can't hold the layer as it is: a feature without a shape, a field name longer than 10
+  bytes, text in characters the file's code page lacks.
+
+The file keeps its code page (its `.cpg` and the language driver in its `.dbf`), each column's
+width, decimals and type where the values still fit, and its `.prj`. A column that can't hold
+an edited value gets one that can, and a notice names it with its old and new form; a field
+deleted or renamed in the layer leaves its column out of the file, and a notice names it too. A layer read in another
+coordinate system than its `.prj` names, including one assigned with Define Projection, gets a
+`.prj` for that system, said too. A shape that wasn't edited is
+written with the coordinates the file holds, so a projected file's untouched shapes stay as they
+were to the bit. An edited shape in a projected system is converted from longitude/latitude, as
+RustGIS holds it, and read back: publishing refuses one that would move by more than one part in
+10¹¹ of its coordinates (a tenth of a millimetre at ten thousand kilometres). A notice
+names the file, counts shapes with projection round-off and identifies the first feature and
+the largest coordinate difference in degrees; exact round trips give no such notice.
+
+Publishing refuses symbolic links in any source part: add the actual source files instead.
+This keeps each link and its target unchanged.
+
+The new parts are written beside the old ones, with the old parts' file permissions, checked,
+and then renamed into place, the `.shp` last. An OS lock prevents two RustGIS processes from
+publishing the same source at once; a competing publish refuses immediately. The empty
+`.filename.shp.rustgis-lock` sidecar stays beside the source for reuse; the OS releases its lock
+when the publisher finishes or exits. On Unix, this empty file permits read/write access across
+accounts so users sharing the source directory can reopen it for locking, including on NFS.
+Other programs do not follow this locking protocol: changes they make after RustGIS's final
+source check can be overwritten by the publish. Stop other writers before publishing.
+If one part fails to land, the old parts are put back;
+should putting one back fail too, the message names the temporary file that holds it, beside the
+Shapefile, so it can be renamed back by hand. Sidecars RustGIS doesn't write, such as `.shp.xml`
+metadata, are left alone. The spatial indexes that would no longer match (`.qix`, `.sbn`, `.sbx`)
+are removed where they can be; one that can't be (held open by another program) is left, and
+should be deleted before that program uses the file.
+
+This rollback needs RustGIS to keep running. Replacing several Shapefile parts is not atomic:
+a process crash or power loss between renames can leave a mixed or incomplete set. Keep an
+independent backup before publishing. After such an interruption, preserve the whole directory,
+including hidden `.<part-name>.<process-id>.<number>.tmp` files (for example,
+`.parcels.dbf.1234.5.tmp`); these can contain both staged new parts and displaced old parts.
+Restore a complete, consistent Shapefile from your backup before opening or publishing it again.
+Do not restore an arbitrary temporary file or mix parts from different versions. Temporary
+files may help with manual recovery, but are not a crash-safe backup.
+
+Once published, the layer holds its rows as the file reads them, which differs only where a
+Shapefile can't tell values apart (an empty text reads as no value, a column of whole numbers with no declared
+decimals as integers, date-time fields as ISO 8601 text). A double field becoming integer or a date-time field
+becoming text produces a notice. The layer reads `inSync`; the project has a change to save. Undo doesn't change the file:
+undoing an edit made before publishing shows the layer as `edited` again. A layer with no edits writes nothing. Layers read in place remain read-only.
+
+#### GeoJSON
+
+For `.geojson`, publish also checks that the source is unchanged, that it still reads as it did
+at the last sync, and that both the original and the edited layer survive a read/write. It keeps
+the document's kind (FeatureCollection, Feature or bare geometry), a collection's name, and
+feature ids. Ordinary integer coordinate text stays integer text when the value is unchanged.
+Whitespace and member order may change.
+
+Publish refuses a rewrite that would change foreign members, a legacy `crs` member, Z values,
+a geometry the reader simplifies, nested properties it reads as text, duplicate object keys,
+or number text the writer would spell differently (such as `1.00` or `1E3`). The message says
+why; the original file stays unchanged. A file with feature ids requires the same internal row
+ids in the same order: adding, deleting or reordering rows is refused when their external ids
+couldn't be preserved, and the same holds for a layer without fields whose features mix absent,
+null and object `properties`. Absent or null `properties` are kept only in a layer without fields:
+a collection that mixes them with attributed features is refused. A `bbox` on the collection
+or its features is recomputed from the coordinates written. A feature keeps a box only where it had one, unless
+rows were added, removed or reordered: then every feature gets one when any did. A feature whose
+geometry was cleared is written without one, having nothing to bound. A collection `bbox` with no geometry
+left, one that doesn't match the file's own coordinates, or a `bbox` on a geometry object, is
+refused. Use Export Features for a
+different document structure. A single Feature can't become a collection, a bare geometry can't
+gain attributes, and an empty collection can't retain a field schema.
+
+The new file is written beside the source with its existing permissions, synced and read back.
+The source is checked again immediately before the atomic replacement; cancellation or failure
+before replacement leaves it unchanged. The same OS lock as for Shapefile prevents concurrent
+RustGIS publishers; its empty `.filename.geojson.rustgis-lock` sidecar stays for reuse. Other
+programs do not follow this lock: changes they make after RustGIS's final source check can be
+overwritten by the publish. Stop other writers before publishing. A field removed or renamed in
+the layer produces a notice naming the properties left out. Afterward the
+layer takes the file's read-back values and its new sync point, without changing the project
+format. Undo changes the layer, and shows it as edited; it does not undo a write to the file.
+
+#### Running a publish
+
+On the desktop, make the layer active and choose **Publish to Source** in Command Search; it runs
+in the background, with progress and Cancel in the status bar. CLI and Python: `source.publish`
+with `{"layer":"parcels"}`.
+
 ## Keyboard shortcuts
 
 | Keys | Action |
@@ -415,6 +541,7 @@ found shows in the status bar. CLI and Python: `source.syncState` with `{"layer"
 | Arrow keys / ++shift++ + arrow keys | Nudge the selected layout element / nudge it further |
 | ++alt+shift+right++ / ++alt+shift+left++ | Indent the active layer into the group above it / outdent it out of its group |
 | ++alt+shift+up++ / ++alt+shift+down++ | Move the active layer up / down one step in the Layers pane |
+| ++f2++ | Rename the active layer |
 | ++ctrl+c++ / ++ctrl+x++ / ++ctrl+v++ | Copy / Cut / Paste features |
 
 On macOS, ++cmd++ takes the place of ++ctrl++. **Help › Shortcuts** lists them all in the app,

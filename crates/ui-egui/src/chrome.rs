@@ -355,6 +355,8 @@ pub fn status_bar(app: &mut RustGisApp, ui: &mut Ui) {
                     sep(ui, &t);
                     crate::readjob::status(app, ui, &t);
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                source_open_status(app, ui, &t);
                 crate::geocodeui::status(app, ui);
                 // Downloads and windows being read off the frame, each with its Cancel.
                 if !app.ui.downloads.is_empty() || window_reads_under_way(app) {
@@ -462,6 +464,72 @@ pub fn status_bar(app: &mut RustGisApp, ui: &mut Ui) {
                 });
             });
         });
+}
+
+/// Restored local FlatGeobuf layers classify dates off the frame, including hidden maps.
+/// This status keeps progress and Cancel available until those scans finish.
+#[cfg(not(target_arch = "wasm32"))]
+fn source_open_status(app: &RustGisApp, ui: &mut Ui, t: &Tokens) {
+    let sources: Vec<_> = app
+        .session
+        .project
+        .maps
+        .iter()
+        .flat_map(|m| &m.layers)
+        .filter_map(|l| l.source.as_ref())
+        .filter_map(|s| s.opening_progress().map(|p| (s, p)))
+        .collect();
+    if sources.is_empty() {
+        return;
+    }
+    sep(ui, t);
+    ui.spinner();
+    ui.label(egui::RichText::new(tl!("Reading dates…")).size(11.5).color(t.text_dim));
+    let (done, total) =
+        sources.iter().fold((0u64, 0u64), |(done, total), (_, (d, n, _))| (done.saturating_add(*d), total.saturating_add(*n)));
+    if total > 0 && sources.iter().all(|(_, (_, n, _))| *n > 0) {
+        ui.add(egui::ProgressBar::new((done as f32 / total as f32).min(1.0)).show_percentage().desired_width(120.0).desired_height(12.0));
+    }
+    if ui.add_enabled(sources.iter().any(|(_, (_, _, cancelled))| !cancelled), egui::Button::new(tl!("Cancel")).small()).clicked() {
+        for (source, _) in sources {
+            source.cancel_opening();
+        }
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+}
+
+/// Whether work is running that the status bar shows with its progress and Cancel: an export, a
+/// file or a layer being read, a download.
+pub(crate) fn background_busy(app: &RustGisApp) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    if app.export_job.is_some() || crate::readjob::showing(app) || sources_opening(app) {
+        return true;
+    }
+    !app.ui.downloads.is_empty() || window_reads_under_way(app)
+}
+
+/// That work's progress and Cancel, as the status bar draws them, for a shell without one.
+pub(crate) fn background_status(app: &mut RustGisApp, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    #[cfg(not(target_arch = "wasm32"))]
+    if app.export_job.is_some() {
+        crate::exportjob::status(app, ui, &t);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if crate::readjob::showing(app) {
+        crate::readjob::status(app, ui, &t);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    source_open_status(app, ui, &t);
+    if !app.ui.downloads.is_empty() || window_reads_under_way(app) {
+        downloads_status(app, ui, &t);
+    }
+}
+
+/// Whether a restored layer's dates are still being read ([`source_open_status`] shows them).
+#[cfg(not(target_arch = "wasm32"))]
+fn sources_opening(app: &RustGisApp) -> bool {
+    app.session.project.maps.iter().flat_map(|m| &m.layers).filter_map(|l| l.source.as_ref()).any(|s| s.opening_progress().is_some())
 }
 
 /// Whether windows are being read off the frame (none in the browser).
@@ -688,6 +756,23 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
             }
             continue;
         }
+        // Esc cancels a held box gesture before leaving the drawing tool on another press.
+        if id == "tool.set"
+            && p.get("tool").and_then(serde_json::Value::as_str) == Some("explore")
+            && app.session.tool == rustgis_engine::Tool::RotatedBox
+            && crate::boxedit::drawing(app)
+        {
+            crate::boxedit::cancel(app);
+            continue;
+        }
+        if id == "tool.set"
+            && p.get("tool").and_then(serde_json::Value::as_str) == Some("explore")
+            && app.session.tool == rustgis_engine::Tool::Circle
+            && crate::circleedit::drawing(app)
+        {
+            crate::circleedit::cancel(app);
+            continue;
+        }
         // With Edit Vertices, Delete removes the chosen vertex rather than the feature.
         if id == "edit.delete"
             && app.session.active_layout.is_none()
@@ -743,6 +828,13 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
             }
             continue;
         }
+        // Rename with no name given (F2) opens the Rename dialog for the active layer, as Command
+        // Search does: the name is typed there. One naming another layer runs the command, which
+        // says the name is missing, rather than renaming the active layer instead.
+        if id == "layer.rename" && p.get("name").is_none() && p.get("layer").is_none() {
+            let _ = app.run("ui.dialog", json!({"name": "renameLayer"}));
+            continue;
+        }
         let _ = app.run_by_user(id, p);
     }
 }
@@ -769,6 +861,7 @@ pub(crate) const UI_COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.customizeShortcuts", "Keyboard Shortcuts", "Settings › Customize"),
     ("ui.addData", "Add Data…", "Home › Add"),
     ("ui.addDelimited", "Add Delimited Text…", "Home › Add › Add Data"),
+    ("ui.addDxf", "Import DXF…", "Home › Add › Add Data"),
     ("ui.addUrl", "Add Data From URL…", "Home › Add › Add Data"),
     ("ui.addZarr", "Add Zarr Variable…", "Home › Add › Add Data"),
     ("ui.addService", "Add From Service…", "Home › Add › Add Data"),
@@ -836,6 +929,7 @@ fn search_action(id: &str) -> Option<SearchAction> {
         "map.package" => SaveItem("mapPackage"),
         "map.rename" => Dialog("renameMap"),
         "map.goToXY" => Dialog("goToXY"),
+        "map.exportOrbit" => Dialog("exportOrbit"),
         "map.findPlace" => Dialog("findPlace"),
         "map.camera" | "map.setScale" => Dialog("camera"),
         "map.basemap" => Dialog("basemap"),
@@ -1393,7 +1487,6 @@ pub fn notices(app: &mut RustGisApp, ctx: &egui::Context) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

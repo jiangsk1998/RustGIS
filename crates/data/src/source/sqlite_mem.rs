@@ -385,9 +385,20 @@ impl FeatureSource for SqliteMemSource {
                     ControlFlow::Continue(())
                 })
                 .map_err(err)?;
-            return Ok(Batch { matched: sample.seen(), complete: sample.complete(), features: sample.items, skipped: 0, unread_dates });
+            return Ok(Batch {
+                matched: sample.seen(),
+                complete: sample.complete(),
+                features: sample.items,
+                skipped: 0,
+                unread_dates,
+                rounded_dates: Vec::new(),
+            });
         };
-        let native = req.extent.map(|e| self.reproject.extent_from_lonlat(&e));
+        let native = req.extent.and_then(|e| self.reproject.extent_from_lonlat(&e));
+        // A refused view needs a geometry scan to count.
+        if limit == 0 && req.extent.is_some() && native.is_none() {
+            return Err(super::unbounded_count());
+        }
         let mut sample = if native.is_none() { Sampler::with_total(limit, self.info.count.unwrap_or(0)) } else { Sampler::new(limit) };
         let mut skipped = 0;
         let mut unread_dates = Vec::new();
@@ -429,7 +440,14 @@ impl FeatureSource for SqliteMemSource {
                 ControlFlow::Continue(())
             })
             .map_err(err)?;
-        Ok(Batch { matched: sample.seen(), complete: sample.complete(), features: sample.items, skipped, unread_dates })
+        Ok(Batch {
+            matched: sample.seen(),
+            complete: sample.complete(),
+            features: sample.items,
+            skipped,
+            unread_dates,
+            rounded_dates: Vec::new(),
+        })
     }
 
     /// The upload is held in memory already, so every table can be visited.
@@ -442,7 +460,7 @@ impl FeatureSource for SqliteMemSource {
         let mut chunks = super::chunk_memory::Chunker::new(bytes, visit)?;
         let req = Request { extent, limit: usize::MAX };
         let native = match (self.geom_col, extent) {
-            (Some(_), Some(e)) => Some(self.reproject.extent_from_lonlat(&e)),
+            (Some(_), Some(e)) => self.reproject.extent_from_lonlat(&e),
             _ => None,
         };
         let mut out = Batch { complete: true, ..Batch::default() };

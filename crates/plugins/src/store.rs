@@ -6,6 +6,7 @@
 //! <data>/plugins/unpacked/<id>/   an installed process plugin's files, where its program runs
 //! <data>/plugins/state.json       {"disabled": [ids], "folders": [plugin folders]}
 //! <data>/plugins/blocklist.json   the registry's blocklist, as last fetched
+//! <data>/plugins/settings/<id>.json  what a plugin remembered (see [`crate::settings`])
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -51,17 +52,49 @@ struct State {
     disabled: Vec<String>,
     #[serde(default)]
     folders: Vec<String>,
+    /// Keys a newer RustGIS added, written back as they were.
+    #[serde(flatten)]
+    other: serde_json::Map<String, serde_json::Value>,
+    /// Why `state.json` couldn't be read, when it couldn't: it is then never written over.
+    #[serde(skip)]
+    unreadable: Option<String>,
 }
 
 fn state_path() -> Option<PathBuf> {
     dir().map(|d| d.join("state.json"))
 }
 
+/// `state.json`: none, or an empty one, is no plugin disabled or added from a folder. One that can't
+/// be read (or that a newer RustGIS wrote in a shape this one doesn't know) is said by
+/// [`load_installed`], which then loads no plugin, and kept as it is: [`write_state`] refuses to
+/// write over it.
 fn read_state() -> State {
-    state_path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    let Some(path) = state_path() else { return State::default() };
+    let read = match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return State::default(),
+        // Written whole each time, so an empty file was made empty on purpose, not cut short. A
+        // byte-order mark (an editor's) isn't part of the JSON.
+        Ok(text) if text.trim_start_matches('\u{feff}').trim().is_empty() => return State::default(),
+        Err(e) => Err(e.to_string()),
+        Ok(text) => serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| e.to_string()),
+    };
+    read.unwrap_or_else(|e| State { unreadable: Some(format!("{}: {e}", path.display())), ..State::default() })
 }
 
+/// Refuses a change to `state.json` when [`read_state`] couldn't read the one there. Callers ask
+/// before they change anything in memory, so a refused change isn't half made.
+fn writable(st: &State) -> Result<(), String> {
+    match &st.unreadable {
+        Some(why) => Err(format!(
+            "{why}; it is kept as it is, so which plugins are disabled or added from folders can't be changed until it is fixed or removed"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Writes `state.json`, refused when [`read_state`] couldn't read the one there.
 fn write_state(st: &State) -> Result<(), String> {
+    writable(st)?;
     let path = state_path().ok_or("there is no folder for plugins")?;
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
@@ -94,6 +127,14 @@ pub fn load_installed() -> Vec<String> {
         )),
     }
     let st = read_state();
+    // Which plugins are disabled is in that file, and a disabled one may be a native program: with
+    // it unreadable none is loaded, rather than starting what the user turned off.
+    if let Some(why) = &st.unreadable {
+        errors.push(format!(
+            "{why}: plugins are off because this file couldn't be read; repairing or removing it brings them back (it is kept as it is until then)"
+        ));
+        return errors;
+    }
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("rgplugin"))).collect())
         .unwrap_or_default();
@@ -248,6 +289,10 @@ fn extract(bytes: &[u8], to: &Path) -> Result<(), String> {
 /// Installs a package's bytes: checks it, copies it into the plugins folder (replacing an
 /// older copy) and loads it.
 pub fn install_bytes(bytes: &[u8]) -> Result<Arc<Plugin>, String> {
+    crate::may_install()?;
+    // Installed plugins start enabled: while `state.json` can't be read, the one being installed
+    // may be one the user disabled (and a native program), so it isn't installed either.
+    writable(&read_state())?;
     let mut pkg = Package::from_zip(bytes)?;
     // A process plugin is checked (blocklist, platform) before its files replace an installed
     // copy's: a package that won't load leaves the old one working.
@@ -288,6 +333,7 @@ pub fn install_bytes(bytes: &[u8]) -> Result<Arc<Plugin>, String> {
 /// Installs from a path: a `.rgplugin` file is copied in; a plugin folder (for development) is
 /// remembered and loaded from where it is.
 pub fn install_path(path: &Path) -> Result<Arc<Plugin>, String> {
+    crate::may_install()?;
     if !path.is_dir() {
         // Size-checked before reading: a huge file isn't read into memory.
         let len = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?.len();
@@ -298,9 +344,12 @@ pub fn install_path(path: &Path) -> Result<Arc<Plugin>, String> {
         return install_bytes(&bytes);
     }
     let pkg = Package::from_dir(path)?;
-    let plugin = crate::load(pkg, &path.display().to_string())?;
     let mut st = read_state();
     let p = path.display().to_string();
+    if !st.folders.contains(&p) {
+        writable(&st)?;
+    }
+    let plugin = crate::load(pkg, &p)?;
     if !st.folders.contains(&p) {
         st.folders.push(p);
         write_state(&st)?;
@@ -308,9 +357,15 @@ pub fn install_path(path: &Path) -> Result<Arc<Plugin>, String> {
     Ok(plugin)
 }
 
-/// Uninstalls a plugin: unloads it, deletes its package, or forgets its folder.
+/// Uninstalls a plugin: unloads it, deletes its package, or forgets its folder. What it
+/// remembered (its settings) goes with its package, or when nothing installed remains for the id.
 pub fn uninstall(id: &str) -> Result<(), String> {
     let plugin = crate::get(id).ok_or_else(|| format!("no plugin '{id}'"))?;
+    // The installed package, if there is one, and whether it is the plugin that is loaded.
+    // Uninstalling a development folder that shadows an installed copy leaves the copy, and so
+    // what the copy remembered.
+    let package = dir().map(|d| d.join(format!("{id}.rgplugin"))).filter(|p| p.is_file());
+    let is_package = package.as_ref().is_some_and(|p| p.display().to_string() == plugin.source);
     let mut st = read_state();
     st.folders.retain(|f| *f != plugin.source);
     st.disabled.retain(|d| d != id);
@@ -319,23 +374,45 @@ pub fn uninstall(id: &str) -> Result<(), String> {
     // installed copy leaves the copy).
     write_state(&st)?;
     crate::unload(id);
-    if let Some(d) = dir() {
-        let path = d.join(format!("{id}.rgplugin"));
-        if path.is_file() && path.display().to_string() == plugin.source {
-            std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            if let Some(unpacked) = unpacked_dir(id).filter(|u| u.is_dir()) {
-                std::fs::remove_dir_all(&unpacked).map_err(|e| format!("{}: {e}", unpacked.display()))?;
-            }
-            crate::pyenv::remove(id)?;
+    if let Some(path) = package.as_ref().filter(|_| is_package) {
+        std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    // Its settings go last, once it can't come back and its files are gone. Uninstalling can't be
+    // tried again from here (it is gone), so a step that fails now says where they are when they
+    // stay (a later install of the id would find them).
+    let erase = is_package || package.is_none();
+    let file = dir().map(|d| d.join("settings").join(format!("{id}.json")));
+    let kept = |e: String| match file.as_ref().filter(|f| erase && f.exists()) {
+        Some(f) => format!("{e} (the plugin was uninstalled; its saved settings were kept: remove {} by hand)", f.display()),
+        None => e,
+    };
+    if is_package {
+        let mut failures = Vec::new();
+        if let Some(unpacked) = unpacked_dir(id).filter(|u| u.is_dir())
+            && let Err(e) = std::fs::remove_dir_all(&unpacked)
+        {
+            failures.push(format!("{}: {e}", unpacked.display()));
         }
+        // The package is already gone: attempt independent cleanup even when one directory
+        // cannot be removed, and name every leftover path before preserving its settings.
+        if let Err(e) = crate::pyenv::remove(id) {
+            failures.push(e);
+        }
+        if !failures.is_empty() {
+            return Err(kept(failures.join("; ")));
+        }
+    }
+    if erase {
+        crate::settings::remove(id).map_err(kept)?;
     }
     Ok(())
 }
 
 /// Enables or disables a plugin, and remembers it.
 pub fn set_enabled(id: &str, enabled: bool) -> Result<(), String> {
-    crate::set_enabled(id, enabled)?;
     let mut st = read_state();
+    writable(&st)?;
+    crate::set_enabled(id, enabled)?;
     st.disabled.retain(|d| d != id);
     if !enabled {
         st.disabled.push(id.to_string());

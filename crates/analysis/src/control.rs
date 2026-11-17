@@ -25,6 +25,9 @@ pub struct Control {
     cancel_at_start: bool,
     /// How often the work looked at the flag ([`Control::looked`]).
     looked: AtomicU64,
+    /// Cancelled at its `n`th look ([`Control::cancelled_at_look`]); 0 for never.
+    #[cfg(any(test, feature = "testing"))]
+    cancel_at_look: u64,
 }
 
 impl Control {
@@ -45,9 +48,18 @@ impl Control {
         Arc::new(Control { cancel_at_start: true, ..Control::default() })
     }
 
-    /// How often the work under a [`Control::cancelled_once_started`] control looked at its flag:
-    /// the tool's checks, and the data writers' (not those of whoever runs it, before and after).
-    /// Always 0 for other controls.
+    /// A control cancelled at the work's `n`th look at its flag ([`check`], [`Pace`], the data
+    /// writers' progress checks), to stop a command at each of its checks in turn and look at what
+    /// Cancel leaves behind (#1562); `u64::MAX` never cancels, and counts the looks. Several
+    /// threads share the count, so which of their looks is the `n`th can differ between runs.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn cancelled_at_look(n: u64) -> Arc<Control> {
+        Arc::new(Control { cancel_at_look: n, ..Control::default() })
+    }
+
+    /// How often the work under a [`Control::cancelled_once_started`] or
+    /// [`Control::cancelled_at_look`] control looked at its flag: the tool's checks, and the data
+    /// writers' (not those of whoever runs it, before and after). Always 0 for other controls.
     pub fn looked(&self) -> u64 {
         self.looked.load(Ordering::Relaxed)
     }
@@ -63,8 +75,15 @@ impl Control {
     /// The flag, looked at by the work: counted for a test's control only, so an ordinary run's
     /// threads don't share a counter.
     fn looked_at(&self) -> bool {
-        if self.cancel_at_start {
-            self.looked.fetch_add(1, Ordering::Relaxed);
+        #[cfg(any(test, feature = "testing"))]
+        let at = self.cancel_at_look;
+        #[cfg(not(any(test, feature = "testing")))]
+        let at = 0;
+        if self.cancel_at_start || at > 0 {
+            let looks = self.looked.fetch_add(1, Ordering::Relaxed) + 1;
+            if looks >= at && at > 0 {
+                self.cancel();
+            }
         }
         self.is_cancelled()
     }
@@ -192,7 +211,7 @@ pub(crate) fn uncapped() -> bool {
 
 /// The work units (a distance, a ray step, a multiply-add) between two looks at the cancel flag
 /// inside an item of a loop ([`Pace`]): a few milliseconds.
-const PACE_WORK: usize = 1 << 22;
+pub(crate) const PACE_WORK: usize = 1 << 22;
 
 /// Looks at the cancel flag about every [`PACE_WORK`] units of work, within an item that may
 /// take long on its own (a row of a wide grid without a work cap), so Cancel stops the run soon.
@@ -277,6 +296,26 @@ mod tests {
         // An ordinary control isn't cancelled by starting.
         let plain = Control::new();
         assert!(crate::run_under("Plain", &plain, || Ok::<_, String>(())).is_ok());
+    }
+
+    /// A control cancelled at the `n`th look lets the looks before it pass, and `u64::MAX` only
+    /// counts them.
+    #[test]
+    fn a_control_cancelled_at_a_look_stops_there() {
+        let control = Control::cancelled_at_look(3);
+        let mut passed = 0;
+        let res = crate::run_under("Loop", &control, || {
+            for _ in 0..10 {
+                check()?;
+                passed += 1;
+            }
+            Ok::<_, String>(())
+        });
+        assert!(res.unwrap_err().contains("Loop was cancelled"));
+        assert_eq!((passed, control.looked()), (2, 3));
+        let counting = Control::cancelled_at_look(u64::MAX);
+        assert!(crate::run_under("Count", &counting, || (0..5).try_for_each(|_| check()).map_err(String::from)).is_ok());
+        assert_eq!(counting.looked(), 5);
     }
 
     /// Revocation during real file construction must reach the data writer's final rename,

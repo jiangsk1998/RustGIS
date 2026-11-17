@@ -92,7 +92,6 @@ impl GlobeDrape {
 
     /// Makes sure the drape covers the `w × h` view, drawing it again when the view has turned
     /// or zoomed past it or the map changed. False when there is nothing to drape.
-    #[allow(clippy::too_many_arguments)]
     pub fn prepare(&mut self, ctx: &egui::Context, map: &mut Map, key: DrapeKey, tiles: u64, w: f64, h: f64, ppp: f32, time: f64) -> bool {
         let g = Globe::new(&map.camera, w, h);
         // A screen's worth of detail: at most one point per pixel, so a dense screen keeps the

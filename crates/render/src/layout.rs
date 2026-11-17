@@ -83,19 +83,26 @@ pub fn render_pending(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageIn
 /// [`render_pending`], its frames waiting for cast shadows when `wait_shadows` (an export).
 fn render_page(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo, wait_shadows: bool) -> Result<(Pixmap, bool), String> {
     let revisions = archive_revisions(layout, maps);
+    let mut source_error = None;
     let result = if wait_shadows {
-        render_pending_inner(layout, maps, dpi, info)
+        render_pending_inner(layout, maps, dpi, info, &mut source_error)
     } else {
-        crate::without_shadow_wait(|| render_pending_inner(layout, maps, dpi, info))
+        crate::without_shadow_wait(|| render_pending_inner(layout, maps, dpi, info, &mut source_error))
     };
-    revisions.finish_revision(archive_revisions(layout, maps), result, "the page is too large to draw")
+    revisions.finish_revision(archive_revisions(layout, maps), result, source_error.as_deref().unwrap_or("the page is too large to draw"))
 }
 
-fn render_pending_inner(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Option<(Pixmap, bool)> {
+fn render_pending_inner(
+    layout: &Layout,
+    maps: &mut [Map],
+    dpi: f64,
+    info: &PageInfo,
+    source_error: &mut Option<String>,
+) -> Option<(Pixmap, bool)> {
     let (w, h, k) = page_geometry(layout, dpi);
     let bounds = tiny_skia::IntRect::from_xywh(0, 0, w, h)?;
     let mut pending = false;
-    let pm = draw_page(layout, maps, info, k, bounds, None, None, &mut pending)?.into_pixmap();
+    let pm = draw_page(layout, maps, info, k, bounds, None, None, &mut pending, source_error)?.into_pixmap();
     Some((pm, pending))
 }
 
@@ -112,8 +119,9 @@ pub fn render_drawing(
     info: &PageInfo,
 ) -> Result<(crate::vector::Drawing, Vec<(u32, String)>), String> {
     let revisions = archive_revisions(layout, maps);
-    let result = render_drawing_inner(layout, maps, dpi, info);
-    revisions.finish_revision(archive_revisions(layout, maps), result, "the page is too large to draw")
+    let mut source_error = None;
+    let result = render_drawing_inner(layout, maps, dpi, info, &mut source_error);
+    revisions.finish_revision(archive_revisions(layout, maps), result, source_error.as_deref().unwrap_or("the page is too large to draw"))
 }
 
 fn render_drawing_inner(
@@ -121,11 +129,12 @@ fn render_drawing_inner(
     maps: &mut [Map],
     dpi: f64,
     info: &PageInfo,
+    source_error: &mut Option<String>,
 ) -> Option<(crate::vector::Drawing, Vec<(u32, String)>)> {
     let (w, h, k) = page_geometry(layout, dpi);
     let bounds = tiny_skia::IntRect::from_xywh(0, 0, w, h)?;
     let mut pictured = Vec::new();
-    let drawing = draw_page(layout, maps, info, k, bounds, None, Some(&mut pictured), &mut false)?.into_drawing()?;
+    let drawing = draw_page(layout, maps, info, k, bounds, None, Some(&mut pictured), &mut false, source_error)?.into_drawing()?;
     Some((drawing, pictured))
 }
 
@@ -138,11 +147,107 @@ pub(crate) fn page_geometry(layout: &Layout, dpi: f64) -> (u32, u32, f64) {
     (w as u32, h as u32, k.min(w / layout.width).min(h / layout.height))
 }
 
+/// Visible text elements (and legend titles) whose ink crosses the page boundary, or whose
+/// lines the text renderer omits at its box's vertical limit or its 200-line limit. Text is not
+/// clipped horizontally to its element: a line wider than its box alone is not a loss. Dynamic
+/// text uses this page and its first frame, and rotated text is checked after its turn.
+pub fn clipped_text(layout: &Layout, maps: &[Map], dpi: f64, info: &PageInfo) -> Vec<(u32, String)> {
+    let (w, h, k) = page_geometry(layout, dpi);
+    let ppp = (k / PT_PER_MM) as f32;
+    let first = layout.first_frame().and_then(|id| layout.element(id)).and_then(|e| {
+        let ElementKind::MapFrame { map, center, scale, bearing, pitch, .. } = &e.kind else { return None };
+        let m = maps.get(map_index(maps, map)?)?;
+        Some((m, frame_camera(m, *center, *scale, *bearing, *pitch)))
+    });
+    layout
+        .elements
+        .iter()
+        .filter(|e| e.visible)
+        .filter_map(|e| {
+            let r = Rect::from_xywh((e.x * k) as f32, (e.y * k) as f32, (e.w * k) as f32, (e.h * k) as f32)?;
+            let (s, size, face, align, spacing, rotation, title) = match &e.kind {
+                ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing, font, font_name, rotation }
+                    if color.a() > 0 =>
+                {
+                    let face = text::Face {
+                        bold: *bold,
+                        italic: *italic,
+                        serif: *font == rustgis_map::layout::FontFamily::Serif,
+                        family: font_name.as_deref().and_then(crate::families::find_ready),
+                    };
+                    (expand(t, layout, info, first), *size as f32, face, *align, *letter_spacing as f32, *rotation as f32, false)
+                }
+                ElementKind::Legend { title, frame, .. } => {
+                    let ElementKind::MapFrame { map, .. } = &layout.element(*frame)?.kind else { return None };
+                    map_index(maps, map)?;
+                    (title.clone(), 12.0, text::Face { bold: true, ..Default::default() }, TextAlign::Left, 0.0, 0.0, true)
+                }
+                _ => return None,
+            };
+            let px = size.clamp(2.0, 400.0) * 1.33 * ppp;
+            let mut cy = r.y() + if title { LEGEND_ROW * ppp / 2.0 } else { px * 0.6 };
+            let turn = Transform::from_rotate_at(rotation, r.x() + r.width() / 2.0, r.y() + r.height() / 2.0);
+            // Legend titles are drawn on one line, unlike text elements' explicit line breaks.
+            let lines = std::iter::once(s.as_str()).filter(|_| title).chain(s.lines().filter(|_| !title));
+            let cut = lines.enumerate().any(|(i, line)| {
+                let ink = text::styled_bounds(line, px, face, spacing * 1.33 * ppp);
+                let drawn = i < 200 && (title || cy <= r.bottom() + px);
+                let cut = ink.is_some_and(|ink| {
+                    if !drawn {
+                        return true;
+                    }
+                    let left = match align {
+                        TextAlign::Left => r.x(),
+                        TextAlign::Center => r.x() + (r.width() - ink.width()) / 2.0 - ink.left(),
+                        TextAlign::Right => r.right() - ink.width() - ink.left(),
+                    };
+                    let mut corners = [
+                        tiny_skia::Point::from_xy(left + ink.left(), cy + ink.top()),
+                        tiny_skia::Point::from_xy(left + ink.right(), cy + ink.top()),
+                        tiny_skia::Point::from_xy(left + ink.left(), cy + ink.bottom()),
+                        tiny_skia::Point::from_xy(left + ink.right(), cy + ink.bottom()),
+                    ];
+                    turn.map_points(&mut corners);
+                    corners.iter().any(|p| p.x < 0.0 || p.y < 0.0 || p.x > w as f32 || p.y > h as f32)
+                });
+                cy += px * 1.25;
+                cut
+            });
+            cut.then(|| (e.id, e.name.clone()))
+        })
+        .collect()
+}
+
+/// One counted notice per kind, naming the affected elements by their stable address. Exports
+/// can merge repeated element IDs across series pages before calling this, so a PDF's fallback
+/// rendering and repeated pages never multiply the count.
+pub fn clipped_text_notice(clipped: &[(u32, String)]) -> Option<String> {
+    if clipped.is_empty() {
+        return None;
+    }
+    let mut names = clipped.iter().take(10).map(|(id, name)| format!("{name} ({id})")).collect::<Vec<_>>().join(", ");
+    if clipped.len() > 10 {
+        names.push_str(&format!(" and {} more", clipped.len() - 10));
+    }
+    Some(format!(
+        "Text is cut off in {} layout element(s): {names}; resize or move the text, reduce its size, or add line breaks",
+        clipped.len()
+    ))
+}
+
 /// One element on transparency, allocating only its on-page pixel bounds.
 /// Outer `None` means rendering failed; inner `None` means the element is off-page.
-pub(crate) fn render_element(layout: &Layout, id: u32, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Option<Option<(Pixmap, [f64; 4])>> {
+/// A fatal source error is retained for the composed SVG's revision check and error report.
+pub(crate) fn render_element(
+    layout: &Layout,
+    id: u32,
+    maps: &mut [Map],
+    dpi: f64,
+    info: &PageInfo,
+    source_error: &mut Option<String>,
+) -> Option<Option<(Pixmap, [f64; 4])>> {
     let Some((bounds, k, mm)) = element_bounds(layout, id, dpi)? else { return Some(None) };
-    let pm = draw_page(layout, maps, info, k, bounds, Some(id), None, &mut false)?.into_pixmap();
+    let pm = draw_page(layout, maps, info, k, bounds, Some(id), None, &mut false, source_error)?.into_pixmap();
     Some(Some((pm, mm)))
 }
 
@@ -156,9 +261,10 @@ pub(crate) fn record_element(
     dpi: f64,
     info: &PageInfo,
     pictured: &mut Vec<(u32, String)>,
+    source_error: &mut Option<String>,
 ) -> Option<Option<(crate::vector::Drawing, [f64; 4], f64)>> {
     let Some((bounds, k, mm)) = element_bounds(layout, id, dpi)? else { return Some(None) };
-    let drawing = draw_page(layout, maps, info, k, bounds, Some(id), Some(pictured), &mut false)?.into_drawing()?;
+    let drawing = draw_page(layout, maps, info, k, bounds, Some(id), Some(pictured), &mut false, source_error)?.into_drawing()?;
     Some(Some((drawing, mm, k)))
 }
 
@@ -178,7 +284,8 @@ fn element_bounds(layout: &Layout, id: u32, dpi: f64) -> Option<Option<(tiny_ski
 /// Draws the selected region with the full layout's frame and dynamic-text context, recorded
 /// when `record` holds a list (see [`render_drawing`]), which gets the names of the frames
 /// drawn as pictures. `pending` is set when a frame drew while some of what it shows was still on
-/// its way (see [`render_pending`]).
+/// its way (see [`render_pending`]). A source read that stops the page supplies its named error;
+/// the caller checks the page's archive revision before reporting it.
 fn draw_page(
     layout: &Layout,
     maps: &mut [Map],
@@ -188,6 +295,7 @@ fn draw_page(
     element: Option<u32>,
     mut record: Option<&mut Vec<(u32, String)>>,
     pending: &mut bool,
+    source_error: &mut Option<String>,
 ) -> Option<Canvas> {
     let ppp = k / PT_PER_MM;
     let mut pm =
@@ -213,10 +321,10 @@ fn draw_page(
     // What each legend's frame draws, worked out before any element is drawn: its map is synced
     // to that frame's view first, so a streamed layer holds that frame's features whichever order
     // the frames and legends come in, and whichever other frame showed the map last.
-    let mut shown: Vec<(u32, Vec<(u32, Vec<LegendEntry>)>)> = Vec::new();
+    let mut shown = Vec::new();
     for e in layout.elements.iter().filter(visible) {
-        if let ElementKind::Legend { frame: f, all_classes: false, .. } = &e.kind
-            && !shown.iter().any(|(id, _)| id == f)
+        if let ElementKind::Legend { frame: f, all_classes: false, show_no_data, .. } = &e.kind
+            && !shown.iter().any(|(id, no_data, _)| id == f && no_data == show_no_data)
             && let Some(&(_, mi, cam, fw, fh)) = frame(*f)
             && let Some(map) = maps.get_mut(mi)
         {
@@ -224,7 +332,12 @@ fn draw_page(
             let lonlat = crate::view_lonlat(map, &view);
             let scale = map.ground_res_at(&cam) / rustgis_geom::PIXEL_M;
             map.sync_sources(&lonlat, scale, true);
-            shown.push((*f, complete_shown_legends(map, scale)?));
+            let mut failed_source = None;
+            let Some(entries) = complete_shown_legends(map, scale, *show_no_data, &mut failed_source) else {
+                *source_error = failed_source_error(map, failed_source);
+                return None;
+            };
+            shown.push((*f, *show_no_data, entries));
         }
     }
     for e in layout.elements.iter().filter(visible) {
@@ -247,8 +360,10 @@ fn draw_page(
                 // The grid is drawn with the frame's map, before its attribution, which keeps
                 // clear of the grid's labels.
                 let grid = grid.as_ref().map(|g| (g, layout.decimal_comma));
-                let Some(mut frame_pm) = frame_canvas(map, cam, fw, fh, fppp, pm.is_recording(), pending, grid) else {
+                let mut failed_source = None;
+                let Some(mut frame_pm) = frame_canvas(map, cam, fw, fh, fppp, pm.is_recording(), pending, grid, &mut failed_source) else {
                     if frame_requires_complete(map, &view) {
+                        *source_error = failed_source_error(map, failed_source);
                         return None;
                     }
                     // Preserve upstream's best-effort page export for ordinary maps.
@@ -260,7 +375,7 @@ fn draw_page(
                     frame_pm.overflowed() || pm.recorded_cost().saturating_add(frame_pm.recorded_cost()) > crate::vector::max_cost();
                 if frame_pm.is_recording()
                     && too_large
-                    && let Some(pixels) = frame_canvas(map, cam, fw, fh, fppp, false, pending, grid)
+                    && let Some(pixels) = frame_canvas(map, cam, fw, fh, fppp, false, pending, grid, &mut None)
                 {
                     frame_pm = pixels;
                     if let Some(list) = record.as_deref_mut() {
@@ -329,14 +444,20 @@ fn draw_page(
                     scale_bar(&mut pm, r, map.ground_res_at(&cam), bar, (*color, *fill), ppp, layout.decimal_comma);
                 }
             }
-            ElementKind::Legend { frame: f, title, all_classes, hide_other, exclude, columns, labels } => {
+            ElementKind::Legend { frame: f, title, all_classes, hide_other, show_no_data, exclude, columns, labels } => {
                 if let Some(&(_, mi, cam, ..)) = frame(*f)
                     && let Some(map) = maps.get(mi)
                 {
-                    let drawn = (!*all_classes).then(|| shown.iter().find(|(id, _)| id == f).map(|(_, v)| v.as_slice()).unwrap_or(&[]));
+                    let drawn = (!*all_classes).then(|| {
+                        shown
+                            .iter()
+                            .find(|(id, no_data, _)| id == f && no_data == show_no_data)
+                            .map(|(_, _, v)| v.as_slice())
+                            .unwrap_or(&[])
+                    });
                     let scale = map.ground_res_at(&cam) / rustgis_geom::PIXEL_M;
                     wait_for_tile_legends(map, scale, exclude);
-                    let opts = LegendOptions { hide_other: *hide_other, exclude, labels, scale };
+                    let opts = LegendOptions { show_no_data: *show_no_data, hide_other: *hide_other, exclude, labels, scale };
                     legend(&mut pm, r, map, (title, *columns), drawn, opts, ppp);
                 }
             }
@@ -488,8 +609,9 @@ fn draw_page(
 /// page needs them all. Refuses a linked archive changed during the complete frame.
 pub fn frame_map(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp: f64) -> Result<Pixmap, String> {
     let revisions = crate::archive_revisions([&*map]);
-    let result = frame_canvas(map, camera, w, h, ppp, false, &mut false, None).map(Canvas::into_pixmap);
-    revisions.finish([&*map], result, "could not draw the map frame")
+    let mut failed_source = None;
+    let result = frame_canvas(map, camera, w, h, ppp, false, &mut false, None, &mut failed_source).map(Canvas::into_pixmap);
+    revisions.finish(map, failed_source, result, "could not draw the map frame")
 }
 
 /// [`frame_map`] on a canvas: one that records (see [`crate::canvas`]) when `record` and the
@@ -506,12 +628,13 @@ fn frame_canvas(
     record: bool,
     pending: &mut bool,
     grid: Option<(&Grid, bool)>,
+    failed_source: &mut Option<u64>,
 ) -> Option<Canvas> {
     let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
     // Why its layers were drawn without their cast shadows is kept for the page's caller (see
     // `crate::shadows_said`).
     let (img, shadows) = crate::frame_with_shadows_to_come(|| {
-        if record { crate::render_complete_recorded(map, &view) } else { crate::render_complete(map, &view) }
+        if record { crate::render_complete_recorded(map, &view, failed_source) } else { crate::complete(map, &view, false, failed_source) }
     });
     let img = img?;
     *pending |= img.tiles_pending || img.data_pending || shadows;
@@ -1699,11 +1822,11 @@ fn scale_bar(
 /// layer that draws nothing there isn't listed. The scale is the one the renderer draws the frame
 /// at (the one its layers' scale ranges and display filters see), not the paper scale `{scale}`
 /// prints, so the legend follows what the frame actually shows.
-fn shown_legends(map: &Map, scale: f64) -> Vec<(u32, Vec<LegendEntry>)> {
+fn shown_legends(map: &Map, scale: f64, show_no_data: bool) -> Vec<(u32, Vec<LegendEntry>)> {
     map.layers
         .iter()
         .filter(|l| map.draws_at(l, scale) && legend_lists(l))
-        .filter_map(|l| layer_shown(l, scale).map(|entries| (l.id, entries)))
+        .filter_map(|l| layer_shown(l, scale, show_no_data).map(|entries| (l.id, entries)))
         .collect()
 }
 
@@ -1717,11 +1840,15 @@ pub fn legend_lists(l: &rustgis_map::Layer) -> bool {
 /// What a layer a legend lists draws at 1:`scale` ([`rustgis_map::Layer::shown_legend`]); for a
 /// classified raster, the classes it holds ([`raster_classes`]). `None` when it draws nothing
 /// there.
-fn layer_shown(l: &rustgis_map::Layer, scale: f64) -> Option<Vec<LegendEntry>> {
+fn layer_shown(l: &rustgis_map::Layer, scale: f64, show_no_data: bool) -> Option<Vec<LegendEntry>> {
     if l.is_raster() {
         return raster_classes(l, false).filter(|classes| l.in_scale_range(scale) && !classes.is_empty());
     }
-    l.shown_legend(scale)
+    let mut entries = l.shown_legend(scale)?;
+    if show_no_data {
+        entries.extend(l.renderer.no_data_legend(&l.dataset, Some(&l.drawn_rows(scale))));
+    }
+    Some(entries)
 }
 
 /// A classified raster's classes as legend rows (#1679), as the Layers pane draws them
@@ -1738,10 +1865,24 @@ fn raster_classes(l: &rustgis_map::Layer, all_classes: bool) -> Option<Vec<Legen
     )
 }
 
+/// Names only the source whose read stopped this page, leaving unrelated failures generic.
+fn failed_source_error(map: &Map, failed_source: Option<u64>) -> Option<String> {
+    let id = failed_source?;
+    let layer = map.layers.iter().find(|layer| layer.instance_id() == id)?;
+    layer.source.as_ref()?.read_error().map(|why| format!("{}: {why}", layer.name))
+}
+
 /// Complete-source legends retain one minimal value per used class, never its geometry.
-fn complete_shown_legends(map: &mut Map, scale: f64) -> Option<Vec<(u32, Vec<LegendEntry>)>> {
+/// A failed traversal returns its live layer identity for the page's source-error report.
+fn complete_shown_legends(
+    map: &mut Map,
+    scale: f64,
+    show_no_data: bool,
+    failed_source: &mut Option<u64>,
+) -> Option<Vec<(u32, Vec<LegendEntry>)>> {
+    *failed_source = None;
     if !map.layers.iter().any(|l| l.source.as_ref().and_then(|s| s.chunk_source()).is_some()) {
-        return Some(shown_legends(map, scale));
+        return Some(shown_legends(map, scale, show_no_data));
     }
     let wanted: Vec<usize> =
         map.layers.iter().enumerate().filter(|(_, l)| map.draws_at(l, scale) && legend_lists(l)).map(|(i, _)| i).collect();
@@ -1749,7 +1890,7 @@ fn complete_shown_legends(map: &mut Map, scale: f64) -> Option<Vec<(u32, Vec<Leg
     for index in wanted {
         let layer = map.layers.get_mut(index)?;
         let Some(source) = layer.source.as_ref().and_then(|s| s.chunk_source()) else {
-            if let Some(entries) = layer_shown(layer, scale) {
+            if let Some(entries) = layer_shown(layer, scale, show_no_data) {
                 out.push((layer.id, entries));
             }
             continue;
@@ -1771,12 +1912,16 @@ fn complete_shown_legends(map: &mut Map, scale: f64) -> Option<Vec<(u32, Vec<Leg
         let mut sample = rustgis_data::Dataset::new("legend", layer.geometry_type(), fields);
         let mut used = std::collections::HashSet::new();
         let mut any = false;
+        let mut no_data = None;
         let mut chunk = layer.clone();
         chunk.source = None;
         chunk.clear_cache();
         let result = crate::visit_complete(source.as_ref(), &mut |features| {
             chunk.dataset.features = features.into();
             let rows = chunk.drawn_rows(scale);
+            if show_no_data && no_data.is_none() {
+                no_data = chunk.renderer.no_data_legend(&chunk.dataset, Some(&rows));
+            }
             let classer = by_expression.then(|| chunk.renderer.classer(&chunk.dataset, Some(scale)));
             for row in rows.iter().enumerate().filter_map(|(row, keep)| keep.then_some(row)) {
                 any = true;
@@ -1805,11 +1950,17 @@ fn complete_shown_legends(map: &mut Map, scale: f64) -> Option<Vec<(u32, Vec<Leg
             if let Some(source) = &mut layer.source {
                 source.error = Some(e.to_string());
             }
+            *failed_source = Some(layer.instance_id());
             return None;
+        }
+        if let Some(source) = &mut layer.source {
+            source.clear_error();
         }
         if any {
             // (A sample of the classes seen: classed again at this scale, by expression.)
-            out.push((layer.id, layer.renderer.legend_at(&sample, &[], Some(scale))));
+            let mut entries = layer.renderer.legend_at(&sample, &[], Some(scale));
+            entries.extend(no_data);
+            out.push((layer.id, entries));
         }
     }
     Some(out)
@@ -1821,6 +1972,7 @@ fn complete_shown_legends(map: &mut Map, scale: f64) -> Option<Vec<(u32, Vec<Leg
 #[derive(Clone, Copy)]
 struct LegendOptions<'a> {
     hide_other: bool,
+    show_no_data: bool,
     exclude: &'a [String],
     labels: &'a BTreeMap<String, String>,
     scale: f64,
@@ -2069,6 +2221,9 @@ fn legend_rows<'a>(map: &'a Map, drawn: Option<&[(u32, Vec<LegendEntry>)]>, opts
             None if l.is_raster() => raster_classes(l, true).unwrap_or_default(),
             None => l.renderer.legend(),
         };
+        if drawn.is_none() && opts.show_no_data {
+            entries.extend(l.renderer.no_data_legend(&l.dataset, None));
+        }
         // The fallback row only (a class that happens to bear its name stays).
         if opts.hide_other && entries.iter().any(|e| e.fallback) {
             entries.retain(|e| !e.fallback);
@@ -2253,8 +2408,20 @@ pub fn legend_sizes_mm(
     hide_other: bool,
     (exclude, labels): (&[String], &BTreeMap<String, String>),
 ) -> Option<[(f64, f64); MAX_LEGEND_COLUMNS]> {
-    let drawn = if all_classes { None } else { Some(complete_shown_legends(map, scale)?) };
-    let rows = legend_rows(map, drawn.as_deref(), &LegendOptions { hide_other, exclude, labels, scale });
+    legend_sizes_with_no_data_mm(map, scale, all_classes, hide_other, false, (exclude, labels))
+}
+
+/// Sizes of an optional no-data legend, using the same rows and filters as the drawing.
+pub fn legend_sizes_with_no_data_mm(
+    map: &mut Map,
+    scale: f64,
+    all_classes: bool,
+    hide_other: bool,
+    show_no_data: bool,
+    (exclude, labels): (&[String], &BTreeMap<String, String>),
+) -> Option<[(f64, f64); MAX_LEGEND_COLUMNS]> {
+    let drawn = if all_classes { None } else { Some(complete_shown_legends(map, scale, show_no_data, &mut None)?) };
+    let rows = legend_rows(map, drawn.as_deref(), &LegendOptions { show_no_data, hide_other, exclude, labels, scale });
     let mm = 25.4 / 96.0;
     Some(std::array::from_fn(|i| {
         let (starts, height) = balanced(&rows, i + 1, scale);
@@ -2322,6 +2489,34 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
     frame_coverage_judged_on(map, center, scale, (w_mm, h_mm), (w_mm, h_mm), cells)
 }
 
+/// The visible layers a frame showing `map` at 1:`scale` around `center` takes as context around
+/// its data, by id: those that only outline their polygons ([`only_outlines`]) unless nothing else
+/// is shown, and those that fill them in one colour ([`plain_fill`]) beside a layer drawn by classes
+/// or a raster, when they run on past a frame `judged` (mm) wide and tall, as neighbouring states
+/// do. [`frame_coverage`] leaves them out of what the map draws; a publication's legend leaves them
+/// out too (#1379).
+pub fn context_layers(map: &Map, center: Coord, scale: f64, judged: (f64, f64)) -> Vec<u32> {
+    let at = frame_render_scale(map, center, scale);
+    if map.layers.iter().filter(|l| map.draws_at(l, at)).all(only_outlines) {
+        return Vec::new();
+    }
+    let classes =
+        map.layers.iter().any(|l| map.draws_at(l, at) && (l.is_raster() || !matches!(&l.renderer, rustgis_map::Renderer::Single(_))));
+    let judged_view = View {
+        width: judged.0 * PT_PER_MM,
+        height: judged.1 * PT_PER_MM,
+        pixels_per_point: 1.0,
+        camera: frame_camera(map, center, scale, 0.0, 0.0),
+        sky: false,
+    };
+    let frame = crate::view_lonlat(map, &judged_view);
+    let past_the_frame = |l: &rustgis_map::Layer| {
+        let e = l.shown_extent();
+        !e.is_empty() && (e.min_x < frame.min_x || e.max_x > frame.max_x || e.min_y < frame.min_y || e.max_y > frame.max_y)
+    };
+    map.layers.iter().filter(|l| l.visible && (only_outlines(l) || (classes && plain_fill(l) && past_the_frame(l)))).map(|l| l.id).collect()
+}
+
 /// [`frame_coverage`] of a frame `size` (mm), with what runs on past the frame judged on a frame
 /// `judged` (mm) with the same centre: a drawing wider than the frame asked for, cut for frames
 /// moved inside it, leaves out the same one-colour layers as that frame does.
@@ -2361,24 +2556,7 @@ pub fn frame_coverage_judged_on(
             self.map.label_lock_line_anchors = std::mem::take(&mut self.anchors);
         }
     }
-    let at = frame_render_scale(map, center, scale);
-    let outlines: Vec<u32> = if map.layers.iter().filter(|l| map.draws_at(l, at)).all(only_outlines) {
-        Vec::new()
-    } else {
-        let classes =
-            map.layers.iter().any(|l| map.draws_at(l, at) && (l.is_raster() || !matches!(&l.renderer, rustgis_map::Renderer::Single(_))));
-        let judged_view = View { width: judged.0 * PT_PER_MM, height: judged.1 * PT_PER_MM, ..view };
-        let frame = crate::view_lonlat(map, &judged_view);
-        let past_the_frame = |l: &rustgis_map::Layer| {
-            let e = l.shown_extent();
-            !e.is_empty() && (e.min_x < frame.min_x || e.max_x > frame.max_x || e.min_y < frame.min_y || e.max_y > frame.max_y)
-        };
-        map.layers
-            .iter()
-            .filter(|l| l.visible && (only_outlines(l) || (classes && plain_fill(l) && past_the_frame(l))))
-            .map(|l| l.id)
-            .collect()
-    };
+    let outlines = context_layers(map, center, scale, judged);
     for l in map.layers.iter_mut().filter(|l| outlines.contains(&l.id)) {
         l.visible = false;
     }
@@ -2398,6 +2576,71 @@ pub fn frame_coverage_judged_on(
     // pale or translucent fill counts (only a fill of that very white, invisible on it, doesn't).
     let drawn = pm.pixels().iter().map(|p| p.alpha() > 0 && (p.red(), p.green(), p.blue(), p.alpha()) != (255, 255, 255, 255)).collect();
     Some((gw, gh, drawn))
+}
+
+/// Whether a frame showing `map` at 1:`scale` around `center`, `size` (mm) wide and tall, shows
+/// one light plain colour under `under` (mm from the frame's top left), the basemap's water or
+/// land colour, and nothing else: no layer, label or context layer, no outline of the basemap's.
+/// Drawn as the map is, on a grid of about `cells` cells across the frame's longer side, its label lock set aside (and put
+/// back) as [`frame_coverage`] does. Web tiles aren't fetched for it, so a map with any is not
+/// plain anywhere; nor is a frame that can't be drawn. For a publication's legend, which needs no
+/// box there (#1379).
+pub fn frame_plain_under(
+    map: &mut Map,
+    center: Coord,
+    scale: f64,
+    (w_mm, h_mm): (f64, f64),
+    under: (f64, f64, f64, f64),
+    cells: u32,
+) -> bool {
+    if !map.tiles.is_empty() || !(w_mm > 0.0 && h_mm > 0.0) {
+        return false;
+    }
+    let (w, h) = (w_mm * PT_PER_MM, h_mm * PT_PER_MM);
+    let ppp = f64::from(cells.clamp(8, 1024)) / w.max(h);
+    let view = View { width: w, height: h, pixels_per_point: ppp, camera: frame_camera(map, center, scale, 0.0, 0.0), sky: false };
+    // The background as the map draws it: on another body, the land's grey (Map::palette).
+    let (water, land, ..) = map.palette();
+    struct Lock<'a> {
+        lock: Option<Vec<(rustgis_map::LabelKey, rustgis_map::LockedPlace)>>,
+        anchors: std::collections::HashMap<rustgis_map::LabelKey, Coord>,
+        map: &'a mut Map,
+    }
+    impl Drop for Lock<'_> {
+        fn drop(&mut self) {
+            self.map.label_lock = self.lock.take();
+            self.map.label_lock_line_anchors = std::mem::take(&mut self.anchors);
+        }
+    }
+    let lock = Lock { lock: map.label_lock.take(), anchors: std::mem::take(&mut map.label_lock_line_anchors), map };
+    let Some(img) = crate::render(&mut *lock.map, &view) else { return false };
+    drop(lock);
+    // A streamed layer still reading, or a raster read in place whose tiles are on their way or
+    // were drawn from less than the view needs: what lies under the rectangle isn't known yet.
+    if img.data_pending || !img.pending_in_place.is_empty() || !img.partial.is_empty() {
+        return false;
+    }
+    // The labels are drawn apart from the features, as the frame draws them over its map.
+    let crate::Rendered { pixmap, labels, unplaced, label_layers, .. } = img;
+    let mut canvas = Canvas::from_pixmap(pixmap);
+    crate::draw_labels(&mut canvas, (&unplaced, &labels, &label_layers), ppp as f32);
+    let pm = canvas.into_pixmap();
+    let (gw, gh) = (pm.width() as usize, pm.height() as usize);
+    // Every cell the rectangle touches, partly too.
+    let cell = |v: f64, size: f64, n: usize, round: fn(f64) -> f64| (round(v / size * n as f64).max(0.0) as usize).min(n);
+    let (c0, c1) = (cell(under.0, w_mm, gw, f64::floor), cell(under.0 + under.2, w_mm, gw, f64::ceil));
+    let (r0, r1) = (cell(under.1, h_mm, gh, f64::floor), cell(under.1 + under.3, h_mm, gh, f64::ceil));
+    let px = pm.pixels();
+    let mut seen = (r0..r1).flat_map(|r| (c0..c1).map(move |c| r * gw + c)).map(|i| px[i]);
+    // One colour, and that the basemap's water or land: a polygon filling the whole rectangle in
+    // one colour, data or context, isn't the background.
+    let rgba = |p: tiny_skia::PremultipliedColorU8| (p.red(), p.green(), p.blue(), p.alpha());
+    let Some(first) = seen.next().map(rgba) else { return false };
+    // Legend text stays dark (LEGEND_TEXT), so dark water or land must keep its paper backing.
+    let background = [water, land]
+        .iter()
+        .any(|c| (c.0[0], c.0[1], c.0[2], 255) == first && u16::from(c.r()) + u16::from(c.g()) + u16::from(c.b()) > 3 * 160);
+    background && seen.all(|p| rgba(p) == first)
 }
 
 /// A legend entry's symbol `s` of the layer `l` in the box (`x`, `y`, `w`, `h`): a point as
@@ -2867,6 +3110,95 @@ pub fn map_index(maps: &[rustgis_map::Map], name: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
+    /// No-data rows reuse the map's fallback symbol, respect filters, and never appear by
+    /// default. All-classes mode can key the symbol even when the current frame doesn't use it.
+    #[test]
+    fn layout_no_data_legend_follows_the_frame() {
+        use rustgis_data::{Dataset, Field, FieldType, Geometry, Value};
+        let mut map = Map::new("m");
+        let mut ds = Dataset::new("tracts", GeometryType::Point, vec![Field::new("percent", FieldType::Double)]);
+        for v in [Value::Float(10.0), Value::Float(50.0), Value::Null] {
+            ds.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![v]);
+        }
+        let id = map.add_dataset(ds);
+        let l = map.layer_mut(id).unwrap();
+        l.renderer = rustgis_map::Renderer::graduated(
+            &l.dataset,
+            &[],
+            "percent",
+            2,
+            rustgis_map::ClassMethod::EqualInterval,
+            rustgis_map::Ramp::Ember,
+            rustgis_map::Symbol::default_for(GeometryType::Point, 0),
+        )
+        .unwrap();
+        let fallback = l.renderer.symbol_for(&l.dataset, 2);
+        let listed = |map: &mut Map, all: bool, show: bool| {
+            let drawn = (!all).then(|| complete_shown_legends(map, 1e6, show, &mut None).unwrap());
+            let opts = LegendOptions { show_no_data: show, hide_other: true, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
+            legend_rows(map, drawn.as_deref(), &opts)
+                .into_iter()
+                .filter_map(|r| match r {
+                    LegendRow::Class(_, e) if e.label == "No data" => Some(e.symbol),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(listed(&mut map, false, false).is_empty());
+        assert_eq!(listed(&mut map, false, true), vec![fallback]);
+        map.layer_mut(id).unwrap().definition_query = Some("percent IS NOT NULL".into());
+        assert!(listed(&mut map, false, true).is_empty());
+        assert_eq!(listed(&mut map, true, true), vec![fallback]);
+        let sizes = |map: &mut Map, show| legend_sizes_with_no_data_mm(map, 1e6, true, true, show, (&[], &NO_LABELS)).unwrap()[0];
+        assert!(sizes(&mut map, true).1 > sizes(&mut map, false).1);
+    }
+
+    /// Page clipping is tested after alignment and rotation; box width alone is not clipping.
+    /// A legend's long title is text too, and invisible elements must not generate notices.
+    #[test]
+    fn layout_text_clipping_uses_ink_and_visibility() {
+        let mut l = Layout::new("Page", 120.0, 90.0);
+        let id = l.add("Title", (10.0, 10.0, 5.0, 12.0), ElementKind::text("Long line", 14.0, Rgba::rgb(0, 0, 0), false));
+        let info = PageInfo::default();
+        assert!(clipped_text(&l, &[], 96.0, &info).is_empty(), "outside the box but on the page");
+        l.element_mut(id).unwrap().x = 117.0;
+        assert_eq!(clipped_text(&l, &[], 96.0, &info), vec![(id, "Title".into())]);
+        l.element_mut(id).unwrap().visible = false;
+        assert!(clipped_text(&l, &[], 96.0, &info).is_empty());
+        let e = l.element_mut(id).unwrap();
+        e.visible = true;
+        (e.x, e.y, e.w) = (0.0, 40.0, 60.0);
+        if let ElementKind::Text { align, rotation, letter_spacing, .. } = &mut e.kind {
+            *align = TextAlign::Right;
+            *letter_spacing = 2.0;
+            *rotation = 90.0;
+        }
+        assert!(clipped_text(&l, &[], 96.0, &info).is_empty(), "turned ink fits");
+        l.element_mut(id).unwrap().y = 85.0;
+        assert_eq!(clipped_text(&l, &[], 96.0, &info).len(), 1, "turned ink is off-page");
+        l.element_mut(id).unwrap().visible = false;
+        let frame = l.add(
+            "Frame",
+            (10.0, 10.0, 60.0, 70.0),
+            serde_json::from_value(serde_json::json!({"MapFrame":{"map":"m", "center":{"x":0,"y":0}, "scale":1000000}})).unwrap(),
+        );
+        let legend = l.add(
+            "Legend",
+            (115.0, 10.0, 5.0, 40.0),
+            ElementKind::Legend {
+                frame,
+                title: "Long legend title".into(),
+                all_classes: false,
+                hide_other: false,
+                show_no_data: false,
+                exclude: vec![],
+                columns: 1,
+                labels: BTreeMap::new(),
+            },
+        );
+        assert_eq!(clipped_text(&l, &[Map::new("m")], 96.0, &info), vec![(legend, "Legend".into())]);
+    }
+
     /// No layer labelled: every layer under its name.
     static NO_LABELS: BTreeMap<String, String> = BTreeMap::new();
 
@@ -3030,7 +3362,7 @@ mod tests {
         let red = |map: &Map, width: f32, exclude: &[String], scale: f64| {
             let mut pm = Pixmap::new(300, 400).unwrap();
             pm.fill(tiny_skia::Color::WHITE);
-            let opts = LegendOptions { hide_other: false, exclude, labels: &NO_LABELS, scale };
+            let opts = LegendOptions { show_no_data: false, hide_other: false, exclude, labels: &NO_LABELS, scale };
             crate::canvas::with_canvas(&mut pm, |c| {
                 legend(c, Rect::from_xywh(0.0, 0.0, width, 400.0).unwrap(), map, ("", 1), None, opts, 1.0)
             });
@@ -3062,7 +3394,7 @@ mod tests {
         map.tiles.push(second);
         let mut pm = Pixmap::new(70, 200).unwrap();
         pm.fill(tiny_skia::Color::WHITE);
-        let opts = LegendOptions { hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
+        let opts = LegendOptions { show_no_data: false, hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
         crate::canvas::with_canvas(&mut pm, |c| legend(c, Rect::from_xywh(0.0, 0.0, 70.0, 200.0).unwrap(), &map, ("", 1), None, opts, 1.0));
         let red_rows =
             (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| pm.pixel(x, y).is_some_and(|p| p.red() > 200 && p.green() < 60))).count();
@@ -3104,6 +3436,68 @@ mod tests {
         map.tiles.truncate(1);
         map.tiles[0].visible = false;
         assert_eq!(red(&map, 300.0, &[], 1e6).0, 0, "hidden");
+    }
+
+    /// Plain under a rectangle is nothing drawn there but the background: the basemap's paper, not a
+    /// layer or its label, not an outline that coverage takes as context, and never with web tiles
+    /// (#1379).
+    #[test]
+    fn frame_plain_under_counts_everything_drawn_but_the_background() {
+        use rustgis_data::{Dataset, Geometry};
+        let square = |name: &str, half: f64| {
+            let mut d = Dataset::new(name, GeometryType::Polygon, Vec::new());
+            let ring = [(-half, -half), (half, -half), (half, half), (-half, half), (-half, -half)];
+            d.push(Some(Geometry::Polygon(vec![vec![ring.map(|(x, y)| Coord::new(x, y)).to_vec()]])), Vec::new());
+            d
+        };
+        let mut map = Map::new("m");
+        (map.basemap, map.graticule) = (rustgis_map::Basemap::Blank, false);
+        map.add_dataset(square("data", 0.1));
+        // A 100 mm frame at 1:1,000,000 shows about 0.9° across: the square sits in its middle.
+        let plain = |map: &mut Map, under| frame_plain_under(map, Coord::new(0.0, 0.0), 1_000_000.0, (100.0, 100.0), under, 128);
+        assert!(plain(&mut map, (2.0, 70.0, 25.0, 25.0)), "a corner is the blank paper");
+        assert!(!plain(&mut map, (40.0, 40.0, 20.0, 20.0)), "the data in the middle");
+        assert!(!plain(&mut map, (48.0, 48.0, 4.0, 4.0)), "one colour all over, but the data's, not the background");
+        map.graticule = true;
+        assert!(!plain(&mut map, (2.0, 2.0, 96.0, 96.0)), "the map's own graticule is drawn in the frame too");
+        map.graticule = false;
+        let border = map.add_dataset(square("border", 0.3));
+        if let Some(l) = map.layers.iter_mut().find(|l| l.id == border) {
+            let outline = rustgis_map::Symbol::default_for(GeometryType::Polygon, 0);
+            l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol { fill: Rgba::new(0, 0, 0, 0), ..outline });
+        }
+        assert!(plain(&mut map, (2.0, 86.0, 12.0, 12.0)), "the outline (17 to 83 mm) runs clear of that corner");
+        assert!(!plain(&mut map, (2.0, 2.0, 96.0, 96.0)), "an outline coverage leaves out still counts here");
+        // A point left of the rectangle, its label running into it: the label counts.
+        let mut d = Dataset::new("named", GeometryType::Point, vec![rustgis_data::Field::new("name", rustgis_data::FieldType::Text)]);
+        d.push(Some(Geometry::Point(Coord::new(-0.2, -0.25))), vec![rustgis_data::Value::Text("A long place name".into())]);
+        let named = map.add_dataset(d);
+        let right_of_it = (31.0, 63.0, 67.0, 33.0);
+        map.layer_mut(border).unwrap().visible = false;
+        assert!(plain(&mut map, right_of_it), "the point itself lies outside it");
+        map.layer_mut(named).unwrap().labels.enabled = true;
+        assert!(!plain(&mut map, right_of_it), "its label lies inside it");
+        map.layer_mut(named).unwrap().labels.enabled = false;
+        // On another body the background is drawn in the land's grey (Map::palette), not the
+        // Earth basemap's water: that grey is the background there.
+        (map.body, map.basemap) = ("mars".into(), rustgis_map::Basemap::Paper);
+        assert!(plain(&mut map, (2.0, 86.0, 12.0, 12.0)), "Mars's plain grey is its background");
+        (map.body, map.basemap) = ("earth".into(), rustgis_map::Basemap::Blank);
+        map.tiles.push(rustgis_map::TileLayer::new("tiles", rustgis_map::TileKind::Raster, "https://example.invalid/{z}/{x}/{y}.png"));
+        assert!(!plain(&mut map, (2.0, 86.0, 12.0, 12.0)), "web tiles aren't fetched for it, so nothing is plain");
+    }
+
+    #[test]
+    fn plain_dark_basemaps_keep_the_legend_paper_while_light_ones_clear_it() {
+        for body in ["earth", "mars"] {
+            for basemap in [rustgis_map::Basemap::Midnight, rustgis_map::Basemap::Paper, rustgis_map::Basemap::Ocean] {
+                let mut map = Map::new("plain");
+                (map.body, map.basemap, map.graticule) = (body.into(), basemap, false);
+                // The Earth frame is open Gulf of Guinea water; on Mars it is the palette's grey.
+                let plain = frame_plain_under(&mut map, Coord::new(0.0, 0.0), 1_000_000.0, (100.0, 100.0), (40.0, 40.0, 20.0, 20.0), 128);
+                assert_eq!(plain, basemap != rustgis_map::Basemap::Midnight, "{body}: {basemap:?}");
+            }
+        }
     }
 
     /// A layer that only outlines its polygons isn't counted as drawn, unless nothing else is shown,
@@ -3307,7 +3701,7 @@ mod tests {
                 expression: None,
             };
         }
-        let opts = || LegendOptions { hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
+        let opts = || LegendOptions { show_no_data: false, hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
         let rows = legend_rows(&map, None, &opts());
         assert_eq!(rows.len(), 32);
         assert_eq!(balanced(&rows, 1, 1e6), (vec![0], 32.0 * LEGEND_ROW));
@@ -3391,7 +3785,7 @@ mod tests {
         let small = rustgis_map::Symbol::default_for(GeometryType::Point, 0);
         let classes = (0u32..4).map(|i| (format!("c{i}"), small)).collect();
         let map = classed_point_map(classes, small);
-        let opts = || LegendOptions { hide_other: true, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
+        let opts = || LegendOptions { show_no_data: false, hide_other: true, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
         let rows = legend_rows(&map, None, &opts());
         let (starts, _) = flow(&rows, 2, LEGEND_ROW, 1e6);
         assert_eq!(starts, vec![0, 2]);
@@ -3416,7 +3810,7 @@ mod tests {
         let classes =
             (0u32..10).map(|i| (format!("c{i}"), rustgis_map::Symbol { size: if i < 2 { 40.0 } else { 4.0 }, ..small })).collect();
         let map = classed_point_map(classes, small);
-        let opts = LegendOptions { hide_other: true, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
+        let opts = LegendOptions { show_no_data: false, hide_other: true, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
         let rows = legend_rows(&map, None, &opts);
         let tall = rows[1].height(1e6);
         assert!(tall > 2.0 * LEGEND_ROW, "{tall}");
@@ -3461,7 +3855,7 @@ mod tests {
         let labels =
             |pairs: &[(&str, &str)]| -> BTreeMap<String, String> { pairs.iter().map(|(n, l)| (n.to_string(), l.to_string())).collect() };
         let names = |labels: &BTreeMap<String, String>| -> Vec<String> {
-            let opts = LegendOptions { hide_other: true, exclude: &[], labels, scale: 1e6 };
+            let opts = LegendOptions { show_no_data: false, hide_other: true, exclude: &[], labels, scale: 1e6 };
             legend_rows(&map, None, &opts)
                 .iter()
                 .filter_map(|r| match r {
@@ -3486,7 +3880,7 @@ mod tests {
         let reach = |labels: &BTreeMap<String, String>| {
             let mut pm = Pixmap::new(400, 200).unwrap();
             pm.fill(tiny_skia::Color::WHITE);
-            let opts = LegendOptions { hide_other: true, exclude: &[], labels, scale: 1e6 };
+            let opts = LegendOptions { show_no_data: false, hide_other: true, exclude: &[], labels, scale: 1e6 };
             crate::canvas::with_canvas(&mut pm, |c| {
                 legend(c, Rect::from_xywh(0.0, 0.0, 400.0, 200.0).unwrap(), &map, ("", 1), None, opts, 1.0)
             });
@@ -3529,14 +3923,14 @@ mod tests {
         let depth_without = |map: &Map, drawn: Option<&[(u32, Vec<LegendEntry>)]>, hide_other: bool, exclude: &[String]| {
             let mut pm = Pixmap::new(300, 400).unwrap();
             pm.fill(tiny_skia::Color::WHITE);
-            let opts = LegendOptions { hide_other, exclude, labels: &NO_LABELS, scale: 1e6 };
+            let opts = LegendOptions { show_no_data: false, hide_other, exclude, labels: &NO_LABELS, scale: 1e6 };
             crate::canvas::with_canvas(&mut pm, |c| {
                 legend(c, Rect::from_xywh(0.0, 0.0, 300.0, 400.0).unwrap(), map, ("", 1), drawn, opts, 1.0)
             });
             (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| pm.pixel(x, y).is_some_and(|p| p.red() < 200))).max().unwrap_or(0)
         };
         let depth = |map: &Map, drawn: Option<&[(u32, Vec<LegendEntry>)]>, hide_other: bool| depth_without(map, drawn, hide_other, &[]);
-        let drawn = shown_legends(&map, 1e6);
+        let drawn = shown_legends(&map, 1e6, false);
         assert_eq!(drawn.len(), 1, "the empty layer draws nothing: {drawn:?}");
         let (shown, all) = (depth(&map, Some(&drawn), false), depth(&map, None, false));
         // The drawn legend is two rows (the layer's heading and "a"); every class makes it six
@@ -3558,7 +3952,7 @@ mod tests {
                     map,
                     ("", 1),
                     drawn,
-                    LegendOptions { hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 },
+                    LegendOptions { show_no_data: false, hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 },
                     1.0,
                 )
             });
@@ -3589,7 +3983,7 @@ mod tests {
         {
             classes.retain(|(k, _)| k != "a");
         }
-        let drawn = shown_legends(&map, 1e6);
+        let drawn = shown_legends(&map, 1e6, false);
         assert!(depth(&map, Some(&drawn), false) > 0, "<all other values> alone is listed");
         assert_eq!(depth(&map, Some(&drawn), true), 0, "and hidden, the layer is left out");
         // So is one whose drawn features all fall in a fully transparent <all other values>,
@@ -3603,7 +3997,7 @@ mod tests {
             }
         };
         set_other_alpha(&mut map, 0);
-        let drawn = shown_legends(&map, 1e6);
+        let drawn = shown_legends(&map, 1e6, false);
         assert_eq!(depth(&map, Some(&drawn), false), 0, "the invisible fallback stands for nothing");
         set_other_alpha(&mut map, 255);
         // A class that bears the fallback's name is a class: hiding the fallback keeps it.
@@ -3620,7 +4014,7 @@ mod tests {
         if let Some(l) = map.layers.iter_mut().find(|l| l.id == pts) {
             l.dataset.features.iter_mut().for_each(|f| f.attrs = vec![Value::Text(rustgis_map::symbology::OTHER_VALUES.into())]);
         }
-        let drawn = shown_legends(&map, 1e6);
+        let drawn = shown_legends(&map, 1e6, false);
         assert!(depth(&map, Some(&drawn), true) > 0, "the class named like the fallback is still listed");
         // A Graduated layer with no classes still shows its plain swatch, as before #207.
         if let Some(l) = map.layers.iter_mut().find(|l| l.id == pts) {
@@ -3680,6 +4074,9 @@ mod tests {
             altitude: 30.0,
             z_factor: 1.0,
             shadow,
+            sky: 0.0,
+            fill: 0.0,
+            rock: None,
         };
         for shadow in [0.0, 1.0] {
             let map = ramp_map(relief(shadow), rustgis_map::raster::Stretch::MinMax);
@@ -3728,6 +4125,9 @@ mod tests {
                 altitude: 10.0,
                 z_factor: 1.0,
                 shadow: 1.0,
+                sky: 0.0,
+                fill: 0.0,
+                rock: None,
             };
             let mut m = Map::new(name.clone());
             assert_eq!(m.add_raster("dem", copy), 1);
@@ -3810,7 +4210,7 @@ mod tests {
     #[test]
     fn a_legend_lists_a_classified_rasters_classes() {
         let mut map = classes_map(5);
-        let opts = LegendOptions { hide_other: true, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
+        let opts = LegendOptions { show_no_data: false, hide_other: true, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
         let labels = |rows: &[LegendRow]| -> Vec<String> {
             rows.iter()
                 .map(|r| match r {
@@ -3823,7 +4223,7 @@ mod tests {
         };
         let want = ["[Land cover]", "Forest", "2", "3", "4", "5"];
         assert_eq!(labels(&legend_rows(&map, None, &opts)), want);
-        let drawn = shown_legends(&map, 1e6);
+        let drawn = shown_legends(&map, 1e6, false);
         assert_eq!(labels(&legend_rows(&map, Some(&drawn), &opts)), want);
         // Its swatches are the pane's colours.
         let pane: Vec<Rgba> = map.layers[0]
@@ -3853,14 +4253,14 @@ mod tests {
         let exclude = ["land cover".to_string()];
         assert!(legend_rows(&map, None, &LegendOptions { exclude: &exclude, ..opts }).is_empty());
         map.layers[0].visible = false;
-        assert!(shown_legends(&map, 1e6).is_empty());
+        assert!(shown_legends(&map, 1e6, false).is_empty());
         assert!(legend_rows(&map, None, &opts).is_empty());
         // A raster on a ramp: a colorbar keys it, the legend doesn't list it.
         let ramp = ramp_map(
             rustgis_map::raster::RasterRenderer::Stretch { band: 0, ramp: rustgis_map::Ramp::Harbour, invert: false },
             rustgis_map::raster::Stretch::MinMax,
         );
-        assert!(legend_rows(&ramp, None, &opts).is_empty() && shown_legends(&ramp, 1e6).is_empty());
+        assert!(legend_rows(&ramp, None, &opts).is_empty() && shown_legends(&ramp, 1e6, false).is_empty());
     }
 
     /// A drawn legend fills each class's swatch with its colour, under the raster's name.
@@ -5161,7 +5561,7 @@ Elaboração: RustGIS",
     fn point_legend(map: &Map) -> Pixmap {
         let mut pm = Pixmap::new(200, 200).unwrap();
         pm.fill(tiny_skia::Color::WHITE);
-        let opts = LegendOptions { hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
+        let opts = LegendOptions { show_no_data: false, hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
         crate::canvas::with_canvas(&mut pm, |c| legend(c, Rect::from_xywh(0.0, 0.0, 200.0, 200.0).unwrap(), map, ("", 1), None, opts, 1.0));
         pm
     }
@@ -5170,7 +5570,7 @@ Elaboração: RustGIS",
     /// back on white.
     fn recorded_legend(map: &Map, side: u32) -> Pixmap {
         let mut c = Canvas::recording(side, side).unwrap();
-        let opts = LegendOptions { hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
+        let opts = LegendOptions { show_no_data: false, hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
         legend(&mut c, Rect::from_xywh(0.0, 0.0, side as f32, side as f32).unwrap(), map, ("", 1), None, opts, 1.0);
         let (_, _, items) = c.into_drawing().unwrap().finish();
         let mut pm = Pixmap::new(side, side).unwrap();
@@ -5392,7 +5792,7 @@ Elaboração: RustGIS",
         let mut pm = Pixmap::new(200, 200).unwrap();
         pm.fill(tiny_skia::Color::WHITE);
         let blank = pm.clone();
-        let opts = LegendOptions { hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
+        let opts = LegendOptions { show_no_data: false, hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
         crate::canvas::with_canvas(&mut pm, |c| legend(c, Rect::from_xywh(0.0, 0.0, 200.0, 47.0).unwrap(), &map, ("", 1), None, opts, 1.0));
         assert!(pm.data() == blank.data());
         // A size no page could hold stays a size a legend can take.
@@ -5452,7 +5852,7 @@ Elaboração: RustGIS",
         };
         let map = point_legend_map(|l| l.renderer = rustgis_map::Renderer::Single(s));
         let mut c = Canvas::recording(2100, 2100).unwrap();
-        let opts = LegendOptions { hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
+        let opts = LegendOptions { show_no_data: false, hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
         legend(&mut c, Rect::from_xywh(0.5, 0.5, 2099.0, 2099.0).unwrap(), &map, ("", 1), None, opts, 1.0);
         let (_, _, items) = c.into_drawing().unwrap().finish();
         let mut pm = Pixmap::new(2100, 2100).unwrap();
@@ -5578,7 +5978,7 @@ Elaboração: RustGIS",
             });
             let mut pm = Pixmap::new(2100, 2100).unwrap();
             pm.fill(tiny_skia::Color::WHITE);
-            let opts = LegendOptions { hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
+            let opts = LegendOptions { show_no_data: false, hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
             crate::canvas::with_canvas(&mut pm, |c| {
                 legend(c, Rect::from_xywh(0.0, 0.0, 2100.0, 2100.0).unwrap(), &map, ("", 1), None, opts, 1.0)
             });
@@ -5607,7 +6007,7 @@ Elaboração: RustGIS",
         });
         let mut pm = Pixmap::new(300, 300).unwrap();
         pm.fill(tiny_skia::Color::WHITE);
-        let opts = LegendOptions { hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
+        let opts = LegendOptions { show_no_data: false, hide_other: false, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
         crate::canvas::with_canvas(&mut pm, |c| {
             legend(c, Rect::from_xywh(-50.0, -50.0, 2100.0, 2100.0).unwrap(), &map, ("", 1), None, opts, 1.0)
         });

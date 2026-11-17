@@ -149,12 +149,16 @@ pub fn expand(template: &str, t: TileId, tile_size: u32, tms: bool, subdomains: 
     let n = 1u64 << t.z.min(30);
     let flipped = n.saturating_sub(1).saturating_sub(u64::from(t.y));
     let (y, neg_y) = if tms { (flipped, u64::from(t.y)) } else { (u64::from(t.y), flipped) };
-    let pick = |opts: &[&str]| -> String {
+    // A chosen host or switch value that carries a URL delimiter would move the split between the
+    // authority and the rest of the address (a subdomain of `192.168.1.5/x?` reaches another host),
+    // so the delimiters are percent-encoded where the value goes in.
+    let pick = |opts: &[&str], authority: bool| -> String {
         if opts.is_empty() {
             return String::new();
         }
         let i = (u64::from(t.x) + u64::from(t.y)) as usize % opts.len();
-        opts.get(i).copied().unwrap_or_default().to_string()
+        let value = opts.get(i).copied().unwrap_or_default();
+        if authority { value.replace('/', "%2F").replace('?', "%3F").replace('#', "%23").replace('@', "%40") } else { value.to_string() }
     };
     let mut out = String::with_capacity(template.len() + 16);
     let mut rest = template;
@@ -167,6 +171,7 @@ pub fn expand(template: &str, t: TileId, tile_size: u32, tms: bool, subdomains: 
             break;
         };
         let token = after.get(..close).unwrap_or_default();
+        let authority = out.split_once("://").is_some_and(|(_, rest)| !rest.contains(['/', '?', '#']));
         let value = match token {
             "z" | "zoom" => Some(t.z.to_string()),
             "x" => Some(t.x.to_string()),
@@ -176,7 +181,7 @@ pub fn expand(template: &str, t: TileId, tile_size: u32, tms: bool, subdomains: 
             "s" => {
                 let subs: Vec<&str> =
                     if subdomains.is_empty() { vec!["a", "b", "c"] } else { subdomains.iter().map(String::as_str).collect() };
-                Some(pick(&subs))
+                Some(pick(&subs, authority))
             }
             "bbox-epsg-3857" => {
                 let e = t.extent();
@@ -185,7 +190,7 @@ pub fn expand(template: &str, t: TileId, tile_size: u32, tms: bool, subdomains: 
             "width" | "height" => Some(tile_size.to_string()),
             "r" => Some(String::new()),
             "ratio" => Some("1".into()),
-            _ => token.strip_prefix("switch:").map(|opts| pick(&opts.split(',').map(str::trim).collect::<Vec<_>>())),
+            _ => token.strip_prefix("switch:").map(|opts| pick(&opts.split(',').map(str::trim).collect::<Vec<_>>(), authority)),
         };
         match value {
             Some(v) => out.push_str(&v),
@@ -195,6 +200,11 @@ pub fn expand(template: &str, t: TileId, tile_size: u32, tms: bool, subdomains: 
         rest = after.get(close + 1..).unwrap_or_default();
     }
     out.push_str(rest);
+    if crate::cache::ceiling_for(template) == crate::address::Reach::Public
+        && crate::cache::ceiling_for(&out) != crate::address::Reach::Public
+    {
+        crate::cache::restrict_to_public(&out);
+    }
     out
 }
 
@@ -407,6 +417,18 @@ mod tests {
         assert_eq!(expand("https://x/{z}/{x}/{y}{r}.png", t, 256, false, &[]), "https://x/3/5/2.png");
     }
 
+    /// A subdomain value with a delimiter stays in the host it was given for (#2055).
+    #[test]
+    fn a_subdomain_value_cannot_move_the_host_split() {
+        let t = TileId { z: 3, x: 5, y: 2 };
+        let hostile = ["192.168.1.5/x?".to_string()];
+        assert_eq!(
+            expand("https://{s}.tiles.example/{z}/{x}/{y}.png", t, 256, false, &hostile),
+            "https://192.168.1.5%2Fx%3F.tiles.example/3/5/2.png"
+        );
+        assert_eq!(expand("https://{switch:x,a@b}.x/{z}", t, 256, false, &[]), "https://a%40b.x/3", "a switch value is encoded too");
+    }
+
     #[test]
     fn wide_extents_take_coarser_tiles() {
         let world = Extent::new(-HALF_WORLD, -HALF_WORLD, HALF_WORLD, HALF_WORLD);
@@ -468,5 +490,14 @@ mod tests {
         assert_eq!(joined, malformed_child);
         let malformed_base = crate::s3::anonymous(&crate::s3::anonymous("https://tiles.example/style.json"));
         assert!(crate::address::check(&join(&malformed_base, "tile/0"), None).is_err());
+    }
+    #[test]
+    fn switches_in_paths_and_queries_keep_delimiters() {
+        let t = TileId { z: 0, x: 0, y: 0 };
+        assert_eq!(
+            expand("https://tiles.example/{switch:a/b,c}/{z}?q={switch:x/y,z}", t, 256, false, &[]),
+            "https://tiles.example/a/b/0?q=x/y"
+        );
+        assert_eq!(expand("https://{switch:a/b,c}.example/{z}", t, 256, false, &[]), "https://a%2Fb.example/0");
     }
 }

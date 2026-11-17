@@ -8,6 +8,7 @@ use serde_json::json;
 mod remembered_database;
 
 mod remembered_s3;
+mod remembered_service;
 mod service_logins;
 /// Builds a headless World Atlas UI for interaction tests.
 fn harness() -> egui_kittest::Harness<'static, RustGisApp> {
@@ -1457,6 +1458,106 @@ fn connections_persist_and_import_once() {
     assert!(empty.session.connections.connections.is_empty(), "an empty saved list must not import again");
 }
 
+/// Saved data sources from a newer RustGIS (#1405): rows, fields and lists this version can't read
+/// are said at start and survive recording a recent source; a preference that can't be read at
+/// all stays byte for byte.
+#[test]
+fn saved_sources_from_a_newer_version_survive_recording_a_recent_one() {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("points.geojson");
+    std::fs::write(
+        &file,
+        r#"{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{}}]}"#,
+    )
+    .unwrap();
+    let future = json!({"kind": "gcs", "name": "Bucket", "address": "gs://b/a.tif"});
+    let newer = json!({"favourites": [future.clone()], "recent": [{"kind": "file", "name": "R", "address": "/r.csv", "opened": 3}], "folders": ["/data"]})
+        .to_string();
+    for text in [newer, "[\"not\", \"an object\"]".to_string()] {
+        let store = Arc::new(Mutex::new(HashMap::from([
+            ("data_sources".to_string(), text.clone()),
+            ("connections".to_string(), "{}".to_string()),
+        ])));
+        let (load, save) = (store.clone(), store.clone());
+        let services = rustgis_ui_egui::Services {
+            load_pref: Some(Box::new(move |k| load.lock().unwrap().get(k).cloned())),
+            save_pref: Some(Box::new(move |k, v| {
+                save.lock().unwrap().insert(k.to_string(), v.to_string());
+            })),
+            ..Default::default()
+        };
+        let mut app = RustGisApp::with_sample().with_services(services);
+        app.run("layer.addData", json!({"path": file.display().to_string()})).unwrap();
+        assert!(app.session.sources.recent.iter().any(|r| r.address.ends_with("points.geojson")), "{text}");
+        let said: Vec<_> = app.session.notices_since(0).iter().map(|n| n.text.clone()).collect();
+        assert!(said.iter().any(|t| t.contains("saved data source")), "{said:?}");
+        let stored = store.lock().unwrap()["data_sources"].clone();
+        if text.starts_with('[') {
+            assert_eq!(stored, text, "a preference that can't be read stays as it was");
+        } else {
+            let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+            assert_eq!(stored["favourites"], json!([future]));
+            assert_eq!(stored["folders"], json!(["/data"]));
+            assert!(stored["recent"][0]["address"].as_str().unwrap().ends_with("points.geojson"));
+            assert_eq!(stored["recent"][1]["opened"], 3);
+        }
+    }
+}
+
+/// Saved connections from a newer RustGIS (#1405): a preference of a newer version is said, isn't
+/// used and stays byte for byte through other changes to the preferences, recording a recent
+/// source among them; rows and fields this version can't read survive a connection made here.
+#[test]
+fn connections_from_a_newer_version_survive_other_changes() {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    let newer = json!({"version": 2, "next": 2, "connections": [{"id": "c1", "name": "A", "kind": "wms", "address": "https://a.example"}]})
+        .to_string();
+    let future_row = json!({"id": "c5", "name": "Bucket", "kind": "gcs", "address": "https://g.example"});
+    let unknown = json!({"version": 1, "next": 2, "connections": [
+        {"id": "c1", "name": "A", "kind": "wms", "address": "https://a.example", "refresh": 30},
+        future_row.clone()
+    ]})
+    .to_string();
+    for text in [newer.clone(), unknown] {
+        let store = Arc::new(Mutex::new(HashMap::from([("connections".to_string(), text.clone())])));
+        let (load, save) = (store.clone(), store.clone());
+        let services = rustgis_ui_egui::Services {
+            load_pref: Some(Box::new(move |k| load.lock().unwrap().get(k).cloned())),
+            save_pref: Some(Box::new(move |k, v| {
+                save.lock().unwrap().insert(k.to_string(), v.to_string());
+            })),
+            ..Default::default()
+        };
+        let mut app = RustGisApp::with_sample().with_services(services);
+        let said: Vec<_> = app.session.notices_since(0).iter().map(|n| n.text.clone()).collect();
+        assert!(said.iter().any(|t| t.contains("saved connection")), "{said:?}");
+        app.session.sources.note(rustgis_engine::sources::Source {
+            kind: "url".into(),
+            name: "Recent".into(),
+            address: "https://r.example/a.geojson".into(),
+            extra: serde_json::Value::Null,
+        });
+        app.run("sources.favourite", json!({"kind": "url", "address": "https://f.example/b.geojson"})).unwrap();
+        let added = app.run("connection.new", json!({"kind": "wms", "name": "New", "address": "https://n.example/wms"}));
+        let stored = store.lock().unwrap()["connections"].clone();
+        if text == newer {
+            assert!(added.unwrap_err().contains("newer RustGIS"));
+            assert!(app.session.connections.connections.is_empty());
+            assert_eq!(stored, text, "a newer version's connections stay as they were");
+        } else {
+            added.unwrap();
+            let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+            let rows = stored["connections"].as_array().unwrap();
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[0]["refresh"], 30);
+            assert_eq!(rows[2], future_row);
+        }
+    }
+}
+
 /// Settings › Start-up › Start With a project (#377): the last one opened or saved, or one picked
 /// once. It opens with its own projection and view, a shell's `blank` still wins, one that no
 /// longer opens leaves the sample with a notice, and after a crash none is opened.
@@ -1869,6 +1970,19 @@ fn delimited_text_options_go_with_the_picked_file() {
     let r = app.open_picked(&picked, b"lon,lat\n1,2\n").unwrap();
     let e = app.session.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().extent();
     assert_eq!((e.min_x, e.min_y), (1.0, 2.0));
+    // DAT and gzip picks carry the same explicit columns and delimiter to their importer.
+    use base64::Engine as _;
+    let gzip = base64::engine::general_purpose::STANDARD.decode("H4sIAAAAAAAC/8tMqUlNLC6pycsvKsngcqwxNKgxMuACACT4xC0WAAAA").unwrap();
+    let utf16: Vec<u8> = [0xff, 0xfe].into_iter().chain("id|east|north\nA|10|20\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    for (name, bytes) in
+        [("points.dat", b"id|east|north\nA|10|20\n".as_slice()), ("points.dat", utf16.as_slice()), ("points.csv.gz", gzip.as_slice())]
+    {
+        app.run("ui.addDelimited", json!({"x":"east", "y":"north", "delimiter":"|"})).unwrap();
+        let picked = format!("{}{name}", rustgis_ui_egui::DELIMITED_PICK);
+        let r = app.open_picked(&picked, bytes).unwrap();
+        let e = app.session.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().extent();
+        assert_eq!((e.min_x, e.min_y), (10.0, 20.0), "{name}");
+    }
 }
 
 /// Add Delimited Text in the web app: the file first, then the dialog lists its columns (the ones
@@ -1909,6 +2023,153 @@ fn delimited_text_dialog_lists_the_picked_files_columns() {
     let picked = format!("{}stops.csv", rustgis_ui_egui::DELIMITED_PICK);
     h.state_mut().open_picked(&picked, b"stop,Lat,Lon\nA,1,2\n").unwrap();
     assert_eq!((h.state().dialogs.a.as_str(), h.state().dialogs.b.as_str()), ("Lon", "Lat"));
+}
+
+/// Import DXF: a drawing picked, dropped or uploaded asks for the coordinate system its
+/// coordinates are in (the map's, to start with) and whether its blocks (图块) are drawn; a second
+/// drawing dropped meanwhile waits its turn.
+#[test]
+fn import_dxf_asks_for_its_coordinate_system_and_blocks() {
+    let pairs: &[(i32, &str)] = &[
+        (0, "SECTION"),
+        (2, "ENTITIES"),
+        (0, "LINE"),
+        (8, "Roads"),
+        (10, "500000"),
+        (20, "4649776"),
+        (11, "500100"),
+        (21, "4649776"),
+        (0, "ENDSEC"),
+        (0, "EOF"),
+    ];
+    let text: String = pairs.iter().map(|(c, v)| format!("{c:>3}\n{v}\n")).collect();
+    let mut h = harness();
+    h.state_mut().run("ui.language", json!({"code": "en"})).unwrap();
+    // A dropped drawing opens the dialog instead of being added at once.
+    h.state_mut().open_picked("site.dxf", text.as_bytes()).unwrap();
+    assert_eq!(h.state().dialogs.open, Some("addDxf"));
+    assert_eq!(h.state().dialogs.text, "EPSG:3857", "the map's coordinate system");
+    assert!(h.state().dialogs.flag, "blocks are drawn unless unticked");
+    // A second drawing dropped while it is open waits for the first to close.
+    h.state_mut().open_picked("other.dxf", text.as_bytes()).unwrap();
+    assert_eq!(h.state().ui.dxf_waiting.len(), 1);
+    // Unticked blocks and the drawing's own coordinate system go with the file.
+    {
+        let d = &mut h.state_mut().dialogs;
+        d.flag = false;
+        d.text = "EPSG:32633".into();
+    }
+    h.step();
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Add").click();
+    h.step();
+    h.step();
+    let e = h.state().session.map().layer_by_name("site lines").unwrap().extent();
+    assert!((e.min_x - 15.0).abs() < 1e-6 && (e.min_y - 42.0).abs() < 0.01, "{e:?}");
+    // The drawing that waited opens now, with the map's coordinate system again.
+    assert_eq!(h.state().dialogs.open, Some("addDxf"));
+    assert_eq!(h.state().dialogs.text, "EPSG:3857");
+    assert!(h.state().dialogs.flag, "blocks are drawn again");
+    assert!(h.state().ui.dxf_waiting.is_empty());
+    // Cancel discards the active drawing and advances the queue.
+    h.state_mut().open_picked("third.dxf", text.as_bytes()).unwrap();
+    let before = h.state().session.map().layers.len();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Cancel").click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().dialogs.open, Some("addDxf"));
+    assert_eq!(h.state().dialogs.dxf.as_ref().unwrap().name, "third.dxf");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Cancel").click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().dialogs.open, None);
+    assert!(h.state().dialogs.dxf.is_none());
+    assert_eq!(h.state().session.map().layers.len(), before);
+}
+
+/// Import DXF in the web app with a script's options: they go with the drawing picked next (and
+/// only that one), so it is added without the dialog.
+#[test]
+fn dxf_options_go_with_the_picked_drawing() {
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let log = asked.clone();
+    let services = rustgis_ui_egui::Services {
+        open_async: Some(Box::new(move |purpose: &str| log.lock().unwrap().push(purpose.to_string()))),
+        ..Default::default()
+    };
+    let mut app = RustGisApp::with_sample().with_services(services);
+    app.run("ui.addDxf", json!(null)).unwrap();
+    app.run("ui.addDxf", json!({"crs": "EPSG:32633", "blocks": false})).unwrap();
+    assert_eq!(asked.lock().unwrap().as_slice(), ["dxf:1", "dxf:2"]);
+    // A block's point and a line: leaving blocks out keeps the line only, in the CRS given.
+    let text: String = [
+        (0, "SECTION"),
+        (2, "BLOCKS"),
+        (0, "BLOCK"),
+        (2, "B"),
+        (0, "POINT"),
+        (8, "Symbols"),
+        (10, "500050"),
+        (20, "4649800"),
+        (0, "ENDBLK"),
+        (0, "ENDSEC"),
+        (0, "SECTION"),
+        (2, "ENTITIES"),
+        (0, "INSERT"),
+        (2, "B"),
+        (10, "500050"),
+        (20, "4649800"),
+        (0, "LINE"),
+        (8, "Roads"),
+        (10, "500000"),
+        (20, "4649776"),
+        (11, "500100"),
+        (21, "4649776"),
+        (0, "ENDSEC"),
+        (0, "EOF"),
+    ]
+    .iter()
+    .map(|(c, v)| format!("{c:>3}\n{v}\n"))
+    .collect();
+    let picked = format!("{}2:site.dxf", rustgis_ui_egui::DXF_PICK);
+    app.ui.pending_open = Some("map.import");
+    app.open_picked(&picked, text.as_bytes()).unwrap();
+    assert_eq!(app.ui.pending_open, Some("map.import"));
+    assert_eq!(app.dialogs.open, None, "the options add it without the dialog");
+    let names: Vec<&str> = app.session.map().layers.iter().map(|l| l.name.as_str()).filter(|n| n.starts_with("site")).collect();
+    assert_eq!(names, ["site lines"], "the block's point is left out");
+    let e = app.session.map().layer_by_name("site lines").unwrap().extent();
+    assert!((e.min_x - 15.0).abs() < 1e-6 && (e.min_y - 42.0).abs() < 0.01, "{e:?}");
+    // The options were used up: the next drawing opens the dialog.
+    let picked = format!("{}1:other.dxf", rustgis_ui_egui::DXF_PICK);
+    app.open_picked(&picked, text.as_bytes()).unwrap();
+    assert_eq!(app.dialogs.open, Some("addDxf"));
+    assert_eq!(app.dialogs.text, "EPSG:3857");
+    assert!(app.dialogs.flag);
+    // Two explicit option sets also remain distinct when the earlier picker finishes first.
+    app.run("ui.addDxf", json!({"crs": "EPSG:32633", "blocks": false})).unwrap();
+    app.run("ui.addDxf", json!({"crs": "EPSG:3857", "blocks": true})).unwrap();
+    app.open_picked(&format!("{}3:owned.dxf", rustgis_ui_egui::DXF_PICK), text.as_bytes()).unwrap();
+    let owned = app.session.map().layer_by_name("owned lines").unwrap().extent();
+    assert!((owned.min_x - 15.0).abs() < 1e-6 && (owned.min_y - 42.0).abs() < 0.01, "{owned:?}");
+    assert!(app.session.map().layer_by_name("owned points").is_none());
+    app.open_picked(&format!("{}4:later.dxf", rustgis_ui_egui::DXF_PICK), text.as_bytes()).unwrap();
+    assert!(app.session.map().layer_by_name("later points").is_some());
+    // Stored bytes are added through their own command after an unrelated picker starts.
+    let mut h = harness();
+    h.state_mut().open_picked("stored.dxf", text.as_bytes()).unwrap();
+    h.state_mut().ui.pending_open = Some("map.import");
+    h.step();
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Add").click();
+    h.step();
+    h.step();
+    assert!(h.state().session.map().layer_by_name("stored lines").is_some());
+    assert_eq!(h.state().ui.pending_open, Some("map.import"));
+    // Cancelling a picker consumes only that request's options.
+    app.run("ui.addDxf", json!({"blocks": false})).unwrap();
+    app.open_picked(&format!("{}5:", rustgis_ui_egui::DXF_PICK), &[]).unwrap();
+    assert!(app.ui.pending_dxf.is_empty());
 }
 
 /// Edit Text (#420) on a placed text opens the Format pane on it (#516): it is selected alone, and
@@ -2005,7 +2266,7 @@ fn data_from_a_web_address_lands_later() {
         if h.state().session.map().layer_by_name("Pin").is_some() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for downloaded data
     }
     assert_eq!(h.state().session.map().layers.len(), before + 1);
     assert!(h.state().session.map().layer_by_name("Pin").is_some());
@@ -2042,7 +2303,7 @@ fn address_failures_keep_status_without_credentials() {
             if h.state().session.notices.iter().any(|n| n.error) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10)); // test-wait: legacy polling for the address error notice
         }
         let notices = &h.state().session.notices;
         let failure = notices.iter().find(|n| n.error).unwrap_or_else(|| panic!("{file}: no failure notice"));
@@ -2069,7 +2330,7 @@ fn shapefile_part_failures_keep_one_address_and_the_http_reason() {
             if h.state().session.notices.iter().any(|notice| notice.error) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10)); // test-wait: legacy polling for the Shapefile failure notice
         }
         let failure = h.state().session.notices.iter().find(|notice| notice.error).unwrap();
         assert!(failure.text.contains(&format!("/{name}.dbf")) && failure.text.contains("404"), "{failure:?}");
@@ -2171,7 +2432,7 @@ fn an_unnamed_cog_address_is_read_in_place() {
         if h.state().session.map().layers.iter().any(|l| l.name == "Ortho") {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the probed raster layer
     }
     let t = h.state().session.map().layers.iter().find(|l| l.name == "Ortho").and_then(|l| l.raster.clone());
     assert!(t.is_some_and(|r| r.in_place && r.path.as_deref() == Some(url.as_str())), "added as a raster layer read in place");
@@ -2187,7 +2448,7 @@ fn an_unnamed_cog_address_is_read_in_place() {
         if h.state().session.map().layers.iter().any(|l| l.name == "Null") {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the refused raster layer
     }
     let t = h.state().session.map().layers.iter().find(|l| l.name == "Null").and_then(|l| l.raster.clone());
     assert!(t.is_some_and(|r| r.in_place && r.path.as_deref() == Some(null_url.as_str())), "added as a raster layer read in place");
@@ -2197,7 +2458,7 @@ fn an_unnamed_cog_address_is_read_in_place() {
     assert!(h.state().ui.cog_probes.is_empty());
     for _ in 0..50 {
         h.step();
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy settling delay to check duplicate probes stay absent
     }
     assert!(!h.state().session.map().layers.iter().any(|l| l.name == "Late"));
 }
@@ -2287,6 +2548,55 @@ fn service_features_are_read_in_protocol_buffer_pages() {
     assert_eq!(formats, ["json", "pbf", "pbf"]);
 }
 
+/// An ArcGIS layer added from the app, read off the frame, is drawn as its description's
+/// `drawingInfo` says (#2080).
+#[test]
+fn a_service_layer_from_the_app_comes_in_with_its_services_symbology() {
+    use ogc_server::{Route, Server};
+    use rustgis_ui_egui::rustgis_engine::map::{Renderer, Rgba, symbology::Marker};
+    let layer = "/arcgis/rest/services/P/FeatureServer/0";
+    let described = json!({"currentVersion": 11.5, "maxRecordCount": 2, "supportedQueryFormats": "JSON, geoJSON, PBF",
+        "advancedQueryCapabilities": {"supportsPagination": true}, "fields": [{"name": "OBJECTID", "type": "esriFieldTypeOID"}],
+        "drawingInfo": {"renderer": {"type": "simple", "symbol": {"type": "esriSMS", "style": "esriSMSTriangle", "color": [0, 112, 255, 255], "size": 12}},
+            "transparency": 40}})
+    .to_string();
+    let page = format!("{layer}/query?where=1%3D1&outFields=*&resultOffset=0&resultRecordCount=2&orderByFields=OBJECTID&f=pbf");
+    let server = Server::new(vec![Route::new(layer, &described), Route::bytes(&page, esripbf_answers::page(&[0, 1], false, "OBJECTID"))]);
+    let mut h = harness();
+    h.step();
+    let url = format!("{}{layer}/query?where=1%3D1&outFields=*&f=geojson", server.base);
+    h.state_mut().run("ui.addUrl", json!({"url": url, "name": "Hydrants", "service": true})).unwrap();
+    wait_for_ogc(&mut h, |app| app.session.map().layer_by_name("Hydrants").is_some());
+    let hydrants = h.state().session.map().layer_by_name("Hydrants").unwrap();
+    let Renderer::Single(sym) = hydrants.renderer else { panic!("{:?}", hydrants.renderer) };
+    assert_eq!((sym.marker, sym.fill, sym.size), (Marker::Triangle, Rgba::rgb(0, 112, 255), 12.0));
+    assert_eq!(hydrants.transparency, 40.0);
+}
+
+/// An ArcGIS layer added from the app whose description couldn't be read, or whose query asks for
+/// a window of its own and so reads none, keeps RustGIS's own symbol and says why (#2152).
+#[test]
+fn a_service_layer_from_the_app_says_why_its_services_symbology_didnt_come_in() {
+    use ogc_server::{Route, Server, arcgis_page};
+    use rustgis_ui_egui::rustgis_engine::map::Renderer;
+    // No description, only the features.
+    let layer = "/arcgis/rest/services/P/FeatureServer/0";
+    let server = Server::new(vec![Route::new(&format!("{layer}/query"), &arcgis_page(&[0, 1], false))]);
+    let mut h = harness();
+    h.step();
+    let cases = [("Broken", "", "which RustGIS couldn't read ("), ("Window", "&resultRecordCount=5", "not read for an address")];
+    for (name, query, why) in cases {
+        let url = format!("{}{layer}/query?where=1%3D1&outFields=*&f=geojson{query}", server.base);
+        h.state_mut().run("ui.addUrl", json!({"url": url, "name": name, "service": true})).unwrap();
+        wait_for_ogc(&mut h, |app| app.session.map().layer_by_name(name).is_some());
+        let app = h.state();
+        let added = app.session.map().layer_by_name(name).unwrap();
+        assert!(matches!(&added.renderer, Renderer::Single(_)), "{:?}", added.renderer);
+        let said = format!("{name}: its service's symbology, {why}");
+        assert!(app.session.notices.iter().any(|n| n.text.starts_with(&said)), "{:?}", app.session.notices);
+    }
+}
+
 /// A service layer whose features can't be fetched at all is said as an error, and its download
 /// is forgotten: no layer is added and nothing is left waiting.
 #[test]
@@ -2341,7 +2651,7 @@ fn a_project_from_a_web_address_opens_when_it_lands() {
         if h.state().session.project.name == "Shared map" {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the downloaded project
     }
     assert_eq!(h.state().session.project.name, "Shared map");
     assert_eq!(h.state().session.map().layers.len(), layers);
@@ -2385,7 +2695,7 @@ fn a_late_project_download_leaves_the_newer_project_and_the_picker_alone() {
         if h.state().ui.project_download.is_none() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the stale project download
     }
     assert!(h.state().ui.project_download.is_none());
     assert_eq!(h.state().session.project.name, newer);
@@ -2399,7 +2709,7 @@ fn a_late_project_download_leaves_the_newer_project_and_the_picker_alone() {
         if h.state().session.project.name == "late" {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the later project download
     }
     assert_eq!(h.state().session.project.name, "late");
     assert_eq!(h.state().ui.pending_open, Some("style.add"));
@@ -2430,7 +2740,7 @@ fn a_service_is_listed_when_its_capabilities_land() {
         if h.state().ui.service.as_ref().is_some_and(|c| c.listing.is_some() || c.error.is_some() || c.failure.is_some()) {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for service capabilities
     }
     let conn = h.state().ui.service.as_ref().unwrap();
     assert_eq!(conn.error, None);
@@ -2491,7 +2801,7 @@ Connection: close
         if h.state().ui.service.as_ref().is_some_and(|c| c.listing.is_some() || c.error.is_some() || c.failure.is_some()) {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the filtered listing
     }
     let conn = h.state().ui.service.as_ref().unwrap();
     assert_eq!(conn.error, None);
@@ -2575,7 +2885,7 @@ fn connections_section_and_dialog() {
         if h.state().dialogs.info.as_ref().is_some_and(|s| s.contains("1 layers")) || h.state().dialogs.error.is_some() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for connection test feedback
     }
     assert_eq!(h.state().dialogs.error, None);
     assert!(
@@ -2636,7 +2946,7 @@ fn add_service_keeps_and_picks_connections() {
             if h.state().ui.service.as_ref().is_some_and(|c| c.listing.is_some() || c.error.is_some() || c.failure.is_some()) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the selected service listing
         }
         let conn = h.state().ui.service.as_ref().unwrap();
         assert_eq!(conn.error, None);
@@ -2856,7 +3166,7 @@ fn stac_dialog_keeps_and_picks_connections() {
         if !h.state().ui.stac.collections.is_empty() || h.state().ui.stac.error.is_some() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for STAC collections
     }
     assert_eq!(h.state().ui.stac.error, None);
     assert_eq!(h.state().ui.stac.collections, vec![("c1".to_string(), "C".to_string())]);
@@ -2978,7 +3288,7 @@ fn connections_test_feedback_tracks_edited_inputs() {
         if old.lock().unwrap().is_some() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(20)); // test-wait: legacy polling for the old connection probe
     }
     assert!(old.lock().unwrap().is_some(), "the discarded request must actually finish");
     assert_eq!(h.state().dialogs.info, None);
@@ -2995,7 +3305,7 @@ fn connections_test_feedback_tracks_edited_inputs() {
             if h.state().ui.connection.test.is_none() {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(20)); // test-wait: legacy polling for the edited connection probe
         }
         assert!(h.state().ui.connection.test.is_none());
         if succeeds {
@@ -3057,7 +3367,7 @@ fn connections_tree_browses_and_adds() {
         if h.query_by_label("A").is_some() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the expanded connection tree
     }
     assert!(h.query_by_label("A").is_some(), "the layers are listed under the connection");
     let before = h.state().session.map().tiles.len();
@@ -3405,7 +3715,7 @@ fn wait_for_ogc(h: &mut egui_kittest::Harness<'static, RustGisApp>, ready: impl 
             return;
         }
         assert!(std::time::Instant::now() < deadline, "service did not finish: {:?}", h.state().ui.service.as_ref().map(|c| &c.error));
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(10)); // test-wait: legacy polling for OGC service state
     }
 }
 
@@ -3518,7 +3828,7 @@ fn ogc_landing_reconnecting_ignores_a_delayed_response() {
     let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
     while std::time::Instant::now() < until {
         h.step();
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(10)); // test-wait: legacy settling delay for a stale reconnect response
     }
     let conn = h.state().ui.service.as_ref().unwrap();
     assert_eq!(conn.url, current.root());
@@ -3592,7 +3902,7 @@ fn ogc_group_background_import_does_not_land_in_a_new_project() {
     let until = std::time::Instant::now() + std::time::Duration::from_millis(250);
     while std::time::Instant::now() < until {
         h.step();
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(10)); // test-wait: legacy settling delay for an abandoned group import
     }
     assert!(h.state().session.map().layers.is_empty());
     assert!(h.state().session.map().service_groups.is_empty());
@@ -4425,4 +4735,71 @@ fn zonal_statistics_shows_available_band_range() {
     assert!(h.query_by_label("Raster has bands 1 to 1.").is_some());
     assert!(h.query_by_label("Band must be a positive integer, list of bands, or 'all'.").is_some());
     assert!(h.get_by_label("Calculate Statistics").accesskit_node().is_disabled());
+}
+
+/// By Coordinates… opens on the map's center in its Longitude (X) and Latitude (Y) boxes, each of
+/// which takes degrees, minutes and seconds; a grid reference goes in place of both, and one that
+/// names no place, or a scale it can't use, keeps the dialog open with the reason.
+#[test]
+fn by_coordinates_reads_x_y_and_a_grid_reference() {
+    let mut h = harness();
+    h.state_mut().run("map.goToXY", json!({"lon": 10, "lat": 50})).unwrap();
+    h.state_mut().run("ui.dialog", json!({"name": "goToXY"})).unwrap();
+    h.step();
+    assert_eq!(h.state().dialogs.open, Some("goToXY"));
+    assert_eq!((h.state().dialogs.a.as_str(), h.state().dialogs.b.as_str()), ("10.0000", "50.0000"));
+    // Each box takes degrees, minutes and seconds.
+    h.state_mut().dialogs.a = "74°0′22″W".into();
+    h.state_mut().dialogs.b = "40°42′46″N".into();
+    h.step();
+    h.get_by_label("Go").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, None, "{:?}", h.state().dialogs.error);
+    let c = h.state().session.map().center_lonlat();
+    assert!((c.y - 40.7128).abs() < 1e-3 && (c.x + 74.006).abs() < 1e-3, "{c:?}");
+    // A grid reference goes in place of both; one that names no place says why.
+    h.state_mut().run("ui.dialog", json!({"name": "goToXY"})).unwrap();
+    h.step();
+    h.state_mut().dialogs.text = "33UZZ1234512345".into();
+    h.step();
+    h.get_by_label("Go").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, Some("goToXY"));
+    assert!(h.state().dialogs.error.as_deref().is_some_and(|e| e.contains("100 km square")), "{:?}", h.state().dialogs.error);
+    // A scale it can't read is said, not dropped.
+    h.state_mut().dialogs.text = "18TWL8395907350".into();
+    h.state_mut().dialogs.c = "50k".into();
+    h.step();
+    h.get_by_label("Go").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, Some("goToXY"));
+    assert!(h.state().dialogs.error.as_deref().is_some_and(|e| e.contains("scale")), "{:?}", h.state().dialogs.error);
+    h.state_mut().dialogs.c = "50,000".into();
+    // From elsewhere, so the grid reference is what brings the map to New York.
+    h.state_mut().session.run("map.goToXY", &json!({"lon": 10, "lat": 50})).unwrap();
+    h.step();
+    h.get_by_label("Go").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, None);
+    let c = h.state().session.map().center_lonlat();
+    assert!((c.y - 40.7128).abs() < 1e-3 && (c.x + 74.006).abs() < 1e-3, "{c:?}");
+}
+
+/// Panned past the antimeridian, By Coordinates still opens on a longitude within ±180, so Go on
+/// the text it wrote goes there.
+#[test]
+fn by_coordinates_wraps_the_longitude_past_the_antimeridian() {
+    let mut h = harness();
+    h.state_mut().run("map.goToXY", json!({"lon": 170, "lat": 10, "scale": 5_000_000})).unwrap();
+    // 20° further east in Web Mercator meters: 190° E.
+    h.state_mut().session.map_mut().camera.center.x += 20.0_f64.to_radians() * 6_378_137.0;
+    let lon = h.state().session.map().center_lonlat().x;
+    assert!(lon > 180.0, "the camera is past the antimeridian: {lon}");
+    h.state_mut().run("ui.dialog", json!({"name": "goToXY"})).unwrap();
+    h.step();
+    assert_eq!((h.state().dialogs.a.as_str(), h.state().dialogs.b.as_str()), ("-170.0000", "10.0000"));
+    h.step();
+    h.get_by_label("Go").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, None, "{:?}", h.state().dialogs.error);
 }

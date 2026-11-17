@@ -19,7 +19,7 @@ pub struct State {
     loaded: bool,
     pub error: Option<String>,
     /// The browser's sign-in under way: who signed in, or why not.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(not(target_arch = "wasm32"), expect(dead_code, reason = "only the browser signs in through a popup"))]
     pending: Option<crate::Slot<Result<String, String>>>,
 }
 

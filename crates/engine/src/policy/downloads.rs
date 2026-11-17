@@ -189,6 +189,11 @@ impl Session {
         if ["geolibreProject", "geolibreLayer", "geolibreZarr"].iter().any(|k| p.get(k).is_some()) {
             return Err("internal import targets require an engine import request".into());
         }
+        // How an ArcGIS service draws a layer is read by the app from the layer's description
+        // while it reads the features (#2080), never asked for with an address.
+        if p.get("drawingInfo").is_some() {
+            return Err("drawingInfo is internal: the app reads it from an ArcGIS layer's description".into());
+        }
         if self.policy_has_no_operation() {
             return self.request_url_authorized(p);
         }
@@ -471,7 +476,10 @@ impl Session {
                 || (key == "zoom"
                     && crate::cmd::bool_value(value) == Some(false)
                     && claim.params.get(key).and_then(crate::cmd::bool_value) == Some(true))
-                || (key == "window" && asked_window(&claim.params, value));
+                || (key == "window" && asked_window(&claim.params, value))
+                // How an ArcGIS service draws the layer, read by the app from its description
+                // while reading its features (#2080).
+                || (key == "drawingInfo" && value.is_object() && claim.params.get("service").and_then(Value::as_bool) == Some(true));
             if !refinement && claim.params.get(key) != Some(value) {
                 return Err("the download's address or parameters changed since it was requested".into());
             }

@@ -73,6 +73,10 @@ pub struct Item {
     pub id: String,
     pub collection: String,
     pub datetime: String,
+    /// Whether `datetime` is the item's own `properties.datetime`: false when that is null or
+    /// missing, and `datetime` stands in with `start_datetime` (which an API sorting on
+    /// `datetime` did not sort by).
+    pub own_datetime: bool,
     /// West, south, east, north.
     pub bbox: Option<[f64; 4]>,
     /// Its footprint, a GeoJSON geometry.
@@ -86,6 +90,8 @@ pub struct Item {
     /// `self` link, which it could point anywhere); `None` for an item given whole, whose assets
     /// may then only be public web addresses.
     pub origin: Option<String>,
+    /// Observed network reach of the document this item was read from.
+    pub origin_reach: crate::address::Reach,
     /// Its properties, to show: the first hundred plain values (not objects or arrays), long
     /// text cut.
     pub properties: Option<Value>,
@@ -192,6 +198,53 @@ fn sort_parts(sortby: Option<&str>) -> Result<Option<(&'static str, String)>, St
         format!("properties.{field}")
     };
     Ok(Some((sign, field)))
+}
+
+/// Whether `v` is in order, ascending or descending (equal neighbours are fine).
+fn ordered<T: PartialOrd>(v: &[T], descending: bool) -> bool {
+    v.windows(2).all(|w| if descending { w[0] >= w[1] } else { w[0] <= w[1] })
+}
+
+/// Whether `items`, as an API answered a search sorted by `sortby`, are visibly not in that
+/// order: `Some(false)` when two neighbours are the wrong way round, `Some(true)` when they are
+/// all in order, `None` when it can't be told: no sort, a sort on anything but date or cloud
+/// cover, dates that are not comparable as text, or fewer than two values. An API without the
+/// sort extension may ignore a sort rather than refuse it, and this is how that shows.
+pub fn sort_followed(items: &[Item], sortby: Option<&str>) -> Option<bool> {
+    let (sign, field) = sort_parts(sortby).ok().flatten()?;
+    let descending = sign == "-";
+    match field.as_str() {
+        "properties.eo:cloud_cover" => {
+            let v: Vec<f64> = items.iter().filter_map(|i| i.cloud).collect();
+            (v.len() >= 2).then(|| ordered(&v, descending))
+        }
+        // Dates compare as written, which orders them only when they are UTC (`Z`) and of one
+        // length (the same fraction of a second); any other offset or form is not compared.
+        "properties.datetime" => {
+            let len = items.first()?.datetime.len();
+            // An item whose own `datetime` is null carries its `start_datetime` here, which the
+            // API did not sort by: it can't be compared.
+            if len == 0
+                || items.len() < 2
+                || items.iter().any(|i| {
+                    !i.own_datetime || i.datetime.len() != len || !i.datetime.ends_with('Z') || i.datetime.get(10..11) != Some("T")
+                })
+            {
+                return None;
+            }
+            let v: Vec<&str> = items.iter().map(|i| i.datetime.as_str()).collect();
+            Some(ordered(&v, descending))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a sort was asked for and `items` can't show if the API followed it: two or more items
+/// (one is in order whatever the sort) that [`sort_followed`] can't tell, because the sort is on
+/// something it doesn't compare or the dates are not comparable. The caller says so rather than
+/// leave the user to assume the sort was applied.
+pub fn sort_unchecked(items: &[Item], sortby: Option<&str>) -> bool {
+    items.len() >= 2 && sort_parts(sortby).ok().flatten().is_some() && sort_followed(items, sortby).is_none()
 }
 
 /// The address a POST search goes to.
@@ -317,11 +370,73 @@ pub fn parse_collections(bytes: &[u8]) -> Result<Vec<Collection>, String> {
 /// The items of a search's answer (an ItemCollection), and the address of its next page. `from`
 /// is the address the answer came from, which relative addresses are resolved against.
 pub fn parse_items(bytes: &[u8], from: &str) -> Result<(Vec<Item>, Option<String>), String> {
+    parse_items_from_origin(bytes, &crate::address::Origin::named(from))
+}
+
+/// Like [`parse_items`], carrying the observed post-redirect [`crate::address::Origin`] and reach.
+pub fn parse_items_from_origin(bytes: &[u8], origin: &crate::address::Origin) -> Result<(Vec<Item>, Option<String>), String> {
+    parse_items_noted(bytes, origin).map(|listing| (listing.items.into_iter().map(|parsed| parsed.item).collect(), listing.next))
+}
+
+/// Counts bounded-parser omissions separately from invalid input entries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ParseLosses {
+    pub skipped_items: usize,
+    pub omitted_items: usize,
+    pub skipped_assets: usize,
+    pub omitted_assets: usize,
+}
+
+impl ParseLosses {
+    /// Whether every item and asset entry was retained.
+    pub fn is_empty(&self) -> bool {
+        self.skipped_items == 0 && self.omitted_items == 0 && self.skipped_assets == 0 && self.omitted_assets == 0
+    }
+}
+
+/// An item and the asset entries its bounded parser could not retain.
+#[derive(Debug)]
+pub struct ParsedItem {
+    pub item: Item,
+    pub losses: ParseLosses,
+}
+
+/// Search results with both aggregate and per-item losses, preserving observed provenance.
+#[derive(Debug)]
+pub struct ItemListing {
+    pub items: Vec<ParsedItem>,
+    pub next: Option<String>,
+    pub next_refused: bool,
+    pub matched: Option<u64>,
+    pub losses: ParseLosses,
+}
+
+/// Like [`parse_items_from_origin`], retaining counts of invalid and capped items and assets.
+pub fn parse_items_noted(bytes: &[u8], origin: &crate::address::Origin) -> Result<ItemListing, String> {
     let v = json(bytes)?;
     let features = v.get("features").and_then(Value::as_array).ok_or("the answer isn't a list of STAC items")?;
-    let items = features.iter().take(MAX_ITEMS).filter_map(|f| item(f, Some(from))).collect();
-    let next = link(&v, "next", from);
-    Ok((items, next))
+    let mut losses = ParseLosses { omitted_items: features.len().saturating_sub(MAX_ITEMS), ..Default::default() };
+    let mut items = Vec::new();
+    for feature in features.iter().take(MAX_ITEMS) {
+        if let Some(parsed) = item_noted(feature, origin) {
+            losses.skipped_assets += parsed.losses.skipped_assets;
+            losses.omitted_assets += parsed.losses.omitted_assets;
+            items.push(parsed);
+        } else {
+            losses.skipped_items += 1;
+        }
+    }
+    let next = link(&v, "next", origin.url());
+    let next_refused = next.as_ref().is_some_and(|url| origin.check(url).is_err());
+    let next = next.filter(|_| !next_refused);
+    let matched = v.get("numberMatched").or_else(|| v.get("context").and_then(|c| c.get("matched"))).and_then(Value::as_u64);
+    Ok(ItemListing { items, next, next_refused, matched, losses })
+}
+
+/// Whether an answer's `next` link is one `origin`'s reach refuses. [`parse_items_from_origin`]
+/// drops such a link without saying so, so a caller that must say it asks here.
+pub fn next_refused(bytes: &[u8], origin: &crate::address::Origin) -> bool {
+    json(bytes).ok().and_then(|v| link(&v, "next", origin.url())).is_some_and(|u| origin.check(&u).is_err())
 }
 
 /// Whether a search's answer has a `next` link of any method. [`parse_items`] gives none for a
@@ -363,7 +478,28 @@ pub fn api_of(bytes: &[u8], from: &str) -> Option<String> {
 }
 
 pub fn parse_item(bytes: &[u8], from: &str) -> Result<Item, String> {
-    item(&json(bytes)?, Some(from)).ok_or_else(|| "the answer isn't a STAC item".to_string())
+    parse_item_from_origin(bytes, &crate::address::Origin::named(from))
+}
+
+/// Like [`parse_item`], carrying the observed post-redirect [`crate::address::Origin`] and reach.
+pub fn parse_item_from_origin(bytes: &[u8], origin: &crate::address::Origin) -> Result<Item, String> {
+    parse_item_noted(bytes, origin).map(|parsed| parsed.item)
+}
+
+/// Like [`parse_item_from_origin`], retaining counts of invalid and capped asset entries.
+pub fn parse_item_noted(bytes: &[u8], origin: &crate::address::Origin) -> Result<ParsedItem, String> {
+    item_noted(&json(bytes)?, origin).ok_or_else(|| "the answer isn't a STAC item".to_string())
+}
+
+fn item_noted(value: &Value, origin: &crate::address::Origin) -> Option<ParsedItem> {
+    let item = item_with_reach(value, Some(origin.url()), Some(origin.reach()))?;
+    let assets = value.get("assets").and_then(Value::as_object).map_or(0, serde_json::Map::len);
+    let losses = ParseLosses {
+        skipped_assets: assets.min(MAX_ASSETS).saturating_sub(item.assets.len()),
+        omitted_assets: assets.saturating_sub(MAX_ASSETS),
+        ..Default::default()
+    };
+    Some(ParsedItem { item, losses })
 }
 
 /// An item from its JSON (as STAC gives it, or as [`item_json`] wrote it).
@@ -383,6 +519,10 @@ fn link(v: &Value, rel: &str, from: &str) -> Option<String> {
 }
 
 fn item(f: &Value, from: Option<&str>) -> Option<Item> {
+    item_with_reach(f, from, None)
+}
+
+pub(crate) fn item_with_reach(f: &Value, from: Option<&str>, reach: Option<crate::address::Reach>) -> Option<Item> {
     if f.get("type").and_then(Value::as_str) != Some("Feature") {
         return None;
     }
@@ -410,6 +550,7 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
     });
     let geometry = f.get("geometry").filter(|g| g.is_object() && footprint_size(g) <= MAX_FOOTPRINT).cloned();
     let cloud = props.and_then(|p| p.get("eo:cloud_cover")).and_then(Value::as_f64).filter(|c| c.is_finite());
+    let own_datetime = props.and_then(|p| p.get("datetime")).is_some_and(Value::is_string);
     let datetime = props
         .and_then(|p| p.get("datetime").filter(|d| d.is_string()).or_else(|| p.get("start_datetime")))
         .and_then(Value::as_str)
@@ -480,16 +621,20 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
             .collect();
         Value::Object(kept)
     });
+    let origin_reach =
+        reach.unwrap_or_else(|| from.map_or(crate::address::Reach::Public, |u| crate::address::reach(crate::logins::inner(u))));
     Some(Item {
         id,
         collection: text(f.get("collection")),
         datetime,
+        own_datetime,
         bbox,
         geometry,
         cloud,
         assets,
         url,
         origin: from.map(str::to_string),
+        origin_reach,
         properties,
         tile: props.and_then(tile_of),
     })
@@ -656,6 +801,12 @@ impl Item {
             .or_else(|| self.assets.iter().filter(picture).find(|a| a.roles.iter().any(|r| r == "overview")))
     }
 
+    /// Checks `href` against the document origin and observed reach this item was read from.
+    pub fn check_href(&self, href: &str) -> Result<(), String> {
+        let origin = crate::address::Origin { url: self.origin.clone().unwrap_or_else(|| UNTRUSTED.to_string()), reach: self.origin_reach };
+        origin.check(href)
+    }
+
     /// The address of the asset to add (see [`Item::pick`]), checked: a plain web address the item
     /// may point to, not one that needs signing or a cloud store's own protocol.
     pub fn asset_href(&self, key: Option<&str>) -> Result<(String, String), String> {
@@ -671,7 +822,7 @@ impl Item {
         // Judged by where the item came from; an item given whole may only point at public
         // addresses (as a document on the web may). A Planetary Computer asset is signed by the
         // caller ([`needs_signing`]).
-        crate::address::check(&a.href, Some(self.origin.as_deref().unwrap_or(UNTRUSTED)))?;
+        self.check_href(&a.href)?;
         Ok((a.key.clone(), a.href.clone()))
     }
 }
@@ -838,6 +989,39 @@ pub fn footprints_geojson(items: &[Item]) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn noted_parsing_counts_capped_and_invalid_items_and_assets() {
+        use super::*;
+        let origin = crate::address::Origin::named("https://public.example/search");
+        let item = |id: usize| serde_json::json!({"type":"Feature","id":id.to_string(),"properties":{},"assets":{}});
+        let features: Vec<_> = (0..MAX_ITEMS + 1).map(item).collect();
+        let body = serde_json::json!({"features":features}).to_string();
+        let parsed = parse_items_noted(body.as_bytes(), &origin).unwrap();
+        assert_eq!(parsed.items.len(), MAX_ITEMS);
+        assert_eq!(parsed.losses, ParseLosses { omitted_items: 1, ..Default::default() });
+        let body = serde_json::json!({"features":[item(0),{"type":"Feature"},item(2)]}).to_string();
+        let parsed = parse_items_noted(body.as_bytes(), &origin).unwrap();
+        assert_eq!(parsed.items.len(), 2);
+        assert_eq!(parsed.losses, ParseLosses { skipped_items: 1, ..Default::default() });
+        let body = serde_json::json!({"features":[item(0),item(1),item(2)]}).to_string();
+        assert!(parse_items_noted(body.as_bytes(), &origin).unwrap().losses.is_empty());
+
+        let mut assets = serde_json::Map::new();
+        assets.insert("000_bad".into(), serde_json::json!({"href":42}));
+        for i in 0..MAX_ASSETS + 1 {
+            assets.insert(format!("a{i:03}"), serde_json::json!({"href":format!("https://public.example/{i}.tif")}));
+        }
+        let mut feature = item(0);
+        feature["assets"] = serde_json::Value::Object(assets);
+        let parsed = parse_item_noted(feature.to_string().as_bytes(), &origin).unwrap();
+        assert_eq!(parsed.item.assets.len(), MAX_ASSETS - 1);
+        assert_eq!(parsed.losses, ParseLosses { skipped_assets: 1, omitted_assets: 2, ..Default::default() });
+        let body = serde_json::json!({"features":[feature]}).to_string();
+        let listed = parse_items_noted(body.as_bytes(), &origin).unwrap();
+        assert_eq!(listed.losses, parsed.losses);
+        assert_eq!(listed.items[0].losses, parsed.losses);
+    }
+
     use super::*;
 
     #[test]
@@ -869,6 +1053,21 @@ mod tests {
     }
 
     #[test]
+    fn a_next_link_the_reach_refuses_is_reported_as_refused() {
+        let page = br#"{"type":"FeatureCollection","features":[],"links":[{"rel":"next","href":"http://10.0.0.5/v1/search?page=2"}]}"#;
+        // A public document's next page on the local network is refused: dropped, and said so.
+        let public = crate::address::Origin::named("https://x.org/v1/search");
+        assert!(next_refused(page, &public));
+        assert_eq!(parse_items_from_origin(page, &public).unwrap().1, None);
+        // The same link from a local API is followed, and nothing is refused.
+        let local = crate::address::Origin::named("http://10.0.0.5/v1/search");
+        assert!(!next_refused(page, &local));
+        assert!(parse_items_from_origin(page, &local).unwrap().1.is_some());
+        // No next link, nothing refused.
+        assert!(!next_refused(b"{\"features\":[]}", &public));
+    }
+
+    #[test]
     fn api_of_a_linked_document() {
         // The address before /collections/.
         assert_eq!(api_of(b"{}", "https://x.org/v1/collections/s2/items/a").as_deref(), Some("https://x.org/v1"));
@@ -879,6 +1078,103 @@ mod tests {
             {"rel": "parent", "href": "https://api.example.org/v1/collections/s2"}]}"#;
         assert_eq!(api_of(static_root, "https://cdn.example.org/s2/a.json").as_deref(), Some("https://api.example.org/v1"));
         assert_eq!(api_of(br#"{"links": [{"rel": "root", "href": "catalog.json"}]}"#, "https://cdn.example.org/a.json"), None);
+    }
+
+    /// Items with these dates and cloud covers, as an API answers them.
+    fn answered(rows: &[(&str, Option<f64>)]) -> Vec<Item> {
+        let features: Vec<Value> = rows
+            .iter()
+            .enumerate()
+            .map(|(n, (d, c))| {
+                let mut props = serde_json::json!({"datetime": d});
+                if let Some(c) = c {
+                    props["eo:cloud_cover"] = serde_json::json!(c);
+                }
+                serde_json::json!({"type": "Feature", "id": format!("i{n}"), "bbox": [0, 0, 1, 1], "properties": props})
+            })
+            .collect();
+        let body = serde_json::json!({"type": "FeatureCollection", "features": features}).to_string();
+        parse_items(body.as_bytes(), "https://x.org/v1/search").unwrap().0
+    }
+
+    #[test]
+    fn a_sort_the_api_ignored_shows_in_the_order_of_its_items() {
+        let newest =
+            answered(&[("2024-06-03T00:00:00Z", Some(9.0)), ("2024-06-02T00:00:00Z", Some(1.0)), ("2024-06-01T00:00:00Z", Some(5.0))]);
+        assert_eq!(sort_followed(&newest, Some("-datetime")), Some(true));
+        assert_eq!(sort_followed(&newest, Some("datetime")), Some(false));
+        // Cloud cover goes the other way: 9, 1, 5 is in neither order.
+        assert_eq!(sort_followed(&newest, Some("eo:cloud_cover")), Some(false));
+        assert_eq!(sort_followed(&newest, Some("-eo:cloud_cover")), Some(false));
+        let least =
+            answered(&[("2024-06-03T00:00:00Z", Some(1.0)), ("2024-06-01T00:00:00Z", Some(1.0)), ("2024-06-02T00:00:00Z", Some(5.0))]);
+        assert_eq!(sort_followed(&least, Some("eo:cloud_cover")), Some(true));
+        // Nothing to tell by: no sort, another field, one item, no cloud covers, dates of other lengths.
+        assert_eq!(sort_followed(&newest, None), None);
+        assert_eq!(sort_followed(&newest, Some("")), None);
+        assert_eq!(sort_followed(&newest, Some("platform")), None);
+        assert_eq!(sort_followed(&newest, Some("bad sort!")), None);
+        assert_eq!(sort_followed(&newest[..1], Some("-datetime")), None);
+        assert_eq!(
+            sort_followed(&answered(&[("2024-06-03T00:00:00Z", None), ("2024-06-01T00:00:00Z", None)]), Some("eo:cloud_cover")),
+            None
+        );
+        assert_eq!(sort_followed(&answered(&[("2024-06-03", None), ("2024-06-01T00:00:00Z", None)]), Some("datetime")), None);
+        assert_eq!(sort_followed(&[], Some("datetime")), None);
+        // Dates that are not UTC are not compared as text: the same length is no proof of the same zone.
+        let zones = answered(&[("2024-06-03T10:00:00+02:00", None), ("2024-06-03T06:00:00-05:00", None)]);
+        assert_eq!(sort_followed(&zones, Some("-datetime")), None);
+        assert_eq!(sort_followed(&zones, Some("datetime")), None);
+        // The same instant written two ways is not out of order.
+        let same = answered(&[("2024-06-01T00:00:00.0000Z", None), ("2024-06-01T00:00:00+00:00", None)]);
+        assert_eq!(sort_followed(&same, Some("datetime")), None);
+        // A lowercase `t` or a space for the separator sorts differently as text: not compared.
+        let sep = answered(&[("2024-06-01t00:00:00Z", None), ("2024-06-01T01:00:00Z", None)]);
+        assert_eq!(sort_followed(&sep, Some("datetime")), None);
+        let space = answered(&[("2024-06-01 00:00:00Z", None), ("2024-06-01T01:00:00Z", None)]);
+        assert_eq!(sort_followed(&space, Some("datetime")), None);
+    }
+
+    /// A sort whose order can't be checked is said so, and only when there is something to check:
+    /// a sort asked for, two or more items, and the answer can't tell.
+    #[test]
+    fn a_sort_that_cannot_be_checked_is_told_apart_from_one_that_can() {
+        let newest = answered(&[("2024-06-03T00:00:00Z", Some(9.0)), ("2024-06-02T00:00:00Z", Some(1.0))]);
+        // In order, or visibly out of it: checked either way.
+        assert!(!sort_unchecked(&newest, Some("-datetime")));
+        assert!(!sort_unchecked(&newest, Some("datetime")));
+        // No sort asked, or one that isn't a sort: nothing to say.
+        assert!(!sort_unchecked(&newest, None));
+        assert!(!sort_unchecked(&newest, Some(" ")));
+        assert!(!sort_unchecked(&newest, Some("bad sort!")));
+        // A field that isn't compared, dates in other zones, no cloud covers: asked, not known.
+        assert!(sort_unchecked(&newest, Some("platform")));
+        let zones = answered(&[("2024-06-03T10:00:00+02:00", None), ("2024-06-03T06:00:00-05:00", None)]);
+        assert!(sort_unchecked(&zones, Some("-datetime")));
+        let bare = answered(&[("2024-06-03T00:00:00Z", None), ("2024-06-01T00:00:00Z", None)]);
+        assert!(sort_unchecked(&bare, Some("eo:cloud_cover")));
+        // One item is in order whatever the sort, and no items have no order.
+        assert!(!sort_unchecked(&zones[..1], Some("-datetime")));
+        assert!(!sort_unchecked(&[], Some("-datetime")));
+    }
+
+    /// An item with a null `datetime` carries its `start_datetime` as its date, which the API did
+    /// not sort by: a correctly sorted answer with one is not called out of order.
+    #[test]
+    fn a_range_item_with_no_datetime_is_not_compared_by_its_start() {
+        let features = serde_json::json!([
+            {"type": "Feature", "id": "a", "bbox": [0, 0, 1, 1], "properties": {"datetime": "2024-06-03T00:00:00Z"}},
+            {"type": "Feature", "id": "b", "bbox": [0, 0, 1, 1], "properties": {"datetime": null, "start_datetime": "2024-06-05T00:00:00Z"}},
+        ]);
+        let body = serde_json::json!({"type": "FeatureCollection", "features": features}).to_string();
+        let items = parse_items(body.as_bytes(), "https://x.org/v1/search").unwrap().0;
+        assert_eq!(items[1].datetime, "2024-06-05T00:00:00Z");
+        assert!(items[0].own_datetime && !items[1].own_datetime);
+        // Newest first by `datetime`: the API may have put the null one last. Can't be told.
+        assert_eq!(sort_followed(&items, Some("-datetime")), None);
+        // Items that all have their own date are still checked.
+        let own = answered(&[("2024-06-03T00:00:00Z", None), ("2024-06-05T00:00:00Z", None)]);
+        assert_eq!(sort_followed(&own, Some("-datetime")), Some(false));
     }
 
     #[test]

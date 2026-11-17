@@ -1,6 +1,6 @@
 //! Projection methods read from a Shapefile's `.prj` and from a GeoTIFF's GeoKeys, through the
 //! public readers: sinusoidal, Robinson, orthographic, Mercator (variant A) and the
-//! PROJ-compatible equidistant cylindrical of EPSG:4087. Each places a point where expected,
+//! equidistant cylindrical of EPSG:4087, ellipsoidal as in PROJ 9.8. Each places a point where expected,
 //! and a method that still isn't supported keeps saying so.
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -15,8 +15,8 @@ const MARS_R: f64 = 3_396_190.0;
 const MARS_GEOGCS: &str = r#"GEOGCS["GCS_Mars_2015_-_Sphere_Ocentric",DATUM["D_Mars_2015_-_Sphere",SPHEROID["Mars_2015_-_Sphere",3396190.0,0.0]],PRIMEM["Reference_Meridian",0.0],UNIT["Degree",0.0174532925199433]]"#;
 const WGS84_GEOGCS: &str = r#"GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]"#;
 
-/// The same EPSG method can be declared with or without a CRS authority. Both readers must
-/// report the compatibility choice without changing the PROJ/GDAL coordinates.
+/// The same EPSG method can be declared with or without a CRS authority. Both readers say that
+/// it is computed as PROJ 9.8 computes it, ellipsoidal, unlike PROJ 9.7 and earlier.
 #[test]
 fn explicit_method_1028_warns_in_full_and_streamed_shapefiles() {
     let wkt = r#"PROJCRS["World EQC",BASEGEOGCRS["WGS 84",DATUM["WGS_1984",ELLIPSOID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0]],CONVERSION["EQC",METHOD["Equidistant Cylindrical",ID["EPSG",1028]],PARAMETER["Latitude of 1st standard parallel",0],PARAMETER["Longitude of natural origin",0],PARAMETER["False easting",0],PARAMETER["False northing",0]],CS[Cartesian,2],AXIS["Easting",east],AXIS["Northing",north],LENGTHUNIT["metre",1]]"#;
@@ -24,9 +24,16 @@ fn explicit_method_1028_warns_in_full_and_streamed_shapefiles() {
     let sphere = wkt.replace("WGS_1984", "Sphere").replace("298.257223563", "0");
     let crs = rustgis_data::raster::wkt::crs_from_wkt(wkt).unwrap();
     let wkt1 = rustgis_data::raster::wkt::to_wkt(crs).unwrap();
-    for (prj, warned) in [(wkt, true), (coded.as_str(), true), (sphere.as_str(), false), (wkt1.as_str(), false)] {
+    // 45°N: on WGS 84's ellipsoid (PROJ 9.8.1), and on the sphere of its semi-major axis.
+    let (ellipsoidal, spherical) = (4_984_944.377_977_743, 6_378_137.0 * std::f64::consts::FRAC_PI_4);
+    for (prj, warned, y) in [
+        (wkt, true, ellipsoidal),
+        (coded.as_str(), true, ellipsoidal),
+        (sphere.as_str(), false, spherical),
+        (wkt1.as_str(), false, ellipsoidal),
+    ] {
         let mut ds = Dataset::new("p", GeometryType::Point, Vec::new());
-        ds.push(Some(Geometry::Point(Coord::new(0.0, 5_009_377.085_697_311))), Vec::new());
+        ds.push(Some(Geometry::Point(Coord::new(0.0, y))), Vec::new());
         let dir = tempfile::tempdir().unwrap();
         for (ext, bytes) in io::shapefile_parts(&ds).unwrap().0 {
             let bytes = if ext == "prj" { prj.as_bytes().to_vec() } else { bytes };
@@ -39,7 +46,7 @@ fn explicit_method_1028_warns_in_full_and_streamed_shapefiles() {
         for notes in [&report.messages, &streamed.info().notes] {
             assert_eq!(notes.iter().filter(|n| n.contains("EPSG method 1028")).count(), usize::from(warned), "{prj}: {notes:?}");
             if warned {
-                assert!(notes.iter().any(|n| n.contains("PROJ/GDAL") && n.contains("differ")), "{notes:?}");
+                assert!(notes.iter().any(|n| n.contains("PROJ 9.8") && n.contains("PROJ 9.7 and earlier")), "{notes:?}");
             }
         }
     }
@@ -137,7 +144,7 @@ fn read_as_projected(messages: &[String]) {
 
 /// Sinusoidal: ESRI:54008 (World Sinusoidal) as Esri writes its `.prj`, and the IAU's Mars
 /// sinusoidal (IAU_2015:49920) as GDAL writes it. The World Sinusoidal point is pyproj 3.7.1's
-/// (PROJ 9.5.1), as `rustgis_geom::sinusoidal`'s tests record it; on a sphere x = R·λ·cos φ,
+/// (PROJ 9.5.1); on a sphere x = R·λ·cos φ,
 /// y = R·φ (Snyder 1987, ch. 30, eqs. 30-1, 30-2).
 #[test]
 fn sinusoidal() {
@@ -175,7 +182,7 @@ fn robinson() {
     );
     // 170°E, 40°N: 20° east of the central meridian.
     let (px, py) = (x(A, 0.9216, 20.0), y(A, 0.4958));
-    // Projected by the system read from the `.prj` within a decimetre of the table (proj4rs, as
+    // Projected by the system read from the `.prj` within a decimetre of the table (terrio-crs, as
     // PROJ, interpolates it with cubic splines: 1 741 397.303, 4 276 351.584 from the origin);
     // read back to within 2e-6°, where its inverse settles.
     let crs = rustgis_data::raster::wkt::crs_from_wkt(&world).unwrap();
@@ -284,8 +291,9 @@ fn mercator_variant_a() {
     written_back(&r);
 }
 
-/// EPSG:4087 matches PROJ/GDAL's sphere of WGS 84's semi-major axis. Coordinates from PROJ
-/// 9.7.1 are read at the same latitude from both a Shapefile and a GeoTIFF.
+/// EPSG:4087 matches PROJ 9.8.1's ellipsoidal formula: its coordinates are read at the same
+/// latitude from both a Shapefile and a GeoTIFF (pyproj 3.8.0, `Transformer.from_crs("EPSG:4326",
+/// "EPSG:4087", always_xy=True)`: 10°E 55°N is 1113194.91, 6097230.31).
 #[test]
 fn equidistant_cylindrical_epsg_4087() {
     let esri = format!(
@@ -294,22 +302,22 @@ fn equidistant_cylindrical_epsg_4087() {
     let coded = esri.strip_suffix(']').unwrap().to_string() + r#",AUTHORITY["EPSG",4087]]"#;
     for prj in [&esri, &coded] {
         // Within a centimetre (1e-7° is 1.1 cm of latitude).
-        let (at, messages) = read_prj(prj, 0.0, 5_009_377.085_697_311);
+        let (at, messages) = read_prj(prj, 0.0, 4_984_944.377_977_743);
         near(at, 0.0, 45.0, 1e-7);
         clean(&messages);
-        let (at, _) = read_prj(prj, 1_113_194.907_932_735_7, 6_122_571.993_630_046);
+        let (at, _) = read_prj(prj, 1_113_194.907_932_735_7, 6_097_230.313_124_184);
         near(at, 10.0, 55.0, 1e-7);
     }
     assert_eq!(rustgis_data::raster::wkt::crs_from_wkt(&coded), Ok(Crs::Epsg(4087)));
     // A GeoTIFF with user-defined keys (coordinate transformation 17) on WGS 84, and one by its
     // EPSG code.
-    let user_defined = tiff(17, &[], None, (1_113_194.907_932_735_7, 6_122_571.993_630_046));
+    let user_defined = tiff(17, &[], None, (1_113_194.907_932_735_7, 6_097_230.313_124_184));
     let (r, at) = read_tiff(&user_defined);
     assert!(matches!(r.crs, Crs::Custom(_)), "{:?}", r.crs);
     near(Some(at), 10.0, 55.0, 1e-7);
     written_back(&r);
     let gt =
-        rustgis_data::raster::GeoTransform { origin_x: 0.0, origin_y: 5_009_377.085_697_311, pixel_width: 1000.0, pixel_height: -1000.0 };
+        rustgis_data::raster::GeoTransform { origin_x: 0.0, origin_y: 4_984_944.377_977_743, pixel_width: 1000.0, pixel_height: -1000.0 };
     let r =
         Raster::new("e", 2, 2, vec![vec![1.0; 4]], gt, Crs::Epsg(4087), None, rustgis_data::raster::ColorHint::Gray, "Float32").unwrap();
     let (back, at) = read_tiff(&rustgis_data::raster::geotiff::write(&r, 0).unwrap());

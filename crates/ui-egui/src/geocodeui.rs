@@ -425,7 +425,6 @@ pub fn geocode(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

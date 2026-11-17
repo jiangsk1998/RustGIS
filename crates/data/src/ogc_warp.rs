@@ -194,15 +194,15 @@ pub fn usable(epsg: u32) -> Option<Crs> {
 
 /// A longitude/latitude box (west, south, east, north) in a system: the bounds of a grid of
 /// points over it worked out there (a projected box's corners aren't its extremes, and a world's
-/// edges meet at the poles and the antimeridian: its inside says where it is).
+/// edges meet at the poles and the antimeridian: its inside says where it is). If a grid point
+/// is refused, the box is unknown: surviving points must not exclude imagery inside the area.
 pub fn native_box(t: &Transformer, [w, s, e, n]: [f64; 4]) -> Option<[f64; 4]> {
     let mut out: Option<[f64; 4]> = None;
     for i in 0..=8 {
         for j in 0..=8 {
             let (x, y) = (w + (e - w) * f64::from(i) / 8.0, s + (n - s) * f64::from(j) / 8.0);
-            if let Some(c) = t.from_lonlat(Coord::new(x, y)).filter(|c| c.x.is_finite() && c.y.is_finite()) {
-                out = Some(out.map_or([c.x, c.y, c.x, c.y], |b| [b[0].min(c.x), b[1].min(c.y), b[2].max(c.x), b[3].max(c.y)]));
-            }
+            let c = t.from_lonlat(Coord::new(x, y)).filter(|c| c.x.is_finite() && c.y.is_finite())?;
+            out = Some(out.map_or([c.x, c.y, c.x, c.y], |b| [b[0].min(c.x), b[1].min(c.y), b[2].max(c.x), b[3].max(c.y)]));
         }
     }
     out
@@ -307,7 +307,7 @@ impl Warp {
                             let mut p = c.splitn(3, '|');
                             let epsg = p.next()?.parse().ok()?;
                             let lat_first = p.next()? == "n";
-                            let name = unescape(p.next()?);
+                            let name = crate::address::percent_decode(p.next()?);
                             (!name.is_empty() && name.len() <= MAX_SYSTEM_NAME).then_some(System { epsg, name, lat_first })
                         })
                         .collect();
@@ -320,7 +320,7 @@ impl Warp {
                         let n = |t: &str| t.parse::<f64>().ok().filter(|v| v.is_finite());
                         let u = |t: &str| t.parse::<u32>().ok().filter(|v| *v > 0);
                         let m = Matrix {
-                            id: unescape(id),
+                            id: crate::address::percent_decode(id),
                             left: n(left)?,
                             top: n(top)?,
                             cell: n(cell).filter(|c| *c > 0.0)?,
@@ -498,24 +498,6 @@ fn escape(id: &str) -> String {
     percent_escape(id, b"%|~;#{}")
 }
 
-fn unescape(id: &str) -> String {
-    let bytes = id.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while let Some(&b) = bytes.get(i) {
-        if b == b'%'
-            && let Some(v) = id.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())
-        {
-            out.push(v);
-            i += 3;
-            continue;
-        }
-        out.push(b);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 /// Whether a layer's box from a capabilities document (a WMS `BoundingBox`: `minx`, `miny`,
 /// `maxx`, `maxy` as written) is written north first, for a system whose EPSG axis order RustGIS
 /// doesn't know (see [`crate::raster::epsg_axes`]): the way that overlaps more of `area` (the
@@ -604,6 +586,17 @@ mod tests {
         assert_eq!(epsg_of("AUTO:42001"), None);
         assert!(usable(2056).is_some() && usable(4326).is_some());
         assert!(usable(3857).is_none(), "Web Mercator is drawn as it is");
+    }
+
+    /// A partial projected box must not cull valid imagery inside the service's geographic area.
+    #[test]
+    fn refused_grid_points_do_not_make_a_partial_culling_box() {
+        let t = transformer(32617).unwrap();
+        let view = [-170.0, 0.0, 10.0, 50.0];
+        let place = t.from_lonlat(Coord::new(-170.0, 10.5)).unwrap();
+        assert!(t.from_lonlat(Coord::new(-170.0, 0.0)).is_none());
+        let bounds = native_box(&t, view);
+        assert!(bounds.is_none(), "partial bounds {bounds:?} can cull valid imagery at {place:?}");
     }
 
     #[test]

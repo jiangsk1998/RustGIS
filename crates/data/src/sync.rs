@@ -30,14 +30,14 @@ pub struct FileStamp {
 pub struct Synced {
     /// The files, as they were.
     pub files: FileSync,
-    /// The layer's [`rows_digest`] then.
+    /// The layer's [`rows_digest`] then: the file's as it read then too.
     pub rows: u64,
 }
 
 /// A hash of what a dataset holds: its fields, coordinate system, and each row's geometry and
 /// attributes in order (FNV-1a over their JSON, written to the hash as it is made). Not its name
-/// or where it came from, which are no edit to the file. A number that isn't finite, which JSON
-/// writes as null, is told from an empty cell by its position and bits, as the GeoPackage edit
+/// or where it came from, or display aliases, which are no edit to the file. A number that isn't
+/// finite, which JSON writes as null, is told from an empty cell by its position and bits, as the GeoPackage edit
 /// rows are: clearing one is an edit. A project saves one as null (and says so), so a layer that
 /// held one reads as edited once its project is opened again: it no longer holds what its file
 /// does. Its work grows with the rows: each is counted as progress ([`crate::progress`]), and it
@@ -61,7 +61,13 @@ pub fn rows_digest(ds: &crate::Dataset) -> crate::Result<u64> {
         h.0 = (h.0 ^ 0xff).wrapping_mul(0x0100_0000_01b3);
     }
     let mut h = Fnv(0xcbf2_9ce4_8422_2325);
-    put(&mut h, &(&ds.fields, &ds.crs));
+    // Whole Shapefile/GeoJSON reads record fields with no aliases. Clear display-only aliases
+    // when comparing a layer, keeping the serialized form and existing saved digests unchanged.
+    let mut fields = ds.fields.clone();
+    for field in &mut fields {
+        field.alias = None;
+    }
+    put(&mut h, &(&fields, &ds.crs));
     crate::progress::begin(ds.features.len());
     for f in ds.features.iter() {
         put(&mut h, &(&f.geometry, &f.attrs));
@@ -97,9 +103,8 @@ mod native {
     fn parts(path: &Path) -> Vec<(String, PathBuf)> {
         let mut paths = vec![path.to_path_buf()];
         if path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("shp")) {
-            for ext in ["shx", "dbf", "prj"] {
-                paths.push(path.with_extension(ext));
-            }
+            // The table in whichever case the reader finds it.
+            paths.extend([path.with_extension("shx"), crate::io::dbf_sidecar(path), path.with_extension("prj")]);
             let cpg = crate::dbf::CPG_SPELLINGS
                 .iter()
                 .map(|e| path.with_extension(e))
@@ -125,7 +130,8 @@ mod native {
     fn sha256(path: &Path) -> Result<String> {
         use sha2::Digest;
         use std::io::Read;
-        let mut file = std::fs::File::open(path)?;
+        let mut file = crate::provenance::open(path)?;
+        let metadata = file.metadata().ok();
         let mut hasher = sha2::Sha256::new();
         let mut buf = vec![0u8; 1 << 16];
         loop {
@@ -136,7 +142,9 @@ mod native {
             hasher.update(buf.get(..n).unwrap_or_default());
             crate::progress::step(n)?;
         }
-        Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+        let hash: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        crate::provenance::hashed(path, metadata.as_ref(), hash.clone());
+        Ok(hash)
     }
 
     /// Bytes as a progress count.
@@ -155,6 +163,28 @@ mod native {
                 let stamp = match len(&p)? {
                     None => None,
                     Some(len) => Some(FileStamp { len, sha256: sha256(&p)? }),
+                };
+                files.push((name, stamp));
+            }
+            Ok(FileSync { files })
+        }
+
+        /// The files of the source at `path` as just written: each of `written` (a path and
+        /// the bytes written to it) by those bytes, so a write made since by someone else isn't
+        /// taken for this one; any other part as it is on the disk.
+        pub fn of_written(path: &Path, written: &[(PathBuf, Vec<u8>)]) -> Result<FileSync> {
+            use sha2::Digest;
+            let mut files = Vec::new();
+            for (name, p) in parts(path) {
+                let stamp = match written.iter().find(|(w, _)| *w == p) {
+                    Some((_, bytes)) => Some(FileStamp {
+                        len: bytes.len() as u64,
+                        sha256: sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect(),
+                    }),
+                    None => match len(&p)? {
+                        None => None,
+                        Some(len) => Some(FileStamp { len, sha256: sha256(&p)? }),
+                    },
                 };
                 files.push((name, stamp));
             }
@@ -216,12 +246,48 @@ mod native {
             }
             Ok(changed)
         }
+
+        /// The names of the files that differ from this record by what metadata alone shows:
+        /// added, removed, or another length. Reads no file, so a change that keeps every length
+        /// isn't seen; [`FileSync::changed`] hashes them. An unreadable file counts as differing.
+        pub fn resized(&self, path: &Path) -> Vec<String> {
+            let now = parts(path);
+            let mut differ: Vec<String> =
+                now.iter().filter(|(name, p)| !self.files.iter().any(|(n, _)| n == name) && p.exists()).map(|(n, _)| n.clone()).collect();
+            for (name, was) in &self.files {
+                let is = now.iter().find(|(n, _)| n == name).map(|(_, p)| len(p));
+                let same = match (was, is) {
+                    (None, None | Some(Ok(None))) => true,
+                    (Some(was), Some(Ok(Some(len)))) => len == was.len,
+                    _ => false,
+                };
+                if !same {
+                    differ.push(name.clone());
+                }
+            }
+            differ
+        }
     }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resized_sees_lengths_and_presence_without_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.geojson");
+        std::fs::write(&path, "{}").unwrap();
+        let record = FileSync::read(&path).unwrap();
+        assert!(record.resized(&path).is_empty());
+        std::fs::write(&path, "[]").unwrap();
+        assert!(record.resized(&path).is_empty(), "same length: only a hash tells");
+        std::fs::write(&path, "{ }").unwrap();
+        assert_eq!(record.resized(&path), ["a.geojson"]);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(record.resized(&path), ["a.geojson"]);
+    }
 
     #[test]
     fn a_shapefile_set_records_its_companions_and_the_missing_ones() {
@@ -335,6 +401,8 @@ mod tests {
         }]
         .into();
         assert_eq!(rows_digest(&ds).unwrap(), 1_724_049_670_388_433_092);
+        ds.fields[0].alias = Some("Street name".into());
+        assert_eq!(rows_digest(&ds).unwrap(), 1_724_049_670_388_433_092, "an alias changes display, not file contents");
     }
 
     #[test]

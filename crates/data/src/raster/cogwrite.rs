@@ -8,12 +8,13 @@
 //! directories' sizes depend only on the tile counts, so they are written first with empty tile
 //! tables, and the tables are filled in once the tiles' places are known.
 //!
-//! Memory: the raster is read in place. A tile is gathered from the bands, compressed and written
-//! before the next one, so no second copy of the pixels is made, and each overview tile is made
-//! straight from the full image (a block of 2ⁿ × 2ⁿ pixels), so no pyramid is kept. The price is
-//! time: every overview level reads the whole full image again, so writing takes about as many
-//! passes over the pixels as there are levels, where building each level from the one before
-//! would take about 1⅓ but hold a second copy.
+//! Memory: the raster is read in place. A tile is gathered from the bands and compressed on its
+//! own, and only a few tiles a thread are held before they are written, so no second copy of the
+//! pixels is made, and each overview tile is made straight from the full image (a block of
+//! 2ⁿ × 2ⁿ pixels), so no pyramid is kept. The price is time: every overview level reads the
+//! whole full image again, so writing takes about as many passes over the pixels as there are
+//! levels, where building each level from the one before would take about 1⅓ but hold a second
+//! copy.
 //!
 //! Tiles are compressed with Deflate at its fastest level, after a predictor that makes neighbouring
 //! samples alike: the floating-point one for floats, differences along the row for whole numbers.
@@ -24,10 +25,18 @@
 //! don't change smoothly, so differences make them no smaller, and their long runs compress quickly
 //! at any level, to half the size of the fastest.
 //!
+//! On the desktop the tiles are made on several threads ([`crate::threads::max`]) while one thread
+//! writes them in their order, so the file is the same as one thread writes, byte for byte; in the
+//! browser they are made one after another.
+//!
 //! Classic TIFF is used when the file can't pass 4 GiB even with every tile left uncompressed,
 //! BigTIFF otherwise.
+//!
+//! The untiled GeoTIFF ([`super::geotiff::write`]) is written here too, by [`write_strips`]: one
+//! image in strips of rows, with the same predictors, Deflate effort and threads, and no overviews.
 
 use std::io::{Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::Path;
 
 use super::geotiff::{GeoKeys, fits_bytes, geo_keys};
@@ -46,6 +55,11 @@ const DEFLATE_CLASSES: u8 = 6;
 
 fn err(e: impl std::fmt::Display) -> DataError {
     DataError::Format(format!("COG: {e}"))
+}
+
+/// An error of the untiled writer ([`write_strips`]).
+fn strip_err(e: impl std::fmt::Display) -> DataError {
+    DataError::Format(format!("GeoTIFF: {e}"))
 }
 
 /// Which TIFF flavour to write.
@@ -67,8 +81,9 @@ pub struct CogInfo {
     pub bytes: u64,
 }
 
+/// The type of every sample in a file.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Sample {
+pub(super) enum Sample {
     Byte,
     Short,
     Float,
@@ -82,6 +97,21 @@ impl Sample {
             Sample::Float => 4,
         }
     }
+
+    /// BitsPerSample and SampleFormat (1 unsigned whole numbers, 3 floats).
+    fn tiff_type(self) -> (u16, u16) {
+        match self {
+            Sample::Byte => (8, 1),
+            Sample::Short => (16, 1),
+            Sample::Float => (32, 3),
+        }
+    }
+}
+
+/// Whether a band holds classes: it names them, or holds a few distinct values. Their codes don't
+/// change smoothly, so they take no predictor (see the module's notes).
+pub(super) fn few_classes(b: &super::Band) -> bool {
+    !b.classes.is_empty() || b.stats.categories.as_ref().is_some_and(|c| c.len() <= 64)
 }
 
 /// What goes into the file: which bands, as what.
@@ -202,7 +232,7 @@ fn plan(r: &Raster, band: usize) -> Result<Plan> {
     };
     let max = if sample == Sample::Byte { 255.0 } else { 65_535.0 };
     // A few distinct whole numbers are classes; photographs and rasters with a range are not.
-    let categorical = !b.classes.is_empty() || (sample != Sample::Float && b.stats.categories.as_ref().is_some_and(|c| c.len() <= 64));
+    let categorical = !b.classes.is_empty() || (sample != Sample::Float && few_classes(b));
     Ok(Plan {
         bands: vec![band],
         sample,
@@ -330,20 +360,36 @@ fn tile_samples(r: &Raster, plan: &Plan, lv: &Level, tx: u32, ty: u32) -> Vec<u8
 /// The TIFF predictor `plan`'s tiles are written with: none (1) for classes, differences along the
 /// row (2) for whole numbers, the floating-point one (3) for floats.
 fn predictor(plan: &Plan) -> u16 {
-    match plan.sample {
-        _ if plan.categorical => 1,
+    predictor_of(plan.sample, plan.categorical)
+}
+
+/// The TIFF predictor for samples of type `sample`: none (1) for classes, differences along the row
+/// (2) for whole numbers, the floating-point one (3) for floats.
+fn predictor_of(sample: Sample, classes: bool) -> u16 {
+    match sample {
+        _ if classes => 1,
         Sample::Byte | Sample::Short => 2,
         Sample::Float => 3,
     }
 }
 
-/// Applies `plan`'s predictor to a tile's samples (as [`tile_samples`] makes them), one tile row at
-/// a time; `row` is scratch space for the floating-point predictor's reordering.
+/// Applies `plan`'s predictor to a tile's samples (as [`tile_samples`] makes them); `row` is
+/// scratch space for the floating-point predictor's reordering.
 fn predict(raw: &mut [u8], plan: &Plan, row: &mut Vec<u8>) {
-    let spp = plan.bands.len();
-    let size = plan.sample.bytes();
-    for line in raw.chunks_exact_mut(TILE as usize * spp * size) {
-        match (predictor(plan), plan.sample) {
+    let line = TILE as usize * plan.bands.len() * plan.sample.bytes();
+    predict_rows(raw, line, plan.bands.len(), plan.sample, predictor(plan), row);
+}
+
+/// Applies `predictor` to rows of `line` bytes each, `spp` samples of type `sample` to a pixel, one
+/// row at a time; `row` is scratch space for the floating-point predictor's reordering.
+fn predict_rows(raw: &mut [u8], line: usize, spp: usize, sample: Sample, predictor: u16, row: &mut Vec<u8>) {
+    let size = sample.bytes();
+    // An image with no columns has no rows to predict (and `chunks_exact_mut` takes no zero).
+    if line == 0 {
+        return;
+    }
+    for line in raw.chunks_exact_mut(line) {
+        match (predictor, sample) {
             (2, Sample::Byte) => differ(line, spp),
             (2, Sample::Short) => {
                 // Each 16-bit sample less the one a pixel before it, wrapping; last first, so each
@@ -396,8 +442,8 @@ const LONG: u16 = 4;
 const DOUBLE: u16 = 12;
 const LONG8: u16 = 16;
 
-/// A directory entry; `patch` marks a tile table, filled in after the tiles are written.
-struct Entry {
+/// A directory entry; `patch` marks a tile (or strip) table, filled in after they are written.
+pub(super) struct Entry {
     tag: u16,
     ty: u16,
     count: u64,
@@ -405,19 +451,23 @@ struct Entry {
     patch: Option<bool>,
 }
 
-fn shorts(tag: u16, v: &[u16]) -> Entry {
+/// An entry of 16-bit values.
+pub(super) fn shorts(tag: u16, v: &[u16]) -> Entry {
     Entry { tag, ty: SHORT, count: v.len() as u64, data: v.iter().flat_map(|x| x.to_le_bytes()).collect(), patch: None }
 }
 
-fn long(tag: u16, v: u32) -> Entry {
+/// An entry of one 32-bit value.
+pub(super) fn long(tag: u16, v: u32) -> Entry {
     Entry { tag, ty: LONG, count: 1, data: v.to_le_bytes().to_vec(), patch: None }
 }
 
-fn doubles(tag: u16, v: &[f64]) -> Entry {
+/// An entry of 64-bit floats.
+pub(super) fn doubles(tag: u16, v: &[f64]) -> Entry {
     Entry { tag, ty: DOUBLE, count: v.len() as u64, data: v.iter().flat_map(|x| x.to_le_bytes()).collect(), patch: None }
 }
 
-fn ascii(tag: u16, s: &str) -> Entry {
+/// An entry of text, NUL-terminated as TIFF ASCII is.
+pub(super) fn ascii(tag: u16, s: &str) -> Entry {
     let mut data = s.as_bytes().to_vec();
     data.push(0);
     Entry { tag, ty: ASCII, count: data.len() as u64, data, patch: None }
@@ -433,11 +483,7 @@ fn table(tag: u16, n: usize, big: bool, counts: bool) -> Entry {
 /// full image only, as GDAL writes it.
 fn entries(r: &Raster, plan: &Plan, lv: &Level, first: bool, geo: &GeoKeys, big: bool) -> Vec<Entry> {
     let spp = plan.bands.len();
-    let (bits, format) = match plan.sample {
-        Sample::Byte => (8u16, 1u16),
-        Sample::Short => (16, 1),
-        Sample::Float => (32, 3),
-    };
+    let (bits, format) = plan.sample.tiff_type();
     let mut e = Vec::new();
     if !first {
         e.push(long(254, 1));
@@ -475,21 +521,6 @@ fn entries(r: &Raster, plan: &Plan, lv: &Level, first: bool, geo: &GeoKeys, big:
     }
     e.push(shorts(339, &vec![format; spp]));
     if first {
-        if let Some(c) = r.copyright.as_deref().map(super::tag_text).filter(|c| !c.is_empty()) {
-            e.push(ascii(33432, &c));
-        }
-        let gt = r.transform;
-        e.push(doubles(33550, &[gt.pixel_width.abs(), gt.pixel_height.abs(), 0.0]));
-        e.push(doubles(33922, &[0.0, 0.0, 0.0, gt.origin_x, gt.origin_y, 0.0]));
-        e.push(shorts(34735, &geo.keys));
-        if let Some(d) = &geo.custom {
-            if !d.doubles.is_empty() {
-                e.push(doubles(34736, &d.doubles));
-            }
-            if !d.ascii.is_empty() {
-                e.push(ascii(34737, &d.ascii));
-            }
-        }
         let n = r.width as usize * r.height as usize;
         let nodata = match (plan.sample, r.nodata) {
             // Alpha says which pixels have no value; a no-data tag would make readers that apply it
@@ -502,14 +533,38 @@ fn entries(r: &Raster, plan: &Plan, lv: &Level, first: bool, geo: &GeoKeys, big:
                 plan.bands.iter().any(|b| r.bands.get(*b).is_some_and(|b| b.stats.count < n)).then(|| "nan".to_string())
             }
         };
-        // The written bands' names and the first one's class names, so a reopened window keeps
-        // them (a band keeping its number has no name to write).
-        if let Some(xml) = super::gdal_metadata_of(r, &plan.bands) {
-            e.push(ascii(42112, &xml));
+        e.extend(geo_entries(r, geo, &plan.bands, nodata));
+    }
+    e
+}
+
+/// The full image's tags past its layout, in tag order: who holds the rights, where it lies, the
+/// names of the bands written as samples (`written`) and the first one's class names, and
+/// `nodata`, the value that marks pixels with none.
+pub(super) fn geo_entries(r: &Raster, geo: &GeoKeys, written: &[usize], nodata: Option<String>) -> Vec<Entry> {
+    let mut e = Vec::new();
+    if let Some(c) = r.copyright.as_deref().map(super::tag_text).filter(|c| !c.is_empty()) {
+        e.push(ascii(33432, &c));
+    }
+    let gt = r.transform;
+    e.push(doubles(33550, &[gt.pixel_width.abs(), gt.pixel_height.abs(), 0.0]));
+    e.push(doubles(33922, &[0.0, 0.0, 0.0, gt.origin_x, gt.origin_y, 0.0]));
+    e.push(shorts(34735, &geo.keys));
+    if let Some(d) = &geo.custom {
+        if !d.doubles.is_empty() {
+            e.push(doubles(34736, &d.doubles));
         }
-        if let Some(nd) = nodata {
-            e.push(ascii(42113, &nd));
+        if !d.ascii.is_empty() {
+            e.push(ascii(34737, &d.ascii));
         }
+    }
+    // The written bands' names and the first one's class names, so a reopened window keeps them (a
+    // band keeping its number has no name to write).
+    if let Some(xml) = super::gdal_metadata_of(r, written) {
+        e.push(ascii(42112, &xml));
+    }
+    if let Some(nd) = nodata {
+        e.push(ascii(42113, &nd));
     }
     e
 }
@@ -639,45 +694,339 @@ pub fn write_to<W: Write + Seek>(r: &Raster, band: usize, flavour: Flavour, out:
     let mut pos = head.bytes.len() as u64;
 
     // Smallest overview first, the full image last; each in row order.
+    let order: Vec<(usize, u32, u32)> = levels
+        .iter()
+        .enumerate()
+        .rev()
+        .flat_map(|(i, lv)| (0..lv.down).flat_map(move |ty| (0..lv.across).map(move |tx| (i, tx, ty))))
+        .collect();
     let mut places: Vec<Vec<(u64, u64)>> = vec![Vec::new(); levels.len()];
-    crate::progress::begin(tiles);
-    let mut row = Vec::new();
     let effort = if plan.categorical { DEFLATE_CLASSES } else { DEFLATE_FAST };
-    for (i, lv) in levels.iter().enumerate().rev() {
-        for ty in 0..lv.down {
-            for tx in 0..lv.across {
-                crate::progress::step(1)?;
-                let mut raw = tile_samples(r, &plan, lv, tx, ty);
-                predict(&mut raw, &plan, &mut row);
-                let zipped = miniz_oxide::deflate::compress_to_vec_zlib(&raw, effort);
-                if !big && pos + zipped.len() as u64 > u64::from(u32::MAX) {
-                    return Err(err("the file is too large for classic TIFF"));
-                }
-                out.write_all(&zipped).map_err(err)?;
-                if let Some(p) = places.get_mut(i) {
-                    p.push((pos, zipped.len() as u64));
-                }
-                pos += zipped.len() as u64;
+    let tile_bytes = (TILE as usize * TILE as usize).saturating_mul(spp * bps);
+    in_order(
+        order.len(),
+        tile_bytes,
+        err,
+        Vec::new,
+        |row, k| {
+            let (i, tx, ty) = order.get(k).copied().ok_or_else(|| err("a tile past the image"))?;
+            let lv = levels.get(i).ok_or_else(|| err("a tile past the image"))?;
+            let mut raw = tile_samples(r, &plan, lv, tx, ty);
+            predict(&mut raw, &plan, row);
+            Ok(miniz_oxide::deflate::compress_to_vec_zlib(&raw, effort))
+        },
+        |k, zipped| {
+            if !big && pos + zipped.len() as u64 > u64::from(u32::MAX) {
+                return Err(err("the file is too large for classic TIFF"));
             }
-        }
-    }
+            out.write_all(&zipped).map_err(err)?;
+            if let Some(p) = order.get(k).and_then(|(i, _, _)| places.get_mut(*i)) {
+                p.push((pos, zipped.len() as u64));
+            }
+            pos += zipped.len() as u64;
+            Ok(())
+        },
+    )?;
 
-    for p in &head.patches {
-        let Some(tiles) = places.get(p.level) else { continue };
-        let mut bytes = Vec::with_capacity(tiles.len() * 8);
-        for (off, len) in tiles {
+    fill_tables(out, &head.patches, &places, big, pos, err)?;
+    Ok(CogInfo { big, levels: levels.iter().map(|l| (l.w, l.h)).collect(), bytes: pos })
+}
+
+/// Fills in the tile (or strip) tables of `patches` with where each piece of image `level` went in
+/// the file and how long it is (`places`), then moves `out` back to the file's end, `end`.
+fn fill_tables<W: Write + Seek>(
+    out: &mut W,
+    patches: &[Patch],
+    places: &[Vec<(u64, u64)>],
+    big: bool,
+    end: u64,
+    err: fn(String) -> DataError,
+) -> Result<()> {
+    for p in patches {
+        let Some(pieces) = places.get(p.level) else { continue };
+        let mut bytes = Vec::with_capacity(pieces.len() * 8);
+        for (off, len) in pieces {
             let v = if p.counts { *len } else { *off };
             if big {
                 bytes.extend_from_slice(&v.to_le_bytes());
             } else {
-                bytes.extend_from_slice(&u32::try_from(v).map_err(err)?.to_le_bytes());
+                bytes.extend_from_slice(&u32::try_from(v).map_err(|e| err(e.to_string()))?.to_le_bytes());
             }
         }
-        out.seek(SeekFrom::Start(p.at)).map_err(err)?;
-        out.write_all(&bytes).map_err(err)?;
+        out.seek(SeekFrom::Start(p.at)).map_err(|e| err(e.to_string()))?;
+        out.write_all(&bytes).map_err(|e| err(e.to_string()))?;
     }
-    out.seek(SeekFrom::Start(pos)).map_err(err)?;
-    Ok(CogInfo { big, levels: levels.iter().map(|l| (l.w, l.h)).collect(), bytes: pos })
+    out.seek(SeekFrom::Start(end)).map_err(|e| err(e.to_string()))?;
+    Ok(())
+}
+
+/// An untiled image for [`write_strips`]: how its pixels are laid out, and its other tags (from
+/// [`geo_entries`], and any more), in any order.
+pub(super) struct Strips {
+    pub w: u32,
+    pub h: u32,
+    /// Samples to a pixel, interleaved.
+    pub spp: u16,
+    pub sample: Sample,
+    /// PhotometricInterpretation: 1 for grey, 2 for RGB.
+    pub photometric: u16,
+    /// The ExtraSamples values of the samples past the grey or colour ones (none to leave it out).
+    pub extra: Vec<u16>,
+    /// Classes: no predictor, and the default Deflate effort (see the module's notes).
+    pub classes: bool,
+    pub tags: Vec<Entry>,
+}
+
+/// Uncompressed bytes a strip holds at most, as whole rows (one row when a row is longer): enough
+/// for Deflate to find what repeats, small enough to hold one strip at a time.
+const STRIP_BYTES: u64 = 1 << 20;
+
+/// Writes an untiled TIFF of one image into `out` (which must be empty: offsets are from its
+/// start): its directory and tags, then its strips, each made by `rows` (which appends the
+/// samples of a range of rows, interleaved and little-endian), run through the predictor and
+/// compressed with Deflate, on several threads on the desktop ([`in_order`]). Classic TIFF when
+/// the file can't pass 4 GiB, BigTIFF otherwise. It counts the strips as its progress, and a
+/// cancelled run stops it within the few strips being made.
+pub(super) fn write_strips<W: Write + Seek>(
+    img: Strips,
+    out: &mut W,
+    rows: impl Fn(Range<usize>, &mut Vec<u8>) -> Result<()> + Sync,
+) -> Result<()> {
+    if img.w == 0 || img.h == 0 {
+        return Err(strip_err("the raster has no pixels to write"));
+    }
+    let spp = usize::from(img.spp);
+    let line = img.w as usize * spp * img.sample.bytes();
+    let per_strip = (STRIP_BYTES / (line as u64).max(1)).clamp(1, u64::from(img.h.max(1))) as u32;
+    let strips = img.h.div_ceil(per_strip) as usize;
+    let predictor = predictor_of(img.sample, img.classes);
+
+    // The worst a file can come to: every strip uncompressed (Deflate's expansion is under 0.1%),
+    // plus the headers, the strip tables and the other tags.
+    let raw = (line as u64).saturating_mul(u64::from(img.h));
+    let tags: u64 = img.tags.iter().map(|e| e.data.len() as u64).sum();
+    let worst = raw.saturating_add(raw / 512).saturating_add(strips as u64 * 64).saturating_add(tags).saturating_add(1 << 20);
+    let big = worst >= u64::from(u32::MAX);
+
+    let (bits, format) = img.sample.tiff_type();
+    let mut e = vec![
+        long(256, img.w),
+        long(257, img.h),
+        shorts(258, &vec![bits; spp]),
+        shorts(259, &[8]),
+        shorts(262, &[img.photometric]),
+        table(273, strips, big, false),
+        shorts(277, &[img.spp]),
+        long(278, per_strip),
+        table(279, strips, big, true),
+        shorts(284, &[1]),
+        shorts(317, &[predictor]),
+        shorts(339, &vec![format; spp]),
+    ];
+    if !img.extra.is_empty() {
+        e.push(shorts(338, &img.extra));
+    }
+    e.extend(img.tags);
+    // A directory's entries go in tag order.
+    e.sort_by_key(|e| e.tag);
+    let head = build_head(&[e], big);
+    out.seek(SeekFrom::Start(0)).map_err(strip_err)?;
+    out.write_all(&head.bytes).map_err(strip_err)?;
+    let mut pos = head.bytes.len() as u64;
+
+    let effort = if img.classes { DEFLATE_CLASSES } else { DEFLATE_FAST };
+    let mut places = vec![Vec::with_capacity(strips)];
+    let (h, per_strip) = (img.h as usize, per_strip as usize);
+    in_order(
+        strips,
+        line.saturating_mul(per_strip),
+        strip_err,
+        || (Vec::new(), Vec::new()),
+        |(raw, row), k| {
+            let y = k * per_strip;
+            raw.clear();
+            rows(y..(y + per_strip).min(h), raw)?;
+            predict_rows(raw, line, spp, img.sample, predictor, row);
+            Ok(miniz_oxide::deflate::compress_to_vec_zlib(raw, effort))
+        },
+        |_, zipped| {
+            if !big && pos + zipped.len() as u64 > u64::from(u32::MAX) {
+                return Err(strip_err("the file is too large for classic TIFF"));
+            }
+            out.write_all(&zipped).map_err(strip_err)?;
+            if let Some(p) = places.first_mut() {
+                p.push((pos, zipped.len() as u64));
+            }
+            pos += zipped.len() as u64;
+            Ok(())
+        },
+    )?;
+    fill_tables(out, &head.patches, &places, big, pos, strip_err)
+}
+
+/// Makes `count` pieces of a file (tiles or strips, each about `bytes` uncompressed) with `make`
+/// and hands each to `put` in their order, with its index. `make` gets the scratch its thread
+/// made with `scratch` once; `err` words a failure of the threads. Every piece stands alone, so
+/// on the desktop, with more than one piece, they are made on several threads
+/// ([`crate::threads::max`], fewer when [`crate::memory::thread_scratch`] can't hold their pieces)
+/// while this thread writes them: the same file as one thread makes, byte for byte. In the browser
+/// they are made one after another.
+///
+/// It counts the pieces as its progress, and a cancelled run stops it within the few pieces being
+/// made ([`AHEAD`] a thread). The first error in the pieces' order comes back, as on one thread.
+fn in_order<S>(
+    count: usize,
+    bytes: usize,
+    err: fn(String) -> DataError,
+    scratch: impl Fn() -> S + Sync,
+    make: impl Fn(&mut S, usize) -> Result<Vec<u8>> + Sync,
+    put: impl FnMut(usize, Vec<u8>) -> Result<()>,
+) -> Result<()> {
+    crate::progress::begin(count);
+    // A piece being made holds about twice its bytes (its samples and their compressed copy), and
+    // each waiting to be written up to its bytes again.
+    let affordable = 1 + crate::memory::thread_scratch() / bytes.saturating_mul(2 + AHEAD).max(1);
+    let threads = crate::threads::for_items(count).min(affordable);
+    if threads > 1 {
+        return in_order_parallel(count, threads, err, scratch, make, put);
+    }
+    one_by_one(count, err, scratch, make, put)?;
+    // A cancel that came while the last piece was made stops the write too.
+    crate::progress::check()
+}
+
+/// [`in_order`] on this thread alone: each piece made, then written, before the next.
+fn one_by_one<S>(
+    count: usize,
+    err: fn(String) -> DataError,
+    scratch: impl Fn() -> S,
+    make: impl Fn(&mut S, usize) -> Result<Vec<u8>>,
+    mut put: impl FnMut(usize, Vec<u8>) -> Result<()>,
+) -> Result<()> {
+    let mut s = scratch();
+    for k in 0..count {
+        crate::progress::step(1)?;
+        put(k, caught(&make, &mut s, k, err).0?)?;
+    }
+    Ok(())
+}
+
+/// Piece `k` from `make`, a panic in it as an error, so the write fails the same way on any number
+/// of threads; and whether it panicked, after which `s` may be half changed.
+fn caught<S>(
+    make: impl Fn(&mut S, usize) -> Result<Vec<u8>>,
+    s: &mut S,
+    k: usize,
+    err: fn(String) -> DataError,
+) -> (Result<Vec<u8>>, bool) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| make(s, k))) {
+        Ok(made) => (made, false),
+        Err(_) => (Err(err("a piece of the image couldn't be made".into())), true),
+    }
+}
+
+/// The pieces a thread of [`in_order`] may make ahead of the one being written: enough that the
+/// threads rarely wait for a slow piece, few enough that the pieces waiting stay small.
+const AHEAD: usize = 2;
+
+/// [`in_order`] on `threads` threads besides this one, which writes. A thread takes the next piece
+/// unless it is more than [`AHEAD`] a thread past the one to write next, so a slow piece holds up
+/// only that many. A piece's panic comes back as an error in its place. A thread the OS refuses
+/// costs speed, not the write; when it refuses all of them, this thread makes the pieces itself.
+fn in_order_parallel<S>(
+    count: usize,
+    threads: usize,
+    err: fn(String) -> DataError,
+    scratch: impl Fn() -> S + Sync,
+    make: impl Fn(&mut S, usize) -> Result<Vec<u8>> + Sync,
+    mut put: impl FnMut(usize, Vec<u8>) -> Result<()>,
+) -> Result<()> {
+    use std::collections::BTreeMap;
+    use std::sync::{Condvar, Mutex, mpsc};
+
+    /// The next piece to take, the next to write, and whether to stop taking pieces.
+    struct Turn {
+        next: usize,
+        written: usize,
+        stop: bool,
+    }
+    let ahead = threads.saturating_mul(AHEAD);
+    let turn = Mutex::new(Turn { next: 0, written: 0, stop: false });
+    let moved = Condvar::new();
+    let failed = || err("a piece of the image couldn't be made".into());
+    // Takes the next piece once it is no more than `ahead` past the one to write; None to stop.
+    let take = || -> Option<usize> {
+        let mut t = turn.lock().ok()?;
+        while !t.stop && t.next < count && t.next >= t.written.saturating_add(ahead) {
+            t = moved.wait(t).ok()?;
+        }
+        if t.stop || t.next >= count {
+            return None;
+        }
+        t.next += 1;
+        Some(t.next - 1)
+    };
+    /// Stops the threads when dropped, however the writing ends: done, an error, or a panic in
+    /// `put`, which would otherwise leave them waiting for the writer for good, and the scope
+    /// waiting for them.
+    struct Stop<'a>(&'a Mutex<Turn>, &'a Condvar);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) {
+            if let Ok(mut t) = self.0.lock() {
+                t.stop = true;
+            }
+            self.1.notify_all();
+        }
+    }
+
+    std::thread::scope(|scope| {
+        let (tx, rx) = mpsc::channel::<(usize, Result<Vec<u8>>)>();
+        let work = |tx: mpsc::Sender<(usize, Result<Vec<u8>>)>| {
+            let mut s = scratch();
+            while let Some(k) = take() {
+                let (made, panicked) = caught(&make, &mut s, k, err);
+                // A thread whose piece panicked stops: its scratch may be half changed.
+                if tx.send((k, made)).is_err() || panicked {
+                    break;
+                }
+            }
+        };
+        let started = (0..threads)
+            .filter_map(|_| {
+                let tx = tx.clone();
+                std::thread::Builder::new().spawn_scoped(scope, move || work(tx)).ok()
+            })
+            .count();
+        drop(tx);
+        // The threads finish the pieces they are making and take no more; the scope waits for them.
+        let _stop = Stop(&turn, &moved);
+        (|| -> Result<()> {
+            if started == 0 {
+                return one_by_one(count, err, &scratch, &make, &mut put);
+            }
+            // Pieces made before the ones ahead of them, by their index.
+            let mut waiting = BTreeMap::new();
+            for k in 0..count {
+                let piece = loop {
+                    if let Some(p) = waiting.remove(&k) {
+                        break p;
+                    }
+                    // Every thread gone before piece `k` came: one panicked outside a piece.
+                    let (i, p) = rx.recv().map_err(|_| failed())?;
+                    waiting.insert(i, p);
+                };
+                crate::progress::step(1)?;
+                put(k, piece?)?;
+                if let Ok(mut t) = turn.lock() {
+                    t.written = k + 1;
+                }
+                moved.notify_all();
+            }
+            Ok(())
+        })()
+    })?;
+    // A cancel that came while the last piece was made stops the write too.
+    crate::progress::check()
 }
 
 /// The bands [`write`] and [`write_file`] write of `r` given `band`, from the same plan.
@@ -707,6 +1056,7 @@ pub fn write_file(r: &Raster, band: usize, path: &Path) -> Result<CogInfo> {
         // the last look: the rename commits the file, and a Cancel after it finds it written.
         crate::progress::check()?;
         std::fs::rename(&tmp, path)?;
+        crate::io::sync_folder(path);
         Ok(info)
     })();
     if res.is_err() {
@@ -1028,6 +1378,51 @@ mod tests {
         }
     }
 
+    /// The untiled writer's strips take the same predictors: floats (NaN, negative and very large
+    /// values) the floating-point one, RGB bytes differences, every band of `write_all`'s float
+    /// samples (colour, alpha and one more) the floating-point one, and a band of a few classes
+    /// none, though it is written as floats. Each image runs over more than one strip, and every value of every band reads back
+    /// exactly.
+    #[test]
+    fn untiled_strips_read_back_exactly_through_their_predictor() {
+        let (w, h) = (700u32, 600u32);
+        let n = (w * h) as usize;
+        let floats = |k: usize| -> Vec<f32> {
+            (0..n)
+                .map(|i| if i % 97 == k { f32::NAN } else { (i as f32 - 1000.0) * 3.7e-4 * if i % 5 == 0 { 1e30 } else { 1.0 } })
+                .collect()
+        };
+        let bytes = |k: usize| -> Vec<f32> { (0..n).map(|i| ((i * 7 + k * 31) % 256) as f32).collect() };
+        let classes = || -> Vec<f32> { (0..n).map(|i| (i / 100 % 3) as f32).collect() };
+        let five: Vec<Vec<f32>> = (0..5).map(floats).collect();
+        let cases = [
+            (geotiff::write(&utm(w, h, vec![floats(0)], ColorHint::Gray, "Float32", None), 0).unwrap(), 3, 1),
+            (geotiff::write(&utm(w, h, (0..3).map(bytes).collect(), ColorHint::Rgb { alpha: false }, "UInt8", None), 0).unwrap(), 2, 3),
+            (geotiff::write_all(&utm(w, h, five, ColorHint::Rgb { alpha: true }, "Float32", None)).unwrap(), 3, 5),
+            (geotiff::write(&utm(w, h, vec![classes()], ColorHint::Gray, "Float32", None), 0).unwrap(), 1, 1),
+        ];
+        for (i, (file, predictor, bands)) in cases.into_iter().enumerate() {
+            let mut dec = Decoder::new(Cursor::new(file.as_slice())).unwrap();
+            assert_eq!(dec.find_tag_unsigned::<u16>(Tag::Predictor).unwrap(), Some(predictor), "case {i}");
+            assert!(dec.find_tag_unsigned_vec::<u64>(Tag::StripOffsets).unwrap().unwrap().len() > 1, "case {i}");
+            let back = geotiff::read(Cursor::new(file), "back").unwrap();
+            assert_eq!(back.band_count(), bands, "case {i}");
+            let want: Vec<Vec<f32>> = match i {
+                0 => vec![floats(0)],
+                1 => (0..3).map(bytes).collect(),
+                2 => (0..5).map(floats).collect(),
+                _ => vec![classes()],
+            };
+            for (b, data) in want.iter().enumerate() {
+                for (j, v) in data.iter().enumerate() {
+                    let (x, y) = ((j % w as usize) as i64, (j / w as usize) as i64);
+                    let got = back.bands[b].data[j];
+                    assert!(got == *v || (got.is_nan() && v.is_nan()), "case {i} band {b} at ({x}, {y}): {got} for {v}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn sixteen_bit_and_grey_alpha_keep_their_type() {
         let (w, h) = (600u32, 10u32);
@@ -1162,7 +1557,7 @@ mod tests {
     }
 
     /// A cancelled GeoTIFF or COG write stops with [`DataError::Cancelled`], the COG leaving no
-    /// file; without a probe both are written.
+    /// file; without a probe both are written, and the GeoTIFF writer counts its strips.
     #[test]
     fn a_cancelled_raster_write_stops() {
         use crate::progress::{install, tests::Counted};
@@ -1173,12 +1568,95 @@ mod tests {
         {
             let _g = install(Some(Counted::cancelling_after(2)));
             assert!(matches!(write_file(&r, 0, &path), Err(DataError::Cancelled)));
-            // Cancelled before it starts: the GeoTIFF writer counts nothing.
+            // Cancelled before its first strip.
             let _g = install(Some(Counted::cancelling_after(0)));
             assert!(matches!(geotiff::write(&r, 0), Err(DataError::Cancelled)));
         }
+        // The GeoTIFF writer counts its strips: 1100 rows of 4400 bytes, 238 to a strip.
+        let counted = std::sync::Arc::new(Counted::default());
+        {
+            let _g = install(Some(counted.clone()));
+            assert!(geotiff::write(&r, 0).is_ok());
+        }
+        use std::sync::atomic::Ordering;
+        assert_eq!((counted.done.load(Ordering::Relaxed), counted.total.load(Ordering::Relaxed)), (5, 5));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
         write_file(&r, 0, &path).unwrap();
         assert!(geotiff::write(&r, 0).is_ok());
+    }
+
+    /// Pieces made on several threads, the later ones sooner, are written in their order; the
+    /// first failure in that order comes back, and a piece that panics is an error, not a crash.
+    #[test]
+    fn pieces_made_on_threads_are_written_in_order() {
+        let slow_first = |_: &mut (), k: usize| {
+            std::thread::sleep(std::time::Duration::from_millis(((40 - k) % 7) as u64)); // test-wait: finish pieces out of order to exercise ordered writing
+            Ok(vec![k as u8])
+        };
+        let mut written = Vec::new();
+        in_order_parallel(
+            40,
+            4,
+            err,
+            || (),
+            slow_first,
+            |k, p| {
+                written.push((k, p));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(written, (0..40).map(|k| (k, vec![k as u8])).collect::<Vec<_>>());
+
+        let failing = |_: &mut (), k: usize| match k {
+            9 => Err(err("nine")),
+            17 => panic!("seventeen"),
+            _ => Ok(Vec::new()),
+        };
+        let mut n = 0;
+        let e = in_order_parallel(
+            40,
+            4,
+            err,
+            || (),
+            failing,
+            |_, _| {
+                n += 1;
+                Ok(())
+            },
+        );
+        assert!(e.unwrap_err().to_string().contains("nine"));
+        assert_eq!(n, 9, "the pieces before the failure are written");
+        let panics = |_: &mut (), k: usize| if k == 3 { panic!("three") } else { Ok(Vec::new()) };
+        let e = in_order_parallel(10, 3, err, || (), panics, |_, _| Ok(()));
+        assert!(e.unwrap_err().to_string().contains("couldn't be made"));
+        // A panic while a piece is written, with the threads waiting for it, is passed on rather
+        // than leaving the write waiting for them.
+        let caught_write = std::panic::catch_unwind(|| {
+            in_order_parallel(40, 2, err, || (), |_, _| Ok(Vec::new()), |k, _| if k == 0 { panic!("write") } else { Ok(()) })
+        });
+        assert!(caught_write.is_err());
+        // On one thread too (the browser, a one-core machine).
+        let e = one_by_one(10, err, || (), panics, |_, _| Ok(()));
+        assert!(e.unwrap_err().to_string().contains("couldn't be made"));
+    }
+
+    /// A cancel that comes while the untiled writer makes its last strip stops the write, rather
+    /// than the file being finished as if nothing had happened.
+    #[test]
+    fn a_cancel_during_the_last_strip_stops_the_untiled_write() {
+        use crate::progress::{install, tests::Counted};
+        use std::sync::atomic::Ordering;
+        let probe = std::sync::Arc::new(Counted::default());
+        let _g = install(Some(probe.clone()));
+        let img = Strips { w: 4, h: 3, spp: 1, sample: Sample::Byte, photometric: 1, extra: Vec::new(), classes: false, tags: Vec::new() };
+        let res = write_strips(img, &mut Cursor::new(Vec::new()), |rows, buf| {
+            if rows.end == 3 {
+                probe.cancel.store(true, Ordering::Relaxed);
+            }
+            buf.extend(std::iter::repeat_n(7u8, rows.len() * 4));
+            Ok(())
+        });
+        assert!(matches!(res, Err(DataError::Cancelled)));
     }
 }

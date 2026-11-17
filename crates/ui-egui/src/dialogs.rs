@@ -23,6 +23,10 @@ pub struct Dialogs {
     pub reload: Option<crate::reloaddata::Form>,
     pub open: Option<&'static str>,
     pub layer: String,
+    /// The standalone table Add Field and Calculate Field act on, when opened from its view: the
+    /// project it is in ([`Session::opened`]) and its id, which another project may give again;
+    /// None for the active layer.
+    pub table: Option<(u64, u32)>,
     /// GeoPackage save/discard targets use IDs because display names can repeat.
     pub gpkg_layer: Option<u32>,
     /// The live instance captured with the map-local ID; Undo can make that ID reusable.
@@ -76,6 +80,12 @@ pub struct Dialogs {
     pub sqlite_crs: String,
     /// Load a table without a geometry column as attributes only, instead of points from X and Y.
     pub sqlite_flat: bool,
+    /// Explicit column selections survive coordinate-system changes, including a pick of None.
+    pub csv_picked: bool,
+    /// Coordinate-system edits are applied on focus loss, rather than parsed while typing.
+    pub csv_crs_dirty: bool,
+    /// Import DXF's file, picked before the dialog opens.
+    pub dxf: Option<DxfFile>,
     /// Reset collapsed then closed dialogs when reopening
     pub reset_collapse: bool,
 }
@@ -103,7 +113,52 @@ pub enum CsvSource {
     Bytes(Vec<u8>),
 }
 
+/// A drawing picked for Import DXF.
+pub struct DxfFile {
+    pub name: String,
+    pub source: DxfSource,
+}
+
+/// Where a drawing picked for Import DXF is: on disk, or (in the browser) its bytes, kept until it
+/// is added.
+pub enum DxfSource {
+    Path(String),
+    Bytes(Vec<u8>),
+}
+
 impl Dialogs {
+    /// Opens Add Field or Calculate Field (`which`) on standalone table `id`.
+    pub fn open_on_table(&mut self, which: &str, s: &Session, id: u32) -> Result<(), String> {
+        // The name kept is a `&'static str`, as `open` keeps it.
+        let name: &'static str = match which {
+            "addField" => "addField",
+            "calculateField" => "calculateField",
+            other => return Err(format!("dialog '{other}' doesn't open on a table")),
+        };
+        let dataset = &s.project.table(id).ok_or("no such table")?.dataset;
+        *self = Dialogs { open: Some(name), mode: "new", reset_collapse: true, table: Some((s.opened, id)), ..Dialogs::default() };
+        match name {
+            "addField" => self.b = "Double".into(),
+            _ => self.a = calculation_fields(dataset).last().map(|f| f.name.clone()).unwrap_or_default(),
+        }
+        Ok(())
+    }
+
+    /// The standalone table the dialog acts on, as `"table"` names it in `p`; refused once another
+    /// project is open, whose table of that id is another table.
+    fn on_table(&self, s: &Session, mut p: Value) -> Result<Value, String> {
+        match self.table {
+            Some((opened, _)) if opened != s.opened => {
+                Err(tl!("Another project is open now: open the dialog again from its table.").into())
+            }
+            Some((_, id)) => {
+                p["table"] = json!(id);
+                Ok(p)
+            }
+            None => Ok(p),
+        }
+    }
+
     /// Opens a dialog on the current selection, capturing the target of CRS changes.
     pub fn open(&mut self, which: &str, s: &Session) -> Result<(), String> {
         let active = s.active_layer.and_then(|id| s.map().layer(id));
@@ -129,6 +184,7 @@ impl Dialogs {
             "layerTemplate" => "layerTemplate",
             "addPolyline" => "addPolyline",
             "addCsv" => "addCsv",
+            "addDxf" => "addDxf",
             "findPlace" => "findPlace",
             "geocode" => "geocode",
             "addUrl" => "addUrl",
@@ -149,6 +205,7 @@ impl Dialogs {
             "zarr" => "zarr",
             "exportLayer" => "exportLayer",
             "saveProject" => "saveProject",
+            "exportOrbit" => "exportOrbit",
             other => return Err(format!("unknown dialog '{other}'")),
         };
         if matches!(name, "addField" | "calculateField" | "renameLayer" | "exportLayer" | "defineProjection") && active.is_none() {
@@ -165,6 +222,9 @@ impl Dialogs {
         }
         if matches!(name, "sqliteSave" | "sqliteDiscard") && !s.map().layers.iter().any(|l| l.sqlite.is_some()) {
             return Err(tl!("the map has no SQLite layer loaded for editing (Home › Add Data › Edit SQLite Table…)").into());
+        }
+        if name == "exportOrbit" && cfg!(target_arch = "wasm32") {
+            return Err("exporting an orbit needs the desktop app".into());
         }
         if name == "selectByAttributes" && s.map().layers.is_empty() {
             return Err("the map has no layers".into());
@@ -186,9 +246,17 @@ impl Dialogs {
                 let is_code = self.text.to_ascii_lowercase().starts_with("epsg");
                 self.a = if is_code { self.text.trim_start_matches(|c: char| !c.is_ascii_digit()).to_string() } else { String::new() };
             }
+            "addDxf" => {
+                // A drawing never says its coordinate system: the map's, where it is drawn.
+                self.text = map_crs(&s.map().projection);
+                // Its blocks (图块) are drawn unless the user says otherwise.
+                self.flag = true;
+            }
             "goToXY" => {
+                // The map's center, the longitude within ±180 even when the view has been panned
+                // past the antimeridian.
                 let c = s.map().center_lonlat();
-                self.a = format!("{:.4}", c.x);
+                self.a = format!("{:.4}", crate::mapmenu::wrap_lon(c.x));
                 self.b = format!("{:.4}", c.y);
             }
             "bookmark" => self.text = rustgis_engine::cmd::navigate::new_bookmark_name(s.map()),
@@ -199,7 +267,11 @@ impl Dialogs {
                 self.c = format!("{:.0}", s.scale());
             }
             "addField" => self.b = "Double".into(),
-            "calculateField" => self.a = active.and_then(|l| l.dataset.fields.last()).map(|f| f.name.clone()).unwrap_or_default(),
+            // The command's defaults: 60 frames once round, 640 × 400 points, 50 ms a frame.
+            "exportOrbit" => [self.a, self.b, self.c, self.d, self.e] = ["60", "360", "640", "400", "50"].map(String::from),
+            "calculateField" => {
+                self.a = active.and_then(|l| calculation_fields(&l.dataset).last()).map(|f| f.name.clone()).unwrap_or_default()
+            }
             "renameLayer" => self.text = active.map(|l| l.name.clone()).unwrap_or_default(),
             // A file name can't hold a folder separator, which a project name may.
             "saveProject" => self.text = format!("{}.rgis", s.project.name.replace(['/', '\\'], "-")),
@@ -331,6 +403,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "layerTemplate" => "Layer Template",
         "addPolyline" => "Add Encoded Polyline",
         "addCsv" => "Add Delimited Text",
+        "addDxf" => "Import DXF",
         "findPlace" => "By Place or Address",
         "geocode" => "Geocode Addresses",
         "addUrl" => "Add Data From URL",
@@ -352,6 +425,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "zarr" => "Add Zarr Variable",
         "exportLayer" => "Export Features",
         "saveProject" => "Save Project As",
+        "exportOrbit" => "Export Orbit",
         "renameMap" => "Rename Map",
         "renameLayout" => "Rename Layout",
         "renameServiceGroup" => "Rename Service Group",
@@ -394,21 +468,48 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         match which {
             "selectByAttributes" => close = select_by_attributes(app, ui, &t),
             "goToXY" => {
+                // UTM and MGRS are the Earth's grids, so another body's map offers degrees alone.
+                // A grid reference, once typed, is where Go goes: the degree boxes gray out.
+                let earth = app.session.map().body().is_earth();
+                let by_grid = earth && !app.dialogs.text.trim().is_empty();
                 egui::Grid::new("xy").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
                     let input_label = ui.label(tl!("Longitude (X)"));
-                    ui.add(egui::TextEdit::singleline(&mut app.dialogs.a).desired_width(200.0)).labelled_by(input_label.id);
+                    ui.add_enabled(!by_grid, egui::TextEdit::singleline(&mut app.dialogs.a).hint_text("-74.006 · 74°0′22″W").desired_width(300.0))
+                        .labelled_by(input_label.id);
                     ui.end_row();
                     let input_label = ui.label(tl!("Latitude (Y)"));
-                    ui.add(egui::TextEdit::singleline(&mut app.dialogs.b).desired_width(200.0)).labelled_by(input_label.id);
+                    ui.add_enabled(!by_grid, egui::TextEdit::singleline(&mut app.dialogs.b).hint_text("40.7128 · 40°42′46″N").desired_width(300.0))
+                        .labelled_by(input_label.id);
                     ui.end_row();
+                    if earth {
+                        let input_label = ui.label(tl!("Or grid reference"));
+                        ui.add(egui::TextEdit::singleline(&mut app.dialogs.text).hint_text("18TWL8395907350 · 18north 583959 4507351").desired_width(300.0))
+                            .labelled_by(input_label.id);
+                        ui.end_row();
+                    }
                     let input_label = ui.label(tl!("Scale 1:"));
-                    ui.add(egui::TextEdit::singleline(&mut app.dialogs.c).hint_text(tl!("keep current")).desired_width(200.0)).labelled_by(input_label.id);
+                    ui.add(egui::TextEdit::singleline(&mut app.dialogs.c).hint_text(tl!("keep current")).desired_width(300.0)).labelled_by(input_label.id);
                     ui.end_row();
                 });
+                // Below the boxes, wrapped to the dialog's width rather than widening it.
+                let hint = if earth {
+                    tl!("Degrees as decimals or degrees, minutes and seconds; or a UTM or MGRS reference in place of both.")
+                } else {
+                    tl!("Degrees as decimals or degrees, minutes and seconds.")
+                };
+                ui.label(egui::RichText::new(hint).weak());
                 close = buttons(app, ui, "Go", |app| {
-                    let mut p = json!({"lon": app.dialogs.a.trim(), "lat": app.dialogs.b.trim()});
-                    if let Ok(s) = app.dialogs.c.trim().replace(',', "").parse::<f64>() {
-                        p["scale"] = json!(s);
+                    let grid = app.dialogs.text.trim();
+                    let mut p = if app.session.map().body().is_earth() && !grid.is_empty() {
+                        json!({"position": grid})
+                    } else {
+                        json!({"lon": app.dialogs.a.trim(), "lat": app.dialogs.b.trim()})
+                    };
+                    // The command refuses a scale it can't use: commas go only where they group
+                    // thousands (50,000), so a decimal comma (1,5) is refused, not read as 15.
+                    let scale = scale_text(&app.dialogs.c);
+                    if !scale.is_empty() {
+                        p["scale"] = json!(scale);
                     }
                     app.run("map.goToXY", p).map(|_| ())
                 });
@@ -479,6 +580,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
             }
             "addTiles" => close = add_tiles(app, ui),
             "addCsv" => close = add_csv(app, ui),
+            "addDxf" => close = add_dxf(app, ui),
             "findPlace" => close = crate::geocodeui::find_place(app, ui),
             "geocode" => close = crate::geocodeui::geocode(app, ui),
             "addUrl" => close = add_url(app, ui),
@@ -522,6 +624,41 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                     app.run("map.camera", json!({"lon": lon, "lat": lat, "scale": scale})).map(|_| ())
                 });
             }
+            "exportOrbit" => {
+                ui.label(tl!("Turns the view about its centre, keeping its scale and pitch, and writes a frame a step: a .gif loops, a .zip holds the frames as PNGs."));
+                egui::Grid::new("orbit").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+                    let d = &mut app.dialogs;
+                    for (label, v) in [
+                        ("Frames", &mut d.a),
+                        ("Turn (degrees)", &mut d.b),
+                        ("Width (points)", &mut d.c),
+                        ("Height (points)", &mut d.d),
+                        ("Frame time (ms, GIF)", &mut d.e),
+                    ] {
+                        let input_label = ui.label(tl!(label));
+                        ui.add(egui::TextEdit::singleline(v).desired_width(120.0)).labelled_by(input_label.id);
+                        ui.end_row();
+                    }
+                });
+                // A file picker cancelled keeps the dialog open, the values typed still in it:
+                // `ui.exportOrbit` answers null when no file was picked.
+                let mut picked = true;
+                close = buttons(app, ui, "Export…", |app| {
+                    // Empty keeps the command's default; anything else must be a number, which
+                    // the command checks against its range.
+                    let mut p = json!({});
+                    let d = &app.dialogs;
+                    for (key, label, v) in [("frames", "Frames", &d.a), ("turn", "Turn", &d.b), ("width", "Width", &d.c), ("height", "Height", &d.d), ("speed", "Frame time", &d.e)] {
+                        let v = v.trim();
+                        if !v.is_empty() {
+                            let n = v.parse::<f64>().ok().filter(|n| n.is_finite());
+                            p[key] = json!(n.ok_or_else(|| crate::i18n::fmt("{what} must be a number", &[("what", tl_raw!(label))]))?);
+                        }
+                    }
+                    picked = !app.run("ui.exportOrbit", p)?.is_null();
+                    Ok(())
+                }) && picked;
+            }
             "bookmark" => {
                 let input_label = ui.label(tl!("Name"));
                 ui.add(egui::TextEdit::singleline(&mut app.dialogs.text).desired_width(f32::INFINITY)).labelled_by(input_label.id);
@@ -550,10 +687,28 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                     }).response.labelled_by(input_label.id);
                     ui.end_row();
                 });
-                close = buttons(app, ui, "Add", |app| app.run("edit.addField", json!({"name": app.dialogs.a, "type": app.dialogs.b})).map(|_| ()));
+                close = buttons(app, ui, "Add", |app| {
+                    let p = app.dialogs.on_table(&app.session, json!({"name": app.dialogs.a, "type": app.dialogs.b}))?;
+                    app.run("edit.addField", p).map(|_| ())
+                });
             }
             "calculateField" => {
-                let fields: Vec<String> = app.session.active_layer.and_then(|id| app.session.map().layer(id)).map(|l| l.dataset.fields.iter().map(|f| f.name.clone()).collect()).unwrap_or_default();
+                /// The data Calculate Field reads: the table's it was opened on, else the active layer's.
+                fn data(app: &crate::RustGisApp) -> Option<&rustgis_engine::data::Dataset> {
+                    data_of(app.dialogs.table, &app.session)
+                }
+                /// The same, from the dialog's table and the session apart, so the box can be
+                /// written while it's read.
+                fn data_of(
+                    table: Option<(u64, u32)>,
+                    session: &rustgis_engine::Session,
+                ) -> Option<&rustgis_engine::data::Dataset> {
+                    match table {
+                        Some((opened, id)) => session.project.table(id).filter(|_| opened == session.opened).map(|t| &t.dataset),
+                        None => session.active_layer.and_then(|id| session.map().layer(id)).map(|l| &l.dataset),
+                    }
+                }
+                let fields: Vec<String> = data(app).map(|d| calculation_fields(d).map(|f| f.name.clone()).collect()).unwrap_or_default();
                 ui.horizontal(|ui| {
                     let input_label = ui.label(tl!("Field"));
                     egui::ComboBox::from_id_salt("cf_field").selected_text(app.dialogs.a.clone()).width(220.0).show_ui(ui, |ui| {
@@ -563,20 +718,36 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                     }).response.labelled_by(input_label.id);
                 });
                 let input_label = ui.label(format!("{} =", app.dialogs.a));
-                let edit = egui::TextEdit::singleline(&mut app.dialogs.text)
-                    .hint_text(tl!("e.g.  pop_est / 1000000   or   upper(name) || ' ' || round(area, 1)"))
-                    .char_limit(rustgis_engine::data::query::MAX_LEN)
-                    .font(egui::TextStyle::Monospace)
-                    .desired_width(f32::INFINITY);
-                ui.add(edit).labelled_by(input_label.id);
+                // Suggestions as it's typed: the fields, functions, variables and keywords (#1240).
+                let ds = data_of(app.dialogs.table, &app.session);
+                fn style(edit: egui::TextEdit<'_>) -> egui::TextEdit<'_> {
+                    edit.hint_text(tl!("e.g.  pop_est / 1000000   or   upper(name) || ' ' || round(area, 1)"))
+                        .char_limit(rustgis_engine::data::query::MAX_LEN)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                }
+                crate::exprcomplete::expr_edit(ui, egui::Id::unique("cf_expression"), &mut app.dialogs.text, ds, style)
+                    .labelled_by(input_label.id);
                 let text = app.dialogs.text.trim();
-                let reads = app.session.active_layer.and_then(|id| app.session.map().layer(id)).filter(|_| !text.is_empty()).map(|l| rustgis_engine::cmd::edit::check_calculation(text, &l.dataset));
+                let reads = data(app).filter(|_| !text.is_empty()).map(|d| rustgis_engine::cmd::edit::check_calculation(text, d));
                 if let Some(Err(e)) = reads {
                     let t = Tokens::get(ui.ctx());
                     ui.label(egui::RichText::new(crate::i18n::fmt("Invalid: {error}", &[("error", &e)])).small().color(t.red));
                 }
-                ui.label(egui::RichText::new(tl!("Fields, numbers, 'text', + - * / % ^, || to join text, comparisons, CASE and functions such as round(), upper(), if() or scale_linear(). Applies to the selected rows, or every row when none is selected.")).small().weak());
-                close = buttons(app, ui, "Calculate", |app| app.run("edit.calculateField", json!({"field": app.dialogs.a, "expression": app.dialogs.text})).map(|_| ()));
+                // A standalone table has no selection: every row.
+                let help = if app.dialogs.table.is_some() {
+                    tl!("Fields, numbers, 'text', + - * / % ^, || to join text, comparisons, CASE and functions such as round(), upper(), if() or scale_linear(). Applies to every row of the table.")
+                } else {
+                    tl!("Fields, numbers, 'text', + - * / % ^, || to join text, comparisons, CASE and functions such as round(), upper(), if() or scale_linear(). Applies to the selected rows, or every row when none is selected.")
+                };
+                ui.label(egui::RichText::new(help).small().weak());
+                close = buttons(app, ui, "Calculate", |app| {
+                    if !fields.contains(&app.dialogs.a) {
+                        return Err(tl!("Choose a field from the list: the previous choice is missing or shadowed by an earlier field with the same name ignoring case.").into());
+                    }
+                    let p = app.dialogs.on_table(&app.session, json!({"field": app.dialogs.a, "expression": app.dialogs.text}))?;
+                    app.run("edit.calculateField", p).map(|_| ())
+                });
             }
             "saveProject" => close = save_project(app, ui),
             // `a` is the map or layout being renamed; an empty or unchanged name just closes.
@@ -627,6 +798,16 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
     });
     if (!open || close) && app.dialogs.open == Some(which) {
         app.dialogs.open = None;
+        if which == "addDxf" {
+            app.dialogs.dxf = None;
+        }
+        // Drawings picked or dropped together: the next opens as one closes.
+        if which == "addDxf"
+            && let Some(next) = app.ui.dxf_waiting.pop_front()
+            && app.dialogs.open("addDxf", &app.session).is_ok()
+        {
+            app.dialogs.dxf = Some(next);
+        }
     }
 }
 
@@ -643,7 +824,12 @@ fn save_project(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         edit.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(end))));
         edit.state.store(ui.ctx(), edit.response.id);
     }
-    ui.label(egui::RichText::new(tl!("The project downloads as this file, to the folder your browser saves downloads in.")).small().weak());
+    let place = if cfg!(any(target_os = "android", target_os = "ios")) {
+        tl!("You choose where the project is saved next.")
+    } else {
+        tl!("The project downloads as this file, to the folder your browser saves downloads in.")
+    };
+    ui.label(egui::RichText::new(place).small().weak());
     buttons(app, ui, "Save", |app| {
         let file = app.dialogs.text.clone();
         app.save_download(&file)
@@ -746,15 +932,113 @@ pub fn open_csv(app: &mut RustGisApp, name: &str, source: CsvSource) -> Result<V
     app.run("ui.dialog", json!({"name": "addCsv"}))?;
     let file = CsvFile { name: name.to_string(), source };
     app.dialogs.mode = "auto";
-    show_columns(&mut app.dialogs, csv_columns(&file, "auto"));
+    let found = csv_columns(&file, "auto", &app.dialogs.text);
+    show_columns(&mut app.dialogs, found);
     app.dialogs.csv = Some(file);
     Ok(Value::Null)
 }
 
+/// Opens Import DXF for a drawing picked: its coordinate system (the map's, to start with) and
+/// whether its blocks (图块) are drawn. A drawing picked while another waits opens after it, so
+/// neither is lost.
+pub fn open_dxf(app: &mut RustGisApp, name: &str, source: DxfSource) -> Result<Value, String> {
+    let file = DxfFile { name: name.to_string(), source };
+    if app.dialogs.open == Some("addDxf") && app.dialogs.dxf.is_some() {
+        app.ui.dxf_waiting.push_back(file);
+        return Ok(Value::Null);
+    }
+    app.run("ui.dialog", json!({"name": "addDxf"}))?;
+    app.dialogs.dxf = Some(file);
+    Ok(Value::Null)
+}
+
+/// Opens Import DXF for a drawing on disk (a drop, Add Data, the Browser pane, `ui.addFile`).
+pub fn open_dxf_path(app: &mut RustGisApp, path: &str) -> Result<Value, String> {
+    open_dxf(app, path, DxfSource::Path(path.to_string()))
+}
+
+/// The current map's coordinate system, as a DXF import can be given it: Web Mercator and the
+/// globe as their EPSG codes; another flat projection as its EPSG code or, for a preset, what the
+/// map projects with, which is the map's exactly (a definition `Crs::parse` reads).
+fn map_crs(p: &rustgis_engine::map::Projection) -> String {
+    use rustgis_engine::map::Projection;
+    match p {
+        Projection::WebMercator => "EPSG:3857".into(),
+        Projection::Globe => "EPSG:4326".into(),
+        Projection::Custom(code) => {
+            let up = code.trim().to_ascii_uppercase();
+            if up.starts_with("EPSG:") {
+                up
+            } else {
+                rustgis_engine::map::projection::lookup(code).map(|(def, _)| def).unwrap_or_else(|_| code.trim().to_string())
+            }
+        }
+    }
+}
+
+/// Import DXF, for the drawing picked: the coordinate system its coordinates are in (blank keeps
+/// them as they are) and whether its blocks (图块) are drawn.
+fn add_dxf(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
+    let Some(name) = app.dialogs.dxf.as_ref().map(|f| f.name.clone()) else {
+        // Opened without a file (`ui.dialog`): the file first.
+        ui.label(tl!("Choose a DXF drawing, then set its coordinate system and whether its blocks are drawn."));
+        let close = buttons(app, ui, "Choose File…", |app| app.run("ui.addDxf", Value::Null).map(|_| ()));
+        return close && app.dialogs.dxf.is_none();
+    };
+    let shown = std::path::Path::new(&name).file_name().and_then(|n| n.to_str()).unwrap_or(&name).to_string();
+    ui.label(egui::RichText::new(shown).strong());
+    ui.label(
+        egui::RichText::new(tl!(
+            "A drawing never says its coordinate system: its coordinates are read in this one. Leave it blank to keep them as they are."
+        ))
+        .weak(),
+    );
+    egui::Grid::new("dxf").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+        let input_label = ui.label(tl!("Coordinate system"));
+        let response = ui.add(egui::TextEdit::singleline(&mut app.dialogs.text).hint_text("EPSG:3857").desired_width(260.0));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, tl!("Coordinate system")));
+        response.labelled_by(input_label.id);
+        ui.end_row();
+    });
+    ui.add_space(4.0);
+    ui.checkbox(&mut app.dialogs.flag, tl!("Import block contents"));
+    buttons(app, ui, "Add", |app| {
+        let mut p = json!({"blocks": app.dialogs.flag});
+        if !app.dialogs.text.trim().is_empty() {
+            p["crs"] = json!(app.dialogs.text.trim());
+        }
+        let file = app.dialogs.dxf.take().ok_or("choose a file first")?;
+        let r = match &file.source {
+            DxfSource::Path(path) => {
+                p["path"] = json!(path);
+                add_dxf_file(app, p)
+            }
+            DxfSource::Bytes(bytes) => app.import_dxf_bytes(&file.name, bytes, p),
+        };
+        // Kept for another try.
+        if r.is_err() {
+            app.dialogs.dxf = Some(file);
+        }
+        r.map(|_| ())
+    })
+}
+
+/// Adds a drawing on disk, read as Add Data reads a file (on a thread of its own when the desktop
+/// app reads it so, [`crate::readjob`]).
+pub(crate) fn add_dxf_file(app: &mut RustGisApp, p: Value) -> Result<Value, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return crate::readjob::run(app, "layer.addData", p);
+    #[cfg(target_arch = "wasm32")]
+    app.run("layer.addData", p)
+}
+
 /// The columns of a file picked for Add Delimited Text, split at `separator` (a code of
-/// [`SEPARATORS`]).
-fn csv_columns(file: &CsvFile, separator: &str) -> Result<Value, String> {
-    let p = if separator == "auto" { json!({}) } else { json!({"delimiter": separator}) };
+/// [`SEPARATORS`]), respecting the coordinate system entered in the dialog.
+fn csv_columns(file: &CsvFile, separator: &str, crs: &str) -> Result<Value, String> {
+    let mut p = if separator == "auto" { json!({}) } else { json!({"delimiter": separator}) };
+    if !crs.trim().is_empty() {
+        p["crs"] = json!(crs.trim());
+    }
     match &file.source {
         CsvSource::Path(path) => rustgis_engine::cmd::layer::columns_in_file(path, &p),
         CsvSource::Bytes(bytes) => rustgis_engine::cmd::layer::columns_of(&file.name, bytes, &p),
@@ -777,6 +1061,8 @@ fn show_columns(d: &mut Dialogs, found: Result<Value, String>) {
         Err(e) => {
             d.list.clear();
             (d.a, d.b, d.c) = (String::new(), String::new(), String::new());
+            // Nothing picked is left, so a corrected coordinate system finds the columns again.
+            d.csv_picked = false;
             d.error = Some(e);
         }
     }
@@ -791,6 +1077,9 @@ fn keep_picked(d: &mut Dialogs, [x, y, wkt]: [String; 3]) {
         (d.a, d.b, d.c) = (x, y, String::new());
     } else if w {
         (d.a, d.b, d.c) = (String::new(), String::new(), wkt);
+    } else {
+        // The picks are gone with the old columns, so later defaults may follow the CRS again.
+        d.csv_picked = false;
     }
 }
 
@@ -809,6 +1098,7 @@ fn add_csv(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
     ui.label(egui::RichText::new(shown).strong());
     ui.label(egui::RichText::new(tl!("Columns named like longitude/latitude, easting/northing or geometry are picked for you.")).weak());
     let mut reread = false;
+    let mut crs_committed = false;
     egui::Grid::new("csv").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
         let columns = app.dialogs.list.clone();
         for (i, label) in ["X column", "Y column", "WKT column"].into_iter().enumerate() {
@@ -833,6 +1123,7 @@ fn add_csv(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                 .response
                 .labelled_by(input_label.id);
             // x/y columns or a WKT column, not both.
+            d.csv_picked |= *v != before;
             if *v != before && !v.is_empty() {
                 if i == 2 {
                     (d.a, d.b) = (String::new(), String::new());
@@ -843,7 +1134,14 @@ fn add_csv(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             ui.end_row();
         }
         let input_label = ui.label(tl!("Coordinate system"));
-        ui.add(egui::TextEdit::singleline(&mut app.dialogs.text).hint_text("EPSG:4326").desired_width(240.0)).labelled_by(input_label.id);
+        let response = ui
+            .add(egui::TextEdit::singleline(&mut app.dialogs.text).hint_text("EPSG:4326").desired_width(240.0))
+            .labelled_by(input_label.id);
+        app.dialogs.csv_crs_dirty |= response.changed();
+        if response.lost_focus() && app.dialogs.csv_crs_dirty {
+            app.dialogs.csv_crs_dirty = false;
+            crs_committed = true;
+        }
         ui.end_row();
         // A sheet has no separator.
         if !sheet {
@@ -864,12 +1162,19 @@ fn add_csv(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             ui.end_row();
         }
     });
-    // Another separator splits the header differently: its columns are read again.
-    if reread && let Some(file) = &app.dialogs.csv {
-        let found = csv_columns(file, app.dialogs.mode);
+    // Only untouched defaults follow a committed CRS edit (Enter also ends a single-line edit).
+    // Parsing a PROJ string registers it, so never parse while the user is still typing.
+    // Another separator keeps the previous picks when its columns still exist.
+    let crs = app.dialogs.text.trim();
+    if (reread || (crs_committed && !app.dialogs.csv_picked))
+        && let Some(file) = &app.dialogs.csv
+    {
+        let found = csv_columns(file, app.dialogs.mode, crs);
         let picked = [app.dialogs.a.clone(), app.dialogs.b.clone(), app.dialogs.c.clone()];
         show_columns(&mut app.dialogs, found);
-        keep_picked(&mut app.dialogs, picked);
+        if reread {
+            keep_picked(&mut app.dialogs, picked);
+        }
     }
     buttons(app, ui, "Add", |app| {
         let mut p = json!({});
@@ -2290,32 +2595,73 @@ pub(crate) fn buttons(app: &mut RustGisApp, ui: &mut egui::Ui, ok: &str, f: impl
     close
 }
 
-/// Buttons that add one of `fields` (the first 24) or an operator to the clause `text`, as Select
-/// By Attributes and the Layer Properties pane's Query tab offer them. Each is set apart from what
-/// the clause ends with, so a name typed just before isn't run into it (`nameLIKE`).
-pub(crate) fn field_chips(ui: &mut egui::Ui, fields: &[rustgis_engine::data::Field], text: &mut String) {
-    let add = |text: &mut String, word: &str| {
-        if !text.is_empty() && !text.ends_with(char::is_whitespace) {
-            text.push(' ');
-        }
-        text.push_str(word);
+/// Adds `word` to the end of the clause `text`, set apart from what the clause ends with, so a
+/// name typed just before isn't run into it (`nameLIKE`), as the buttons beside a clause do.
+pub(crate) fn add_word(text: &mut String, word: &str) {
+    if !text.is_empty() && !text.ends_with(char::is_whitespace) && !text.ends_with('(') {
         text.push(' ');
-    };
+    }
+    text.push_str(word);
+    // A call left open (`round(`) goes on with its arguments.
+    if !word.ends_with('(') {
+        text.push(' ');
+    }
+}
+
+/// The Functions and Variables menus beside a clause's buttons, adding to the clause `text`. They
+/// list the language's own catalogs, the ones the parser reads, so one added to the language is
+/// listed here with no change. Each is listed as it is written, with what it gives on hover; a
+/// function is added open, unless it takes no arguments (`pi()`).
+pub(crate) fn expr_menus(ui: &mut egui::Ui, text: &mut String) {
+    ui.menu_button(tl!("Functions ▾"), |ui| {
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for f in rustgis_engine::data::query::functions() {
+                let word = if f.max == 0 { format!("{}()", f.name) } else { format!("{}(", f.name) };
+                let label = egui::RichText::new(f.signature).monospace();
+                if ui.button(label).on_hover_text(tl!(f.description)).clicked() {
+                    add_word(text, &word);
+                    ui.close();
+                }
+            }
+        });
+    });
+    ui.menu_button(tl!("Variables ▾"), |ui| {
+        for v in rustgis_engine::data::query::VARS {
+            let Some(&name) = v.names.first() else { continue };
+            if ui.button(egui::RichText::new(name).monospace()).on_hover_text(tl!(v.description)).clicked() {
+                add_word(text, name);
+                ui.close();
+            }
+        }
+    });
+}
+
+/// The most fields a clause's buttons offer (a wider table is typed).
+const MAX_FIELD_CHIPS: usize = 40;
+
+/// Buttons that add one of `fields` (the first [`MAX_FIELD_CHIPS`]), as the expression names it
+/// (`"Pop Est"` in quotes), an operator, a function or a variable to the clause `text`: the one
+/// row Select By Attributes, the Layer Properties pane's Query tab and a label class's SQL query
+/// offer. A field an earlier one shadows (`name` after `Name`: the expression reads the first,
+/// letter case aside) gets no button, as the completion list doesn't offer it.
+pub(crate) fn field_chips(ui: &mut egui::Ui, fields: &[rustgis_engine::data::Field], text: &mut String) {
     ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new(tl!("Fields:")).small().weak());
-        for f in fields.iter().take(24) {
+        let named = fields.iter().enumerate().filter(|(i, f)| !fields.iter().take(*i).any(|g| g.name.eq_ignore_ascii_case(&f.name)));
+        for (_, f) in named.take(MAX_FIELD_CHIPS) {
             if ui.small_button(&f.name).clicked() {
-                add(text, &f.name);
+                add_word(text, &crate::exprcomplete::field_ref(&f.name));
             }
         }
     });
     // Wrapped, as the fields are: a narrow pane (the Query tab) would cut the last ones off.
     ui.horizontal_wrapped(|ui| {
-        for op in ["=", "<>", ">", "<", "LIKE", "AND", "OR", "IS NULL"] {
+        for op in ["=", "<>", ">", "<", ">=", "<=", "LIKE", "IN", "IS NULL", "AND", "OR", "NOT"] {
             if ui.small_button(op).clicked() {
-                add(text, op);
+                add_word(text, op);
             }
         }
+        expr_menus(ui, text);
     });
 }
 
@@ -2394,20 +2740,20 @@ fn select_by_attributes(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) -> 
 /// files); `None` when cancelled.
 #[cfg(all(not(target_arch = "wasm32"), not(test)))]
 pub fn pick_open(exts: &[&str], label: &str) -> Option<String> {
-    let dialog = rfd::FileDialog::new();
+    let dialog = crate::filedialog::FileDialog::new();
     let dialog = if exts.is_empty() { dialog } else { dialog.add_filter(label, exts) };
     dialog.add_filter("All files", &["*"]).pick_file().map(|p| p.display().to_string())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn pick_folder() -> Option<String> {
-    rfd::FileDialog::new().pick_folder().map(|p| p.display().to_string())
+    crate::filedialog::FileDialog::new().pick_folder().map(|p| p.display().to_string())
 }
 
 /// Asks where to save, suggesting file `name`, with the system's dialog; `None` when cancelled.
 #[cfg(all(not(target_arch = "wasm32"), not(test)))]
 pub fn pick_save(name: &str, exts: &[&str], label: &str) -> Option<String> {
-    rfd::FileDialog::new().set_file_name(name).add_filter(label, exts).save_file().map(|p| p.display().to_string())
+    crate::filedialog::FileDialog::new().set_file_name(name).add_filter(label, exts).save_file().map(|p| p.display().to_string())
 }
 
 /// Asks for a file to open off the frame: on Linux the system's dialog is drawn by the desktop
@@ -2499,7 +2845,7 @@ pub fn pick_open(_: &[&str], _: &str) -> Option<String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "the browser has no folder picker; kept beside the desktop one")]
 pub fn pick_folder() -> Option<String> {
     None
 }
@@ -2508,9 +2854,6 @@ pub fn pick_folder() -> Option<String> {
 pub fn pick_save(_: &str, _: &[&str], _: &str) -> Option<String> {
     None
 }
-
-#[allow(dead_code)]
-fn unused(_: Value) {}
 
 /// The map's coordinate system: Web Mercator, the globe, a preset, or any projected EPSG code. The
 /// list is on the left; the right shows what the selection is, where it can be used, its PROJ
@@ -2761,9 +3104,178 @@ fn crs_details(ui: &mut egui::Ui, chosen: &str, current: &str, t: &Tokens) {
     }
 }
 
+/// A scale box's text as the command reads it: commas that group thousands (`50,000`,
+/// `1,000,000.5`) taken out, any other comma (a decimal comma, `1,5`) left in, so the command
+/// refuses it rather than reading `15`.
+fn scale_text(text: &str) -> String {
+    let text = text.trim();
+    let whole = text.split_once('.').map_or(text, |(w, _)| w);
+    let grouped = whole.contains(',') && {
+        let mut groups = whole.split(',');
+        let first = groups.next().unwrap_or("");
+        (1..=3).contains(&first.len())
+            && first.chars().all(|c| c.is_ascii_digit())
+            && groups.all(|g| g.len() == 3 && g.chars().all(|c| c.is_ascii_digit()))
+    };
+    let decimals = text.split_once('.').is_none_or(|(_, d)| !d.contains(','));
+    if grouped && decimals { text.replace(',', "") } else { text.to_string() }
+}
+
+/// The columns a name-based edit can reach. Keep both the initial choice and the picker in
+/// step with the command's case-insensitive lookup, including duplicate names in imported data.
+fn calculation_fields(dataset: &rustgis_engine::data::Dataset) -> impl Iterator<Item = &rustgis_engine::data::Field> {
+    dataset.fields.iter().enumerate().filter(|(i, field)| dataset.field_index(&field.name) == Some(*i)).map(|(_, field)| field)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clause's buttons add a field as the expression names it (`"Pop Est"` in quotes, a plain
+    /// name as it is), and every operator, `>=` and `NOT` among them; at most `MAX_FIELD_CHIPS`
+    /// fields are offered, and none an earlier one shadows (`POP` after `pop`), which takes no
+    /// place among them.
+    #[test]
+    fn the_buttons_add_a_field_as_the_expression_names_it() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        use rustgis_engine::data::{Field, FieldType};
+        let mut fields =
+            vec![Field::new("Pop Est", FieldType::Integer), Field::new("pop", FieldType::Integer), Field::new("POP", FieldType::Integer)];
+        fields.extend((0..MAX_FIELD_CHIPS).map(|i| Field::new(format!("f{i}"), FieldType::Integer)));
+        // Without the interface fonts (`theme::install_fonts`) egui's faces have no "▾".
+        let mut h = egui_kittest::Harness::builder()
+            .allow_missing_glyphs()
+            .build_ui_state(move |ui, text: &mut String| field_chips(ui, &fields, text), String::new());
+        h.run();
+        for button in ["Pop Est", ">=", "pop", "AND", "NOT", "IN"] {
+            h.get_by_role_and_label(Role::Button, button).click();
+            h.run();
+        }
+        assert_eq!(h.state(), "\"Pop Est\" >= pop AND NOT IN ");
+        assert!(h.query_by_role_and_label(Role::Button, "POP").is_none(), "a shadowed field");
+        let last = format!("f{}", MAX_FIELD_CHIPS - 3);
+        assert!(h.query_by_role_and_label(Role::Button, &last).is_some(), "the first {MAX_FIELD_CHIPS} fields");
+        let past = format!("f{}", MAX_FIELD_CHIPS - 2);
+        assert!(h.query_by_role_and_label(Role::Button, &past).is_none(), "no more");
+    }
+
+    /// A scale's commas go only where they group thousands: a decimal comma is left for the
+    /// command to refuse, not read as a bigger number.
+    #[test]
+    fn a_scale_box_takes_commas_only_between_thousands() {
+        for (typed, sent) in [
+            ("50,000", "50000"),
+            (" 1,000,000 ", "1000000"),
+            ("1,000,000.5", "1000000.5"),
+            ("50000", "50000"),
+            ("1,5", "1,5"),
+            ("50,00", "50,00"),
+            ("1234,567", "1234,567"),
+            (",500", ",500"),
+            ("1,000.5,5", "1,000.5,5"),
+            ("", ""),
+        ] {
+            assert_eq!(scale_text(typed), sent, "{typed}");
+        }
+        let mut s = rustgis_engine::Session::new(rustgis_engine::Project::default());
+        let refused = s.run("map.goToXY", &json!({"lon": 0, "lat": 0, "scale": scale_text("1,5")})).unwrap_err();
+        assert!(refused.contains("scale must be a positive number"), "{refused}");
+    }
+
+    /// A field dialog opened on a standalone table acts on that table, and on no other once
+    /// another project is open: table ids start again in each project.
+    #[test]
+    fn a_table_dialog_refuses_another_project() {
+        let mut app = RustGisApp::with_sample();
+        let csv = json!({"fileName": "sites.csv", "text": "id,street\n1,Rue Cler\n"});
+        app.run("layer.addDataText", csv.clone()).unwrap();
+        let id = app.session.project.tables[0].id;
+        app.run("ui.dialog", json!({"name": "addField", "table": id})).unwrap();
+        let p = app.dialogs.on_table(&app.session, json!({"name": "note"})).unwrap();
+        assert_eq!(p["table"], json!(id));
+        app.run("project.new", json!({})).unwrap();
+        app.run("layer.addDataText", csv).unwrap();
+        assert_eq!(app.session.project.tables[0].id, id, "the new project's table has the same id");
+        assert!(app.dialogs.on_table(&app.session, json!({"name": "note"})).is_err());
+    }
+
+    /// A case-shadowed field cannot be selected or submitted as another column by the dialog.
+    #[test]
+    fn table_calculation_dialog_refuses_a_shadowed_field() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::new(Session::new(rustgis_engine::Project::default()));
+        app.run("layer.addDataText", json!({"fileName": "names.csv", "text": "Name,name\nfirst,second\n"})).unwrap();
+        app.run("edit.enable", json!({"on": true})).unwrap();
+        let id = app.session.project.tables[0].id;
+        app.run("ui.dialog", json!({"name": "calculateField", "table": id})).unwrap();
+        let mut h = app_harness(app);
+        h.run_steps(3);
+        // A stale choice (for example after a schema change) must not reach the first column.
+        h.state_mut().dialogs.a = "name".into();
+        h.state_mut().dialogs.text = "'changed'".into();
+        h.run_steps(1);
+        h.get_by_label("Calculate").click();
+        h.run_steps(2);
+        assert_eq!(h.state().dialogs.open, Some("calculateField"));
+        assert!(h.state().dialogs.error.is_some());
+        let ds = &h.state().session.project.tables[0].dataset;
+        assert_eq!(ds.value(0, 0), &rustgis_engine::data::Value::Text("first".into()));
+        assert_eq!(ds.value(0, 1), &rustgis_engine::data::Value::Text("second".into()));
+        // The reachable first name is still offered and works.
+        h.get_by_role(egui::accesskit::Role::ComboBox).click();
+        h.run_steps(2);
+        assert!(h.query_by_label("name").is_none(), "the shadowed option is not offered");
+        h.get_by_label("Name").click();
+        h.run_steps(2);
+        h.get_by_label("Calculate").click();
+        h.run_steps(2);
+        assert_eq!(h.state().dialogs.open, None);
+        let ds = &h.state().session.project.tables[0].dataset;
+        assert_eq!(ds.value(0, 0), &rustgis_engine::data::Value::Text("changed".into()));
+        assert_eq!(ds.value(0, 1), &rustgis_engine::data::Value::Text("second".into()));
+    }
+
+    /// Calculate Field suggests as the expression is typed (#1240): Enter takes the highlighted
+    /// field, quoted as the expression needs, and doesn't calculate; Escape closes the list, or
+    /// a call's signature, and leaves the dialog and the text as they are.
+    #[test]
+    fn calculate_field_suggests_the_fields_as_its_expression_is_typed() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::new(Session::new(rustgis_engine::Project::default()));
+        app.run("layer.addDataText", json!({"fileName": "pops.csv", "text": "Pop Est,name\n1,a\n"})).unwrap();
+        app.run("edit.enable", json!({"on": true})).unwrap();
+        let id = app.session.project.tables[0].id;
+        app.run("ui.dialog", json!({"name": "calculateField", "table": id})).unwrap();
+        let mut h = app_harness(app);
+        h.run_steps(3);
+        h.ctx.memory_mut(|m| m.request_focus(egui::Id::unique("cf_expression")));
+        h.run();
+        h.event(egui::Event::Text("po".into()));
+        h.run();
+        assert!(h.query_by_role_and_label(Role::Button, "\"Pop Est\"").is_some(), "the field offered, as written");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().dialogs.text, "\"Pop Est\"");
+        assert_eq!(h.state().dialogs.open, Some("calculateField"), "Enter took the field, not Calculate");
+        h.event(egui::Event::Text(" * ro".into()));
+        h.run();
+        assert!(h.query_by_role_and_label(Role::Button, "round()").is_some(), "the function offered");
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(h.query_by_role_and_label(Role::Button, "round()").is_none(), "the list closed");
+        assert_eq!(h.state().dialogs.text, "\"Pop Est\" * ro");
+        assert_eq!(h.state().dialogs.open, Some("calculateField"));
+        // In a call its signature shows; Escape closes it, not the dialog.
+        h.event(egui::Event::Text(" + round(".into()));
+        h.run();
+        assert!(h.query_by_role_and_label(Role::Label, "round(x[, places])").is_some(), "the signature shown");
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(h.query_by_role_and_label(Role::Label, "round(x[, places])").is_none(), "the signature closed");
+        assert_eq!(h.state().dialogs.open, Some("calculateField"), "Escape took the signature, not the dialog");
+    }
 
     /// The app in a harness, its fonts installed on the first pass (the dialog draws on the next).
     fn app_harness(app: RustGisApp) -> egui_kittest::Harness<'static, RustGisApp> {
@@ -2780,6 +3292,52 @@ mod tests {
             },
             app,
         )
+    }
+
+    /// CRS typing leaves the column choices alone; committing updates defaults, while explicit
+    /// X/Y and None selections survive both Enter and focus loss.
+    #[test]
+    fn delimited_columns_follow_committed_crs_without_replacing_picks() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        for pick in [None, Some("chosen_x"), Some("None")] {
+            let mut app = RustGisApp::new(Session::new(rustgis_engine::Project::default()));
+            open_csv(
+                &mut app,
+                "points.csv",
+                CsvSource::Bytes(b"X,Y,Longitude,Latitude,chosen_x,chosen_y\n1000000,200000,-74,40,1000001,200001\n".to_vec()),
+            )
+            .unwrap();
+            let mut h = app_harness(app);
+            h.run_steps(3);
+            assert_eq!((&*h.state().dialogs.a, &*h.state().dialogs.b), ("Longitude", "Latitude"));
+            if let Some(pick) = pick {
+                h.get_by_role_and_label(Role::ComboBox, "X column").click();
+                h.run_steps(2);
+                h.get_by_role_and_label(Role::Button, pick).click();
+                h.run_steps(2);
+                if pick == "chosen_x" {
+                    h.get_by_role_and_label(Role::ComboBox, "Y column").click();
+                    h.run_steps(2);
+                    h.get_by_role_and_label(Role::Button, "chosen_y").click();
+                    h.run_steps(2);
+                }
+            }
+            let before = (h.state().dialogs.a.clone(), h.state().dialogs.b.clone());
+            h.get_by_role_and_label(Role::TextInput, "Coordinate system").click();
+            h.run_steps(2);
+            h.event(egui::Event::Text("EPSG:2263".into()));
+            h.run_steps(2);
+            assert_eq!(h.state().dialogs.text, "EPSG:2263");
+            assert_eq!((&h.state().dialogs.a, &h.state().dialogs.b), (&before.0, &before.1), "typing must not recompute defaults");
+            h.key_press(if pick == Some("None") { egui::Key::Tab } else { egui::Key::Enter });
+            h.run_steps(2);
+            let expected = if pick.is_none() { ("X", "Y") } else { (before.0.as_str(), before.1.as_str()) };
+            assert_eq!((&*h.state().dialogs.a, &*h.state().dialogs.b), expected, "pick {pick:?}");
+            // Enter also confirms Add through the dialog's usual OK/Cancel row.
+            assert_eq!(h.state().dialogs.open, if pick == Some("None") { Some("addCsv") } else { None });
+            assert!(h.state().dialogs.error.is_none());
+        }
     }
 
     /// The map stamp Add From Service checks: the UI changes the map through `map_mut` and
@@ -2835,6 +3393,46 @@ mod tests {
         }
         let web: Vec<&str> = export_formats(true).map(|(_, e)| *e).collect();
         assert_eq!(web, ["geojson", "parquet", "shp", "csv", "kml", "kmz", "gpx"]);
+    }
+
+    /// The Rename… dialog shows why a name over 200 characters isn't taken and stays open with
+    /// it, the layer keeping its name; a name of 200 renames it and closes the dialog (#1817).
+    #[test]
+    fn the_rename_dialog_says_a_name_is_too_long() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::with_sample();
+        let id = app.session.map().layers.first().map(|l| l.id).unwrap();
+        app.run("layer.select", json!({"layer": id})).unwrap();
+        let old = app.session.map().layer(id).unwrap().name.clone();
+        app.run("ui.dialog", json!({"name": "renameLayer"})).unwrap();
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(900.0, 700.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                let ctx = ui.ctx().clone();
+                super::show(app, &ctx);
+            },
+            app,
+        );
+        h.run_steps(3);
+        h.state_mut().dialogs.text = "é".repeat(201);
+        h.run_steps(1);
+        h.get_by_label("Rename").click();
+        h.run_steps(2);
+        let error = h.state().dialogs.error.clone().unwrap_or_default();
+        assert!(error.contains("201 characters") && error.contains("at most 200"), "{error}");
+        assert_eq!(h.state().dialogs.open, Some("renameLayer"), "stays open with the reason");
+        assert_eq!(h.state().session.map().layer(id).unwrap().name, old);
+        h.state_mut().dialogs.text = "é".repeat(200);
+        h.run_steps(1);
+        h.get_by_label("Rename").click();
+        h.run_steps(2);
+        assert_eq!(h.state().session.map().layer(id).unwrap().name, "é".repeat(200));
+        assert_eq!(h.state().dialogs.open, None);
     }
 
     /// The Coordinate System dialog re-centres a preset (opengeos/RustGIS#517): the central

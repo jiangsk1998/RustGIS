@@ -10,16 +10,17 @@
 //! Generated from PROJ 9.8.1's database (EPSG dataset v12.029, 2025-10-02) with
 //! pyproj 3.8.0: every geographic 2D or projected system in the range that is not
 //! deprecated, as `CRS.from_epsg(code).to_proj4()` without `+type=crs`, and whose projection
-//! proj4rs implements (EPSG:10622, an orthographic, is left out). Geographic 3D, geocentric,
-//! vertical and compound systems have no place in a raster's georeferencing.
+//! proj4rs implemented (RustGIS projected with it when the table was made; EPSG:10622, an
+//! orthographic, is left out). Geographic 3D, geocentric, vertical and compound systems have no
+//! place in a raster's georeferencing.
 //!
 //! Datum shifts: where the first grid-free operation to WGS 84 that PROJ lists
 //! (`TransformerGroup(crs, "EPSG:4326").transformers`) is a single non-zero Helmert step, it is
 //! written as `+towgs84` in the position-vector convention, as the PostGIS entries have it
 //! (VN-2000, the Argentine and Austrian datums …). EPSG:9311 (NAD27 / US National Atlas Equal
-//! Area) has none: its `+datum=NAD27` stands for grid files proj4rs can't load, and a Helmert
-//! with its `+R_A` sphere goes kilometres wrong in proj4rs, so NAD27 is taken as WGS 84 there,
-//! tens of metres off, as it is for its predecessor EPSG:2163 in crs-definitions. The Saba and
+//! Area) has none: its `+datum=NAD27` stood for grid files proj4rs couldn't load, and a
+//! Helmert with its `+R_A` sphere went kilometres wrong in proj4rs, so NAD27 is taken as WGS 84
+//! there, tens of metres off, as it is for its predecessor EPSG:2163 in crs-definitions. The Saba and
 //! Sint Eustatius Helmerts PROJ marks `+exact` (rotations of hundreds of arc-seconds); in the
 //! small-angle form `+towgs84` carries they come out 2–8 m off.
 //!

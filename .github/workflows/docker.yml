@@ -45,15 +45,18 @@ permissions:
 
 # One run at a time per ref, so pushes and manual runs on main publish `edge` in order. A publishing
 # run always finishes (a cancelled one could leave the CLI's tags half updated); a newer push only
-# replaces a run that is still waiting. A pull request's newer push cancels its older run.
+# replaces a run that is still waiting. A pull request's newer push cancels its older run. A pull
+# request's runs are grouped by its number, not by github.ref: a run GitHub creates after the pull
+# request has merged gets refs/heads/main, and would otherwise cancel main's publishing run.
 concurrency:
-  group: docker-${{ github.ref }}
+  group: docker-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Only main and releases publish; a pull request, or a manual run on another branch, only builds
-  # and smoke-tests. (cli-manifest repeats this in its `if`, where env isn't available.)
-  PUBLISH: ${{ github.event_name == 'release' || github.ref == 'refs/heads/main' }}
+  # and smoke-tests. A pull request is told by its event, not its ref: a run created after it merged
+  # has refs/heads/main. (cli-manifest repeats this in its `if`, where env isn't available.)
+  PUBLISH: ${{ github.event_name == 'release' || (github.event_name != 'pull_request' && github.ref == 'refs/heads/main') }}
   WEB_IMAGE: ghcr.io/opengeos/rustgis
   CLI_IMAGE: ghcr.io/opengeos/rustgis-cli
   # The tags of both images (docker/metadata-action); `latest` follows main, as `edge` does.
@@ -62,7 +65,7 @@ env:
     type=sha,enable=${{ github.event_name != 'release' }}
     type=semver,pattern={{version}}
     type=semver,pattern={{major}}.{{minor}}
-    type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+    type=raw,value=latest,enable=${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
 
 jobs:
   web:
@@ -254,7 +257,7 @@ jobs:
   cli-manifest:
     name: Command line image (publish)
     needs: cli
-    if: github.repository == 'opengeos/RustGIS' && (github.event_name == 'release' || github.ref == 'refs/heads/main')
+    if: github.repository == 'opengeos/RustGIS' && (github.event_name == 'release' || (github.event_name != 'pull_request' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

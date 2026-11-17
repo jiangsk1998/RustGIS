@@ -78,7 +78,7 @@ fn service_key_save_redaction_status_and_logout() {
 }
 
 #[test]
-fn basic_login_is_masked_and_session_only_even_with_a_credential_store() {
+fn basic_login_is_masked_and_remember_is_opt_in_even_with_a_credential_store() {
     use rustgis_engine::data::secrets::{MemorySecrets, SecretError};
     let app = RustGisApp::with_sample().with_services(rustgis_ui_egui::Services {
         secrets: Some(std::sync::Arc::new(MemorySecrets::failing(SecretError::Denied))),
@@ -96,7 +96,8 @@ fn basic_login_is_masked_and_session_only_even_with_a_credential_store() {
     settle(&mut h);
     type_field(&mut h, "User", "reader", false);
     type_field(&mut h, "Password", "web-widget-secret-sentinel", true);
-    assert!(h.query_by_label("Remember on this computer").is_none());
+    h.get_by_label("Remember on this computer");
+    assert!(!h.state().ui.connection.remember);
     assert!(!h.get_by_role_and_label(Role::Button, "Test").accesskit_node().is_disabled());
     h.get_by_role_and_label(Role::Button, "Save").click();
     settle(&mut h);
@@ -207,7 +208,7 @@ fn probe_server_with_answer(
                     break stream;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
+                    std::thread::sleep(Duration::from_millis(10)); // test-wait: pace nonblocking accepts until a probe or deadline
                 }
                 Err(e) => panic!("the Test did not connect: {e}"),
             }
@@ -245,7 +246,7 @@ fn finish_probe(h: &mut Harness) {
         if h.state().ui.connection.test.is_none() {
             return;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the connection probe
     }
     panic!("the Test did not finish");
 }
@@ -295,7 +296,7 @@ fn unsaved_wmts_test_uses_typed_header_or_basic_without_touching_saved_login() {
         assert!(!h.state().dialogs.info.as_deref().unwrap().contains(&expected));
         assert!(h.state().ui.connection.id.is_none());
         assert_eq!(h.state().session.connections.connections, vec![saved.clone()]);
-        assert_eq!(web::known_secret(&h.state().session, &saved).unwrap().expose(), "existing-saved-login");
+        assert_eq!(web::known_secret(&mut h.state_mut().session, &saved).unwrap().expose(), "existing-saved-login");
         for entry in h.state().session.log.entries().filter(|e| e.command == "connection.test") {
             assert!(entry.params.get("id").is_none());
             assert!(entry.params.get("password").is_none());
@@ -374,7 +375,7 @@ fn unsaved_authenticated_test_discards_late_results_after_edit_cancel_or_project
             if old.lock().unwrap().is_some() {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the discarded probe result
         }
         assert!(old.lock().unwrap().is_some(), "the detached request must actually complete");
         assert_eq!(h.state().dialogs.info, None, "{action}");

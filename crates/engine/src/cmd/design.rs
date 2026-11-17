@@ -94,6 +94,15 @@ pub(crate) fn need_editable(s: &Session) -> Option<&'static str> {
     need_feature_layer(s)
 }
 
+/// Editing is on, and a feature layer is active or the command's parameters name a standalone
+/// table (`"table"`, [`Session::named_table`]).
+pub(crate) fn need_editable_or_table(s: &Session) -> Option<&'static str> {
+    if s.condition_table.is_some() && s.map().editing.settings.enabled {
+        return None;
+    }
+    need_editable(s)
+}
+
 /// Editing is on and features are selected.
 pub(crate) fn need_editable_selection(s: &Session) -> Option<&'static str> {
     if !s.map().editing.settings.enabled {
@@ -125,6 +134,21 @@ pub(crate) fn apply_with(s: &mut Session, id: u32, changes: Vec<Change>, new_def
     }
     if !s.map().editing.settings.enabled {
         return Err("editing is turned off (Edit › Edit)".into());
+    }
+    // Construction belongs to an object, not a reusable numeric id. Each removed or inserted
+    // feature that passes here (cut/paste, split pieces, edits) forgets its construction. Some
+    // row changes don't (GeoPackage and offline-area syncs, archive restore): there a feature
+    // keeps its construction only while its geometry still equals it (see `box_spec`). Undo
+    // keeps its own cache snapshot.
+    for change in &changes {
+        let feature = match (&change.before, change.row) {
+            (Some(before), None) => Some(before.id),
+            (None, Some(row)) => s.map().layer(id).and_then(|l| l.dataset.features.get(row)).map(|f| f.id),
+            _ => None,
+        };
+        if let Some(feature) = feature {
+            crate::construction::forget_feature(s, id, feature);
+        }
     }
     let elevation = s.map().editing.settings.elevation.clone();
     // Elevation from a surface: sampled before the layer is borrowed mutably.
@@ -1117,7 +1141,7 @@ fn edit_vertex(s: &mut Session, p: &Json) -> CmdResult {
 }
 
 /// Replaces a feature's shape with one of the layer's kind, as one edit.
-fn replace_geometry(s: &mut Session, id: u32, row: usize, g: Geometry) -> Result<(), String> {
+pub(crate) fn replace_geometry(s: &mut Session, id: u32, row: usize, g: Geometry) -> Result<(), String> {
     super::edit::validate(&g)?;
     let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
     if l.geometry_type() != GeometryType::None && l.geometry_type() != g.kind() {
@@ -1583,9 +1607,15 @@ fn subtypes(s: &mut Session, p: &Json) -> CmdResult {
     let fname = f.name.clone();
     let list = p.get("subtypes").and_then(Json::as_array).ok_or("subtypes is required")?;
     let mut subs = Vec::new();
-    for v in list.iter().take(1000) {
+    super::at_most("subtypes", "a field", list, 1000)?;
+    for v in list {
         let code = v.get("code").and_then(Json::as_i64).ok_or("each subtype has an integer code")?;
-        let name = v.get("name").and_then(Json::as_str).ok_or("each subtype has a name")?.chars().take(200).collect();
+        let name = super::within(
+            "a subtype's name",
+            "a subtype's name",
+            v.get("name").and_then(Json::as_str).ok_or("each subtype has a name")?,
+            200,
+        )?;
         let defaults: Vec<(String, Value)> = v
             .get("defaults")
             .and_then(Json::as_object)
@@ -1615,7 +1645,10 @@ fn subtypes(s: &mut Session, p: &Json) -> CmdResult {
         let base = l.renderer.base_symbol();
         // The classes come from every feature, so a definition query doesn't drop any; the
         // features past them are counted among those it lets through, which are drawn.
-        let (r, rest) = rustgis_map::Renderer::unique_counted(&l.dataset, &[], &fname, rustgis_map::Ramp::default(), base)?;
+        let (mut r, rest) = rustgis_map::Renderer::unique_counted(&l.dataset, &[], &fname, rustgis_map::Ramp::default(), base)?;
+        if l.no_fill == Some(rustgis_map::NoFill::Symbols) {
+            r.map_symbols(super::layer::show_fill);
+        }
         let rows = l.visible_rows();
         past = PastClasses { features: drawn_past(&l.dataset, &r, &fname, &rows), ..rest };
         l.renderer = r;
@@ -1907,12 +1940,10 @@ fn template(s: &mut Session, p: &Json) -> CmdResult {
             defaults.push((l.dataset.fields.get(fi).map(|f| f.name.clone()).unwrap_or_default(), coerced));
         }
     }
+    // Checked on the way to adding it, before the templates change: a removal doesn't read it.
+    let description = super::within("description", "a template's description", ps(p, "description").unwrap_or(""), 500)?;
     l.design.templates.retain(|t| !t.name.eq_ignore_ascii_case(&name));
-    l.design.templates.push(FeatureTemplate {
-        name: name.clone(),
-        description: ps(p, "description").unwrap_or("").chars().take(500).collect(),
-        defaults,
-    });
+    l.design.templates.push(FeatureTemplate { name: name.clone(), description, defaults });
     Ok(json!({"template": name, "templates": l.design.templates.len()}))
 }
 
@@ -2361,6 +2392,13 @@ fn elevation_inputs(input: &super::InputContext<'_>, p: &Json) -> Result<super::
 /// Only new rows sample the stored elevation surface; ordinary attribute edits do not.
 pub(crate) fn new_feature_inputs(input: &super::InputContext<'_>, p: &Json) -> Result<super::Inputs, String> {
     let s = input;
+    // A row of a standalone table: the table, with no surface to read (it has no geometry).
+    if p.get("table").is_some_and(|t| !t.is_null()) && p.get("layer").is_none_or(Json::is_null) {
+        let id = s.project.tables.get(s.table_index(p)?).map(|t| t.id).ok_or("no such table")?;
+        let mut inputs = super::Inputs::layers(std::iter::empty());
+        inputs.tables.push(id);
+        return Ok(inputs);
+    }
     let mut inputs = super::Inputs::primary(s, p)?;
     if let Elevation::Surface(name) = &s.map().editing.settings.elevation {
         inputs.layers.extend(surface_layer(input, name).map(|l| (s.map().instance_id(), l.id)));

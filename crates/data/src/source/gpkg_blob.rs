@@ -27,12 +27,16 @@ fn envelope_len(flags: u8) -> Option<usize> {
     }
 }
 
-/// A GeoPackage geometry blob: the header's envelope (if any) and the WKB after it.
+/// A version-zero GeoPackage geometry blob: its envelope (if any) and WKB. Newer header
+/// versions are unreadable, as they are for an empty geometry; never decode them as version zero.
 pub(crate) fn split_blob(b: &[u8]) -> Option<(Option<Extent>, &[u8])> {
     let (magic, rest) = b.split_at_checked(2)?;
     if magic != b"GP" {
         // Some writers store plain WKB.
         return Some((None, b));
+    }
+    if rest.first() != Some(&0) {
+        return None;
     }
     let &flags = rest.get(1)?;
     let little = flags & 1 == 1;
@@ -76,10 +80,52 @@ pub(crate) fn field_type(decl: &str) -> Option<FieldType> {
 }
 
 /// A DATE or DATETIME column's value, from its text (`None` for a number or a blob): ISO 8601, as
-/// GeoPackage stores them ([`crate::Value::parse_stored`]). `None` when it isn't a date of the field's type, which a read gives as
-/// null and counts ([`super::Batch::unread_dates`]); empty text is null without being counted.
-pub(crate) fn temporal(text: Option<&str>, ty: FieldType) -> Option<crate::Value> {
-    let text = text?;
-    let v = crate::Value::parse_stored(text, ty);
-    (!v.is_null() || crate::Value::Text(text.to_string()).asks_null()).then_some(v)
+/// GeoPackage stores them ([`crate::Value::parse_stored`]). Null when it isn't a date of the field's
+/// type (a number or a blob in the column included), which a read counts as the field `k`'s in
+/// `unread` ([`super::Batch::unread_dates`]); empty text is null without being counted. With
+/// `rounded`, digits past the microsecond are rounded off and counted there
+/// ([`super::Batch::rounded_dates`]); without, such a value isn't a date.
+pub(crate) fn temporal(
+    text: Option<&str>,
+    ty: FieldType,
+    unread: &mut Vec<usize>,
+    rounded: Option<&mut Vec<usize>>,
+    k: usize,
+) -> crate::Value {
+    let Some(text) = text else {
+        super::unread_date(unread, k);
+        return crate::Value::Null;
+    };
+    let (v, cut) = match rounded {
+        Some(_) => crate::Value::parse_stored_counted(text, ty),
+        None => (crate::Value::parse_stored(text, ty), false),
+    };
+    if v.is_null() {
+        if !crate::Value::Text(text.to_string()).asks_null() {
+            super::unread_date(unread, k);
+        }
+    } else if cut && let Some(rounded) = rounded {
+        super::unread_date(rounded, k);
+    }
+    v
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn nonempty_geometry_headers_refuse_newer_versions() {
+        let mut point = vec![1, 1, 0, 0, 0];
+        point.extend(10f64.to_le_bytes());
+        point.extend(20f64.to_le_bytes());
+        let mut blob = b"GP\0\x01\0\0\0\0".to_vec();
+        blob.extend(&point);
+        assert_eq!(split_blob(&blob), Some((None, point.as_slice())));
+        for version in [1, u8::MAX] {
+            blob[2] = version;
+            assert!(split_blob(&blob).is_none(), "version {version}");
+        }
+        assert_eq!(split_blob(&point), Some((None, point.as_slice())), "plain WKB remains supported");
+    }
 }

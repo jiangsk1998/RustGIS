@@ -766,7 +766,6 @@ mod folder {
     }
 
     #[cfg(test)]
-    #[allow(clippy::unwrap_used, clippy::panic)]
     mod tests {
         use std::sync::mpsc::channel;
         use std::sync::{Arc, Mutex};
@@ -884,7 +883,6 @@ mod folder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;

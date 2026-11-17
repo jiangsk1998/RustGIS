@@ -790,7 +790,6 @@ pub fn fields_of_the_world(app: &mut RustGisApp, ui: &mut egui::Ui) {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -817,7 +816,7 @@ mod tests {
             let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while crate::readjob::land(&mut app) {
                 assert!(std::time::Instant::now() < until);
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                std::thread::sleep(std::time::Duration::from_millis(5)); // test-wait: legacy polling for dataset add completion
             }
             let (ok, note) = app.ui.web_services.note.as_ref().unwrap();
             assert_eq!(*ok, outcome == "success", "{note}");

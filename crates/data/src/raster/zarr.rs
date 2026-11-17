@@ -7,11 +7,13 @@
 //! with byte shuffle), zlib, gzip, zstd and LZ4. Every count, size and length in a store is
 //! hostile input and bounded.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use super::{ColorHint, Crs, Exact, GeoTransform, Raster, max_samples};
+use crate::date::{civil_from_days, days_from_civil};
 use crate::{DataError, Result};
 
 /// The metadata files a store may have at its root: Zarr 3's `zarr.json`, Zarr 2's consolidated
@@ -257,6 +259,10 @@ pub struct Array {
     /// Its dimensions' names (`_ARRAY_DIMENSIONS`, `dimension_names`), when it says.
     pub dims: Vec<String>,
     pub attrs: Map<String, Value>,
+    /// The georeferencing its groups give it (`inherit_georeferencing`), apart from its own
+    /// attributes so those (and its grid mapping's) come first: each part (transform, coordinate
+    /// system, dimensions) as one group gives it, shared by the arrays under that group.
+    pub inherited: Vec<Arc<Map<String, Value>>>,
     /// Chunk keys: a prefix (`c/` in Zarr 3) and the separator between indexes.
     key_prefix: String,
     separator: char,
@@ -474,7 +480,225 @@ pub fn parse_store(docs: &[(String, Vec<u8>)]) -> Result<Store> {
             "no Zarr arrays found: give a store with consolidated metadata (.zmetadata, or zarr.json at its root), a folder on this computer, or the address of one array",
         ));
     }
+    // Each group's part made once, so a large group attribute isn't copied for every array.
+    let groups = georeferencing_groups(&json);
+    let mut parts = HashMap::new();
+    for a in arrays.iter_mut().filter(|_| !groups.is_empty()) {
+        inherit_georeferencing(a, &groups, &mut parts);
+    }
     Ok(Store { arrays })
+}
+
+/// `docs` parsed as JSON, those over [`MAX_METADATA`] left out (as [`parse_store`] refuses them),
+/// by key from the store's root.
+fn small_json(docs: &[(String, Vec<u8>)]) -> Vec<(&str, Value)> {
+    docs.iter()
+        .filter(|(_, b)| b.len() <= MAX_METADATA)
+        .filter_map(|(k, b)| serde_json::from_slice::<Value>(b).ok().map(|v| (k.trim_start_matches('/'), v)))
+        .collect()
+}
+
+/// Whether `docs` (a store's root files, [`METADATA_KEYS`]) are a group's that lists no arrays:
+/// a Zarr 3 root group whose `consolidated_metadata` isn't an object, or a Zarr 2 `.zgroup` with
+/// no `.zmetadata`. Its arrays are then found by name ([`member_keys`]).
+pub fn lists_no_arrays(docs: &[(String, Vec<u8>)]) -> bool {
+    let json = small_json(docs);
+    let doc = |k: &str| json.iter().find(|(d, _)| *d == k).map(|(_, v)| v);
+    match doc("zarr.json") {
+        Some(z) => {
+            z.get("node_type").and_then(Value::as_str) == Some("group") && !z.get("consolidated_metadata").is_some_and(Value::is_object)
+        }
+        None => doc(".zgroup").is_some() && doc(".zarray").is_none() && !doc(".zmetadata").is_some_and(|m| m.get("metadata").is_some()),
+    }
+}
+
+/// Most names one round of [`member_keys`] asks for: room for the variable's groups (up to
+/// [`MAX_GROUP_DEPTH`]), the variable, the root's `spatial:dimensions`, and the variable's own
+/// dimensions and grid mapping in its group and at the root (each at most [`MAX_DIMS`]), which
+/// come first.
+const MAX_PROBES: usize = MAX_GROUP_DEPTH + 3 + 3 * MAX_DIMS;
+
+/// The metadata files to fetch next from a store whose root lists no arrays ([`lists_no_arrays`]),
+/// given the files fetched so far (`docs`), in this order: the groups above `variable` (its path in
+/// the store, at most [`MAX_GROUP_DEPTH`] of them), the variable, the root group's
+/// `spatial:dimensions`, the variable's dimensions and grid mapping (CF `grid_mapping`), then those
+/// the other arrays fetched so far name. Each is asked for in its array's group and at the root,
+/// where [`Store`] looks for coordinates and grid mappings. Zarr 3 asks for `<name>/zarr.json`, Zarr 2 for `<name>/.zarray` and
+/// `<name>/.zattrs` (a group's `.zgroup` and `.zattrs`).
+///
+/// Files already in `docs`, documents over [`MAX_METADATA`], names that would lead out of the store
+/// and names with `?`, `#` or `%` (which an address would read as something else) are left out.
+/// At most [`MAX_PROBES`] names are asked for, with room for everything a read of the variable
+/// uses: only the other arrays' dimensions (coordinates of coordinates, which no read looks up) can
+/// be left past it. Empty when the root lists its arrays.
+pub fn member_keys(docs: &[(String, Vec<u8>)], variable: &str) -> Vec<String> {
+    if !lists_no_arrays(docs) {
+        return Vec::new();
+    }
+    let v3 = docs.iter().any(|(k, _)| k == "zarr.json");
+    let json = small_json(docs);
+    let strings = |v: Option<&Value>| -> Vec<String> {
+        v.and_then(Value::as_array)
+            .map(|a| a.iter().take(MAX_DIMS).filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    // Each array's dimension names and its grid mapping's (CF `grid_mapping`, which `crs_of`
+    // looks up), by its path; the variable's first.
+    let mut arrays: Vec<(&str, Vec<String>)> = json
+        .iter()
+        .filter_map(|(k, v)| {
+            let (p, dims, attrs) = if v3 {
+                let p = k.strip_suffix("zarr.json")?;
+                if v.get("node_type").and_then(Value::as_str) != Some("array") {
+                    return None;
+                }
+                (p, strings(v.get("dimension_names")), v.get("attributes"))
+            } else {
+                (k.strip_suffix(".zattrs")?, strings(v.get("_ARRAY_DIMENSIONS")), Some(v))
+            };
+            let mapping = attrs.and_then(|a| a.get("grid_mapping")).and_then(Value::as_str).map(str::to_string);
+            Some((p.trim_end_matches('/'), dims.into_iter().chain(mapping).collect()))
+        })
+        .collect();
+    let variable = variable.trim().trim_matches('/');
+    arrays.sort_by_key(|(p, _)| (*p != variable, *p));
+    let mut groups = Vec::new();
+    let mut names = Vec::new();
+    if !variable.is_empty() {
+        let parts: Vec<&str> = variable.split('/').collect();
+        groups.extend((1..parts.len()).map(|depth| parts[..depth].join("/")).take(MAX_GROUP_DEPTH));
+        names.push(variable.to_string());
+    }
+    let root = json.iter().find(|(k, _)| *k == if v3 { "zarr.json" } else { ".zattrs" }).map(|(_, v)| v);
+    let root_attrs = if v3 { root.and_then(|r| r.get("attributes")) } else { root };
+    names.extend(strings(root_attrs.and_then(|a| a.get("spatial:dimensions"))));
+    for (path, dims) in arrays {
+        let group = path.rsplit_once('/').map(|(g, _)| g);
+        for d in dims {
+            if let Some(g) = group {
+                names.push(format!("{g}/{d}"));
+            }
+            names.push(d);
+        }
+    }
+    let have: HashSet<&str> = docs.iter().map(|(k, _)| k.trim_start_matches('/')).collect();
+    let fine = |n: &str| !n.is_empty() && safe_path(n) && !n.contains(['?', '#', '%']);
+    let (group_files, array_files): (&[&str], &[&str]) =
+        if v3 { (&["zarr.json"], &["zarr.json"]) } else { (&[".zgroup", ".zattrs"], &[".zarray", ".zattrs"]) };
+    // Each name once, those with every file fetched already left out, before the cap.
+    let mut seen = HashSet::new();
+    let wanted = groups
+        .iter()
+        .map(|g| (g.as_str(), group_files))
+        .chain(names.iter().map(|n| (n.as_str(), array_files)))
+        .filter(|(n, files)| fine(n) && seen.insert(*n) && files.iter().any(|f| !have.contains(format!("{n}/{f}").as_str())));
+    let mut out = Vec::new();
+    for (n, files) in wanted.take(MAX_PROBES) {
+        out.extend(files.iter().map(|f| format!("{n}/{f}")).filter(|k| !have.contains(k.as_str())));
+    }
+    out
+}
+
+/// The `spatial:` keys that place a grid, which come together from one place: the array, or the
+/// nearest group giving a transform.
+const TRANSFORM_KEYS: [&str; 4] = ["spatial:transform", "spatial:transform_type", "spatial:registration", "spatial:shape"];
+/// The `proj:` keys that give a coordinate system, which come together from one place too.
+const PROJ_KEYS: [&str; 3] = ["proj:wkt2", "proj:code", "proj:epsg"];
+
+/// How many levels of groups above an array are looked at for its georeferencing: far more than
+/// stores nest, and it bounds the walk on a store of very deep paths.
+const MAX_GROUP_DEPTH: usize = 64;
+
+/// Gives `a` (in [`Array::inherited`]) the georeferencing the groups above it set with the
+/// zarr-conventions `spatial:` and `proj:` attributes ([`georeferencing_groups`]), each part from
+/// the nearest group that sets it (within [`MAX_GROUP_DEPTH`] levels), and only where the array
+/// doesn't set it itself:
+/// - the transform with its type, registration and shape, from the nearest group giving a
+///   transform. [`spatial_grid`] applies it only with that group's own `spatial:shape`, checked
+///   against the array's map. A shape from another group never vouches for it, so a coarser level
+///   of a pyramid isn't placed by the full-resolution transform;
+/// - the coordinate system (`proj:wkt2`, `proj:code`, `proj:epsg`), from the nearest group giving
+///   one, unless the array gives any of them;
+/// - `spatial:dimensions`.
+fn inherit_georeferencing(
+    a: &mut Array,
+    groups: &HashMap<&str, &Map<String, Value>>,
+    parts: &mut HashMap<(String, usize), Arc<Map<String, Value>>>,
+) {
+    let has = |keys: &[&str], m: &Map<String, Value>| keys.iter().any(|k| m.contains_key(*k));
+    let mut transform = a.attrs.contains_key("spatial:transform");
+    let mut proj = has(&PROJ_KEYS, &a.attrs);
+    let mut dims = a.attrs.contains_key("spatial:dimensions");
+    let path = a.path.clone();
+    let mut dir = path.as_str();
+    for _ in 0..MAX_GROUP_DEPTH {
+        if path.is_empty() || (transform && proj && dims) {
+            break;
+        }
+        dir = dir.rsplit_once('/').map_or("", |(d, _)| d);
+        if let Some(g) = groups.get(dir) {
+            let mut take = |part: usize, keys: &[&str]| {
+                let made = parts
+                    .entry((dir.to_string(), part))
+                    .or_insert_with(|| Arc::new(keys.iter().filter_map(|k| g.get(*k).map(|v| (k.to_string(), v.clone()))).collect()));
+                a.inherited.push(made.clone());
+            };
+            // Taken without its shape too, so a transform left unread is said ([`spatial_grid`]
+            // doesn't apply a group's without its shape).
+            if !transform && g.contains_key("spatial:transform") {
+                transform = true;
+                take(0, &TRANSFORM_KEYS);
+            }
+            if !proj && has(&PROJ_KEYS, g) {
+                proj = true;
+                take(1, &PROJ_KEYS);
+            }
+            if !dims && g.contains_key("spatial:dimensions") {
+                dims = true;
+                take(2, &["spatial:dimensions"]);
+            }
+        }
+        if dir.is_empty() {
+            break;
+        }
+    }
+}
+
+/// The groups of a store's metadata (`json`, by key) that set georeferencing (`spatial:` or `proj:`
+/// attributes, Zarr 3 `zarr.json` or Zarr 2 `.zattrs`), by folder: found once, so each array
+/// looks only these up, and a store with none is passed by.
+fn georeferencing_groups(json: &HashMap<String, Value>) -> HashMap<&str, &Map<String, Value>> {
+    let mut groups = HashMap::new();
+    for (k, v) in json {
+        let (dir, file) = k.rsplit_once('/').unwrap_or(("", k.as_str()));
+        let attrs = match file {
+            "zarr.json" if v.get("node_type").and_then(Value::as_str) == Some("group") => v.get("attributes"),
+            ".zattrs" if !json.contains_key(&if dir.is_empty() { ".zarray".to_string() } else { format!("{dir}/.zarray") }) => Some(v),
+            _ => None,
+        };
+        if let Some(m) = attrs.and_then(Value::as_object).filter(|m| m.keys().any(|k| k.starts_with("spatial:") || k.starts_with("proj:")))
+        {
+            // A Zarr 3 group's zarr.json comes before a stray .zattrs beside it.
+            if file == "zarr.json" || !groups.contains_key(dir) {
+                groups.insert(dir, m);
+            }
+        }
+    }
+    groups
+}
+
+/// The attributes `a`'s transform is read from: its own when it gives one, else the part it
+/// inherits; `None` when it has neither.
+fn transform_attrs(a: &Array) -> Option<&Map<String, Value>> {
+    if a.attrs.contains_key("spatial:transform") {
+        return Some(&a.attrs);
+    }
+    a.inherited.iter().map(|m| &**m).find(|m| m.contains_key("spatial:transform"))
+}
+
+/// Whether `a` gives a `spatial:transform`, its own or a group's, whether or not it is applied.
+fn has_transform(a: &Array) -> bool {
+    transform_attrs(a).is_some()
 }
 
 fn u64s(v: Option<&Value>) -> Option<Vec<u64>> {
@@ -537,6 +761,7 @@ fn array_v2(path: &str, z: &Value, attrs: Option<&Value>) -> Option<Array> {
         fortran: z.get("order").and_then(Value::as_str) == Some("F"),
         codecs,
         attrs,
+        inherited: Vec::new(),
         key_prefix: String::new(),
         separator: if z.get("dimension_separator").and_then(Value::as_str) == Some("/") { '/' } else { '.' },
     })
@@ -638,6 +863,7 @@ fn array_v3(path: &str, z: &Value) -> Option<Array> {
         fortran: false,
         codecs,
         attrs: z.get("attributes").and_then(Value::as_object).cloned().unwrap_or_default(),
+        inherited: Vec::new(),
         key_prefix,
         separator,
     })
@@ -818,10 +1044,28 @@ fn bitunshuffle(d: &[u8], size: usize, format: u8) -> Vec<u8> {
     out
 }
 
+/// The length of a shard's index of `count` chunks: 16 bytes a chunk, and a checksum after them.
+fn index_len(count: usize, index: &[Codec]) -> Option<usize> {
+    count.checked_mul(16)?.checked_add(if index.contains(&Codec::Crc32c) { 4 } else { 0 })
+}
+
+/// A shard's index (`raw`, encoded with `index`): each of its `count` chunks' (offset, size),
+/// `(u64::MAX, u64::MAX)` for one it doesn't hold.
+fn shard_index(raw: &[u8], count: usize, index: &[Codec]) -> Result<Vec<(u64, u64)>> {
+    if Some(raw.len()) != index_len(count, index) {
+        return Err(bad("a shard's index is cut"));
+    }
+    let (idx, little) = decode_chunk(index, raw, &[count as u64, 2], DType { kind: Kind::UInt, size: 8, little: true }, None)?;
+    let word = |b: &[u8]| -> u64 {
+        let b: [u8; 8] = b.try_into().unwrap_or([0xff; 8]);
+        if little { u64::from_le_bytes(b) } else { u64::from_be_bytes(b) }
+    };
+    Ok(idx.as_chunks::<16>().0.iter().map(|p| p.split_at(8)).map(|(o, l)| (word(o), word(l))).collect())
+}
+
 /// A shard of `shard` values: its chunks of `inner` values, each decoded with `codecs`, put in
 /// place (row-major), with its index of (offset, size) pairs (`index` its encoding) at the end
 /// or the start. Chunks it doesn't hold are `fill`. Returns the values' bytes and byte order.
-#[allow(clippy::too_many_arguments)]
 fn unshard(
     d: &[u8],
     shard: &[u64],
@@ -844,18 +1088,10 @@ fn unshard(
         .ok_or_else(|| bad("a shard too large"))?;
     // The index: 16 bytes a chunk, and a checksum after them. It must lie in the file, so its size
     // is bounded by the file's before anything is made for it.
-    let checksum = if index.contains(&Codec::Crc32c) { 4 } else { 0 };
-    let ilen = count
-        .checked_mul(16)
-        .and_then(|n| n.checked_add(checksum))
-        .filter(|&n| n <= d.len())
-        .ok_or_else(|| bad("a shard's index is cut"))?;
+    let ilen = index_len(count, index).filter(|&n| n <= d.len()).ok_or_else(|| bad("a shard's index is cut"))?;
     let raw = if index_at_end { d.get(d.len() - ilen..) } else { d.get(..ilen) }.ok_or_else(|| bad("a shard's index is cut"))?;
-    let (idx, il) = decode_chunk(index, raw, &[count as u64, 2], DType { kind: Kind::UInt, size: 8, little: true }, None)?;
-    let word = |i: usize| -> u64 {
-        let b: [u8; 8] = idx.get(i * 8..i * 8 + 8).and_then(|b| b.try_into().ok()).unwrap_or([0xff; 8]);
-        if il { u64::from_le_bytes(b) } else { u64::from_be_bytes(b) }
-    };
+    let idx = shard_index(raw, count, index)?;
+    let word = |i: usize| -> u64 { idx.get(i / 2).map_or(u64::MAX, |&(o, l)| if i.is_multiple_of(2) { o } else { l }) };
     let little = codecs.iter().find_map(|c| if let Codec::Bytes { little } = c { Some(*little) } else { None }).unwrap_or(dtype.little);
     let size = dtype.size;
     let total = shard
@@ -910,53 +1146,172 @@ fn unshard(
 
 // --- Slices --------------------------------------------------------------------------------------
 
-/// Which slice of which variable: its other dimensions' indexes (0 when not given).
+/// Which slice of which variable: its other dimensions' indexes (0 when not given), and the window
+/// of its map to read (all of it when not given).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Selection {
     pub variable: String,
     pub index: Vec<(String, u64)>,
+    pub window: Option<Window>,
+}
+
+/// A window of a variable's map: columns `x0..x1` and rows `y0..y1` of its cells as stored (the
+/// ends not included).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Window {
+    pub x0: u64,
+    pub y0: u64,
+    pub x1: u64,
+    pub y1: u64,
 }
 
 impl Selection {
-    /// `t2m[time=3,level=0]`, as projects save it.
+    /// `t2m[time=3,level=0]` (`cells=x0:y0:x1:y1` after them for a window), as projects save it.
     pub fn label(&self) -> String {
-        if self.index.is_empty() {
-            return self.variable.clone();
-        }
-        let parts: Vec<String> = self.index.iter().map(|(d, i)| format!("{d}={i}")).collect();
-        format!("{}[{}]", self.variable, parts.join(","))
+        let mut parts: Vec<String> = self.index.iter().map(|(d, i)| format!("{d}={i}")).collect();
+        parts.extend(self.window.map(|w| format!("cells={}:{}:{}:{}", w.x0, w.y0, w.x1, w.y1)));
+        if parts.is_empty() { self.variable.clone() } else { format!("{}[{}]", self.variable, parts.join(",")) }
     }
 
     pub fn parse(s: &str) -> Selection {
-        let s = s.trim();
-        match s.split_once('[') {
-            Some((v, rest)) => Selection {
-                variable: v.to_string(),
-                index: rest
-                    .trim_end_matches(']')
-                    .split(',')
-                    .filter_map(|kv| {
-                        let (k, v) = kv.split_once('=')?;
-                        Some((k.trim().to_string(), v.trim().parse().ok()?))
-                    })
-                    .take(MAX_DIMS)
-                    .collect(),
-            },
-            None => Selection { variable: s.to_string(), index: Vec::new() },
+        Selection::read(s).0
+    }
+
+    /// [`Selection::parse`] for a slice about to be read: a `cells=` part that isn't four whole
+    /// numbers is refused, not read as the whole slice.
+    pub fn parse_strict(s: &str) -> Result<Selection> {
+        match Selection::read(s) {
+            (_, true) => Err(bad(format!("{s}: its cells aren't four whole numbers (first column, first row, end column, end row)"))),
+            (sel, false) => Ok(sel),
         }
+    }
+
+    /// The selection, and whether it has a `cells=` part that isn't a window.
+    fn read(s: &str) -> (Selection, bool) {
+        let s = s.trim();
+        let Some((v, rest)) = s.split_once('[') else { return (Selection { variable: s.to_string(), ..Selection::default() }, false) };
+        let (mut sel, mut malformed) = (Selection { variable: v.to_string(), ..Selection::default() }, false);
+        for (k, v) in rest.trim_end_matches(']').split(',').filter_map(|kv| kv.split_once('=')).take(MAX_DIMS + 1) {
+            let (k, v) = (k.trim(), v.trim());
+            // A window is four `:`-separated whole numbers; a dimension named `cells` has a step.
+            if k == "cells" && v.contains(':') {
+                let n: Vec<Option<u64>> = v.split(':').map(|n| n.trim().parse().ok()).collect();
+                match n[..] {
+                    [Some(x0), Some(y0), Some(x1), Some(y1)] => sel.window = Some(Window { x0, y0, x1, y1 }),
+                    _ => malformed = true,
+                }
+            } else if let Ok(i) = v.parse() {
+                sel.index.push((k.to_string(), i));
+            } else if k == "cells" {
+                malformed = true;
+            }
+        }
+        (sel, malformed)
     }
 }
 
-/// What a slice needs: the chunk files to fetch, and how they make the raster.
+/// Bytes of a store's file that a [`Plan`] with a window reads, handed back under `id`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    pub key: String,
+    pub span: Span,
+    pub id: String,
+}
+
+/// Which bytes of a file a [`Part`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Span {
+    /// Bytes `first..=last`.
+    Bytes(u64, u64),
+    /// The file's last `n` bytes.
+    Tail(u64),
+}
+
+/// A shard a window of a sharded variable reads: where its index is, and which of its chunks.
+#[derive(Clone, Debug)]
+struct ShardRead {
+    key: String,
+    count: usize,
+    chunks: Vec<usize>,
+}
+
+/// What a slice needs: the chunk files to fetch (`keys`, whole), the bytes of files to fetch
+/// (`parts`, for a window: shards' indexes, coordinates), and how they make the raster. A window
+/// of a sharded variable then reads the shards' chunks it needs ([`inner_parts`]).
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub keys: Vec<String>,
+    pub parts: Vec<Part>,
     var: String,
     y: usize,
     x: usize,
     fixed: Vec<u64>,
     ycoord: Option<String>,
     xcoord: Option<String>,
+    window: Window,
+    windowed: bool,
+    shards: Vec<ShardRead>,
+}
+
+/// The id a shard's chunk `c` (in the shard's row-major order) is handed back under.
+fn inner_id(shard: &str, c: usize) -> String {
+    format!("{shard}#{c}")
+}
+
+/// Whether a 1D array's chunks are its values as they are (no compression), so a window reads
+/// only its own values' bytes of them.
+fn plain(c: &Array) -> bool {
+    c.shape.len() == 1 && c.codecs.iter().all(|k| matches!(k, Codec::Bytes { .. } | Codec::Crc32c))
+}
+
+/// The bytes of chunk `i` of a plain 1D array ([`plain`]) holding its values `a..b`; an error
+/// when they lie past what a byte offset holds (a chunk size no store has).
+fn coord_part(c: &Array, i: u64, a: u64, b: u64) -> Result<Part> {
+    let (cs, size) = (c.chunks.first().copied().unwrap_or(1).max(1), c.dtype.size as u64);
+    let at = |v: u64| i.checked_mul(cs).and_then(|start| v.checked_sub(start)).and_then(|n| n.checked_mul(size));
+    let (first, last) = at(a)
+        .zip(at(b).and_then(|e| e.checked_sub(1)))
+        .filter(|(f, l)| f <= l)
+        .ok_or_else(|| bad(format!("{}: its chunks are too large to read", c.path)))?;
+    let key = c.chunk_key(&[i]);
+    let id = format!("{key}@{first}-{last}");
+    Ok(Part { key, span: Span::Bytes(first, last), id })
+}
+
+/// Values `start..end` of a 1D array, from its chunks or, for a [`plain`] one in a window, the bytes
+/// of them [`coord_part`] names; missing ones are its fill value.
+fn coord_values(c: &Array, start: u64, end: u64, windowed: bool, chunks: &HashMap<String, Vec<u8>>) -> Result<Vec<f64>> {
+    if !windowed {
+        return values_1d(c, chunks);
+    }
+    if end.saturating_sub(start) > MAX_COORDS {
+        return Err(bad(format!("{} is too long", c.path)));
+    }
+    let cs = c.chunks.first().copied().unwrap_or(1).max(1);
+    let little = c.codecs.iter().find_map(|k| if let Codec::Bytes { little } = k { Some(*little) } else { None });
+    let dt = DType { little: little.unwrap_or(c.dtype.little), ..c.dtype };
+    let mut out = Vec::new();
+    for i in start / cs..end.div_ceil(cs) {
+        let (a, b) = ((i * cs).max(start), (i + 1).saturating_mul(cs).min(end));
+        if plain(c) {
+            match chunks.get(&coord_part(c, i, a, b)?.id) {
+                Some(bytes) if bytes.len() as u64 == (b - a) * dt.size as u64 => {
+                    out.extend(bytes.chunks_exact(dt.size).map(|v| dt.value(v)))
+                }
+                Some(_) => return Err(bad(format!("{}: a chunk is cut", c.path))),
+                None => out.extend(std::iter::repeat_n(c.fill.unwrap_or(f64::NAN), (b - a) as usize)),
+            }
+        } else {
+            match chunks.get(&c.chunk_key(&[i])) {
+                Some(bytes) => out.extend(c.decode(bytes)?.into_iter().skip((a - i * cs) as usize).take((b - a) as usize)),
+                None => out.extend(std::iter::repeat_n(c.fill.unwrap_or(f64::NAN), (b - a) as usize)),
+            }
+        }
+    }
+    if out.len() as u64 != end - start {
+        return Err(bad(format!("{}: a chunk is cut", c.path)));
+    }
+    Ok(out)
 }
 
 fn is_y(d: &str) -> bool {
@@ -967,8 +1322,12 @@ fn is_x(d: &str) -> bool {
     matches!(d.to_ascii_lowercase().as_str(), "lon" | "longitude" | "x" | "rlon" | "nav_lon" | "west_east" | "i" | "xc" | "easting")
 }
 
-/// The dimensions that make the map: those named like y and x, else the last two.
+/// The dimensions that make the map: those `spatial:dimensions` names (y first), else those named
+/// like y and x, else the last two.
 fn map_dims(a: &Array) -> (usize, usize) {
+    if let Some(Some(yx)) = spatial_dims(a) {
+        return yx;
+    }
     let names = a.dim_names();
     let y = names.iter().rposition(|d| is_y(d));
     let x = names.iter().rposition(|d| is_x(d));
@@ -976,6 +1335,76 @@ fn map_dims(a: &Array) -> (usize, usize) {
         (Some(y), Some(x)) if y != x => (y, x),
         _ => (a.shape.len().saturating_sub(2), a.shape.len().saturating_sub(1)),
     }
+}
+
+/// The map's dimensions (y, x) `a`'s `spatial:dimensions` (its own or a group's) names: `None`
+/// when it has none, `Some(None)` when it doesn't name two distinct dimensions of `a`.
+fn spatial_dims(a: &Array) -> Option<Option<(usize, usize)>> {
+    let dims = a.attrs.get("spatial:dimensions").or_else(|| a.inherited.iter().find_map(|m| m.get("spatial:dimensions")))?;
+    let names = a.dim_names();
+    let named = |i: usize| dims.get(i)?.as_str().and_then(|n| names.iter().position(|d| d == n));
+    Some(match (named(0), named(1)) {
+        (Some(y), Some(x)) if y != x => Some((y, x)),
+        _ => None,
+    })
+}
+
+/// A grid placed by `spatial:transform` (zarr-conventions `spatial:`): the outer edge of its first
+/// column and row, and the cell size along each (negative when rows run south).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Affine {
+    x0: f64,
+    dx: f64,
+    y0: f64,
+    dy: f64,
+}
+
+/// `a`'s placement from its `spatial:transform` (its own or a group's): an affine transform
+/// `[a, b, c, d, e, f]` (x = a·col + b·row + c, y = d·col + e·row + f) with no rotation, of a
+/// grid whose `spatial:shape`, when given, is its map's. A node-registered grid's transform gives
+/// its first cell's centre. `None` when there is none, or it is one this reader doesn't apply
+/// (rotated, another `spatial:transform_type` or `spatial:registration`, a group's without its
+/// shape): the coordinate arrays place the grid then.
+fn spatial_grid(a: &Array) -> Option<Affine> {
+    if a.shape.len() < 2 {
+        return None;
+    }
+    let attrs = transform_attrs(a)?;
+    // A group's transform places only the arrays its own shape is that of.
+    if !a.attrs.contains_key("spatial:transform") && !attrs.contains_key("spatial:shape") {
+        return None;
+    }
+    if attrs.get("spatial:transform_type").is_some_and(|t| t.as_str() != Some("affine")) {
+        return None;
+    }
+    let t: Vec<f64> = attrs.get("spatial:transform")?.as_array()?.iter().map(Value::as_f64).collect::<Option<_>>()?;
+    let &[dx, b, x0, d, dy, y0] = t.as_slice() else { return None };
+    if !t.iter().all(|v| v.is_finite()) || b != 0.0 || d != 0.0 || dx == 0.0 || dy == 0.0 {
+        return None;
+    }
+    let (y, x) = map_dims(a);
+    if let Some(shape) = attrs.get("spatial:shape")
+        && u64s(Some(shape)) != Some(vec![a.shape.get(y).copied().unwrap_or(0), a.shape.get(x).copied().unwrap_or(0)])
+    {
+        return None;
+    }
+    let half = match attrs.get("spatial:registration").map(Value::as_str) {
+        None | Some(Some("pixel")) => 0.0,
+        Some(Some("node")) => 0.5,
+        // A registration the convention doesn't define isn't guessed.
+        Some(_) => return None,
+    };
+    Some(Affine { x0: x0 - dx * half, dx, y0: y0 - dy * half, dy })
+}
+
+/// What a `spatial:transform` that [`spatial_grid`] doesn't apply is said to be.
+const TRANSFORM_UNREAD: &str = "its spatial:transform isn't one that is read (rotated, of another spatial:transform_type or spatial:registration, with a spatial:shape that isn't its map's, or a group's without its spatial:shape)";
+
+/// Why `a`'s map can't be placed when its y and x have no coordinates: said with its
+/// `spatial:transform` when it has one [`spatial_grid`] doesn't apply.
+fn no_coordinates(a: &Array) -> String {
+    let base = "its y and x dimensions have no coordinates";
+    if has_transform(a) { format!("{base}, and {TRANSFORM_UNREAD}") } else { base.to_string() }
 }
 
 /// The chunk keys of all of a 1D array.
@@ -995,10 +1424,26 @@ pub fn plan(store: &Store, sel: &Selection) -> Result<Plan> {
     let names = a.dim_names();
     let (y, x) = map_dims(a);
     let (h, w) = (a.shape.get(y).copied().unwrap_or(0), a.shape.get(x).copied().unwrap_or(0));
-    let cells = h.checked_mul(w).ok_or_else(|| bad("too large"))?;
+    let window = sel.window.unwrap_or(Window { x0: 0, y0: 0, x1: w, y1: h });
+    if let Some(v) = sel.window
+        && (v.x1 > w || v.y1 > h || v.x1 < v.x0.saturating_add(2) || v.y1 < v.y0.saturating_add(2))
+    {
+        return Err(bad(format!(
+            "{}: the window of columns {}–{} and rows {}–{} isn't within its {w} × {h} cells, or is less than 2 × 2 cells",
+            a.path, v.x0, v.x1, v.y0, v.y1
+        )));
+    }
+    let (ww, wh) = (window.x1 - window.x0, window.y1 - window.y0);
+    let cells = wh.checked_mul(ww).ok_or_else(|| bad("too large"))?;
     let max = max_samples();
     if cells == 0 || cells > max as u64 {
-        return Err(bad(format!("{} is {w} × {h}, more than the {max} cells a raster holds on this computer", a.path)));
+        return Err(bad(match sel.window {
+            Some(_) => format!(
+                "{}: the window is {ww} × {wh} cells, more than the {max} a raster holds on this computer: take a smaller one",
+                a.path
+            ),
+            None => format!("{} is {w} × {h}, more than the {max} cells a raster holds on this computer: take a window of it", a.path),
+        }));
     }
     a.chunk_values()?;
     let mut fixed = vec![0u64; a.shape.len()];
@@ -1013,33 +1458,132 @@ pub fn plan(store: &Store, sel: &Selection) -> Result<Plan> {
             }
         }
     }
-    let (gy, gx) = (a.grid(y), a.grid(x));
-    if gy.saturating_mul(gx) > MAX_CHUNKS as u64 {
-        return Err(bad(format!("{} needs {} chunks for one slice, more than {MAX_CHUNKS}", a.path, gy.saturating_mul(gx))));
+    // The units of `unit` the window covers along y and x, and how many they are.
+    let cover = |unit: &[u64]| {
+        let size = |d: usize| unit.get(d).copied().unwrap_or(1).max(1);
+        let (ry, rx) = (window.y0 / size(y)..window.y1.div_ceil(size(y)), window.x0 / size(x)..window.x1.div_ceil(size(x)));
+        let n = (ry.end - ry.start).saturating_mul(rx.end - rx.start);
+        (ry, rx, n)
+    };
+    // A window of a sharded variable reads the shards' chunks it needs, by range, while they are at
+    // most MAX_CHUNKS. Past that, and outside a window, it reads whole chunk files (whole shards),
+    // as before, so the limit still counts what is fetched.
+    let sharding = match a.codecs.first() {
+        Some(Codec::Sharding { inner, index, .. }) if sel.window.is_some() && cover(inner).2 <= MAX_CHUNKS as u64 => Some((inner, index)),
+        _ => None,
+    };
+    let unit = sharding.map_or(&a.chunks, |(inner, _)| inner);
+    let size = |d: usize| unit.get(d).copied().unwrap_or(1).max(1);
+    let (ry, rx, n) = cover(unit);
+    // A shard's chunks along each dimension, the same for every shard.
+    let per: Vec<u64> = sharding.map_or_else(Vec::new, |(inner, _)| a.chunks.iter().zip(inner).map(|(s, i)| s / i.max(&1)).collect());
+    // Each shard read, by key: its place in `shards`.
+    let mut shard_at: HashMap<String, usize> = HashMap::new();
+    if n > MAX_CHUNKS as u64 {
+        let what = if sel.window.is_some() { "the window" } else { "one slice" };
+        return Err(bad(format!("{} needs {n} chunks for {what}, more than {MAX_CHUNKS}: take a smaller window", a.path)));
     }
-    let mut keys = Vec::new();
-    for cy in 0..gy {
-        for cx in 0..gx {
+    let (mut keys, mut parts, mut shards) = (Vec::new(), Vec::new(), Vec::<ShardRead>::new());
+    for cy in ry {
+        for cx in rx.clone() {
             let idx: Vec<u64> = (0..a.shape.len())
-                .map(|d| {
-                    if d == y {
-                        cy
-                    } else if d == x {
-                        cx
-                    } else {
-                        fixed.get(d).copied().unwrap_or(0) / a.chunks.get(d).copied().unwrap_or(1).max(1)
-                    }
+                .map(|d| match d {
+                    d if d == y => cy,
+                    d if d == x => cx,
+                    d => fixed.get(d).copied().unwrap_or(0) / size(d),
                 })
                 .collect();
-            keys.push(a.chunk_key(&idx));
+            let Some((_, index)) = sharding else {
+                keys.push(a.chunk_key(&idx));
+                continue;
+            };
+            // The shard holding this chunk, and the chunk's place in the shard's row-major order.
+            let shard: Vec<u64> = idx.iter().zip(&per).map(|(u, p)| u / p.max(&1)).collect();
+            let c = idx.iter().zip(&per).fold(0u64, |c, (u, p)| c * p + u % p.max(&1));
+            let key = a.chunk_key(&shard);
+            match shard_at.get(&key).and_then(|&i| shards.get_mut(i)) {
+                Some(s) => s.chunks.push(c as usize),
+                None => {
+                    shard_at.insert(key.clone(), shards.len());
+                    let count = per.iter().product::<u64>() as usize;
+                    let len = index_len(count, index).ok_or_else(|| bad("a shard too large"))? as u64;
+                    let span = if matches!(a.codecs.first(), Some(Codec::Sharding { index_at_end: false, .. })) {
+                        Span::Bytes(0, len - 1)
+                    } else {
+                        Span::Tail(len)
+                    };
+                    parts.push(Part { key: key.clone(), span, id: format!("{key}#index") });
+                    shards.push(ShardRead { key, count, chunks: vec![c as usize] });
+                }
+            }
         }
     }
-    let coord = |d: usize| names.get(d).and_then(|n| store.coordinate(a, n)).filter(|c| c.shape.first() == a.shape.get(d));
+    // A grid placed by its spatial:transform reads no coordinates.
+    let placed = spatial_grid(a).is_some();
+    let coord = |d: usize| names.get(d).and_then(|n| store.coordinate(a, n)).filter(|c| !placed && c.shape.first() == a.shape.get(d));
     let (yc, xc) = (coord(y), coord(x));
-    for c in [yc, xc].into_iter().flatten() {
-        keys.extend(all_keys(c));
+    for (c, start, end) in [(yc, window.y0, window.y1), (xc, window.x0, window.x1)] {
+        let Some(c) = c else { continue };
+        if sel.window.is_none() {
+            keys.extend(all_keys(c));
+            continue;
+        }
+        // A window's coordinates: the chunks holding them, only their bytes when stored plain.
+        let cs = c.chunks.first().copied().unwrap_or(1).max(1);
+        if end.div_ceil(cs) - start / cs > MAX_CHUNKS as u64 {
+            return Err(bad(format!("{}: the window needs more than {MAX_CHUNKS} chunks of it: take a smaller window", c.path)));
+        }
+        for i in start / cs..end.div_ceil(cs) {
+            if plain(c) {
+                parts.push(coord_part(c, i, (i * cs).max(start), (i + 1).saturating_mul(cs).min(end))?);
+            } else {
+                keys.push(c.chunk_key(&[i]));
+            }
+        }
     }
-    Ok(Plan { keys, var: a.path.clone(), y, x, fixed, ycoord: yc.map(|c| c.path.clone()), xcoord: xc.map(|c| c.path.clone()) })
+    Ok(Plan {
+        keys,
+        parts,
+        var: a.path.clone(),
+        y,
+        x,
+        fixed,
+        ycoord: yc.map(|c| c.path.clone()),
+        xcoord: xc.map(|c| c.path.clone()),
+        window,
+        windowed: sel.window.is_some(),
+        shards,
+    })
+}
+
+/// The shards' chunks a window of a sharded variable reads, from their indexes (`got`, by the ids
+/// of the plan's index [`Part`]s): each chunk's bytes. A shard that isn't stored, and a chunk its
+/// index says it doesn't hold, are left out: [`assemble`] leaves the first empty, as a chunk never
+/// written, and gives the second the fill value, as a shard read whole does.
+pub fn inner_parts(store: &Store, plan: &Plan, got: &HashMap<String, Vec<u8>>) -> Result<Vec<Part>> {
+    let Some(a) = store.array(&plan.var) else { return Ok(Vec::new()) };
+    let Some(Codec::Sharding { index, .. }) = a.codecs.first() else { return Ok(Vec::new()) };
+    let (mut parts, mut total) = (Vec::new(), 0u64);
+    for s in &plan.shards {
+        let Some(raw) = got.get(&format!("{}#index", s.key)) else { continue };
+        let idx = shard_index(raw, s.count, index).map_err(|e| bad(format!("{}: {e}", s.key)))?;
+        for &c in &s.chunks {
+            let Some(&(off, len)) = idx.get(c) else { continue };
+            if off == u64::MAX && len == u64::MAX {
+                continue;
+            }
+            let last = off
+                .checked_add(len)
+                .filter(|_| len > 0 && len <= MAX_CHUNK_FILE)
+                .ok_or_else(|| bad(format!("{}: a chunk's place in it is wrong", s.key)))?;
+            total = total.saturating_add(len);
+            if total > MAX_READ {
+                return Err(bad(format!("{}: the window's chunks are more than {} GB: take a smaller window", a.path, MAX_READ >> 30)));
+            }
+            parts.push(Part { key: s.key.clone(), span: Span::Bytes(off, last - 1), id: inner_id(&s.key, c) });
+        }
+    }
+    Ok(parts)
 }
 
 /// A 1D array's values, from its chunks (missing ones are its fill value).
@@ -1109,36 +1653,78 @@ fn geographic(c: &Array) -> bool {
         || matches!(c.name().to_ascii_lowercase().as_str(), "lat" | "lon" | "latitude" | "longitude")
 }
 
-/// The coordinate system a variable's attributes (or its grid mapping's) say, and what reading its
-/// WKT said, as for a `.prj` ([`super::wkt::read_wkt`]).
-fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
-    let read = |t: &str| {
-        let t = t.trim();
-        if t.contains('[') { super::wkt::read_wkt(t).ok() } else { Crs::parse(t).ok().map(|c| (c, None)) }
+/// A coordinate system given as an EPSG code (a number, or `EPSG:n` text).
+fn crs_code(v: &Value) -> Option<Crs> {
+    let code = match v {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.trim_start_matches("EPSG:").parse().ok(),
+        _ => None,
     };
-    let from = |x: &Array| {
-        for k in ["crs_wkt", "spatial_ref", "crs", "proj4", "proj4text", "proj4_params"] {
-            if let Some(read) = attr_str(x, k).and_then(read) {
+    code.and_then(|c| u32::try_from(c).ok()).and_then(Crs::from_epsg)
+}
+
+/// A coordinate system given as text (WKT, a code, PROJ), and what reading its WKT said.
+fn crs_text(t: &str) -> Option<(Crs, Option<String>)> {
+    let t = t.trim();
+    if t.contains('[') { super::wkt::read_wkt(t).ok() } else { Crs::parse(t).ok().map(|c| (c, None)) }
+}
+
+/// What `a`'s `proj:` keys (its own, else its groups') give that isn't a coordinate system that is
+/// read, said with each value (a long one, such as a WKT, by its start and length); `None` when
+/// all are read, or there are none.
+fn unread_proj(a: &Array) -> Option<String> {
+    let has_proj = |m: &Map<String, Value>| PROJ_KEYS.iter().any(|k| m.contains_key(*k));
+    let proj = if has_proj(&a.attrs) { Some(&a.attrs) } else { a.inherited.iter().map(|m| &**m).find(|m| has_proj(m)) };
+    let unread: Vec<String> = proj
+        .into_iter()
+        .flat_map(|m| {
+            PROJ_KEYS.iter().filter_map(move |k| {
+                let v = m.get(*k)?;
+                let read = if *k == "proj:epsg" { crs_code(v).is_some() } else { v.as_str().and_then(crs_text).is_some() };
+                (!read).then(|| {
+                    let text = v.to_string();
+                    let n = text.chars().count();
+                    if n > 80 {
+                        format!("{k} {}… ({n} characters)", text.chars().take(80).collect::<String>())
+                    } else {
+                        format!("{k} {text}")
+                    }
+                })
+            })
+        })
+        .collect();
+    (!unread.is_empty()).then(|| format!("{} isn't a coordinate system that is read, so it isn't used", unread.join(", ")))
+}
+
+/// The coordinate system a variable's attributes (or its grid mapping's, else its groups' `proj:`)
+/// say, and what reading its WKT said, as for a `.prj` ([`super::wkt::read_wkt`]).
+fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
+    let (epsg, read) = (crs_code, crs_text);
+    // `proj:wkt2`, `proj:code` (`EPSG:4326`) and `proj:epsg` are the zarr-conventions `proj:`
+    // ones, which a group may also set for its arrays (`inherit_georeferencing`).
+    let from = |x: &Map<String, Value>| {
+        for k in ["crs_wkt", "spatial_ref", "crs", "proj:wkt2", "proj:code", "proj4", "proj4text", "proj4_params"] {
+            if let Some(read) = x.get(k).and_then(Value::as_str).and_then(read) {
                 return Some(read);
             }
         }
-        for k in ["epsg_code", "epsg"] {
-            let code = match x.attrs.get(k) {
-                Some(Value::Number(n)) => n.as_u64(),
-                Some(Value::String(s)) => s.trim_start_matches("EPSG:").parse().ok(),
-                _ => None,
-            };
-            if let Some(c) = code.and_then(|c| u32::try_from(c).ok()).and_then(Crs::from_epsg) {
-                return Some((c, None));
-            }
-        }
-        None
+        ["epsg_code", "epsg", "proj:epsg"].iter().find_map(|k| x.get(*k).and_then(epsg)).map(|c| (c, None))
     };
-    from(a)
-        .or_else(|| attr_str(a, "grid_mapping").and_then(|g| store.coordinate(a, g).or_else(|| store.array(g))).and_then(from))
+    // A `proj:` value given that isn't read is said, with the system used instead.
+    let said = unread_proj(a);
+    let crs = from(&a.attrs)
+        .or_else(|| {
+            attr_str(a, "grid_mapping").and_then(|g| store.coordinate(a, g).or_else(|| store.array(g))).and_then(|g| from(&g.attrs))
+        })
+        // What a group says comes after the variable and its grid mapping.
+        .or_else(|| a.inherited.iter().find_map(|m| from(m)))
         // A store that doesn't name its grid mapping may still hold rioxarray's `spatial_ref` (or a
         // `crs`) array beside its variables.
-        .or_else(|| ["spatial_ref", "crs"].iter().filter_map(|n| store.array(n)).find_map(from))
+        .or_else(|| ["spatial_ref", "crs"].iter().filter_map(|n| store.array(n)).find_map(|x| from(&x.attrs)));
+    crs.map(|(c, note)| match (note, said) {
+        (Some(n), Some(s)) => (c, Some(format!("{n}; {s}"))),
+        (n, s) => (c, n.or(s)),
+    })
 }
 
 /// One axis from its coordinates: the first cell's outer edge and the cell size, if the
@@ -1160,9 +1746,19 @@ fn axis(v: &[f64]) -> Option<(f64, f64)> {
 /// `crs` is used when the store doesn't say its coordinate system.
 pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, name: &str, crs: Option<Crs>) -> Result<Raster> {
     let a = store.array(&plan.var).ok_or_else(|| bad("the variable is gone"))?;
-    let (h, w) = (a.shape.get(plan.y).copied().unwrap_or(0) as usize, a.shape.get(plan.x).copied().unwrap_or(0) as usize);
+    let win = plan.window;
+    let (h, w) = ((win.y1 - win.y0) as usize, (win.x1 - win.x0) as usize);
     let mut grid = super::filled(w, h, f32::NAN)?;
-    let (cy, cx) = (a.chunks.get(plan.y).copied().unwrap_or(1).max(1), a.chunks.get(plan.x).copied().unwrap_or(1).max(1));
+    // What the cells are read from: chunks, or a window's chunks of shards.
+    let inner = match a.codecs.first() {
+        Some(Codec::Sharding { inner, codecs, index, .. }) if !plan.shards.is_empty() => Some((inner, codecs, index)),
+        _ => None,
+    };
+    let unit = inner.map_or(&a.chunks, |(i, _, _)| i);
+    // A shard's chunks along each dimension, and the shards' indexes as read, by shard key.
+    let per: Vec<u64> = inner.map_or_else(Vec::new, |(i, _, _)| a.chunks.iter().zip(i).map(|(s, i)| s / i.max(&1)).collect());
+    let mut indexes: HashMap<String, Vec<(u64, u64)>> = HashMap::new();
+    let (cy, cx) = (unit.get(plan.y).copied().unwrap_or(1).max(1), unit.get(plan.x).copied().unwrap_or(1).max(1));
     let nd = a.shape.len();
     // Values meaning "no data", before any scaling, as xarray reads them: the CF attributes, and a
     // Zarr 2 array's fill_value (xarray's _FillValue encoding). A Zarr 3 array's fill_value (0 by
@@ -1181,30 +1777,63 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
     // digits), or scaled ones whose f32 no longer gives back the stored value.
     let scaled = scale != 1.0 || offset != 0.0;
     let mut rounded = 0u64;
-    for gy in 0..a.grid(plan.y) {
-        for gx in 0..a.grid(plan.x) {
+    let size = |d: usize| unit.get(d).copied().unwrap_or(1).max(1);
+    for gy in win.y0 / cy..win.y1.div_ceil(cy) {
+        for gx in win.x0 / cx..win.x1.div_ceil(cx) {
             let idx: Vec<u64> = (0..nd)
                 .map(|d| match d {
                     d if d == plan.y => gy,
                     d if d == plan.x => gx,
-                    d => plan.fixed.get(d).copied().unwrap_or(0) / a.chunks.get(d).copied().unwrap_or(1).max(1),
+                    d => plan.fixed.get(d).copied().unwrap_or(0) / size(d),
                 })
                 .collect();
-            let Some(bytes) = chunks.get(&a.chunk_key(&idx)) else { continue };
+            // The chunk's id, and (in a shard) the shard's key and the chunk's place in it.
+            let (id, shard) = match inner {
+                Some(_) => {
+                    let shard: Vec<u64> = idx.iter().zip(&per).map(|(u, p)| u / p.max(&1)).collect();
+                    let key = a.chunk_key(&shard);
+                    let c = idx.iter().zip(&per).fold(0u64, |c, (u, p)| c * p + u % p.max(&1)) as usize;
+                    (inner_id(&key, c), Some((key, c)))
+                }
+                None => (a.chunk_key(&idx), None),
+            };
+            let (vals, dt) = match (chunks.get(&id), inner) {
+                (Some(bytes), Some((i, codecs, _))) => {
+                    let (d, little) = decode_chunk(codecs, bytes, i, a.dtype, a.fill).map_err(|e| bad(format!("{}: {e}", a.path)))?;
+                    (d, DType { little, ..a.dtype })
+                }
+                (Some(bytes), None) => a.decode_bytes(bytes)?,
+                // A shard not stored is left empty, as a chunk never written. In a stored shard, a
+                // chunk its index says it doesn't hold shows the fill value, as when the shard is
+                // read whole ([`unshard`]); one its index places but that wasn't read (the shard
+                // gone since its index was) is an error, not cells made up.
+                (None, Some((i, _, index))) => {
+                    let Some((key, c)) = &shard else { continue };
+                    let Some(raw) = chunks.get(&format!("{key}#index")) else { continue };
+                    if !indexes.contains_key(key) {
+                        let count = per.iter().product::<u64>() as usize;
+                        indexes.insert(key.clone(), shard_index(raw, count, index).map_err(|e| bad(format!("{key}: {e}")))?);
+                    }
+                    if indexes.get(key).and_then(|x| x.get(*c)).is_some_and(|&e| e != (u64::MAX, u64::MAX)) {
+                        return Err(bad(format!("{}: a chunk of shard {key} wasn't read", a.path)));
+                    }
+                    let n = i.iter().product::<u64>() as usize;
+                    (a.dtype.encode(a.fill.unwrap_or(0.0), a.dtype.little).repeat(n), a.dtype)
+                }
+                (None, None) => continue,
+            };
             found += 1;
-            let (vals, dt) = a.decode_bytes(bytes)?;
             // Each value's position in the chunk, row-major (or column-major).
-            let local: Vec<u64> =
-                (0..nd).map(|d| plan.fixed.get(d).copied().unwrap_or(0) % a.chunks.get(d).copied().unwrap_or(1).max(1)).collect();
+            let local: Vec<u64> = (0..nd).map(|d| plan.fixed.get(d).copied().unwrap_or(0) % size(d)).collect();
             let strides: Vec<u64> = {
                 let mut s = vec![1u64; nd];
                 if a.fortran {
                     for d in 1..nd {
-                        s[d] = s[d - 1] * a.chunks[d - 1];
+                        s[d] = s[d - 1] * size(d - 1);
                     }
                 } else {
                     for d in (0..nd.saturating_sub(1)).rev() {
-                        s[d] = s[d + 1] * a.chunks[d + 1];
+                        s[d] = s[d + 1] * size(d + 1);
                     }
                 }
                 s
@@ -1212,12 +1841,18 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
             let base: u64 = (0..nd).filter(|d| *d != plan.y && *d != plan.x).map(|d| local[d] * strides[d]).sum();
             for ly in 0..cy {
                 let row = gy * cy + ly;
-                if row as usize >= h {
+                if row < win.y0 {
+                    continue;
+                }
+                if row >= win.y1 {
                     break;
                 }
                 for lx in 0..cx {
                     let col = gx * cx + lx;
-                    if col as usize >= w {
+                    if col < win.x0 {
+                        continue;
+                    }
+                    if col >= win.x1 {
                         break;
                     }
                     let i = base + ly * strides[plan.y] + lx * strides[plan.x];
@@ -1249,7 +1884,7 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
                         rounded += u64::from(!held);
                         f
                     };
-                    if let Some(g) = grid.get_mut(row as usize * w + col as usize) {
+                    if let Some(g) = grid.get_mut((row - win.y0) as usize * w + (col - win.x0) as usize) {
                         *g = out;
                     }
                 }
@@ -1259,20 +1894,30 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
     if found == 0 {
         return Err(DataError::NoChunks(a.path.clone()));
     }
-    // Georeferencing from the coordinate arrays.
-    let coords = |p: &Option<String>| -> Result<Option<(Vec<f64>, &Array)>> {
+    // Georeferencing from the spatial:transform, else from the coordinate arrays.
+    let coords = |p: &Option<String>, start: u64, end: u64| -> Result<Option<(Vec<f64>, &Array)>> {
         match p.as_ref().and_then(|p| store.array(p)) {
-            Some(c) => Ok(Some((values_1d(c, chunks)?, c))),
+            Some(c) => Ok(Some((coord_values(c, start, end, plan.windowed, chunks)?, c))),
             None => Ok(None),
         }
     };
-    let (ys, xs) = (coords(&plan.ycoord)?, coords(&plan.xcoord)?);
-    let (Some((ys, yc)), Some((xs, xc))) = (ys, xs) else {
-        return Err(bad(format!("{}: its y and x dimensions have no coordinates, so it can't be placed on the map", a.path)));
-    };
-    let ((mut y0, mut dy), (mut x0, mut dx)) = match (axis(&ys), axis(&xs)) {
-        (Some(y), Some(x)) => (y, x),
-        _ => return Err(bad(format!("{}: its coordinates aren't evenly spaced (a curvilinear or irregular grid isn't read)", a.path))),
+    let (((mut y0, mut dy), (mut x0, mut dx)), lonlat) = match spatial_grid(a) {
+        Some(g) => (((g.y0 + g.dy * win.y0 as f64, g.dy), (g.x0 + g.dx * win.x0 as f64, g.dx)), lonlat_by_coordinates(store, a)),
+        None => {
+            let (ys, xs) = (coords(&plan.ycoord, win.y0, win.y1)?, coords(&plan.xcoord, win.x0, win.x1)?);
+            let (Some((ys, yc)), Some((xs, xc))) = (ys, xs) else {
+                return Err(bad(format!("{}: {}, so it can't be placed on the map", a.path, no_coordinates(a))));
+            };
+            match (axis(&ys), axis(&xs)) {
+                (Some(y), Some(x)) => ((y, x), geographic(yc) && geographic(xc)),
+                _ => {
+                    return Err(bad(format!(
+                        "{}: its coordinates aren't evenly spaced (a curvilinear or irregular grid isn't read)",
+                        a.path
+                    )));
+                }
+            }
+        }
     };
     // North up and west to east: flip rows (or columns) as needed.
     if dy > 0.0 {
@@ -1293,16 +1938,20 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
         x0 += dx * w as f64;
         dx = -dx;
     }
-    let lonlat = geographic(yc) && geographic(xc);
+    // A proj: value that isn't read is said whatever system is used: the store's ([`crs_of`]
+    // says it), the axes' longitude/latitude, or the one given.
+    let found = crs_of(store, a);
+    let unread = if found.is_none() { unread_proj(a) } else { None };
     let (crs, crs_note) = if lonlat {
         // The axes are read as longitude/latitude, whatever the WKT says; a shift it gives that
         // isn't applied is still said.
-        (Some(Crs::LonLat), crs_of(store, a).and_then(|(_, note)| note))
+        (Some(Crs::LonLat), found.and_then(|(_, note)| note).or(unread.clone()))
     } else {
-        crs_of(store, a).map_or((crs, None), |(crs, note)| (Some(crs), note))
+        found.map_or((crs, unread.clone()), |(crs, note)| (Some(crs), note))
     };
     let Some(crs) = crs else {
-        return Err(bad(format!("{}: the store doesn't say its coordinate system; give \"crs\" (such as EPSG:3035)", a.path)));
+        let said = unread.map(|u| format!(" that is read ({u})")).unwrap_or_default();
+        return Err(bad(format!("{}: the store doesn't say its coordinate system{said}; give \"crs\" (such as EPSG:3035)", a.path)));
     };
     // Longitudes of 0–360: a global grid is turned to start at -180; one wholly east of 180 is
     // moved by 360.
@@ -1336,6 +1985,18 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
         r.rounded = vec![rounded];
     }
     r.lost.extend(crs_note);
+    // A transform the coordinates stood in for is said, not dropped without a word.
+    if has_transform(a) && spatial_grid(a).is_none() {
+        r.lost.push(format!("{}: {TRANSFORM_UNREAD}: its coordinates place it", a.path));
+    }
+    if spatial_dims(a) == Some(None) {
+        r.lost.push(format!(
+            "{}: its spatial:dimensions don't name two of its dimensions, so its map's are taken by their names ({} and {})",
+            a.path,
+            a.dim_names().get(plan.y).map_or("", String::as_str),
+            a.dim_names().get(plan.x).map_or("", String::as_str)
+        ));
+    }
     Ok(r)
 }
 
@@ -1387,7 +2048,10 @@ pub fn coordinate_keys(store: &Store, variable: &str) -> Vec<String> {
 /// coordinate has CF time units (`days since 2001-01-01`), with its steps as milliseconds since
 /// 1970 (UTC). A `noleap` date is the same real date; a 360- or 366-day year is laid over its real
 /// year in proportion (360_day's 30 February falls about 1 March), so its dates stay distinct and
-/// in order. `None` when no dimension has such a coordinate, or one of its steps isn't a date.
+/// in order. A coordinate of whole years with no CF units ([`year_axis`]: named `time` or `year`,
+/// or marked `axis: "T"` or `standard_name: "time"`) is a time dimension too, each year's step on
+/// its 1 January. `None` when no dimension has such a coordinate, or one of its steps
+/// isn't a date.
 pub fn time_axis(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>>) -> Option<(String, Vec<f64>)> {
     let v = store.array(variable)?;
     let (y, x) = map_dims(v);
@@ -1398,11 +2062,12 @@ pub fn time_axis(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>
         // A coordinate of the dimension's own length (one found at the root, of another group,
         // may not be), so date `i` is step `i`.
         let Some(c) = store.coordinate(v, name).filter(|c| c.shape.first() == v.shape.get(d)) else { continue };
-        if !attr_str(c, "units").is_some_and(|u| u.contains(" since ")) {
+        let cf = attr_str(c, "units").is_some_and(|u| u.contains(" since "));
+        if !cf && !year_axis(c) {
             continue;
         }
         let Ok(vals) = values_1d(c, chunks) else { continue };
-        let ms: Option<Vec<f64>> = vals.iter().map(|t| time_ms(c, *t)).collect();
+        let ms: Option<Vec<f64>> = vals.iter().map(|t| if cf { time_ms(c, *t) } else { year_ms(*t) }).collect();
         if let Some(ms) = ms.filter(|m| !m.is_empty()) {
             return Some((name.clone(), ms));
         }
@@ -1412,7 +2077,7 @@ pub fn time_axis(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>
 
 /// The chunk keys of `variable`'s map coordinates (its y and x), for [`locate`].
 pub fn map_coordinate_keys(store: &Store, variable: &str) -> Vec<String> {
-    let Some(a) = store.array(variable) else { return Vec::new() };
+    let Some(a) = store.array(variable).filter(|a| spatial_grid(a).is_none()) else { return Vec::new() };
     let names = a.dim_names();
     let (y, x) = map_dims(a);
     let mut keys = Vec::new();
@@ -1428,6 +2093,13 @@ pub fn map_coordinate_keys(store: &Store, variable: &str) -> Vec<String> {
 /// coordinate system [`grid_crs`] gives (or the one a caller is told).
 pub fn is_lonlat_grid(store: &Store, variable: &str) -> bool {
     let Some(a) = store.array(variable) else { return false };
+    lonlat_by_coordinates(store, a) || (spatial_grid(a).is_some() && crs_of(store, a).is_some_and(|(c, _)| c == Crs::LonLat))
+}
+
+/// Whether `a`'s map coordinates are longitude and latitude, by their names, units or standard
+/// names ([`geographic`]): read from their metadata only, so a grid its `spatial:transform` places
+/// is known as one too.
+fn lonlat_by_coordinates(store: &Store, a: &Array) -> bool {
     let names = a.dim_names();
     let (y, x) = map_dims(a);
     let geo = |d: usize| names.get(d).and_then(|n| store.coordinate(a, n)).is_some_and(geographic);
@@ -1458,25 +2130,123 @@ pub fn typed_crs_note(store: &Store, variable: &str, r: &Raster, typed: &str) ->
 /// for a slice.
 pub fn locate(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>>, x: f64, y: f64) -> Result<Option<(u64, u64)>> {
     let a = store.array(variable).ok_or_else(|| bad(format!("no variable named {variable}")))?;
-    let names = a.dim_names();
+    let ((y0, dy, ny), (x0, dx, nx), geo) = grid_axes(store, a, chunks)?;
+    let cell = |v: f64, v0: f64, dv: f64, n: u64| {
+        let i = ((v - v0) / dv).floor();
+        (i >= 0.0 && i < n as f64).then_some(i as u64)
+    };
+    let row = cell(y, y0, dy, ny);
+    // A longitude may be written another way round the globe than the grid's.
+    let turns: &[f64] = if geo { &[0.0, 360.0, -360.0] } else { &[0.0] };
+    let col = turns.iter().find_map(|k| cell(x + k, x0, dx, nx));
+    Ok(row.zip(col))
+}
+
+/// `a`'s map axes, y then x, each as its first cell's outer edge, its cell size and its length, and
+/// whether x is longitude: from its `spatial:transform` ([`spatial_grid`]), with no coordinates
+/// read, else from its coordinates (`chunks`), which must be evenly spaced.
+fn grid_axes(store: &Store, a: &Array, chunks: &HashMap<String, Vec<u8>>) -> Result<((f64, f64, u64), (f64, f64, u64), bool)> {
     let (yd, xd) = map_dims(a);
+    let len = |d: usize| a.shape.get(d).copied().unwrap_or(0);
+    if let Some(g) = spatial_grid(a) {
+        let geo = lonlat_by_coordinates(store, a) || crs_of(store, a).is_some_and(|(c, _)| c == Crs::LonLat);
+        return Ok(((g.y0, g.dy, len(yd)), (g.x0, g.dx, len(xd)), geo));
+    }
+    let names = a.dim_names();
     let coord = |d: usize| names.get(d).and_then(|n| store.coordinate(a, n)).filter(|c| c.shape.first() == a.shape.get(d));
     let (Some(yc), Some(xc)) = (coord(yd), coord(xd)) else {
-        return Err(bad(format!("{}: its y and x dimensions have no coordinates", a.path)));
+        return Err(bad(format!("{}: {}", a.path, no_coordinates(a))));
     };
     let (ys, xs) = (values_1d(yc, chunks)?, values_1d(xc, chunks)?);
     let (Some((y0, dy)), Some((x0, dx))) = (axis(&ys), axis(&xs)) else {
         return Err(bad(format!("{}: its coordinates aren't evenly spaced", a.path)));
     };
-    let cell = |v: f64, v0: f64, dv: f64, n: usize| {
-        let i = ((v - v0) / dv).floor();
-        (i >= 0.0 && i < n as f64).then_some(i as u64)
+    Ok(((y0, dy, ys.len() as u64), (x0, dx, xs.len() as u64), geographic(xc)))
+}
+
+/// The chunk keys of `variable`'s map coordinates, for [`window_of`]: each is read whole (its
+/// first [`MAX_CHUNKS`] chunks, as any coordinate), so longer ones than [`MAX_COORDS`] can't place
+/// a box (a window is given in cells instead). None for a grid its `spatial:transform` places.
+pub fn window_keys(store: &Store, variable: &str) -> Result<Vec<String>> {
+    let a = store.array(variable).ok_or_else(|| bad(format!("no variable named {variable}")))?;
+    // A grid placed by its spatial:transform places a box by arithmetic, however long its axes.
+    if spatial_grid(a).is_some() {
+        return Ok(Vec::new());
+    }
+    let names = a.dim_names();
+    let (y, x) = map_dims(a);
+    for d in [y, x] {
+        let n = a.shape.get(d).copied().unwrap_or(0);
+        let coord = names.get(d).and_then(|n| store.coordinate(a, n)).filter(|c| c.shape.first() == a.shape.get(d));
+        match coord {
+            None => {
+                let dim = names.get(d).map_or("", String::as_str);
+                return Err(bad(format!("{}: its {dim} dimension has no coordinates to place a bbox on: give cells", a.path)));
+            }
+            Some(c) if n > MAX_COORDS => {
+                return Err(bad(format!("{}: {n} values, more than the {MAX_COORDS} read to place a bbox: give cells", c.path)));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(map_coordinate_keys(store, variable))
+}
+
+/// The window of `variable`'s map cells a box `[west, south, east, north]` covers, in the grid's own
+/// coordinates (degrees, of either longitude convention, for a longitude/latitude grid), from its
+/// coordinates (`chunks` from [`window_keys`]); whether the box reaches past the grid (only the
+/// part within it is read); and whether it was widened to 2 × 2 cells, the fewest a window takes so
+/// the cell size is known. A box round the whole globe, or holding the whole axis, is the whole
+/// axis. The coordinates must be evenly spaced, as for a slice.
+pub fn window_of(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>>, bbox: [f64; 4]) -> Result<(Window, bool, bool)> {
+    let [w, s, e, n] = bbox;
+    if !bbox.iter().all(|v| v.is_finite()) || w >= e || s >= n {
+        return Err(bad("bbox is [west, south, east, north], west below east and south below north"));
+    }
+    let a = store.array(variable).ok_or_else(|| bad(format!("no variable named {variable}")))?;
+    let ((y0, dy, ny), (x0, dx, len), geo) = grid_axes(store, a, chunks)?;
+    // The cells from `lo` to `hi` along an axis whose first edge is `v0`, a step `dv`, `len` of
+    // them: the range, whether it was cut to the grid, and whether it was widened to two cells;
+    // None when it misses it.
+    let cells = |lo: f64, hi: f64, v0: f64, dv: f64, len: u64| {
+        let (i, j) = if dv > 0.0 { ((lo - v0) / dv, (hi - v0) / dv) } else { ((hi - v0) / dv, (lo - v0) / dv) };
+        // An edge on a cell's edge, to within rounding, takes no cell past it.
+        let snap = |v: f64| if (v - v.round()).abs() < 1e-6 { v.round() } else { v };
+        let (i, j) = (snap(i).floor(), snap(j).ceil());
+        let (from, to) = (i.max(0.0) as u64, j.min(len as f64).max(0.0) as u64);
+        (from < to).then(|| {
+            // Two cells at least, so the window's coordinates give the cell size.
+            let widened = to - from < 2;
+            let (from, to) =
+                if widened { (from.min(len.saturating_sub(2)), (from.min(len.saturating_sub(2)) + 2).min(len)) } else { (from, to) };
+            (from, to, i < 0.0 || j > len as f64, widened)
+        })
     };
-    let row = cell(y, y0, dy, ys.len());
+    let rows = cells(s, n, y0, dy, ny);
     // A longitude may be written another way round the globe than the grid's.
-    let turns: &[f64] = if geographic(xc) { &[0.0, 360.0, -360.0] } else { &[0.0] };
-    let col = turns.iter().find_map(|k| cell(x + k, x0, dx, xs.len()));
-    Ok(row.zip(col))
+    let turns: &[f64] = if geo { &[0.0, 360.0, -360.0] } else { &[0.0] };
+    let hits: Vec<_> = turns.iter().filter_map(|k| cells(w + k, e + k, x0, dx, len)).collect();
+    // A box holding the whole axis in one turn, or (longitude) going round the globe, is the whole
+    // axis: one run of columns.
+    let whole = hits
+        .iter()
+        .find(|h| h.0 == 0 && h.1 == len)
+        .copied()
+        .or_else(|| (turns.len() > 1 && e - w >= 360.0).then_some((0, len, true, false)));
+    // Over the grid's seam (0°/360°, or ±180°) a box is otherwise two runs of columns, which a
+    // window isn't: refused rather than read on one side.
+    if whole.is_none() && hits.len() > 1 {
+        return Err(bad(format!(
+            "{}: the bbox crosses the grid's edge at {:.0}°, so it is two parts of the grid: give a box on each side",
+            a.path,
+            x0 + dx * len as f64
+        )));
+    }
+    let cols = whole.or_else(|| hits.first().copied());
+    let (Some((y0, y1, cut_y, wide_y)), Some((x0, x1, cut_x, wide_x))) = (rows, cols) else {
+        return Err(bad(format!("{}: the bbox lies outside its grid", a.path)));
+    };
+    Ok((Window { x0, y0, x1, y1 }, cut_x || cut_y, wide_x || wide_y))
 }
 
 /// What a point's series needs (see [`plan_series`]).
@@ -1602,6 +2372,24 @@ pub fn assemble_series(store: &Store, plan: &SeriesPlan, chunks: &HashMap<String
         out.push(if v.is_nan() || missing.contains(&v) { f64::NAN } else { v * scale + offset });
     }
     Ok(out)
+}
+
+/// Whether `c` is a coordinate of whole years with no CF time units, as `aef-mosaic`'s `time`
+/// (`2017…2025`): integers, named `time` or `year` (or marked `axis: "T"` or `standard_name:
+/// "time"`), with no units or units of `year`/`years`. Its values must also be years from 1000 to
+/// 9999 ([`year_ms`]), or the axis isn't read as one.
+fn year_axis(c: &Array) -> bool {
+    let units = attr_str(c, "units").map(|u| u.trim().to_ascii_lowercase());
+    let timely = matches!(c.name().to_ascii_lowercase().as_str(), "time" | "year" | "years")
+        || attr_str(c, "axis").is_some_and(|a| a.eq_ignore_ascii_case("T"))
+        || attr_str(c, "standard_name").is_some_and(|s| s.eq_ignore_ascii_case("time"));
+    matches!(c.dtype.kind, Kind::Int | Kind::UInt) && timely && units.as_deref().is_none_or(|u| matches!(u, "" | "year" | "years"))
+}
+
+/// A year of a [`year_axis`] as milliseconds since 1970 (UTC) at its 1 January; `None` for a
+/// value that isn't a whole year from 1000 to 9999 (a step number, say).
+fn year_ms(v: f64) -> Option<f64> {
+    (v.fract() == 0.0 && (1000.0..=9999.0).contains(&v)).then(|| days_from_civil(v as i64, 1, 1) as f64 * 86_400_000.0)
 }
 
 /// A CF time coordinate's value as milliseconds since 1970 (see [`time_axis`]).
@@ -1746,27 +2534,9 @@ fn clock_seconds(time: &str) -> f64 {
 /// overflow.
 const MAX_YEAR: i64 = 1_000_000;
 
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
 fn date_label(t: i64) -> String {
     let (days, secs) = (t.div_euclid(86_400), t.rem_euclid(86_400));
-    let z = days.saturating_add(719_468);
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
+    let (y, m, d) = civil_from_days(days);
     if secs == 0 { format!("{y:04}-{m:02}-{d:02}") } else { format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", secs / 3600, secs % 3600 / 60) }
 }
 
@@ -1812,6 +2582,9 @@ pub fn info(store: &Store, chunks: &HashMap<String, Vec<u8>>) -> Value {
                 "units": attr_str(v, "units"),
                 "dtype": format!("{:?}{}", v.dtype.kind, v.dtype.size * 8),
                 "dims": dims,
+                "chunks": v.chunks,
+                // A sharded variable's chunks inside its shards: what a window reads of them.
+                "innerChunks": match v.codecs.first() { Some(Codec::Sharding { inner, .. }) => Some(inner), _ => None },
                 "readable": v.unsupported().is_none(),
                 "why": v.unsupported(),
             })
@@ -1835,7 +2608,7 @@ pub fn read_metadata(dir: &std::path::Path) -> Result<Store> {
         if p.metadata().map(|m| m.len()).unwrap_or(0) as usize > MAX_METADATA {
             return Err(bad(format!("{} is too large", p.display())));
         }
-        if let Ok(b) = std::fs::read(&p) {
+        if let Ok(b) = crate::provenance::read(&p) {
             docs.push((rel, b));
         }
         Ok(())
@@ -1892,7 +2665,7 @@ pub fn read_dir(dir: &std::path::Path, selection: &str, crs: Option<&str>) -> Re
 /// [`read_dir`] with the store's metadata already read ([`read_metadata`]).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_dir_in(store: &Store, dir: &std::path::Path, selection: &str, crs: Option<&str>) -> Result<Raster> {
-    let mut sel = Selection::parse(selection);
+    let mut sel = Selection::parse_strict(selection)?;
     if sel.variable.is_empty() {
         sel.variable = store
             .variables()
@@ -1906,13 +2679,47 @@ pub fn read_dir_in(store: &Store, dir: &std::path::Path, selection: &str, crs: O
     let mut total = 0u64;
     for k in &p.keys {
         let path = dir.join(k);
-        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        let meta = match std::fs::metadata(&path) {
+            Ok(meta) => meta,
+            // Never written: only a file that isn't there. Any other failure is said.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
         total = total.saturating_add(meta.len());
         if !meta.is_file() || meta.len() > MAX_CHUNK_FILE || total > MAX_READ {
             return Err(bad(format!("{}: the slice's chunks are too large to read", dir.display())));
         }
-        chunks.insert(k.clone(), std::fs::read(&path)?);
+        chunks.insert(k.clone(), crate::provenance::read(&path)?);
     }
+    // A window's bytes of files: shards' indexes and coordinates, then the shards' chunks.
+    let mut read = |parts: &[Part], chunks: &mut HashMap<String, Vec<u8>>| -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        for part in parts {
+            let mut f = match crate::provenance::open(dir.join(&part.key)) {
+                Ok(f) => f,
+                // Never written: only a file that isn't there. Any other failure is said.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            let len = f.metadata()?.len();
+            let (first, n) = match part.span {
+                Span::Bytes(a, b) => (a, b - a + 1),
+                Span::Tail(n) => (len.saturating_sub(n), n.min(len)),
+            };
+            total = total.saturating_add(n);
+            if first.saturating_add(n) > len || n > MAX_CHUNK_FILE || total > MAX_READ {
+                return Err(bad(format!("{}: {} is cut, or the window's chunks are too large to read", dir.display(), part.key)));
+            }
+            f.seek(SeekFrom::Start(first))?;
+            let mut buf = Vec::new();
+            f.take(n).read_to_end(&mut buf)?;
+            chunks.insert(part.id.clone(), buf);
+        }
+        Ok(())
+    };
+    read(&p.parts, &mut chunks)?;
+    let inner = inner_parts(store, &p, &chunks)?;
+    read(&inner, &mut chunks)?;
     let crs = crs.map(Crs::parse).transpose().map_err(DataError::Format)?;
     let stem = dir.file_stem().and_then(|s| s.to_str()).unwrap_or("zarr");
     let mut r = assemble(store, &p, &chunks, &format!("{stem} {}", sel.label()), crs)?;
@@ -2105,7 +2912,7 @@ mod tests {
         let f64s = |v: [f64; 2]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
         let chunks =
             HashMap::from([("v/0.0".to_string(), values), ("lat/0".into(), f64s([10.0, 20.0])), ("lon/0".into(), f64s([30.0, 40.0]))]);
-        let p = plan(&store, &Selection { variable: "v".into(), index: vec![] }).unwrap();
+        let p = plan(&store, &Selection { variable: "v".into(), index: vec![], window: None }).unwrap();
         assemble(&store, &p, &chunks, "v", None).unwrap().rounded
     }
 
@@ -2178,7 +2985,7 @@ mod tests {
     fn reads_a_slice_of_a_v2_store() {
         let (store, chunks) = store_v2();
         assert_eq!(store.variables().len(), 1);
-        let sel = Selection { variable: "t".into(), index: vec![("time".into(), 1)] };
+        let sel = Selection { variable: "t".into(), index: vec![("time".into(), 1)], window: None };
         let p = plan(&store, &sel).unwrap();
         assert!(
             p.keys.contains(&"t/1.0.0".to_string()) && p.keys.contains(&"t/1.0.1".to_string()) && p.keys.contains(&"lat/0".to_string())
@@ -2194,12 +3001,12 @@ mod tests {
         fewer.remove("t/1.0.1");
         let r = assemble(&store, &p, &fewer, "t", None).unwrap();
         assert!(r.bands[0].data.iter().filter(|v| v.is_nan()).count() == 4);
-        let p0 = plan(&store, &Selection { variable: "t".into(), index: vec![] }).unwrap();
+        let p0 = plan(&store, &Selection { variable: "t".into(), index: vec![], window: None }).unwrap();
         assert!(assemble(&store, &p0, &chunks, "t", None).is_err());
         // Out of range, unknown names.
-        assert!(plan(&store, &Selection { variable: "t".into(), index: vec![("time".into(), 2)] }).is_err());
-        assert!(plan(&store, &Selection { variable: "nope".into(), index: vec![] }).is_err());
-        assert!(plan(&store, &Selection { variable: "t".into(), index: vec![("depth".into(), 0)] }).is_err());
+        assert!(plan(&store, &Selection { variable: "t".into(), index: vec![("time".into(), 2)], window: None }).is_err());
+        assert!(plan(&store, &Selection { variable: "nope".into(), index: vec![], window: None }).is_err());
+        assert!(plan(&store, &Selection { variable: "t".into(), index: vec![("depth".into(), 0)], window: None }).is_err());
         // Time labels.
         let info = info(&store, &chunks);
         assert_eq!(info["variables"][0]["dims"][0]["labels"], serde_json::json!(["2000-01-01", "2000-01-02 06:00"]));
@@ -2223,7 +3030,7 @@ mod tests {
         let store = parse_store(&[("zarr.json".into(), root.to_string().into_bytes())]).unwrap();
         let a = store.array("elev").unwrap();
         assert_eq!(a.chunk_key(&[0, 0]), "elev/c/0/0");
-        let p = plan(&store, &Selection { variable: "elev".into(), index: vec![] }).unwrap();
+        let p = plan(&store, &Selection { variable: "elev".into(), index: vec![], window: None }).unwrap();
         assert_eq!(p.keys, vec!["elev/c/0/0", "y/c/0", "x/c/0"]);
         // A zstd frame isn't made here (ruzstd decodes only): the chunk is checked raw instead.
         let raw: Vec<u8> = (0..12i16).map(|v| if v == 5 { -9999 } else { v * 10 }).flat_map(|v| v.to_be_bytes()).collect();
@@ -2259,7 +3066,7 @@ mod tests {
             let mut r = root.clone();
             r["consolidated_metadata"]["metadata"]["elev"]["codecs"] = codecs;
             let s = parse_store(&[("zarr.json".into(), r.to_string().into_bytes())]).unwrap();
-            let e = plan(&s, &Selection { variable: "elev".into(), index: vec![] }).unwrap_err().to_string();
+            let e = plan(&s, &Selection { variable: "elev".into(), index: vec![], window: None }).unwrap_err().to_string();
             assert!(e.contains(why), "{e}");
         };
         let shard = |inner: Value, codecs: Value| serde_json::json!({"name": "sharding_indexed", "configuration": {"chunk_shape": inner, "codecs": codecs, "index_codecs": [{"name": "bytes"}]}});
@@ -2338,7 +3145,7 @@ mod tests {
                 "elev": elev, "y": coords("y", 2), "x": coords("x", 2),
             }}});
             let store = parse_store(&[("zarr.json".into(), root.to_string().into_bytes())]).unwrap();
-            let p = plan(&store, &Selection { variable: "elev".into(), index: vec![] }).unwrap();
+            let p = plan(&store, &Selection { variable: "elev".into(), index: vec![], window: None }).unwrap();
             let r = assemble(&store, &p, &chunks, "elev", None).unwrap();
             assert_eq!(r.crs, crs, "{attrs}");
             assert_eq!(r.lost, lost, "{attrs}");
@@ -2374,7 +3181,7 @@ mod tests {
                 "elev": elev, "lat": coords("lat", 2), "lon": coords("lon", 2),
             }}});
             let store = parse_store(&[("zarr.json".into(), root.to_string().into_bytes())]).unwrap();
-            let p = plan(&store, &Selection { variable: "elev".into(), index: vec![] }).unwrap();
+            let p = plan(&store, &Selection { variable: "elev".into(), index: vec![], window: None }).unwrap();
             let r = assemble(&store, &p, &chunks, "elev", None).unwrap();
             assert_eq!(r.crs, Crs::LonLat, "{attrs}");
             assert_eq!(r.lost, lost, "{attrs}");
@@ -2580,13 +3387,705 @@ mod tests {
         assert!(s1.array("").unwrap().decode(&[0u8; 40]).is_err());
         let huge = serde_json::json!({"metadata": {"a/.zarray": {"shape": [1u64 << 40, 1u64 << 40], "chunks": [1u64 << 30, 1u64 << 30], "dtype": "<f8", "compressor": null}}});
         let s = parse_store(&[(".zmetadata".into(), huge.to_string().into_bytes())]).unwrap();
-        assert!(plan(&s, &Selection { variable: "a".into(), index: vec![] }).is_err());
+        assert!(plan(&s, &Selection { variable: "a".into(), index: vec![], window: None }).is_err());
         assert!(parse_store(&[(".zmetadata".into(), b"{}".to_vec())]).is_err());
         assert!(parse_store(&[("zarr.json".into(), b"[1,2".to_vec())]).is_err());
         assert_eq!(
             Selection::parse("t2m[time=3, level=1]"),
-            Selection { variable: "t2m".into(), index: vec![("time".into(), 3), ("level".into(), 1)] }
+            Selection { variable: "t2m".into(), index: vec![("time".into(), 3), ("level".into(), 1)], window: None }
         );
         assert_eq!(Selection::parse("t2m[time=3,level=1]").label(), "t2m[time=3,level=1]");
+    }
+
+    /// A Zarr 3 store of `v` (time 2, y 8, x 12; int16, value `t·1000 + row·100 + col`) in zstd
+    /// chunks of 1 × 2 × 3, or (`sharded`) in shards of 1 × 4 × 6 holding them, the index at the end
+    /// with a checksum. Step 0's chunk (rows 2–3, columns 3–5) and its rows 4–7 × columns 6–11 aren't
+    /// written (a shard not holding a chunk, and a shard not stored). `y` is stored plain (cell
+    /// centres from 75 down by 10), `x` with zstd (from 5 up by 10): its files, by key.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn window_store(sharded: bool) -> Vec<(String, Vec<u8>)> {
+        let coord = |n: u64, codecs: Value| {
+            serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [n], "data_type": "float64",
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [n]}}, "codecs": codecs, "fill_value": 0})
+        };
+        let inner = serde_json::json!([{"name": "bytes", "configuration": {"endian": "little"}}, {"name": "zstd"}]);
+        let (chunk_shape, codecs) = if sharded {
+            let index = serde_json::json!([{"name": "bytes", "configuration": {"endian": "little"}}, {"name": "crc32c"}]);
+            let sharding = serde_json::json!({"name": "sharding_indexed", "configuration": {"chunk_shape": [1, 2, 3], "codecs": inner,
+                "index_codecs": index, "index_location": "end"}});
+            (serde_json::json!([1, 4, 6]), serde_json::json!([sharding]))
+        } else {
+            (serde_json::json!([1, 2, 3]), inner)
+        };
+        let v = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [2, 8, 12], "data_type": "int16",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": chunk_shape}}, "codecs": codecs,
+            "fill_value": -1, "dimension_names": ["time", "y", "x"], "attributes": {"epsg_code": 3857}});
+        let root = serde_json::json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+            "v": v, "y": coord(8, serde_json::json!([{"name": "bytes", "configuration": {"endian": "little"}}])),
+            "x": coord(12, serde_json::json!([{"name": "bytes", "configuration": {"endian": "little"}}, {"name": "zstd"}]))}}});
+        let f64s = |v: Vec<f64>| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let mut files = vec![
+            ("zarr.json".to_string(), root.to_string().into_bytes()),
+            ("y/c/0".to_string(), f64s((0..8).map(|i| 75.0 - 10.0 * i as f64).collect())),
+            ("x/c/0".to_string(), zstd::encode_all(&f64s((0..12).map(|i| 5.0 + 10.0 * i as f64).collect())[..], 3).unwrap()),
+        ];
+        // Chunk (t, gy, gx), zstd; None where it isn't written.
+        let chunk = |t: u64, gy: u64, gx: u64| {
+            if t == 0 && ((gy, gx) == (1, 1) || (gy >= 2 && gx >= 2)) {
+                return None;
+            }
+            let raw: Vec<u8> = (0..2)
+                .flat_map(|r| (0..3).map(move |c| (t * 1000 + (gy * 2 + r) * 100 + gx * 3 + c) as i16))
+                .flat_map(i16::to_le_bytes)
+                .collect();
+            Some(zstd::encode_all(&raw[..], 3).unwrap())
+        };
+        for t in 0..2u64 {
+            if !sharded {
+                for (gy, gx) in (0..4u64).flat_map(|gy| (0..4u64).map(move |gx| (gy, gx))) {
+                    files.extend(chunk(t, gy, gx).map(|b| (format!("v/c/{t}/{gy}/{gx}"), b)));
+                }
+                continue;
+            }
+            for (sy, sx) in [(0u64, 0u64), (0, 1), (1, 0), (1, 1)] {
+                let (mut body, mut index) = (Vec::new(), Vec::new());
+                for (iy, ix) in [(0u64, 0u64), (0, 1), (1, 0), (1, 1)] {
+                    match chunk(t, sy * 2 + iy, sx * 2 + ix) {
+                        Some(packed) => {
+                            index.extend([body.len() as u64, packed.len() as u64]);
+                            body.extend(packed);
+                        }
+                        None => index.extend([u64::MAX, u64::MAX]),
+                    }
+                }
+                if body.is_empty() {
+                    continue;
+                }
+                body.extend(index.iter().flat_map(|v| v.to_le_bytes()));
+                body.extend([0u8; 4]);
+                files.push((format!("v/c/{t}/{sy}/{sx}"), body));
+            }
+        }
+        files
+    }
+
+    /// What `p` reads of `files`: its whole files by key, its parts by their ids (as a web store
+    /// answers ranges).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read_plan(files: &[(String, Vec<u8>)], p: &Plan) -> HashMap<String, Vec<u8>> {
+        let mut got: HashMap<String, Vec<u8>> = files.iter().filter(|(k, _)| p.keys.contains(k)).cloned().collect();
+        for q in &p.parts {
+            let Some((_, f)) = files.iter().find(|(k, _)| *k == q.key) else { continue };
+            let bytes = match q.span {
+                Span::Bytes(a, b) => f[a as usize..=b as usize].to_vec(),
+                Span::Tail(n) => f[f.len() - n as usize..].to_vec(),
+            };
+            got.insert(q.id.clone(), bytes);
+        }
+        got
+    }
+
+    /// A grid its group places by `spatial:transform` and `proj:code` (zarr-conventions, as the
+    /// AlphaEarth mosaic in #1720) reads no coordinates, and a box or a point is placed on it by
+    /// arithmetic. The array's own attributes win over its group's; a transform that isn't applied
+    /// leaves the coordinates to place the grid.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_spatial_transform_places_the_grid_with_no_coordinates() {
+        let files = window_store(false);
+        let mut root: Value = serde_json::from_slice(&files[0].1).unwrap();
+        let meta = root.pointer_mut("/consolidated_metadata/metadata").and_then(Value::as_object_mut).unwrap();
+        meta.remove("x");
+        meta.remove("y");
+        meta["v"]["attributes"] = serde_json::json!({});
+        root["attributes"] = serde_json::json!({"proj:code": "EPSG:4326", "spatial:dimensions": ["y", "x"], "spatial:shape": [8, 12],
+            "spatial:transform": [0.5, 0.0, -50.0, 0.0, -0.25, 10.0], "other": 1});
+        let read = |root: &Value| parse_store(&[("zarr.json".into(), root.to_string().into_bytes())]).unwrap();
+        let store = read(&root);
+        let v = store.array("v").unwrap();
+        let keys: Vec<&String> = v.inherited.iter().flat_map(|m| m.keys()).collect();
+        assert!(v.attrs.is_empty() && keys.len() == 4 && !keys.contains(&&"other".to_string()), "{keys:?}");
+        // Columns 2–5 and rows 1–4 of step 1: its four chunks, and no coordinates.
+        let w = Window { x0: 2, y0: 1, x1: 5, y1: 4 };
+        let sel = Selection { variable: "v".into(), index: vec![("time".into(), 1)], window: Some(w) };
+        let p = plan(&store, &sel).unwrap();
+        assert_eq!(p.keys, ["v/c/1/0/0", "v/c/1/0/1", "v/c/1/1/0", "v/c/1/1/1"]);
+        assert!(p.parts.is_empty() && p.ycoord.is_none() && p.xcoord.is_none());
+        let r = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert_eq!(r.crs, Crs::LonLat);
+        assert_eq!(r.transform, GeoTransform { origin_x: -49.0, origin_y: 9.75, pixel_width: 0.5, pixel_height: -0.25 });
+        let want: Vec<f32> = (1..4).flat_map(|r| (2..5).map(move |c| (1000 + r * 100 + c) as f32)).collect();
+        assert_eq!(r.bands[0].data, want);
+        // A box and a point, with no coordinates read, in either longitude convention.
+        let none = HashMap::new();
+        assert!(window_keys(&store, "v").unwrap().is_empty() && map_coordinate_keys(&store, "v").is_empty());
+        assert_eq!(window_of(&store, "v", &none, [-49.0, 9.0, -47.5, 9.75]).unwrap(), (w, false, false));
+        assert_eq!(window_of(&store, "v", &none, [311.0, 9.0, 312.5, 9.75]).unwrap(), (w, false, false));
+        assert_eq!(window_of(&store, "v", &none, [-60.0, 9.0, -47.5, 9.75]).unwrap(), (Window { x0: 0, ..w }, true, false));
+        assert_eq!(locate(&store, "v", &none, -48.2, 9.3).unwrap(), Some((2, 3)));
+        assert_eq!(locate(&store, "v", &none, -30.0, 9.3).unwrap(), None);
+        assert!(is_lonlat_grid(&store, "v"));
+        // A node-registered transform gives the first cell's centre.
+        root["attributes"]["spatial:registration"] = "node".into();
+        let r = assemble(&read(&root), &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert_eq!((r.transform.origin_x, r.transform.origin_y), (-49.25, 9.875));
+        // The array's own coordinate system wins over its group's, under another key too, and so
+        // does its CF grid mapping's.
+        let crs = |attrs: Value| {
+            let mut root = root.clone();
+            root["consolidated_metadata"]["metadata"]["v"]["attributes"] = attrs;
+            root["consolidated_metadata"]["metadata"]["gm"] = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [1],
+                "data_type": "int8", "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1]}},
+                "codecs": [{"name": "bytes"}], "attributes": {"epsg_code": 3857}});
+            let store = read(&root);
+            assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap().crs
+        };
+        assert_eq!(crs(serde_json::json!({"proj:code": "EPSG:3857"})), Crs::WebMercator);
+        assert_eq!(crs(serde_json::json!({"proj:epsg": 3857})), Crs::WebMercator);
+        assert_eq!(crs(serde_json::json!({"grid_mapping": "gm"})), Crs::WebMercator);
+        assert_eq!(crs(serde_json::json!({})), Crs::LonLat);
+        // A proj: value that isn't read is said, with the system used instead.
+        let mut odd = root.clone();
+        odd["consolidated_metadata"]["metadata"]["v"]["attributes"] =
+            serde_json::json!({"proj:code": "EPSG:nonsense", "grid_mapping": "gm"});
+        odd["consolidated_metadata"]["metadata"]["gm"] = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [1],
+            "data_type": "int8", "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1]}},
+            "codecs": [{"name": "bytes"}], "attributes": {"epsg_code": 3857}});
+        let r = assemble(&read(&odd), &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert_eq!(r.crs, Crs::WebMercator);
+        assert!(r.lost.iter().any(|l| l.contains("proj:code \"EPSG:nonsense\" isn't a coordinate system that is read")), "{:?}", r.lost);
+        // With no other system read, it is said too: in the error, or beside the system given.
+        let mut alone = odd.clone();
+        alone["consolidated_metadata"]["metadata"]["v"]["attributes"] = serde_json::json!({"proj:code": "EPSG:nonsense"});
+        alone["attributes"].as_object_mut().unwrap().remove("proj:code");
+        let store = read(&alone);
+        let e = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap_err().to_string();
+        assert!(e.contains("doesn't say its coordinate system that is read (proj:code \"EPSG:nonsense\""), "{e}");
+        let r = assemble(&store, &p, &read_plan(&files, &p), "v", Some(Crs::WebMercator)).unwrap();
+        assert!(r.crs == Crs::WebMercator && r.lost.iter().any(|l| l.contains("proj:code \"EPSG:nonsense\"")), "{:?}", r.lost);
+        let mut long = odd.clone();
+        long["consolidated_metadata"]["metadata"]["v"]["attributes"]["proj:code"] = format!("X{}", "y".repeat(10_000)).into();
+        let r = assemble(&read(&long), &p, &read_plan(&files, &p), "v", None).unwrap();
+        let note = r.lost.iter().find(|l| l.contains("proj:code")).unwrap();
+        assert!(note.len() < 300 && note.contains("(10003 characters)"), "{note}");
+        // A proj: value that is read says nothing.
+        let clean = read(&root);
+        assert_eq!(crs_of(&clean, clean.array("v").unwrap()), Some((Crs::LonLat, None)));
+        // A 1-D array isn't placed by a transform, whatever its shape says.
+        let line = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [4], "data_type": "int8",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [4]}}, "codecs": [{"name": "bytes"}],
+            "attributes": {"spatial:transform": [1.0, 0.0, 0.0, 0.0, -1.0, 0.0], "spatial:shape": [4, 4]}});
+        let one = parse_store(&[("zarr.json".into(), line.to_string().into_bytes())]).unwrap();
+        assert!(spatial_grid(one.array("").unwrap()).is_none());
+        // A transform-placed grid whose coordinates are named lat and lon, with no coordinate
+        // system said, is longitude/latitude, as a grid its coordinates place.
+        let mut named = root.clone();
+        named["attributes"].as_object_mut().unwrap().remove("proj:code");
+        named["attributes"].as_object_mut().unwrap().remove("spatial:registration");
+        named["attributes"]["spatial:dimensions"] = serde_json::json!(["lat", "lon"]);
+        let meta = named.pointer_mut("/consolidated_metadata/metadata").and_then(Value::as_object_mut).unwrap();
+        meta["v"]["dimension_names"] = serde_json::json!(["time", "lat", "lon"]);
+        for (k, n) in [("lat", 8), ("lon", 12)] {
+            meta.insert(
+                k.into(),
+                serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [n], "data_type": "float64",
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [n]}}, "codecs": [{"name": "bytes"}]}),
+            );
+        }
+        let store = read(&named);
+        let p = plan(&store, &sel).unwrap();
+        assert!(p.ycoord.is_none(), "placed by the transform, no coordinates read");
+        let r = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert_eq!(r.crs, Crs::LonLat);
+        assert!(is_lonlat_grid(&store, "v"));
+        assert_eq!(locate(&store, "v", &none, 311.8, 9.3).unwrap(), Some((2, 3)));
+        // A rotated transform, another transform type, or a shape that isn't the map's isn't
+        // applied: with no coordinates, the grid can't be placed.
+        for (k, v) in [
+            ("spatial:transform", serde_json::json!([0.5, 0.1, -50.0, 0.0, -0.25, 10.0])),
+            ("spatial:transform_type", serde_json::json!("rpc")),
+            ("spatial:shape", serde_json::json!([12, 8])),
+            ("spatial:registration", serde_json::json!("corner")),
+        ] {
+            let mut odd = root.clone();
+            odd["attributes"][k] = v;
+            let store = read(&odd);
+            let p = plan(&store, &sel).unwrap();
+            let e = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap_err().to_string();
+            assert!(e.contains("have no coordinates, and its spatial:transform isn't one that is read"), "{k}: {e}");
+        }
+        // A group's transform without its shape isn't applied (it may be another level's), and
+        // that is said.
+        let mut unshaped = root.clone();
+        unshaped["attributes"].as_object_mut().unwrap().remove("spatial:shape");
+        let store = read(&unshaped);
+        assert!(spatial_grid(store.array("v").unwrap()).is_none());
+        let e = plan(&store, &sel).and_then(|p| assemble(&store, &p, &read_plan(&files, &p), "v", None)).unwrap_err().to_string();
+        assert!(e.contains("its spatial:transform isn't one that is read"), "{e}");
+        // Nor is a coarser level's (`lvl1/v`, 4 × 6) placed by the root's transform (8 × 12) when
+        // its own group gives only a shape: a transform comes with its own group's shape.
+        let mut pyramid = root.clone();
+        let mut level = pyramid["consolidated_metadata"]["metadata"]["v"].clone();
+        level["shape"] = serde_json::json!([2, 4, 6]);
+        pyramid["consolidated_metadata"]["metadata"]["lvl1"] =
+            serde_json::json!({"zarr_format": 3, "node_type": "group", "attributes": {"spatial:shape": [4, 6]}});
+        pyramid["consolidated_metadata"]["metadata"]["lvl1/v"] = level;
+        let store = read(&pyramid);
+        assert!(spatial_grid(store.array("lvl1/v").unwrap()).is_none());
+        assert!(spatial_grid(store.array("v").unwrap()).is_some());
+        // A Zarr 2 group's .zattrs give their arrays the same.
+        let v2 = [
+            (".zgroup", serde_json::json!({"zarr_format": 2})),
+            (".zattrs", {
+                let mut a = root["attributes"].clone();
+                a.as_object_mut().unwrap().remove("spatial:registration");
+                a
+            }),
+            (
+                "v/.zarray",
+                serde_json::json!({"zarr_format": 2, "shape": [8, 12], "chunks": [8, 12], "dtype": "<i2",
+                "compressor": null, "fill_value": 0, "order": "C", "filters": null}),
+            ),
+            ("v/.zattrs", serde_json::json!({"_ARRAY_DIMENSIONS": ["y", "x"]})),
+        ];
+        let store = parse_store(&v2.map(|(k, v)| (k.to_string(), v.to_string().into_bytes()))).unwrap();
+        assert!(is_lonlat_grid(&store, "v"));
+        assert_eq!(locate(&store, "v", &none, -48.2, 9.3).unwrap(), Some((2, 3)));
+        // Each group's part is made once and shared by its arrays, so a large group attribute
+        // (a long proj:wkt2) isn't copied for each of them.
+        let mut many = root.clone();
+        let wkt = format!("GEOGCRS[\"x\"{}]", " ".repeat(1 << 20));
+        many["attributes"] = serde_json::json!({"proj:wkt2": wkt});
+        for i in 0..200 {
+            many["consolidated_metadata"]["metadata"][format!("w{i}")] = many["consolidated_metadata"]["metadata"]["v"].clone();
+        }
+        let store = read(&many);
+        let first = &store.array("w0").unwrap().inherited;
+        assert_eq!(first.len(), 1);
+        assert!((1..200).all(|i| Arc::ptr_eq(&store.array(&format!("w{i}")).unwrap().inherited[0], &first[0])));
+        // Groups are looked for up to MAX_GROUP_DEPTH levels above an array, so a store of very deep
+        // paths can't make the walk long: an array 3 levels down takes the root's coordinate system,
+        // one 70 levels down doesn't.
+        let mut deep = root.clone();
+        deep["attributes"] = serde_json::json!({"proj:code": "EPSG:3857"});
+        let v = deep["consolidated_metadata"]["metadata"]["v"].clone();
+        for depth in [3, 70] {
+            deep["consolidated_metadata"]["metadata"][format!("{}v", "g/".repeat(depth))] = v.clone();
+        }
+        let store = read(&deep);
+        assert_eq!(store.array(&format!("{}v", "g/".repeat(3))).unwrap().inherited.len(), 1);
+        assert!(store.array(&format!("{}v", "g/".repeat(70))).unwrap().inherited.is_empty());
+        // A transform that isn't applied, beside coordinates that place the grid, is said; a store
+        // with no transform says nothing of one.
+        let mut placed: Value = serde_json::from_slice(&files[0].1).unwrap();
+        let p = plan(&read(&placed), &sel).unwrap();
+        let r = assemble(&read(&placed), &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert!(r.lost.iter().all(|l| !l.contains("spatial:transform")), "{:?}", r.lost);
+        placed["attributes"] = serde_json::json!({"spatial:transform": [0.5, 0.1, -50.0, 0.0, -0.25, 10.0], "spatial:shape": [8, 12]});
+        let store = read(&placed);
+        let p = plan(&store, &sel).unwrap();
+        let r = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert_eq!(r.transform, GeoTransform { origin_x: 20.0, origin_y: 70.0, pixel_width: 10.0, pixel_height: -10.0 });
+        assert!(
+            r.lost.iter().any(|l| l.contains("spatial:transform isn't one that is read") && l.contains("its coordinates place it")),
+            "{:?}",
+            r.lost
+        );
+        // spatial:dimensions names the map's dimensions, y first, whatever they are called.
+        let a = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [3, 4, 5], "data_type": "int8",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [3, 4, 5]}}, "codecs": [{"name": "bytes"}],
+            "dimension_names": ["row", "band", "col"], "attributes": {"spatial:dimensions": ["row", "col"]}});
+        let store = parse_store(&[("zarr.json".into(), a.to_string().into_bytes())]).unwrap();
+        assert_eq!(map_dims(store.array("").unwrap()), (0, 2));
+        // A spatial:dimensions that doesn't name the array's dimensions is said, and the map is
+        // taken by the names instead.
+        let mut misnamed: Value = serde_json::from_slice(&files[0].1).unwrap();
+        misnamed["consolidated_metadata"]["metadata"]["v"]["attributes"]["spatial:dimensions"] = serde_json::json!(["lat", "lon"]);
+        let store = read(&misnamed);
+        assert_eq!(spatial_dims(store.array("v").unwrap()), Some(None));
+        let p = plan(&store, &sel).unwrap();
+        let r = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert!(
+            r.lost.iter().any(|l| l.contains("spatial:dimensions don't name two of its dimensions") && l.contains("(y and x)")),
+            "{:?}",
+            r.lost
+        );
+    }
+
+    /// A window reads only the chunks it touches, a plain coordinate's own bytes and a compressed
+    /// one's chunk; chunks never written are empty; the cells are those the whole slice holds there.
+    /// A folder's window is the same, saved with its slice's label.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_window_reads_only_its_chunks() {
+        let files = window_store(false);
+        let store = parse_store(&files[..1]).unwrap();
+        let sel = |t: u64, w: Window| Selection { variable: "v".into(), index: vec![("time".into(), t)], window: Some(w) };
+        // Columns 2–5 and rows 1–4 of step 1: four chunks.
+        let p = plan(&store, &sel(1, Window { x0: 2, y0: 1, x1: 5, y1: 4 })).unwrap();
+        assert_eq!(p.keys, ["v/c/1/0/0", "v/c/1/0/1", "v/c/1/1/0", "v/c/1/1/1", "x/c/0"]);
+        assert_eq!(p.parts, [Part { key: "y/c/0".into(), span: Span::Bytes(8, 31), id: "y/c/0@8-31".into() }]);
+        let r = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert_eq!((r.width, r.height), (3, 3));
+        let want: Vec<f32> = (1..4).flat_map(|r| (2..5).map(move |c| (1000 + r * 100 + c) as f32)).collect();
+        assert_eq!(r.bands[0].data, want);
+        assert_eq!(r.transform, GeoTransform { origin_x: 20.0, origin_y: 70.0, pixel_width: 10.0, pixel_height: -10.0 });
+        // Step 0, rows 2–7 and columns 4–9, over chunks never written.
+        let w0 = Window { x0: 4, y0: 2, x1: 10, y1: 8 };
+        let p = plan(&store, &sel(0, w0)).unwrap();
+        let r = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap();
+        let at = |r: usize, c: usize| r * 6 + c;
+        assert!(r.bands[0].data[at(0, 0)].is_nan() && r.bands[0].data[at(1, 1)].is_nan());
+        assert_eq!(r.bands[0].data[at(0, 2)], 206.0);
+        assert!(r.bands[0].data[at(2, 2)].is_nan());
+        assert_eq!(r.bands[0].data[at(2, 0)], 404.0);
+        // The same window from a folder.
+        // Removed however the test ends.
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("rustgis-zarr-window-{}", std::process::id()));
+        let _gone = Gone(dir.clone());
+        for (k, b) in &files {
+            let path = dir.join(k);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b).unwrap();
+        }
+        let label = sel(0, w0).label();
+        assert_eq!(label, "v[time=0,cells=4:2:10:8]");
+        assert_eq!(Selection::parse(&label), sel(0, w0));
+        let from_dir = read_dir(&dir, &label, None).unwrap();
+        assert_eq!(format!("{:?}", from_dir.bands[0].data), format!("{:?}", r.bands[0].data));
+        // A window that isn't four whole numbers is refused, not read as the whole slice.
+        // A dimension named `cells` keeps its step through a label.
+        let named = Selection { variable: "v".into(), index: vec![("cells".into(), 1)], window: Some(w0) };
+        assert_eq!(named.label(), "v[cells=1,cells=4:2:10:8]");
+        assert_eq!(Selection::parse_strict(&named.label()).unwrap(), named);
+        assert_eq!(Selection::parse_strict("v[cells=1]").unwrap().index, [("cells".to_string(), 1)]);
+        for bad in ["v[time=0,cells=4:x:10:8]", "v[time=0,cells=4:2:10]", "v[cells=x]"] {
+            assert!(Selection::parse_strict(bad).is_err(), "{bad}");
+            assert!(read_dir(&dir, bad, None).unwrap_err().to_string().contains("aren't four whole numbers"), "{bad}");
+        }
+        // A box in the grid's coordinates is the cells it covers, cut to the grid (and said so).
+        let mut coords = HashMap::new();
+        for k in window_keys(&store, "v").unwrap() {
+            coords.insert(k.clone(), files.iter().find(|(f, _)| *f == k).unwrap().1.clone());
+        }
+        assert_eq!(
+            window_of(&store, "v", &coords, [21.0, 41.0, 49.0, 69.0]).unwrap(),
+            (Window { x0: 2, y0: 1, x1: 5, y1: 4 }, false, false)
+        );
+        assert_eq!(
+            window_of(&store, "v", &coords, [-50.0, 41.0, 13.0, 200.0]).unwrap(),
+            (Window { x0: 0, y0: 0, x1: 2, y1: 4 }, true, false)
+        );
+        // An edge on a cell's edge but for rounding takes no cell past it.
+        assert_eq!(
+            window_of(&store, "v", &coords, [11.0, 41.0, (0.1 + 0.2) * 100.0, 69.0]).unwrap().0,
+            Window { x0: 1, y0: 1, x1: 3, y1: 4 }
+        );
+        // Within one cell: two, so the cell size is known, and said.
+        assert_eq!(
+            window_of(&store, "v", &coords, [21.0, 41.0, 22.0, 42.0]).unwrap(),
+            (Window { x0: 2, y0: 3, x1: 4, y1: 5 }, false, true)
+        );
+        assert!(window_of(&store, "v", &coords, [500.0, 41.0, 600.0, 69.0]).is_err());
+        assert!(window_of(&store, "v", &coords, [49.0, 41.0, 21.0, 69.0]).is_err());
+        // On a longitude grid of 0–360°, a box over its 0°/360° seam is refused (it is two runs of
+        // columns); one on either side, written either way round, is read.
+        let globe = serde_json::json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+            "v": {"zarr_format": 3, "node_type": "array", "shape": [2, 12], "data_type": "int16", "dimension_names": ["lat", "lon"],
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2, 12]}}, "codecs": [{"name": "bytes"}], "fill_value": 0},
+            "lat": {"zarr_format": 3, "node_type": "array", "shape": [2], "data_type": "float64", "dimension_names": ["lat"],
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2]}}, "codecs": [{"name": "bytes"}], "fill_value": 0},
+            "lon": {"zarr_format": 3, "node_type": "array", "shape": [12], "data_type": "float64", "dimension_names": ["lon"],
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [12]}}, "codecs": [{"name": "bytes"}], "fill_value": 0}}}});
+        let globe = parse_store(&[("zarr.json".into(), globe.to_string().into_bytes())]).unwrap();
+        let mut gc = HashMap::new();
+        gc.insert("lat/c/0".to_string(), [15.0f64, -15.0].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>());
+        gc.insert("lon/c/0".to_string(), (0..12).flat_map(|i| (15.0 + 30.0 * i as f64).to_le_bytes()).collect::<Vec<u8>>());
+        for seam in [[-20.0, -10.0, 20.0, 10.0], [340.0, -10.0, 380.0, 10.0]] {
+            let e = window_of(&globe, "v", &gc, seam).unwrap_err().to_string();
+            assert!(e.contains("crosses the grid's edge at 360°"), "{seam:?}: {e}");
+        }
+        assert_eq!(
+            window_of(&globe, "v", &gc, [-50.0, -10.0, -10.0, 10.0]).unwrap(),
+            (Window { x0: 10, y0: 0, x1: 12, y1: 2 }, false, false)
+        );
+        assert_eq!(window_of(&globe, "v", &gc, [10.0, -10.0, 50.0, 10.0]).unwrap(), (Window { x0: 0, y0: 0, x1: 2, y1: 2 }, false, false));
+        // A box round the whole globe, or holding the whole axis in one turn, is the whole axis.
+        let all = (Window { x0: 0, y0: 0, x1: 12, y1: 2 }, true, false);
+        assert_eq!(window_of(&globe, "v", &gc, [-200.0, -10.0, 200.0, 10.0]).unwrap(), all);
+        assert_eq!(window_of(&globe, "v", &gc, [-10.0, -10.0, 370.0, 10.0]).unwrap(), all);
+        // A window outside the grid, or under 2 × 2 cells, is refused; one wanting more chunks than
+        // a read takes says to take a smaller one.
+        for w in [Window { x0: 2, y0: 1, x1: 13, y1: 4 }, Window { x0: 2, y0: 1, x1: 3, y1: 4 }, Window { x0: 5, y0: 1, x1: 2, y1: 4 }] {
+            assert!(plan(&store, &sel(0, w)).is_err(), "{w:?}");
+        }
+        let many = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [100, 100], "data_type": "int16",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1, 1]}}, "codecs": [{"name": "bytes"}], "fill_value": 0});
+        let many = parse_store(&[("zarr.json".into(), many.to_string().into_bytes())]).unwrap();
+        let e = plan(&many, &Selection { variable: "".into(), index: vec![], window: Some(Window { x0: 0, y0: 0, x1: 65, y1: 65 }) })
+            .unwrap_err();
+        assert!(e.to_string().contains("4225 chunks for the window, more than 4096: take a smaller window"), "{e}");
+        // A coordinate chunk sized past what a byte offset holds (hostile metadata) neither panics
+        // nor overflows: its window reads, or is refused.
+        for (n, cs) in [(u64::MAX / 2 + 9, u64::MAX / 2 + 1), (u64::MAX / 2 + 9, u64::MAX / 2 + 9)] {
+            let z = serde_json::json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+                "v": {"zarr_format": 3, "node_type": "array", "shape": [2, n], "data_type": "int16", "dimension_names": ["y", "x"],
+                    "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1, 1]}}, "codecs": [{"name": "bytes"}], "fill_value": 0},
+                "x": {"zarr_format": 3, "node_type": "array", "shape": [n], "data_type": "float64", "dimension_names": ["x"],
+                    "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [cs]}}, "codecs": [{"name": "bytes"}], "fill_value": 0}}}});
+            let hostile = parse_store(&[("zarr.json".into(), z.to_string().into_bytes())]).unwrap();
+            let w = Window { x0: n - 4, y0: 0, x1: n - 2, y1: 2 };
+            let _ = plan(&hostile, &Selection { variable: "v".into(), index: vec![], window: Some(w) });
+        }
+        // A coordinate's bytes cut short is an error, not a misplaced raster.
+        let p = plan(&store, &sel(1, Window { x0: 2, y0: 1, x1: 5, y1: 4 })).unwrap();
+        let mut cut = read_plan(&files, &p);
+        cut.insert("y/c/0@8-31".into(), vec![0u8; 16]);
+        assert!(assemble(&store, &p, &cut, "v", None).is_err());
+    }
+
+    /// A window of a sharded variable reads each shard's index by its last bytes, then only the
+    /// shard's chunks it needs, by range; a chunk the index says isn't there shows the fill value
+    /// and a shard not stored is empty, as when the shards are read whole. An index cut short, or
+    /// placing a chunk past what a read takes, is an error.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_window_reads_only_its_shards_chunks_by_range() {
+        let files = window_store(true);
+        let store = parse_store(&files[..1]).unwrap();
+        let sel = |t: u64, w: Window| Selection { variable: "v".into(), index: vec![("time".into(), t)], window: Some(w) };
+        let read = |p: &Plan| {
+            let mut got = read_plan(&files, p);
+            let inner = inner_parts(&store, p, &got).unwrap();
+            let q = Plan { keys: Vec::new(), parts: inner.clone(), ..p.clone() };
+            got.extend(read_plan(&files, &q));
+            (inner, got)
+        };
+        // Columns 2–5 and rows 1–4 of step 1: shard (1, 0, 0)'s four chunks, by range.
+        let p = plan(&store, &sel(1, Window { x0: 2, y0: 1, x1: 5, y1: 4 })).unwrap();
+        assert_eq!(p.keys, ["x/c/0"]);
+        let spans = |key: &str| p.parts.iter().filter(|q| q.key == key).map(|q| q.span).collect::<Vec<_>>();
+        assert_eq!(spans("v/c/1/0/0"), [Span::Tail(4 * 16 + 4)]);
+        assert_eq!(spans("y/c/0"), [Span::Bytes(8, 31)]);
+        let (inner, got) = read(&p);
+        assert_eq!(inner.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(), ["v/c/1/0/0#0", "v/c/1/0/0#1", "v/c/1/0/0#2", "v/c/1/0/0#3"]);
+        let r = assemble(&store, &p, &got, "v", None).unwrap();
+        assert_eq!(r.bands[0].data, (1..4).flat_map(|r| (2..5).map(move |c| (1000 + r * 100 + c) as f32)).collect::<Vec<_>>());
+        // A chunk the index places but whose bytes didn't come (the shard gone since its index
+        // was read) is an error, not the fill value.
+        let mut gone = got.clone();
+        gone.remove("v/c/1/0/0#0");
+        assert!(assemble(&store, &p, &gone, "v", None).is_err());
+        // Step 0, rows 2–7 and columns 4–9: the chunk shard (0, 0, 0) doesn't hold and shard
+        // (0, 1, 1), not stored, are not asked for. The first shows the fill value and the second
+        // is empty, as when the shards are read whole.
+        let w0 = Window { x0: 4, y0: 2, x1: 10, y1: 8 };
+        let p = plan(&store, &sel(0, w0)).unwrap();
+        let (inner, got) = read(&p);
+        assert!(inner.iter().all(|q| q.id != "v/c/0/0/0#3" && q.key != "v/c/0/1/1"), "{inner:?}");
+        let r = assemble(&store, &p, &got, "v", None).unwrap();
+        let at = |r: usize, c: usize| r * 6 + c;
+        assert_eq!((r.bands[0].data[at(0, 0)], r.bands[0].data[at(1, 1)]), (-1.0, -1.0));
+        assert!(r.bands[0].data[at(2, 2)].is_nan());
+        assert_eq!((r.bands[0].data[at(0, 2)], r.bands[0].data[at(2, 0)]), (206.0, 404.0));
+        let whole = Selection { window: None, ..sel(0, w0) };
+        let pw = plan(&store, &whole).unwrap();
+        let all = assemble(&store, &pw, &read_plan(&files, &pw), "v", None).unwrap();
+        let cut: Vec<f32> =
+            (2..8).flat_map(|row| (4..10).map(move |col| (row, col))).map(|(row, col)| all.bands[0].data[row * 12 + col]).collect();
+        assert_eq!(format!("{cut:?}"), format!("{:?}", r.bands[0].data));
+        // From a folder, by range: the same cells.
+        let dir = std::env::temp_dir().join(format!("rustgis-zarr-shard-window-{}", std::process::id()));
+        for (k, b) in &files {
+            let path = dir.join(k);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b).unwrap();
+        }
+        let from_dir = read_dir(&dir, &sel(0, w0).label(), None).unwrap();
+        assert_eq!(format!("{:?}", from_dir.bands[0].data), format!("{:?}", r.bands[0].data));
+        // A shard that is there but can't be read (a folder in its place) is an error, not cells
+        // left empty as if it were never written.
+        let shard = dir.join("v/c/0/0/0");
+        std::fs::remove_file(&shard).unwrap();
+        std::fs::create_dir(&shard).unwrap();
+        assert!(read_dir(&dir, &sel(0, w0).label(), None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+        // A window over more than MAX_CHUNKS of the shards' chunks reads its shards whole, as a
+        // window did before, rather than being refused: 260 × 260 cells of 2 × 2 chunks in shards
+        // of 130 × 130.
+        let big = serde_json::json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+            "v": {"zarr_format": 3, "node_type": "array", "shape": [1, 260, 260], "data_type": "int16",
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1, 130, 130]}},
+                "codecs": [{"name": "sharding_indexed", "configuration": {"chunk_shape": [1, 2, 2], "codecs": [{"name": "bytes"}],
+                    "index_codecs": [{"name": "bytes"}], "index_location": "end"}}],
+                "fill_value": 0, "dimension_names": ["time", "y", "x"]}}}});
+        let big = parse_store(&[("zarr.json".to_string(), big.to_string().into_bytes())]).unwrap();
+        let p = plan(&big, &sel(0, Window { x0: 0, y0: 0, x1: 260, y1: 260 })).unwrap();
+        assert!(p.shards.is_empty() && p.parts.is_empty(), "{:?}", p.parts);
+        assert_eq!(p.keys, ["v/c/0/0/0", "v/c/0/0/1", "v/c/0/1/0", "v/c/0/1/1"]);
+        // A small window of it still reads only its chunks.
+        let p = plan(&big, &sel(0, Window { x0: 0, y0: 0, x1: 4, y1: 4 })).unwrap();
+        assert_eq!((p.shards.len(), p.shards[0].chunks.len()), (1, 4));
+        // An index cut short, or one placing a chunk past what a read takes.
+        let p = plan(&store, &sel(1, Window { x0: 2, y0: 1, x1: 5, y1: 4 })).unwrap();
+        let mut cut = HashMap::new();
+        cut.insert("v/c/1/0/0#index".to_string(), vec![0u8; 20]);
+        assert!(inner_parts(&store, &p, &cut).is_err());
+        let mut lying = vec![0u8; 68];
+        lying[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        cut.insert("v/c/1/0/0#index".to_string(), lying);
+        assert!(inner_parts(&store, &p, &cut).is_err());
+    }
+
+    /// A Zarr 3 store whose root group lists no arrays (as `aef-mosaic`'s): `emb(time, band, y, x)`
+    /// placed by the root's `spatial:transform`, a `time` of whole years, and no `band`, `y` or
+    /// `x` arrays. `prefix` puts `emb` and `time` in a group.
+    fn unlisted_store(prefix: &str, years: Value, time_type: &str, time_attrs: Value) -> Vec<(String, Vec<u8>)> {
+        let root = serde_json::json!({"zarr_format": 3, "node_type": "group", "attributes": {"proj:code": "EPSG:4326",
+            "spatial:dimensions": ["y", "x"], "spatial:transform": [0.5, 0.0, -43.0, 0.0, -0.5, -20.0], "spatial:shape": [4, 6]}});
+        let bytes = serde_json::json!([{"name": "bytes", "configuration": {"endian": "little"}}]);
+        let emb = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [3, 2, 4, 6], "data_type": "int8",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1, 2, 4, 6]}}, "codecs": bytes, "fill_value": -128,
+            "dimension_names": ["time", "band", "y", "x"]});
+        let time = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [3], "data_type": time_type,
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [3]}}, "codecs": bytes, "fill_value": 0,
+            "dimension_names": ["time"], "attributes": time_attrs});
+        let values: Vec<u8> = years
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|y| match y.as_i64() {
+                Some(i) if time_type == "int32" => (i as i32).to_le_bytes().to_vec(),
+                _ => y.as_f64().unwrap().to_le_bytes().to_vec(),
+            })
+            .collect();
+        vec![
+            ("zarr.json".into(), root.to_string().into_bytes()),
+            (format!("{prefix}emb/zarr.json"), emb.to_string().into_bytes()),
+            (format!("{prefix}time/zarr.json"), time.to_string().into_bytes()),
+            (format!("{prefix}time/c/0"), values),
+        ]
+    }
+
+    /// What a web store's reader fetches of `files` ([`member_keys`] rounds, as the engine runs
+    /// them, each file asked for once): the root's metadata, then each round's. Gives the docs and
+    /// each round's keys.
+    fn discover(files: &[(String, Vec<u8>)], variable: &str) -> (Vec<(String, Vec<u8>)>, Vec<Vec<String>>) {
+        let mut docs: Vec<(String, Vec<u8>)> = files.iter().filter(|(k, _)| METADATA_KEYS.contains(&k.as_str())).cloned().collect();
+        let (mut tried, mut rounds) = (HashSet::new(), Vec::new());
+        for _ in 0..3 {
+            let next: Vec<String> = member_keys(&docs, variable).into_iter().filter(|k| tried.insert(k.clone())).collect();
+            if next.is_empty() {
+                break;
+            }
+            docs.extend(files.iter().filter(|(k, _)| next.contains(k)).cloned());
+            rounds.push(next);
+        }
+        (docs, rounds)
+    }
+
+    /// The `time/c/0` chunk of `files`, under `prefix`.
+    fn time_chunk(files: &[(String, Vec<u8>)], prefix: &str) -> HashMap<String, Vec<u8>> {
+        files.iter().filter(|(k, _)| *k == format!("{prefix}time/c/0")).cloned().collect()
+    }
+
+    #[test]
+    fn a_store_without_consolidated_metadata_is_found_by_name_with_years_as_dates() {
+        let years = serde_json::json!([2017, 2018, 2025]);
+        let files = unlisted_store("", years.clone(), "int32", serde_json::json!({}));
+        assert!(lists_no_arrays(&files[..1]));
+        assert!(parse_store(&files[..1]).is_err(), "the root alone holds no arrays");
+        // The variable and the root's spatial:dimensions, then the variable's dimensions; the
+        // missing ones (band, y, x) asked for once.
+        let (docs, rounds) = discover(&files, "emb");
+        assert_eq!(rounds, vec![vec!["emb/zarr.json", "y/zarr.json", "x/zarr.json"], vec!["time/zarr.json", "band/zarr.json"]]);
+        let store = parse_store(&docs).unwrap();
+        assert_eq!(store.variables().iter().map(|v| v.path.as_str()).collect::<Vec<_>>(), ["emb"]);
+        // Placed by the root's transform and system, with no coordinates.
+        let emb = store.array("emb").unwrap();
+        assert!(spatial_grid(emb).is_some());
+        assert!(matches!(crs_of(&store, emb), Some((Crs::LonLat, _))));
+        // Whole years are the time axis, each on its 1 January.
+        let chunks = time_chunk(&files, "");
+        assert_eq!(coordinate_keys(&store, "emb"), ["time/c/0"]);
+        let jan1 = |y: i64| days_from_civil(y, 1, 1) as f64 * 86_400_000.0;
+        assert_eq!(time_axis(&store, "emb", &chunks), Some(("time".to_string(), vec![jan1(2017), jan1(2018), jan1(2025)])));
+        assert_eq!(jan1(2017), 1_483_228_800_000.0);
+        assert_eq!(info(&store, &chunks)["variables"][0]["dims"][0]["labels"], serde_json::json!(["2017", "2018", "2025"]));
+
+        // With no variable, only the map's dimensions are asked for, and no variable is found.
+        let (docs, _) = discover(&files, "");
+        assert!(parse_store(&docs).is_err());
+        // A variable in a group: its group's metadata, then its dimensions in its group and at
+        // the root (where coordinates are looked for too).
+        let nested = unlisted_store("g/", years.clone(), "int32", serde_json::json!({}));
+        let (docs, rounds) = discover(&nested, "g/emb");
+        assert_eq!(rounds[0], ["g/zarr.json", "g/emb/zarr.json", "y/zarr.json", "x/zarr.json"]);
+        assert_eq!(
+            rounds[1],
+            ["g/time/zarr.json", "time/zarr.json", "g/band/zarr.json", "band/zarr.json", "g/y/zarr.json", "g/x/zarr.json"]
+        );
+        let store = parse_store(&docs).unwrap();
+        assert!(time_axis(&store, "g/emb", &time_chunk(&nested, "g/")).is_some());
+        // A name that would lead out of the store isn't asked for.
+        assert_eq!(member_keys(&files[..1], "../emb"), ["y/zarr.json", "x/zarr.json"]);
+        // A store that lists its arrays asks for nothing more; nor does Zarr 2 with .zmetadata.
+        assert!(member_keys(&window_store(false)[..1], "v").is_empty());
+        let zgroup = |k: &str| (k.to_string(), br#"{"zarr_format": 2}"#.to_vec());
+        assert!(member_keys(&[zgroup(".zgroup"), (".zmetadata".into(), br#"{"metadata": {}}"#.to_vec())], "v").is_empty());
+        // Zarr 2 with no .zmetadata: an array's .zarray and .zattrs, then its _ARRAY_DIMENSIONS.
+        assert_eq!(member_keys(&[zgroup(".zgroup")], "v"), ["v/.zarray", "v/.zattrs"]);
+        let v2 =
+            [zgroup(".zgroup"), zgroup("v/.zarray"), ("v/.zattrs".into(), br#"{"_ARRAY_DIMENSIONS": ["year", "lat", "lon"]}"#.to_vec())];
+        assert_eq!(member_keys(&v2, "v"), ["year/.zarray", "year/.zattrs", "lat/.zarray", "lat/.zattrs", "lon/.zarray", "lon/.zattrs"]);
+
+        // The variable's CF grid mapping is asked for with its dimensions, and its system wins
+        // over the root's proj:code, as when the store lists it.
+        let mut mapped = files.clone();
+        let mut emb = serde_json::from_slice::<Value>(&mapped[1].1).unwrap();
+        emb["attributes"] = serde_json::json!({"grid_mapping": "gm"});
+        mapped[1].1 = emb.to_string().into_bytes();
+        let gm = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [1], "data_type": "int8",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1]}}, "codecs": [{"name": "bytes"}],
+            "attributes": {"epsg_code": 3857}});
+        mapped.push(("gm/zarr.json".into(), gm.to_string().into_bytes()));
+        let (docs, rounds) = discover(&mapped, "emb");
+        assert_eq!(rounds[1], ["time/zarr.json", "band/zarr.json", "gm/zarr.json"]);
+        let store = parse_store(&docs).unwrap();
+        assert!(matches!(crs_of(&store, store.array("emb").unwrap()), Some((Crs::WebMercator, _))));
+        // Names an address would read as something else aren't asked for.
+        assert_eq!(member_keys(&files[..1], "emb#x"), ["y/zarr.json", "x/zarr.json"]);
+        assert_eq!(member_keys(&files[..1], "emb?x"), ["y/zarr.json", "x/zarr.json"]);
+        // A root over MAX_METADATA isn't read (parse_store refuses it too).
+        let mut huge = serde_json::from_slice::<Value>(&files[0].1).unwrap();
+        huge["attributes"]["pad"] = "x".repeat(MAX_METADATA).into();
+        assert!(!lists_no_arrays(&[("zarr.json".into(), huge.to_string().into_bytes())]));
+        // Many other arrays naming many dimensions: the variable's own come first, within the cap.
+        let mut crowded = discover(&files, "emb").0;
+        for i in 0..16 {
+            let dims: Vec<String> = (0..MAX_DIMS).map(|d| format!("o{i}_{d}")).collect();
+            let other = serde_json::json!({"zarr_format": 3, "node_type": "array", "dimension_names": dims});
+            crowded.insert(1, (format!("a{i}/zarr.json"), other.to_string().into_bytes()));
+        }
+        let keys = member_keys(&crowded, "emb");
+        assert_eq!(keys.len(), MAX_PROBES);
+        assert_eq!(keys[..4], ["y/zarr.json", "x/zarr.json", "band/zarr.json", "o0_0/zarr.json"]);
+
+        // Not years: step numbers, units that aren't years, a float axis.
+        let not_years = |years: Value, time_type: &str, attrs: Value| {
+            let files = unlisted_store("", years, time_type, attrs);
+            let (docs, _) = discover(&files, "emb");
+            time_axis(&parse_store(&docs).unwrap(), "emb", &time_chunk(&files, ""))
+        };
+        assert_eq!(not_years(serde_json::json!([0, 1, 2]), "int32", serde_json::json!({})), None);
+        assert_eq!(not_years(years.clone(), "int32", serde_json::json!({"units": "days"})), None);
+        assert_eq!(not_years(serde_json::json!([2017.0, 2018.0, 2025.0]), "float64", serde_json::json!({})), None);
+        assert!(not_years(years, "int32", serde_json::json!({"units": "years"})).is_some());
     }
 }

@@ -235,7 +235,6 @@ fn rows(ui: &mut Ui, selected: bool, paste: bool, mac: bool) -> Option<Edit> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use egui::accesskit::Role;
     use egui_kittest::kittest::Queryable;

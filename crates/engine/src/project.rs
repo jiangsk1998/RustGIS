@@ -8,8 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::GpRecord;
 
+#[path = "project_capabilities.rs"]
+mod capabilities;
 #[path = "project_label_losses.rs"]
 pub(crate) mod label_losses;
+pub(crate) use capabilities::{layer_file_bytes, map_file_bytes, model_capabilities};
 
 /// A map export cannot keep runtime-only download reservations, even in a larger project.
 pub(crate) fn ensure_map_imports_complete(map: &Map) -> Result<(), String> {
@@ -38,7 +41,9 @@ pub const PACKAGE_EXTENSION: &str = "rgispkg";
 /// Whether a file name or path opens as a project: a project file or a project package, ignoring
 /// case. Unlike [`is_project_file`], this includes packages, which a project never saves to.
 pub fn opens_as_project(name: &str) -> bool {
-    is_project_file(name) || name.to_ascii_lowercase().strip_suffix(PACKAGE_EXTENSION).is_some_and(|s| s.ends_with('.'))
+    is_project_file(name)
+        || name.to_ascii_lowercase().strip_suffix(PACKAGE_EXTENSION).is_some_and(|s| s.ends_with('.'))
+        || crate::cmd::field::is_field_package(name)
 }
 
 /// The command that opens a file given by its path, as the desktop app's command line and a file
@@ -53,9 +58,41 @@ pub fn open_command(path: &str) -> &'static str {
         "layer.addData"
     }
 }
-/// Saved-document compatibility version, independent of the RustGIS release version.
-/// Advance it when an older reader would lose meaningful saved information on resaving.
-pub const FORMAT: u32 = 1;
+/// The format this RustGIS writes: the saved-document compatibility version, independent of the
+/// RustGIS release version. Advance it when an older reader would lose meaningful saved
+/// information on resaving; within format 2, such an addition is named in `requires` instead
+/// (see [`READ_FORMAT`] and [`CAPABILITIES`]).
+pub const FORMAT: u32 = 2;
+/// The newest format this RustGIS reads. Format 2 was made readable before writing began
+/// (#1853): a document of format 2 opens when this RustGIS knows every capability it `requires`,
+/// so what a later RustGIS adds to format 2, and an older one would lose, is listed there and
+/// refused by name instead.
+pub const READ_FORMAT: u32 = 2;
+/// The saved additions this RustGIS understands. Writers require only capabilities used by
+/// their payload, so a format-2 reader without them refuses instead of discarding their fields.
+pub const CAPABILITIES: &[&str] = &[
+    "terrain-block",
+    "terrain-water",
+    "shaded-relief-effects",
+    "normalized-legend-urls",
+    "field-origin",
+    "slope-percent",
+    "table-export-order",
+    "tabulate-intersection-unit",
+];
+/// The most entries a document's `requires` may list: past it the document is refused without
+/// the rest being read.
+pub(crate) const MAX_REQUIRES: usize = 256;
+/// The longest capability name kept whole, in bytes: a longer one can't be a known capability
+/// (none is longer, held below), so only its start is kept, marked `…`, for the refusal to show.
+const MAX_CAPABILITY_BYTES: usize = 128;
+const _: () = {
+    let mut i = 0;
+    while i < CAPABILITIES.len() {
+        assert!(CAPABILITIES[i].len() <= MAX_CAPABILITY_BYTES, "a known capability's name is at most MAX_CAPABILITY_BYTES");
+        i += 1;
+    }
+};
 /// Largest project file read or saved in the browser, or on a computer whose memory isn't known
 /// (512 MiB): the floor of [`max_bytes`].
 pub const BYTES_FLOOR: u64 = 512 << 20;
@@ -313,6 +350,8 @@ pub(crate) fn public_login_params(value: &serde_json::Value) -> Option<serde_jso
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(remote = "Self")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Project {
     /// Read-time adjustments (labels, diagrams, layouts), consumed by the session and never saved.
     #[serde(skip)]
@@ -321,6 +360,13 @@ pub struct Project {
     #[serde(default = "format", serialize_with = "write_format")]
     pub format: u32,
     pub name: String,
+    /// Persistent home-project identity for offline returns; legacy projects acquire it when packaged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub origin_id: String,
+    /// The home and area this field copy belongs to, retained through ordinary saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_origin: Option<FieldOrigin>,
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<crate::schema::Open>"))]
     pub maps: Vec<Map>,
     pub active_map: usize,
     #[serde(default)]
@@ -332,6 +378,7 @@ pub struct Project {
     #[serde(default)]
     pub gp_history: Vec<GpRecord>,
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<crate::schema::Open>"))]
     pub layouts: Vec<rustgis_map::layout::Layout>,
     /// Folder connections shown in the Browser.
     #[serde(default)]
@@ -341,6 +388,7 @@ pub struct Project {
     pub styles: Vec<StyleItem>,
     /// Custom colour ramps, offered beside the built-in ones (renderers keep their own copy).
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<crate::schema::Open>"))]
     pub ramps: Vec<rustgis_map::color::CustomRamp>,
     /// Step-by-step tasks: guided command sequences.
     #[serde(default)]
@@ -353,6 +401,7 @@ pub struct Project {
     pub models: Vec<Model>,
     /// Ortho and reality mapping workspaces.
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<crate::schema::Open>"))]
     pub workspaces: Vec<crate::cmd::imagery::Workspace>,
     /// Maps move together (View › Link Views).
     #[serde(default)]
@@ -368,20 +417,26 @@ pub struct Project {
     pub offline_areas: Vec<OfflineArea>,
     /// Reports on layers' records.
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<crate::schema::Open>"))]
     pub reports: Vec<rustgis_map::report::Report>,
     /// Presentations: pages of maps, text, images and videos.
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<crate::schema::Open>"))]
     pub presentations: Vec<rustgis_map::presentation::Presentation>,
     /// Notebooks of text and command cells.
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<crate::schema::Open>"))]
     pub notebooks: Vec<crate::cmd::notebook::Notebook>,
     /// Trained deep learning models.
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<crate::schema::Open>"))]
     pub dl_models: Vec<crate::cmd::deeplearning::DlModel>,
     /// Shares made (Publish › Share As › Jobs) and the folders they go to.
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<crate::schema::Open>"))]
     pub shared: Vec<crate::cmd::sharing::SharedItem>,
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<crate::schema::Open>"))]
     pub data_stores: Vec<crate::cmd::sharing::DataStore>,
 }
 
@@ -394,6 +449,28 @@ pub struct Table {
     pub id: u32,
     #[serde(flatten)]
     pub dataset: Dataset,
+    /// Runtime identity of these contents; snapshots retain it, wholesale replacements renew it.
+    #[serde(skip)]
+    instance_id: u64,
+}
+
+/// A fresh runtime identity, independent of reusable project-local table ids.
+fn next_table_instance() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+impl Table {
+    /// Wraps a dataset under its project-local id with a fresh, unsaved runtime identity.
+    pub fn new(id: u32, dataset: Dataset) -> Self {
+        Self { id, dataset, instance_id: next_table_instance() }
+    }
+
+    /// Identifies these live contents across ordinary edits and undo snapshots, but not replacement.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
 }
 
 /// A table as a file holds it: the dataset's fields beside the id (absent from files written
@@ -401,6 +478,7 @@ pub struct Table {
 /// geometry lost to it and Z or M values dropped (absent from files written before tables kept
 /// them). Read field by field, since `flatten` would buffer every row first.
 #[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 struct TableFile {
     #[serde(default)]
     id: u32,
@@ -419,10 +497,12 @@ struct TableFile {
 }
 
 impl From<TableFile> for Table {
+    /// Loads stored data under a fresh runtime identity, never one supplied by the file.
     fn from(t: TableFile) -> Self {
         let TableFile { id, name, geometry_type, fields, features, source, crs, crs_incomplete, zm_dropped } = t;
         Table {
             id,
+            instance_id: next_table_instance(),
             dataset: Dataset {
                 name,
                 geometry_type,
@@ -435,6 +515,22 @@ impl From<TableFile> for Table {
                 windowed: false,
             },
         }
+    }
+}
+
+/// A table is saved as [`TableFile`] reads it.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for Table {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Table".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = TableFile::json_schema(generator);
+        schema.insert(
+            "description".into(),
+            "A standalone table: a dataset without geometry, under an id unique among the project's tables (absent from files written before tables had ids).".into(),
+        );
+        schema
     }
 }
 
@@ -464,6 +560,7 @@ impl std::ops::DerefMut for Table {
 
 /// A unit of work tracked in the Workflow Manager.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Job {
     pub id: u32,
     pub name: String,
@@ -482,9 +579,31 @@ pub struct Job {
     pub updated: f64,
 }
 
+/// A field copy's exact home and offline-area identities (128 random bits each).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FieldOrigin {
+    pub project: String,
+    pub area: String,
+}
+
+pub(crate) fn field_id() -> Result<String, String> {
+    let mut bits = [0u8; 16];
+    getrandom::fill(&mut bits).map_err(|e| format!("cannot make a field-package identity: {e}"))?;
+    Ok(bits.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+pub(crate) fn valid_field_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// A map's data clipped to an extent, to take into the field.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OfflineArea {
+    /// Persistent identity, independent of the editable display name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub name: String,
     /// The map it came from (by name).
     pub map: String,
@@ -493,11 +612,13 @@ pub struct OfflineArea {
     #[serde(default)]
     pub synced: f64,
     /// The snapshot: the map's feature layers holding the features meeting the extent.
+    #[cfg_attr(feature = "schema", schemars(with = "crate::schema::Open"))]
     pub data: Map,
 }
 
 /// Settings every geoprocessing run honours.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct GpEnvironment {
     /// Tools only process features meeting this longitude/latitude extent (when no features are
     /// selected).
@@ -530,6 +651,7 @@ impl GpEnvironment {
 
 /// A projected coordinate system for the rasters the environment sets ([`GpEnvironment::projected`]).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProjectedCells {
     /// The system, never one in degrees: `gp.env` refuses those, and opening a project leaves one
     /// out.
@@ -543,6 +665,7 @@ pub struct ProjectedCells {
 /// of step n (1-based). A model drawn in ModelBuilder keeps its `graph` too, which is what runs;
 /// `steps` then holds the same tools in run order, for older versions and web tools.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Model {
     pub name: String,
     #[serde(default)]
@@ -554,6 +677,7 @@ pub struct Model {
 /// A model as ModelBuilder draws it: input, tool and output nodes joined by edges from an output
 /// port to an input port (see `crate::model`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ModelGraph {
     #[serde(default)]
     pub nodes: Vec<ModelNode>,
@@ -562,6 +686,7 @@ pub struct ModelGraph {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ModelNodeKind {
     /// A layer of the map the model reads.
@@ -574,6 +699,7 @@ pub enum ModelNodeKind {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ModelNode {
     pub id: String,
     pub kind: ModelNodeKind,
@@ -598,6 +724,7 @@ pub struct ModelNode {
 
 /// An edge from node `from`'s output port to node `to`'s input port (a tool parameter's name).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ModelEdge {
     pub from: String,
     #[serde(rename = "fromPort", default)]
@@ -608,6 +735,7 @@ pub struct ModelEdge {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ModelStep {
     pub tool: String,
     pub params: serde_json::Value,
@@ -615,10 +743,13 @@ pub struct ModelStep {
 
 /// A saved style: a layer's symbology and labels.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct StyleItem {
     pub name: String,
     pub geometry: rustgis_data::GeometryType,
+    #[cfg_attr(feature = "schema", schemars(with = "crate::schema::Open"))]
     pub renderer: rustgis_map::Renderer,
+    #[cfg_attr(feature = "schema", schemars(with = "crate::schema::Open"))]
     pub labels: rustgis_map::Labeling,
     #[serde(default)]
     pub transparency: f32,
@@ -626,6 +757,7 @@ pub struct StyleItem {
 
 /// A task: steps that each run a command, in order.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Task {
     pub name: String,
     #[serde(default)]
@@ -634,6 +766,7 @@ pub struct Task {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TaskStep {
     pub title: String,
     #[serde(default)]
@@ -683,11 +816,200 @@ fn plain_web_address(path: &str) -> bool {
 struct FileFormat {
     #[serde(default)]
     format: u64,
+    #[serde(default)]
+    requires: Requires,
+}
+
+/// What a document's `requires` holds, read without keeping anything else: the names it lists
+/// (at most [`MAX_REQUIRES`]), or that it lists more, or something that isn't a list of names.
+#[derive(Default)]
+enum Requires {
+    #[default]
+    Nothing,
+    Names(Vec<String>),
+    TooMany,
+    NotNames,
+}
+
+impl<'de> Deserialize<'de> for Requires {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(RequiresVisitor)
+    }
+}
+
+/// One entry of `requires`: a name, or anything else, skipped without being kept.
+enum RequiredName {
+    Name(String),
+    Other,
+}
+
+impl<'de> Deserialize<'de> for RequiredName {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(RequiredNameVisitor)
+    }
+}
+
+/// Skips the rest of a list without keeping any of it.
+fn skip_seq<'de, A: serde::de::SeqAccess<'de>>(mut seq: A) -> Result<(), A::Error> {
+    while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+    Ok(())
+}
+
+/// Skips the rest of an object without keeping any of it.
+fn skip_map<'de, A: serde::de::MapAccess<'de>>(mut map: A) -> Result<(), A::Error> {
+    while map.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
+    Ok(())
+}
+
+/// Implements the visitor methods for the JSON values that are neither a list nor a name: each
+/// gives `$other`.
+macro_rules! other_values {
+    ($other:expr) => {
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+            Ok($other)
+        }
+        fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+            Ok($other)
+        }
+        fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+            Ok($other)
+        }
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+            Ok($other)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            skip_map(map)?;
+            Ok($other)
+        }
+    };
+}
+
+struct RequiredNameVisitor;
+
+impl<'de> serde::de::Visitor<'de> for RequiredNameVisitor {
+    type Value = RequiredName;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a capability name")
+    }
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        // A long name keeps its first bytes (on a character's boundary) and `…` for the refusal;
+        // longer than any known name (held by the assertion above), it can't be taken for one.
+        if v.len() > MAX_CAPABILITY_BYTES {
+            let mut end = MAX_CAPABILITY_BYTES;
+            while !v.is_char_boundary(end) {
+                end -= 1;
+            }
+            Ok(RequiredName::Name(format!("{}…", v.get(..end).unwrap_or_default())))
+        } else {
+            Ok(RequiredName::Name(v.to_string()))
+        }
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(RequiredName::Other)
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+        skip_seq(seq)?;
+        Ok(RequiredName::Other)
+    }
+    other_values!(RequiredName::Other);
+}
+
+struct RequiresVisitor;
+
+impl<'de> serde::de::Visitor<'de> for RequiresVisitor {
+    type Value = Requires;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a list of capability names")
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Requires::Nothing)
+    }
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(Requires::NotNames)
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut names = Vec::new();
+        loop {
+            if names.len() >= MAX_REQUIRES {
+                // One more entry is one too many; the rest is skipped unread.
+                if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    skip_seq(seq)?;
+                    return Ok(Requires::TooMany);
+                }
+                return Ok(Requires::Names(names));
+            }
+            match seq.next_element::<RequiredName>()? {
+                None => return Ok(Requires::Names(names)),
+                Some(RequiredName::Name(n)) => names.push(n),
+                // Not a list of names, whatever else it holds: the rest is skipped unread.
+                Some(RequiredName::Other) => {
+                    skip_seq(seq)?;
+                    return Ok(Requires::NotNames);
+                }
+            }
+        }
+    }
+    other_values!(Requires::NotNames);
+}
+
+/// The capabilities a document requires that this RustGIS doesn't know, each once, or why its
+/// `requires` can't be read (`open`: what that refusal says to update RustGIS for).
+fn unknown_capabilities(requires: &Requires, kind: &str, open: &str) -> Result<Vec<String>, String> {
+    let names = match requires {
+        Requires::Nothing => return Ok(Vec::new()),
+        Requires::Names(names) => names,
+        Requires::TooMany => {
+            return Err(format!(
+                "this {kind} lists more than {MAX_REQUIRES} things it needs (`requires`), more than this RustGIS reads. It may be damaged, or from a newer RustGIS: update RustGIS to {open} it."
+            ));
+        }
+        Requires::NotNames => {
+            return Err(format!(
+                "this {kind} lists what it needs (`requires`) as something other than names, so this RustGIS can't tell whether it reads it. It may be damaged, or from a newer RustGIS: update RustGIS to {open} it."
+            ));
+        }
+    };
+    let mut unknown: Vec<String> = Vec::new();
+    for name in names {
+        if !CAPABILITIES.contains(&name.as_str()) && !unknown.contains(name) {
+            unknown.push(name.clone());
+        }
+    }
+    Ok(unknown)
+}
+
+/// A capability name as a refusal says it: line breaks, other control characters and the
+/// characters that reorder text as spaces, and `(unnamed)` for one with nothing else.
+fn capability_said(name: &str) -> String {
+    let shown: String = name.chars().map(rustgis_data::io::dbf_notice_char).collect();
+    let shown = shown.trim();
+    if shown.is_empty() { "(unnamed)".to_string() } else { shown.to_string() }
+}
+
+/// Whether a saved document's text, read for its format, is one to keep as written rather than
+/// rewrite through RustGIS's types. For a kind whose reader looks at `requires` and reads format 2
+/// (`reads_format_2`: projects and maps): of a format past [`READ_FORMAT`], or requiring anything,
+/// as the typed copy wouldn't keep the list, even of capabilities it knows. For the others (tasks,
+/// presentations, notebooks, models), whose typed copies drop what they don't know: of a format
+/// past [`FORMAT`]. A list (a legacy style file), or text whose `format` isn't a number, isn't one.
+pub(crate) fn kept_as_written(text: &str, reads_format_2: bool) -> bool {
+    if text.trim_start().starts_with('[') {
+        return false;
+    }
+    serde_json::from_str::<FileFormat>(text).is_ok_and(|h| {
+        let requires_nothing = match &h.requires {
+            Requires::Nothing => true,
+            Requires::Names(names) => names.is_empty(),
+            Requires::TooMany | Requires::NotNames => false,
+        };
+        if reads_format_2 { h.format > u64::from(READ_FORMAT) || !requires_nothing } else { h.format > u64::from(FORMAT) }
+    })
 }
 
 /// Refuse future document formats before typed deserialization or normalization. Missing
-/// metadata is legacy content; arrays include legacy style files. Writers remain unchanged
-/// until a change needs a newer format, at which point it must declare that format.
+/// metadata is legacy content; arrays include legacy style files. Up to [`READ_FORMAT`] is read,
+/// unless the document requires a capability this RustGIS doesn't know: that refusal names them.
+/// A change an older reader would lose names a capability in `requires` (see [`CAPABILITIES`]).
 pub(crate) fn check_format(text: &str, kind: &str) -> Result<(), String> {
     let max = max_bytes();
     if text.len() as u64 > max {
@@ -697,8 +1019,34 @@ pub(crate) fn check_format(text: &str, kind: &str) -> Result<(), String> {
         return Ok(());
     }
     let header: FileFormat = serde_json::from_str(text).map_err(|e| format!("not a RustGIS {kind}: {e}"))?;
-    if header.format > u64::from(FORMAT) {
+    if header.format > u64::from(READ_FORMAT) {
         return Err(format!("this {kind} was saved by a newer RustGIS (format {}). Update RustGIS to open it.", header.format));
+    }
+    requires_known(&header.requires, kind, "open")
+}
+
+/// Refuse a document whose `requires` (`None` when it has none) lists a capability this RustGIS
+/// doesn't know, naming them, as [`check_format`] does: for files read as JSON values, such as
+/// models and web tools. `open` is what the refusal says to update RustGIS for ("import").
+pub(crate) fn check_requires(requires: Option<&serde_json::Value>, kind: &str, open: &str) -> Result<(), String> {
+    let requires = match requires {
+        None => Requires::Nothing,
+        Some(v) => Requires::deserialize(v).map_err(|e| format!("not a RustGIS {kind}: {e}"))?,
+    };
+    requires_known(&requires, kind, open)
+}
+
+/// Refuse what `requires` lists that this RustGIS doesn't know, each name said once.
+fn requires_known(requires: &Requires, kind: &str, open: &str) -> Result<(), String> {
+    let unknown = unknown_capabilities(requires, kind, open)?;
+    if !unknown.is_empty() {
+        let mut said: Vec<String> = Vec::new();
+        for name in unknown.iter().map(|n| capability_said(n)) {
+            if !said.contains(&name) {
+                said.push(name);
+            }
+        }
+        return Err(format!("this {kind} needs what this RustGIS can't read: {}. Update RustGIS to {open} it.", crate::names_said(&said)));
     }
     Ok(())
 }
@@ -731,6 +1079,8 @@ impl Project {
             read_notices: Vec::new(),
             format: FORMAT,
             name: name.into(),
+            origin_id: String::new(),
+            field_origin: None,
             maps: vec![Map::new("Map")],
             active_map: 0,
             tables: Vec::new(),
@@ -858,19 +1208,20 @@ impl Project {
     /// Adds a standalone table, and returns the id it got.
     pub fn add_table(&mut self, dataset: Dataset) -> u32 {
         let id = self.new_table_id();
-        self.tables.push(Table { id, dataset });
+        self.tables.push(Table::new(id, dataset));
         id
     }
 
     /// Adds a tool's output table in place of the tables of its name, as running the tool again
-    /// replaces its result: the first of them keeps its id, so a view open on it stays on it.
+    /// replaces its result: the first keeps its id, so an open view stays on it, but the fresh
+    /// runtime identity invalidates drafts that belonged to the previous contents.
     pub fn put_table(&mut self, dataset: Dataset) -> u32 {
         let id = match self.tables.iter().find(|t| t.name == dataset.name) {
             Some(t) => t.id,
             None => self.new_table_id(),
         };
         self.tables.retain(|t| t.name != dataset.name);
-        self.tables.push(Table { id, dataset });
+        self.tables.push(Table::new(id, dataset));
         id
     }
 
@@ -1335,8 +1686,16 @@ impl Project {
                 format!("not a RustGIS project: {msg}")
             }
         })?;
+        let mut area_ids = std::collections::HashSet::new();
+        if (!p.origin_id.is_empty() && !valid_field_id(&p.origin_id))
+            || p.field_origin.as_ref().is_some_and(|origin| !valid_field_id(&origin.project) || !valid_field_id(&origin.area))
+            || p.offline_areas.iter().any(|area| !area.id.is_empty() && (!valid_field_id(&area.id) || !area_ids.insert(area.id.as_str())))
+        {
+            return Err("not a RustGIS project: an offline field identity is invalid or duplicated".into());
+        }
         p.ensure_imports_complete().map_err(|_| "a project file cannot contain runtime GeoLibre download reservations".to_string())?;
-        if p.format > FORMAT {
+        // (A backstop: `check_format` has refused it already.)
+        if p.format > READ_FORMAT {
             return Err(format!("this project was saved by a newer RustGIS (format {}). Update RustGIS to open it.", p.format));
         }
         if restore {
@@ -1502,12 +1861,12 @@ pub(crate) fn read_file(path: &Path, max: u64) -> Result<Vec<u8>, String> {
         return Err(too_large());
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|f| f.take(max.saturating_add(1)).read_to_end(&mut bytes))
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let file = rustgis_data::provenance::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    (&file).take(max.saturating_add(1)).read_to_end(&mut bytes).map_err(|e| format!("{}: {e}", path.display()))?;
     if bytes.len() as u64 > max {
         return Err(too_large());
     }
+    rustgis_data::provenance::buffer(path, &file, &bytes);
     Ok(bytes)
 }
 
@@ -1920,6 +2279,8 @@ impl Durable for Project {
             read_notices: _,
             format: _,
             name: _,
+            origin_id: _,
+            field_origin: _,
             maps,
             active_map: _,
             tables,
@@ -1948,7 +2309,7 @@ impl Durable for Project {
             p.child(Owner::Map(i), v);
         }
         for (i, v) in offline_areas.iter().enumerate() {
-            let OfflineArea { name: _, map: _, extent: _, created: _, synced: _, data } = v;
+            let OfflineArea { id: _, name: _, map: _, extent: _, created: _, synced: _, data } = v;
             p.child(Owner::Area(i), data);
         }
         for (i, v) in tables.iter().enumerate() {
@@ -1991,7 +2352,7 @@ impl Durable for Project {
 impl Durable for Table {
     /// Offers classified whole fields once, before any live mutation.
     fn prepare(&self, p: &mut Prepare<'_>) {
-        let Self { id: _, dataset } = self;
+        let Self { id: _, dataset, instance_id: _ } = self;
         let Dataset {
             name: _,
             geometry_type: _,
@@ -2094,6 +2455,31 @@ fn project_text(p: &Project) -> Result<String, String> {
 }
 
 #[cfg(test)]
+mod requires_tests {
+    use super::*;
+
+    fn requires(names: serde_json::Value) -> Requires {
+        serde_json::from_value::<FileFormat>(serde_json::json!({"format": 2, "requires": names})).map(|h| h.requires).unwrap_or_default()
+    }
+
+    /// At most [`MAX_REQUIRES`] entries are read, and a long name keeps only its start.
+    #[test]
+    fn requires_is_read_within_its_bounds() {
+        let names = |n: usize| serde_json::Value::from((0..n).map(|i| format!("c{i}")).collect::<Vec<_>>());
+        assert!(matches!(requires(names(MAX_REQUIRES)), Requires::Names(n) if n.len() == MAX_REQUIRES));
+        assert!(matches!(requires(names(MAX_REQUIRES + 1)), Requires::TooMany));
+        // A name of a million characters is kept as its first 128 bytes and `…`; a long name of
+        // characters of three bytes is cut on a boundary, and a short one kept whole.
+        let Requires::Names(n) = requires(serde_json::json!(["y".repeat(1_000_000), "名".repeat(50), "名".repeat(42)])) else { panic!() };
+        assert_eq!(n[0], format!("{}…", "y".repeat(MAX_CAPABILITY_BYTES)));
+        assert_eq!(n[1], format!("{}…", "名".repeat(42)));
+        assert_eq!(n[2], "名".repeat(42));
+        // The first entry that isn't a name ends the reading.
+        assert!(matches!(requires(serde_json::json!(["a", 1, "b"])), Requires::NotNames));
+    }
+}
+
+#[cfg(test)]
 mod limit_tests {
     use super::*;
 
@@ -2159,9 +2545,30 @@ mod limit_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod login_binding_tests {
     use super::*;
+
+    #[test]
+    fn a_near_limit_encoded_legend_survives_save_and_recovery_unbinding() {
+        use rustgis_data::{login_address, ogc::Legend};
+        let document = login_address::bind("0123456789abcdef", "https://maps.test", "https://maps.test/wms").unwrap();
+        let prefix = "https://maps.test/legend?name=";
+        let raw = format!("{prefix}{}x", " ".repeat(rustgis_map::tiles::MAX_LEGEND_URL - prefix.len() - 1));
+        let bound = login_address::inherit(&document, &raw);
+        let mut tile = rustgis_map::TileLayer::new("Legend", rustgis_map::tiles::TileKind::Raster, "https://maps.test/{z}/{x}/{y}.png");
+        tile.legends = rustgis_map::tiles::checked_legends([Legend { url: bound.clone(), ..Default::default() }]);
+        assert_eq!(tile.legends.len(), 1);
+        let mut project = Project::default();
+        project.map_mut().tiles.push(tile);
+        let (saved, _) = project.saved_text(None).unwrap();
+        for text in [saved, project.recovery_text().unwrap()] {
+            assert!(!text.contains(login_address::PREFIX));
+            let opened = Project::from_json(&text).unwrap();
+            let legends = &opened.map().tiles[0].legends;
+            assert_eq!(legends.len(), 1, "unbinding must not make an accepted legend too long");
+            assert_eq!(legends[0].url, login_address::inner(&bound));
+        }
+    }
 
     #[test]
     fn saves_and_imports_strip_runtime_capabilities_including_recorded_urls() {

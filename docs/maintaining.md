@@ -70,10 +70,48 @@ same files. New and changed code follows these rules; not every existing reader 
   misread.
 - Where a change allows it, reading a new version ships at least one release before anything
   writes it.
+- A project, map or layer file, a model or a web tool lists in `requires` each capability it needs
+  that an older reader would lose or misread: a reader refuses one it doesn't know, naming it.
+  Task, presentation and notebook readers, and models inside a task's steps, don't check
+  `requires` yet. A release reads
+  `.rgis` format 2 before any writes it (`READ_FORMAT` and `CAPABILITIES` in
+  `crates/engine/src/project.rs`), so what is added to format 2 after that comes with a capability
+  name, added to `CAPABILITIES` where it is read.
+- `schema/project.schema.json` is the JSON Schema of the project file, generated from the types
+  it is saved from by `cargo xtask schema`. A pull request that changes what a project saves
+  regenerates it and commits it in the same pull request; CI's `cargo xtask schema --check` fails
+  otherwise. A pull request that changes how it is read adds or updates a fixture project in
+  `schema/fixtures/`, which must open and validate against the schema. A schema change alone
+  doesn't raise the format: the rules above say when that happens.
 - RustGIS releases, file formats, the plugin ABI and the GeoLibre runner protocol are versioned
   separately.
 - A program RustGIS installs from elsewhere, such as the native GeoLibre runner, is pinned to a
   known release and moved forward by a pull request.
+
+Keep historical projects and preferences in the
+[release fixtures](../crates/engine/testdata/releases/README.md). These are the original bytes
+written by the release named in each filename: never regenerate, reformat or resave them.
+Each release adds a small project and preferences file written by that release and extends
+`released_projects_and_preferences_still_open`. Record a skip in the fixtures' README when a
+release has no such file format. Current-writer examples do not replace these historical files.
+
+New project saves and map/layer exports write format 2. Their `requires` header names only
+features present in the saved payload: `terrain-block`, `terrain-water`,
+`shaded-relief-effects` (cast shadows, sky visibility, fill light or rock colour) and
+`normalized-legend-urls` for normalized legend addresses. Project
+requirements include offline map snapshots. `table-export-order` protects saved task commands,
+command notebook cells and replayable history using Export Table sort or limit options.
+Earlier format-2 readers refuse unknown required
+capabilities instead of opening and later saving away those settings; legacy format-1 files
+still open.
+
+Projects, model files and web tools that save a percent-slope function require `slope-percent`:
+an older reader must refuse them rather than run the saved function in degrees. Project
+requirements also cover executable task steps, replayable history and notebook command cells.
+The same saved containers require `tabulate-intersection-unit` for Tabulate Intersection
+with a non-default `areaUnit`, so older readers refuse instead of silently using km².
+Omitted units and explicit `km2` require nothing extra; omitted zone fields need no
+capability because older tools refuse them.
 
 ## New dependencies
 

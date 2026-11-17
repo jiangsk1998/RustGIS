@@ -16,7 +16,6 @@ impl Host for Recorder {
         match op {
             "host.echo" => Ok(params.clone()),
             // A host request that fails unexpectedly.
-            #[allow(clippy::panic)]
             "host.panic" => panic!("a host request failed unexpectedly"),
             _ => Err(format!("no '{op}'")),
         }
@@ -320,7 +319,7 @@ fn wasm_host_requests_stop_at_the_time_limit() {
     impl Host for Slow {
         fn call(&mut self, _: &str, _: &Value) -> Result<Value, String> {
             self.0 += 1;
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(100)); // test-wait: simulate a slow host call
             Ok(json!(1))
         }
     }
@@ -459,6 +458,29 @@ fn pinned_tool_schema_refuses_changed_defaults_display_and_stale_load() {
     crate::unload("unit-schema-pin");
 }
 
+/// Registry scan limits and omitted identifier samples remain explicit.
+#[test]
+fn registry_limits_and_unnamed_skips_are_counted_without_a_dangling_list() {
+    let entry = json!({"id":"kept", "name":"Kept", "version":"1.0.0", "package":"kept.rgplugin", "sha256":"a".repeat(64)});
+    let url = "https://plugins.rustgis.app/registry.json";
+    let (kept, notice) = registry::parse_with_notice(&json!([entry.clone()]).to_string(), url).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(notice, None);
+    let (kept, notice) = registry::parse_with_notice("[7,8]", url).unwrap();
+    assert!(kept.is_empty());
+    let notice = notice.unwrap();
+    assert!(notice.starts_with("2 plugin(s)") && notice.ends_with("listed twice)"), "{notice}");
+    // Cheap malformed entries fill the inspected window; the valid tail is deliberately
+    // uninspected, rather than silently disappearing or being counted as malformed.
+    let mut entries = vec![Value::Null; registry::MAX_ENTRIES];
+    entries.push(entry);
+    let (kept, notice) = registry::parse_with_notice(&Value::Array(entries).to_string(), url).unwrap();
+    assert!(kept.is_empty());
+    let notice = notice.unwrap();
+    assert!(notice.starts_with(&format!("1 plugin registry entry past the first {} was not inspected", registry::MAX_ENTRIES)), "{notice}");
+    assert!(notice.contains(&format!("{} plugin(s) in the plugin registry were skipped", registry::MAX_ENTRIES)), "{notice}");
+}
+
 /// Registry and blocklist parsing validates entries and resolves package addresses safely.
 #[test]
 fn registries_and_blocklists_are_read_defensively() {
@@ -470,11 +492,20 @@ fn registries_and_blocklists_are_read_defensively() {
         {"id": "bad", "name": "Bad", "version": "1.0.0", "package": "http://insecure.example.com/x.rgplugin", "sha256": sha},
         {"id": "nohash", "name": "No hash", "version": "1.0.0", "package": "x.rgplugin", "sha256": "abc"},
         {"id": "Bad Id", "name": "X", "version": "1.0.0", "package": "x.rgplugin", "sha256": sha},
+        {"id": "bad-min", "name": "X", "version": "1.0.0", "minRustgisVersion": "0.6.x", "package": "x.rgplugin", "sha256": sha},
+        {"id": "a-plugin", "name": "A again", "version": "0.2.0", "package": "https://example.com/a2.rgplugin", "sha256": sha},
         7
     ]})
     .to_string();
     let v = registry::parse(&text, "https://plugins.rustgis.app/registry.json").unwrap();
     assert_eq!(v.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["a-plugin", "b-plugin"]);
+    // The plugins skipped are said, by id where it is readable.
+    let (_, notice) = registry::parse_with_notice(&text, "https://plugins.rustgis.app/registry.json").unwrap();
+    let notice = notice.unwrap_or_default();
+    assert!(
+        notice.starts_with("6 plugin(s) in the plugin registry were skipped") && notice.ends_with(": bad, nohash, bad-min, a-plugin, …"),
+        "{notice}"
+    );
     assert_eq!(v[1].package, "https://plugins.rustgis.app/packages/b/b-1.2.0.rgplugin");
     assert!(v[0].homepage.is_empty(), "only http(s) homepages");
     // Only the name and description keep translations.
@@ -574,7 +605,23 @@ fn blocked_plugins_are_unloaded_and_refused() {
 fn versions_and_translations() {
     assert!(version_cmp("1.10.0", "1.9.3").is_gt());
     assert!(version_cmp("v2.0", "2.0.0").is_eq());
-    assert!(version_cmp("1.0.0-beta.1", "1.0.0").is_eq());
+    // SemVer precedence: a pre-release sorts before its release and after the one before it,
+    // so updates are offered from a beta to the release and from one beta to the next.
+    assert!(version_cmp("1.0.0", "1.0.0-beta.1").is_gt());
+    assert!(version_cmp("1.0.0-beta.1", "0.9.9").is_gt());
+    assert!(version_cmp("v1.0-rc.1", "1.0.0-beta.11").is_gt());
+    assert!(version_cmp("1.0.0-beta.11", "1.0.0-beta.2").is_gt(), "numeric identifiers compare by value");
+    assert!(version_cmp("1.0.0-beta", "1.0.0-alpha.1").is_gt());
+    assert!(version_cmp("1.0.0-alpha.beta", "1.0.0-alpha.1").is_gt(), "words sort after numbers");
+    assert!(version_cmp("1.0.0-alpha.1", "1.0.0-alpha").is_gt(), "more identifiers sort later");
+    // Equal versions and downgrades are not updates; build metadata doesn't count.
+    assert!(version_cmp("1.0.0-beta.2", "1.0.0-beta.2").is_eq());
+    assert!(version_cmp("1.0.0+build.7", "1.0.0").is_eq());
+    assert!(version_cmp("1.0.0-rc.1+build-5", "1.0.0-rc.01").is_eq());
+    assert!(version_cmp("1.0.0-beta.1", "1.0.0").is_lt());
+    // An unreadable version still sorts first.
+    assert!(version_cmp("next", "0.0.1-alpha").is_lt());
+    assert!(version_cmp("next", "later").is_eq());
     let m = Manifest::parse(&testing::manifest("tr", &[])).unwrap();
     assert_eq!(m.translate("de-AT", "Hello"), "Hallo");
     assert_eq!(m.translate("fr", "Hello"), "Hello");
@@ -584,6 +631,20 @@ fn versions_and_translations() {
     m.i18n.insert("zh-CN".into(), [("Hello".to_string(), "你好".to_string())].into());
     assert_eq!(m.translate("zh", "Hello"), "你好");
     assert_eq!(m.translate("zh-TW", "Hello"), "哈囉");
+    // The interface's `zh-tw` matches `zh-TW`, and a Hong Kong or `zh-Hant` interface finds
+    // the plugin's Traditional text.
+    assert_eq!(m.translate("zh-tw", "Hello"), "哈囉");
+    assert_eq!(m.translate("zh-Hant", "Hello"), "哈囉");
+    // Chinese falls back only within its script: English, never the other script's text.
+    let mut simplified_only = Manifest::parse(&testing::manifest("tr", &[])).unwrap();
+    simplified_only.i18n.insert("zh".into(), [("Hello".to_string(), "你好".to_string())].into());
+    simplified_only.i18n.insert("zh-CN".into(), [("Bye".to_string(), "再见".to_string())].into());
+    assert_eq!(simplified_only.translate("zh-tw", "Hello"), "Hello");
+    assert_eq!(simplified_only.translate("zh-tw", "Bye"), "Bye");
+    assert_eq!(simplified_only.translate("zh-Hans-TW", "Hello"), "你好");
+    let mut traditional_only = Manifest::parse(&testing::manifest("tr", &[])).unwrap();
+    traditional_only.i18n.insert("zh-TW".into(), [("Hello".to_string(), "哈囉".to_string())].into());
+    assert_eq!(traditional_only.translate("zh", "Hello"), "Hello");
     // Loaded plugins translate for the interface (tool names, parameters), by language.
     load("unit-i18n", &[]);
     assert_eq!(crate::translate("de", "Hello").as_deref(), Some("Hallo"));
@@ -1510,7 +1571,7 @@ fn process_plugins_that_hang_are_stopped() {
         let pid = host.logs.first().and_then(|p| p.parse::<i32>().ok()).and_then(rustix::process::Pid::from_raw).unwrap();
         let t0 = std::time::Instant::now();
         while rustix::process::test_kill_process(pid).is_ok() && t0.elapsed() < std::time::Duration::from_secs(10) {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(50)); // test-wait: legacy polling for killed plugin exit
         }
         assert!(rustix::process::test_kill_process(pid).is_err(), "the grandchild {pid:?} still runs");
     }
@@ -1538,10 +1599,10 @@ fn process_tools_show_progress_and_can_be_cancelled() {
     // What it logs shows while it runs.
     let t0 = std::time::Instant::now();
     while control.last_log().is_none() && t0.elapsed() < std::time::Duration::from_secs(20) {
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the plugin log
     }
     while control.last_log().as_deref() != Some("step 1 of 3") && t0.elapsed() < std::time::Duration::from_secs(20) {
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for plugin progress
     }
     assert_eq!(control.last_log().as_deref(), Some("step 1 of 3"));
     // A cancel stops it promptly, and the run fails as cancelled.
@@ -1595,7 +1656,7 @@ fn poll_until(plugin: &str, host: &mut Recorder, done: impl Fn(&crate::session::
         if done(&polled, host) || t0.elapsed() > std::time::Duration::from_secs(20) {
             return polled;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for session plugin events
     }
 }
 
@@ -1606,7 +1667,7 @@ fn error_output_past_what_is_kept_is_counted() {
     let kept = crate::process::errors(std::io::Cursor::new(text.into_bytes()), None);
     let t0 = std::time::Instant::now();
     while kept.lock().unwrap().dropped < 5 && t0.elapsed() < std::time::Duration::from_secs(10) {
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(10)); // test-wait: legacy polling for the stderr reader
     }
     let k = kept.lock().unwrap();
     assert_eq!((k.dropped, k.lines.len(), k.lines.front().map(String::as_str)), (5, 20, Some("line 5")));
@@ -1643,7 +1704,7 @@ fn session_plugins_keep_one_program_running() {
     for i in 0..5_000 {
         crate::session::event("sess-keep", &json!({"event": "view", "view": {"scale": i, "pad": "x".repeat(100)}}));
     }
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    std::thread::sleep(std::time::Duration::from_secs(3)); // test-wait: let the paused session consume its bounded event queue
     poll_until("sess-keep", &mut host, |_, _| true);
     let heard = crate::call(&p, &mut host, &command("v"), false).unwrap();
     let views = heard["events"].as_array().unwrap().len();
@@ -1689,7 +1750,7 @@ fn session_plugins_that_end_or_fail_are_started_again() {
         let pid = rustix::process::Pid::from_raw(left.as_i64().unwrap() as i32).unwrap();
         let t0 = std::time::Instant::now();
         while !gone(pid) && t0.elapsed() < std::time::Duration::from_secs(10) {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(50)); // test-wait: legacy polling for session process exit
         }
         assert!(gone(pid), "{pid:?} still runs");
     }
@@ -1746,14 +1807,14 @@ fn an_exited_session_whose_output_keeps_flowing_is_ended() {
             ended = Some(e);
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        std::thread::sleep(std::time::Duration::from_millis(1)); // test-wait: legacy polling for the flowing session to end
     }
     let ended = ended.expect("the session didn't end");
     assert!(ended.unread, "{ended:?}");
     assert!(!crate::session::is_running("sess-flow"));
     let t0 = std::time::Instant::now();
     while !gone(pid) && t0.elapsed() < std::time::Duration::from_secs(10) {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(50)); // test-wait: legacy polling for session process exit
     }
     assert!(gone(pid), "{pid:?} still runs");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1830,6 +1891,63 @@ fn cached_blocklist_survives_refused_refreshes() {
     let _ = std::fs::remove_dir_all(&plugins);
 }
 
+/// `state.json` keeps what a newer RustGIS added through a change here, and one that can't be
+/// read is said at start and never written over.
+#[test]
+fn plugin_state_keeps_what_this_version_cannot_read() {
+    let plugins = std::env::temp_dir().join(format!("rustgis-test-plugin-state-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&plugins);
+    let _store = store_lock();
+    crate::store::set_dir(Some(plugins.clone()));
+    std::fs::create_dir_all(&plugins).unwrap();
+    let state = plugins.join("state.json");
+    std::fs::write(&state, r#"{"disabled": [], "folders": [], "pinned": ["kept"]}"#).unwrap();
+    crate::store::install_bytes(&testing::package("state-test", &[])).unwrap();
+    crate::store::set_enabled("state-test", false).unwrap();
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+    assert_eq!((&saved["disabled"], &saved["pinned"]), (&json!(["state-test"]), &json!(["kept"])));
+    for unreadable in ["not json", r#"{"disabled": [{"id": "state-test", "until": 2}]}"#] {
+        std::fs::write(&state, unreadable).unwrap();
+        assert!(crate::store::load_installed().iter().any(|e| e.contains("state.json")), "{unreadable}");
+        let e = crate::store::set_enabled("state-test", true).unwrap_err();
+        assert!(e.contains("kept as it is"), "{e}");
+        // A refused change leaves the plugin as it was, not changed for this session only.
+        assert!(crate::get("state-test").is_some_and(|p| !p.enabled));
+        let folder = plugins.join("folder-plugin");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("plugin.json"), crate::testing::manifest("folder-test", &[])).unwrap();
+        std::fs::write(folder.join("plugin.wasm"), testing::wasm()).unwrap();
+        assert!(crate::store::install_path(&folder).is_err() && crate::get("folder-test").is_none());
+        assert!(crate::store::install_bytes(&testing::package("state-test", &[])).is_err_and(|e| e.contains("kept as it is")));
+        assert!(crate::store::uninstall("state-test").is_err());
+        assert_eq!(std::fs::read_to_string(&state).unwrap(), unreadable);
+        // At start none is loaded (it may have been disabled, and be a native program), and it is said.
+        crate::unload("state-test");
+        let errors = crate::store::load_installed();
+        assert!(errors.len() == 1 && errors[0].contains("state.json") && errors[0].contains("plugins are off"), "{errors:?}");
+        assert!(crate::get("state-test").is_none());
+        std::fs::write(&state, r#"{"disabled": ["state-test"]}"#).unwrap();
+        assert!(crate::store::load_installed().is_empty());
+    }
+    // No file, or an empty one, is nothing disabled, with no notice.
+    for empty in [None, Some("  \n"), Some("\u{feff}")] {
+        match empty {
+            Some(text) => std::fs::write(&state, text).unwrap(),
+            None => std::fs::remove_file(&state).unwrap(),
+        }
+        crate::unload("state-test");
+        assert!(crate::store::load_installed().is_empty(), "{empty:?}");
+        assert!(crate::get("state-test").is_some_and(|p| p.enabled), "{empty:?}");
+    }
+    // An editor's byte-order mark isn't part of the JSON.
+    std::fs::write(&state, "\u{feff}{\"disabled\": [\"state-test\"]}").unwrap();
+    crate::unload("state-test");
+    assert!(crate::store::load_installed().is_empty());
+    assert!(crate::get("state-test").is_some_and(|p| !p.enabled));
+    crate::store::uninstall("state-test").unwrap();
+    let _ = std::fs::remove_dir_all(&plugins);
+}
+
 #[test]
 fn process_packages_unpack_safely() {
     use std::io::Write;
@@ -1884,9 +2002,35 @@ fn process_packages_unpack_safely() {
     assert!(dir.join("data/b.txt").is_file());
     assert!(!plugins.join("unpacked/evil.txt").exists() && !plugins.join("evil.txt").exists());
     assert!(dir.join("data/b.txt").is_file(), "the installed copy stays");
-    // Uninstalling removes the files.
-    crate::store::uninstall("unpacked").unwrap();
-    assert!(!dir.exists());
+    // A step after the package is gone that fails (its unpacked folder can't be removed) says
+    // the plugin's settings were kept, and where, since uninstalling can't be tried again.
+    let settings = plugins.join("settings").join("unpacked.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        crate::settings::patch("unpacked", &json!({"values": {"kept": true}})).unwrap();
+        let environment = crate::pyenv::env_dir("unpacked").unwrap();
+        std::fs::create_dir_all(&environment).unwrap();
+        std::fs::write(environment.join("leftover.txt"), "synthetic environment").unwrap();
+        let parent = plugins.join("unpacked");
+        let mode = std::fs::metadata(&parent).unwrap().permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = crate::store::uninstall("unpacked");
+        std::fs::set_permissions(&parent, mode).unwrap();
+        assert!(!environment.exists(), "independent Python cleanup must run after an unpacked-folder failure");
+        // Root removes it anyway: then there is nothing to check here.
+        if let Err(e) = failed {
+            assert!(e.contains("its saved settings were kept") && e.contains(&settings.display().to_string()), "{e}");
+            assert!(settings.is_file() && crate::get("unpacked").is_none());
+        }
+        let _ = std::fs::remove_file(&settings);
+        crate::store::install_bytes(&changed).unwrap();
+    }
+    // Uninstalling removes the files, also when its settings can't be erased (they go last).
+    std::fs::create_dir_all(&settings).unwrap();
+    let e = crate::store::uninstall("unpacked").unwrap_err();
+    assert!(e.contains("couldn't erase the saved settings of 'unpacked'") && e.contains("remove") && e.contains("by hand"), "{e}");
+    assert!(!dir.exists() && crate::get("unpacked").is_none() && !plugins.join("unpacked.rgplugin").exists());
     let _ = std::fs::remove_dir_all(&plugins);
 }
 
@@ -1960,7 +2104,7 @@ fn python_environments_are_declared_checked_and_required() {
 /// Downloads uv and a Python and runs a plugin in its environment (network; run by hand:
 /// `cargo test -p rustgis-plugins --features testing -- --ignored python_environments_are_made`).
 #[test]
-#[ignore]
+#[ignore = "needs network downloads of uv, Python and packages"]
 fn python_environments_are_made() {
     let plugins = std::env::temp_dir().join(format!("rustgis-test-pyenv-made-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&plugins);
@@ -2021,9 +2165,9 @@ fn python_environment_preparations_wait_for_the_lock() {
     let prep = std::thread::spawn(move || crate::pyenv::prepare("pyenv-wait", &mut |l| heard.lock().unwrap().push(l.to_string())));
     let t0 = std::time::Instant::now();
     while said.lock().unwrap().is_empty() && t0.elapsed() < std::time::Duration::from_secs(10) {
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the environment lock notice
     }
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::thread::sleep(std::time::Duration::from_millis(200)); // test-wait: legacy delay before asserting preparation stays blocked
     assert!(!prep.is_finished(), "it waits while the lock is held");
     let waiting = said.lock().unwrap().clone();
     assert_eq!(waiting, ["Waiting for another preparation of this environment to finish"]);
@@ -2048,7 +2192,7 @@ fn python_environment_preparations_wait_for_the_lock() {
 /// Two preparations of one environment at once (the app and rustgis-cli): the second waits for
 /// the first and finds its environment (network; run by hand with `--ignored`).
 #[test]
-#[ignore]
+#[ignore = "needs network downloads of uv and Python"]
 fn python_environments_are_prepared_one_at_a_time() {
     let plugins = std::env::temp_dir().join(format!("rustgis-test-pyenv-lock-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&plugins);
@@ -2537,11 +2681,25 @@ fn a_bad_platform_package_is_dropped_alone() {
     // version doesn't know and a registry read whole say nothing.
     let (_, notice) = registry::parse_noting(&text, url, Some("windows")).unwrap();
     let notice = notice.unwrap();
-    assert!(notice.starts_with("6 package(s) for a platform in the plugin registry were skipped"), "{notice}");
+    // A plugin left with no package at all is said as a plugin skipped, first.
+    assert!(notice.starts_with("1 plugin(s) in the plugin registry were skipped") && notice.contains(": g-no-address; "), "{notice}");
+    assert!(notice.contains("; 7 package(s) for a platform in the plugin registry were skipped"), "{notice}");
     assert!(
         notice.ends_with(": a-no-address (Linux), b-no-hash (Linux), c-not-an-object (Linux), d-bad-size (Linux), e-own-too (Linux), …"),
         "{notice}"
     );
+    // An invalid shared fallback beside good platform packages is counted on every platform.
+    let fallback = json!([{"id": "shared", "name": "Shared", "version": "1.0.0",
+        "package": "http://insecure.example.org/a.rgplugin", "sha256": any,
+        "packages": {"windows": good}}])
+    .to_string();
+    for platform in ["windows", "linux", "macos"] {
+        let (entries, notice) = registry::parse_noting(&fallback, url, Some(platform)).unwrap();
+        assert_eq!(entries.len(), 1);
+        let notice = notice.unwrap();
+        assert!(notice.contains("1 package(s)") && notice.ends_with("shared (shared)"), "{platform}: {notice}");
+        assert_eq!(entries[0].available(), platform == "windows");
+    }
     let clean = json!([
         {"id": "ok", "name": "ok", "version": "1.0.0", "packages": {"windows": good, "plan9": {"package": "p.rgplugin", "sha256": lin}}},
         // `null` is no packages: the entry's own package, as without the field.
@@ -2560,4 +2718,297 @@ fn a_bad_platform_package_is_dropped_alone() {
             assert!(e.available() || !e.platforms().is_empty(), "{platform}: {}", e.id);
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// plugin settings (#1261)
+
+/// The plugins folder of the settings tests: not the user's.
+fn plugins_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("rustgis-test-plugin-settings-{}", std::process::id()))
+}
+
+/// Where the plugins folder in use keeps plugin settings.
+fn settings_dir() -> std::path::PathBuf {
+    crate::store::dir().unwrap().join("settings")
+}
+
+/// The lock of [`store_lock`], with the plugins folder one of the tests' own and no settings in it.
+fn fresh_settings() -> std::sync::MutexGuard<'static, ()> {
+    let held = store_lock();
+    crate::store::set_dir(Some(plugins_dir()));
+    let _ = std::fs::remove_dir_all(settings_dir());
+    held
+}
+
+/// Runs the forwarding command of the test plugin `id`: it sends `op` with `params` to the host.
+fn forwarded(id: &str, op: &str, params: Value) -> Result<Value, String> {
+    let cmd = crate::command(&format!("plugin:{id}/f")).unwrap();
+    crate::run_command(&cmd, &mut Recorder::default(), &json!({"op": op, "params": params}))
+}
+
+fn remembered(id: &str) -> Result<Value, String> {
+    forwarded(id, "host.settings", json!({}))
+}
+
+fn remember(id: &str, values: Value) -> Result<Value, String> {
+    forwarded(id, "host.setSettings", json!({"values": values}))
+}
+
+#[test]
+fn plugin_settings_are_kept_per_plugin_across_updates_and_toggles() {
+    let _store = fresh_settings();
+    load("settings-a", &[]);
+    load("settings-b", &[]);
+    assert_eq!(remembered("settings-a").unwrap(), json!({}));
+
+    // Merged at the top level; the answer is the whole object.
+    let first = json!({"favourites": ["l:123", "l:456"], "unit": "m", "nested": {"x": null}});
+    assert_eq!(remember("settings-a", first).unwrap(), json!({"favourites": ["l:123", "l:456"], "unit": "m", "nested": {"x": null}}));
+    let both = json!({"favourites": ["l:123", "l:456"], "nested": {"x": null}, "limit": 5});
+    assert_eq!(remember("settings-a", json!({"unit": null, "limit": 5})).unwrap(), both);
+    assert_eq!(remembered("settings-a").unwrap(), both);
+    let on_disk = std::fs::read_to_string(settings_dir().join("settings-a.json")).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&on_disk).unwrap(), json!({"version": 1, "values": both}));
+    assert!(!on_disk.contains(char::is_whitespace), "compact: {on_disk}");
+
+    // Another plugin has its own, and a request can't name whose to read.
+    assert_eq!(remembered("settings-b").unwrap(), json!({}));
+    let named = forwarded("settings-b", "host.settings", json!({"id": "settings-a", "plugin": "settings-a"}));
+    assert_eq!(named.unwrap(), json!({}));
+    remember("settings-b", json!({"unit": "ft"})).unwrap();
+    assert_eq!(remembered("settings-a").unwrap(), both);
+
+    // The host never sees these requests: they need nothing of it, and no permission.
+    let cmd = crate::command("plugin:settings-a/f").unwrap();
+    let mut host = Recorder::default();
+    let params = json!({"op": "host.setSettings", "params": {"values": {"seen": true}}});
+    crate::run_command(&cmd, &mut host, &params).unwrap();
+    assert!(host.ops.is_empty(), "{:?}", host.ops);
+
+    // Bad values are errors that change nothing.
+    for bad in [json!({}), json!({"values": null}), json!({"values": []}), json!({"values": "x"})] {
+        let e = forwarded("settings-a", "host.setSettings", bad).unwrap_err();
+        assert!(e.contains("values must be a JSON object"), "{e}");
+    }
+    assert_eq!(remembered("settings-a").unwrap()["limit"], 5);
+
+    // A new version of the plugin, turning it off and on, and unloading it keep them.
+    load("settings-a", &[]);
+    crate::set_enabled("settings-a", false).unwrap();
+    assert!(crate::command("plugin:settings-a/f").is_none(), "a disabled plugin runs nothing");
+    crate::set_enabled("settings-a", true).unwrap();
+    assert_eq!(remembered("settings-a").unwrap()["limit"], 5);
+    assert!(crate::unload("settings-a"));
+    load("settings-a", &[]);
+    assert_eq!(remembered("settings-a").unwrap()["limit"], 5);
+
+    // The limit holds through a plugin: exactly 64 KiB fits, one byte more is an error.
+    let exactly = "a".repeat(crate::settings::MAX_BYTES - 8);
+    assert!(remember("settings-b", json!({"unit": null, "x": exactly})).is_ok());
+    let e = remember("settings-b", json!({"x": format!("{exactly}a")})).unwrap_err();
+    assert!(e.contains("plugin settings exceed 65536 bytes"), "{e}");
+    assert_eq!(remembered("settings-b").unwrap(), json!({"x": exactly}));
+
+    // A folder that can't be written to is an error, and what was kept stays.
+    let blocked = std::env::temp_dir().join(format!("rustgis-test-plugin-settings-blocked-{}", std::process::id()));
+    std::fs::write(&blocked, b"not a folder").unwrap();
+    crate::store::set_dir(Some(blocked.clone()));
+    let e = remember("settings-a", json!({"unit": "yd"})).unwrap_err();
+    // Whether the folder can't be read (Unix) or only not written (elsewhere), nothing is saved.
+    assert!(e.contains("the settings of 'settings-a'"), "{e}");
+    assert!(!e.contains(&*blocked.display().to_string()), "the plugin isn't told where: {e}");
+    crate::store::set_dir(Some(plugins_dir()));
+    let _ = std::fs::remove_file(&blocked);
+    let with_seen = json!({"favourites": ["l:123", "l:456"], "nested": {"x": null}, "limit": 5, "seen": true});
+    assert_eq!(remembered("settings-a").unwrap(), with_seen);
+
+    // A damaged record is an error, never `{}` and never overwritten; uninstalling erases it.
+    std::fs::write(settings_dir().join("settings-a.json"), "{").unwrap();
+    let e = remembered("settings-a").unwrap_err();
+    assert!(e.contains("damaged"), "{e}");
+    assert!(remember("settings-a", json!({"unit": "yd"})).is_err());
+    assert_eq!(std::fs::read_to_string(settings_dir().join("settings-a.json")).unwrap(), "{");
+    crate::settings::remove("settings-a").unwrap();
+    assert_eq!(remembered("settings-a").unwrap(), json!({}));
+    crate::unload("settings-a");
+    crate::unload("settings-b");
+}
+
+#[test]
+fn plugin_settings_are_for_commands_not_tools() {
+    let _store = fresh_settings();
+    let plugin = load("settings-tool", &[]);
+    // The tool `t` sends its params to the host as a request (see `testing`).
+    let job = |params: Value| crate::tools::Job {
+        plugin: plugin.clone(),
+        name: "Remember".into(),
+        request: json!({"abi": 1, "kind": "tool", "id": "t", "params": params, "layers": {}, "lang": "en"}),
+    };
+    let control = crate::tools::Control::default();
+    for op in ["host.settings", "host.setSettings"] {
+        let e = job(json!({"op": op, "params": {"values": {"messages": ["one"]}}})).run(&control).unwrap_err();
+        assert!(e.contains(&format!("tools can't use '{op}'")), "{e}");
+    }
+    assert_eq!(remembered("settings-tool").unwrap(), json!({}));
+    assert!(!settings_dir().join("settings-tool.json").exists());
+    // A process plugin's tool request goes to the host it was given (a tool's host refuses it), not the settings.
+    let dir = process_folder("proc-settings-tool", &[]);
+    let p = crate::prepare(Package::from_dir(&dir).unwrap(), "test").unwrap();
+    let tool = json!({"abi": 1, "kind": "tool", "id": "f", "params": {"op": "host.setSettings", "params": {"values": {"a": 1}}}, "layers": {}, "lang": "en"});
+    let mut host = Recorder::default();
+    let e = crate::call(&p, &mut host, &tool, true).unwrap_err();
+    assert!(e.contains("no 'host.setSettings'"), "{e}");
+    assert_eq!(host.ops, ["host.setSettings"]);
+    assert_eq!(crate::settings::read("proc-settings-tool").unwrap(), json!({}));
+    crate::unload("settings-tool");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn plugin_settings_reach_process_plugins() {
+    let _store = fresh_settings();
+    let dir = process_folder("proc-settings", &[]);
+    let p = crate::prepare(Package::from_dir(&dir).unwrap(), "test").unwrap();
+    let request =
+        |op: &str, params: Value| json!({"abi": 1, "kind": "command", "id": "f", "params": {"op": op, "params": params}, "lang": "en"});
+    let mut host = Recorder::default();
+    let saved = json!({"a": [1, {"b": null}]});
+    let set = crate::call(&p, &mut host, &request("host.setSettings", json!({"values": saved})), false).unwrap();
+    assert_eq!(set, json!({"a": [1, {"b": null}]}));
+    assert_eq!(crate::call(&p, &mut host, &request("host.settings", json!({})), false).unwrap(), set);
+    assert!(host.ops.is_empty(), "answered before the host: {:?}", host.ops);
+    assert!(settings_dir().join("proc-settings.json").is_file());
+    let e = crate::call(&p, &mut host, &request("host.setSettings", json!({"values": 1})), false).unwrap_err();
+    assert!(e.contains("values must be a JSON object"), "{e}");
+    // Other requests still reach the host.
+    assert_eq!(crate::call(&p, &mut host, &request("host.echo", json!({"a": 1})), false).unwrap(), json!({"a": 1}));
+    assert_eq!(host.ops, ["host.echo"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn plugin_settings_answer_session_programs_between_commands() {
+    let _store = fresh_settings();
+    let (p, dir) = session_plugin("sess-settings");
+    let mut host = Recorder::default();
+    let forward =
+        |op: &str, params: Value| json!({"abi": 1, "kind": "command", "id": "f", "params": {"op": op, "params": params}, "lang": "en"});
+    // Inside a command.
+    let during = forward("host.setSettings", json!({"values": {"during": 1}}));
+    assert_eq!(crate::call(&p, &mut host, &during, false).unwrap(), json!({"during": 1}));
+    // Between commands: the program asks when it likes, and is answered by its own id.
+    let later = json!({"abi": 1, "kind": "command", "id": "k", "params": {"op": "host.setSettings", "params": {"values": {"between": 2}}}, "lang": "en"});
+    assert_eq!(crate::call(&p, &mut host, &later, false).unwrap(), "asked");
+    poll_until("sess-settings", &mut host, |polled, _| polled.handled > 0);
+    let heard = crate::call(&p, &mut host, &command("v"), false).unwrap();
+    assert_eq!(heard["answers"], json!([{"ok": {"during": 1, "between": 2}, "id": "a2"}]));
+    assert!(host.ops.is_empty(), "answered before the host: {:?}", host.ops);
+    assert_eq!(crate::settings::read("sess-settings").unwrap(), json!({"during": 1, "between": 2}));
+    crate::session::stop("sess-settings");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn plugin_settings_are_erased_only_by_uninstalling() {
+    let _store = fresh_settings();
+    let plugins = std::env::temp_dir().join(format!("rustgis-test-settings-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&plugins);
+    crate::store::set_dir(Some(plugins.clone()));
+    let file = settings_dir().join("settings-store.json");
+    let package = testing::package("settings-store", &[]);
+    crate::store::install_bytes(&package).unwrap();
+    remember("settings-store", json!({"favourites": ["l:1"]})).unwrap();
+
+    // Installing a new version, turning it off and on, and forgetting it for this run keep them.
+    crate::store::install_bytes(&package).unwrap();
+    crate::store::set_enabled("settings-store", false).unwrap();
+    crate::store::set_enabled("settings-store", true).unwrap();
+    crate::unload("settings-store");
+    assert!(file.is_file());
+    crate::store::install_bytes(&package).unwrap();
+    assert_eq!(remembered("settings-store").unwrap(), json!({"favourites": ["l:1"]}));
+
+    // Uninstalling erases them: a plugin installed again starts with none.
+    crate::store::uninstall("settings-store").unwrap();
+    assert!(!file.exists() && crate::get("settings-store").is_none());
+    crate::store::install_bytes(&package).unwrap();
+    assert_eq!(remembered("settings-store").unwrap(), json!({}));
+
+    // A step of the uninstall that fails (here the plugins folder can't be written) leaves the
+    // settings with the plugin still installed.
+    remember("settings-store", json!({"favourites": ["l:2"]})).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&plugins).unwrap().permissions();
+        std::fs::set_permissions(&plugins, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = crate::store::uninstall("settings-store");
+        std::fs::set_permissions(&plugins, mode).unwrap();
+        // Root writes anyway: then it was uninstalled, and that is checked below instead.
+        if failed.is_err() {
+            assert!(file.is_file() && plugins.join("settings-store.rgplugin").is_file());
+            assert_eq!(remembered("settings-store").unwrap(), json!({"favourites": ["l:2"]}));
+        } else {
+            crate::store::install_bytes(&package).unwrap();
+            remember("settings-store", json!({"favourites": ["l:2"]})).unwrap();
+        }
+    }
+
+    // A record that can't be erased: said once the plugin is gone, and the record stays.
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    let e = crate::store::uninstall("settings-store").unwrap_err();
+    assert!(e.contains("couldn't erase the saved settings of 'settings-store'") && e.contains("the plugin was uninstalled"), "{e}");
+    assert!(crate::get("settings-store").is_none() && !plugins.join("settings-store.rgplugin").exists() && file.is_dir());
+
+    // A damaged record doesn't: erasing is what clears it.
+    std::fs::remove_dir(&file).unwrap();
+    std::fs::write(&file, "{").unwrap();
+    crate::store::install_bytes(&package).unwrap();
+    crate::store::uninstall("settings-store").unwrap();
+    assert!(!file.exists() && crate::get("settings-store").is_none() && !plugins.join("settings-store.rgplugin").exists());
+
+    // A development folder that shadows an installed copy: removing it leaves the copy, and what
+    // the copy remembered.
+    crate::store::install_bytes(&package).unwrap();
+    remember("settings-store", json!({"favourites": ["l:3"]})).unwrap();
+    let folder = plugins.join("dev");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("plugin.json"), testing::manifest("settings-store", &[])).unwrap();
+    std::fs::write(folder.join("plugin.wasm"), testing::wasm()).unwrap();
+    crate::store::install_path(&folder).unwrap();
+    assert_eq!(crate::get("settings-store").map(|p| p.source.clone()), Some(folder.display().to_string()));
+    crate::store::uninstall("settings-store").unwrap();
+    assert!(file.is_file() && plugins.join("settings-store.rgplugin").is_file());
+    assert!(crate::store::load_installed().iter().all(|e| !e.contains("settings-store")));
+    assert_eq!(remembered("settings-store").unwrap(), json!({"favourites": ["l:3"]}));
+    crate::store::uninstall("settings-store").unwrap();
+    assert!(!file.exists());
+
+    // A development folder with no installed copy: nothing else owns its settings, so they go.
+    crate::store::install_path(&folder).unwrap();
+    remember("settings-store", json!({"favourites": ["l:4"]})).unwrap();
+    crate::store::uninstall("settings-store").unwrap();
+    assert!(!file.exists() && crate::get("settings-store").is_none());
+    let _ = std::fs::remove_dir_all(&plugins);
+}
+
+#[test]
+fn installing_is_refused_with_the_reason_where_plugins_cant_be_installed() {
+    assert_eq!(crate::allowed(true), Ok(()));
+    let refused = crate::allowed(false);
+    assert_eq!(refused, Err(crate::NOT_INSTALLED_HERE.to_string()));
+    assert!(crate::NOT_INSTALLED_HERE.contains("iOS"));
+    // Where plugins can be installed, installing goes on to read the package.
+    if crate::INSTALLS {
+        assert!(crate::store::install_bytes(b"not a package").is_err_and(|e| e != crate::NOT_INSTALLED_HERE));
+    }
+    // Refused as on iOS: both ways in say why before reading anything.
+    crate::refuse_installs_on_this_thread(true);
+    let bytes = crate::store::install_bytes(b"not a package").err();
+    let path = crate::store::install_path(std::path::Path::new("no-such.rgplugin")).err();
+    crate::refuse_installs_on_this_thread(false);
+    assert_eq!(bytes.as_deref(), Some(crate::NOT_INSTALLED_HERE));
+    assert_eq!(path.as_deref(), Some(crate::NOT_INSTALLED_HERE));
 }

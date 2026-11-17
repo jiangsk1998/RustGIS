@@ -294,7 +294,7 @@ fn training(s: &Session, p: &Value) -> Result<Training, String> {
     let epochs = epochs as usize;
     // Without a name given, a new model never replaces one: it gets a name of its own.
     let (name, auto) = match ps(p, "model") {
-        Some(_) => (name(&json!({"name": p.get("model")}), format!("{}_model", r.name)), None),
+        Some(_) => (name(&json!({"name": p.get("model")}), format!("{}_model", r.name))?, None),
         None => {
             let base = format!("{}_model", r.name);
             (free_name(s, &base), Some(base))
@@ -337,7 +337,7 @@ pub(crate) fn classify_work(s: &Session, p: &Value) -> Result<super::workflows::
         let i = model_index(s, p)?;
         Model::Saved(s.project.dl_models.get(i).cloned().ok_or("no model")?)
     };
-    let out = name(p, format!("{}_dl", r.name));
+    let out = name(p, format!("{}_dl", r.name))?;
     Ok(Box::new(move || {
         let (m, trained) = match model {
             Model::Saved(m) => (m, None),

@@ -442,41 +442,7 @@ fn form_post(url: &str, params: &[(&str, &str)]) -> HttpRequest {
     }
 }
 
-/// Decodes a query value (`+` is a space).
-pub fn urldecode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes.get(i) {
-            Some(b'+') => out.push(b' '),
-            Some(b'%') => {
-                let hex = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
-                match hex {
-                    Some(b) => {
-                        out.push(b);
-                        i += 2;
-                    }
-                    None => out.push(b'%'),
-                }
-            }
-            Some(b) => out.push(*b),
-            None => break,
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// The (decoded) parameters of a query string.
-pub fn query_params(query: &str) -> Vec<(String, String)> {
-    query
-        .split('&')
-        .filter(|p| !p.is_empty())
-        .map(|p| p.split_once('=').unwrap_or((p, "")))
-        .map(|(k, v)| (urldecode(k), urldecode(v)))
-        .collect()
-}
+pub use rustgis_engine::data::address::query_params;
 
 /// Only the Responses API and the model list may receive the plan's access token.
 pub fn api_url(url: &str) -> bool {
@@ -628,17 +594,7 @@ pub fn discovered(config: &Value, key: &str) -> Option<String> {
 pub fn rfc3339(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
-    // Civil date from days (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
+    let (y, m, d) = rustgis_engine::data::date::civil_from_days(days);
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
@@ -838,6 +794,9 @@ mod native {
         }
     }
 
+    /// The sign-in store at `path` (none: no account). One that isn't JSON, or that a newer
+    /// RustGIS saved (a `version` above [`STORE_VERSION`]), is an error: every change reads it
+    /// first, so it is never written over.
     fn read_accounts(path: &Path) -> Result<Accounts, Error> {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
@@ -845,6 +804,21 @@ mod native {
             Err(e) => return Err(e.to_string().into()),
         };
         let v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|_| "the sign-in store isn't JSON")?;
+        // One a newer RustGIS wrote may hold what this version would lose by writing it again: it
+        // is neither used nor written over.
+        match v.get("version").map(|version| version.as_u64().ok_or(version)) {
+            Some(Ok(version)) if version > STORE_VERSION => {
+                return Err(Error::new(
+                    Recovery::Auth,
+                    format!(
+                        "the ChatGPT sign-ins were saved by a newer RustGIS (version {version}; this one reads {STORE_VERSION}): use that RustGIS, or update this one"
+                    ),
+                ));
+            }
+            // A version that isn't a plain integer can't be told from a newer one's.
+            Some(Err(_)) => return Err("the sign-in store's version isn't a whole number".into()),
+            _ => {}
+        }
         if let Some(entries) = v.get("accounts").and_then(Value::as_array) {
             let entries = entries.iter().map(Credentials::from_json).collect::<Result<Vec<_>, _>>()?;
             let active =
@@ -857,6 +831,11 @@ mod native {
         }
     }
 
+    /// The version of the sign-in store this RustGIS reads and writes.
+    const STORE_VERSION: u64 = 2;
+
+    /// Writes the sign-in store as version [`STORE_VERSION`], without tokens except a settings
+    /// file's own from before the keychain.
     fn write_accounts(path: &Path, accounts: &Accounts) -> Result<(), Error> {
         let active = accounts.active.as_ref().map(|(client, subject)| serde_json::json!({"client_id": client, "subject": subject}));
         let entry = |c: &Credentials| {
@@ -871,7 +850,7 @@ mod native {
         };
         write_private(
             path,
-            &serde_json::json!({"version": 2, "active": active, "accounts": accounts.entries.iter().map(entry).collect::<Vec<_>>()})
+            &serde_json::json!({"version": STORE_VERSION, "active": active, "accounts": accounts.entries.iter().map(entry).collect::<Vec<_>>()})
                 .to_string(),
         )
     }
@@ -1025,18 +1004,34 @@ mod native {
     /// The selected registration, including signed-out accounts. Reads the keychain only to move
     /// an older version's tokens into it (once); otherwise only the file.
     pub fn load_any() -> Option<Credentials> {
-        let path = auth_path()?;
-        let _guard = store(&path).ok()?;
-        load_any_at(&path, vault())
+        let (credentials, warning) = load_any_report();
+        if let Some(warning) = warning {
+            log::warn!("{warning}");
+        }
+        credentials
     }
 
+    /// Reads the selected registration and preserves a refused-store diagnostic for the caller.
+    /// A missing store is a clean signed-out state. A token-store failure may still return the
+    /// readable registration without tokens, as [`load_any`] does.
+    pub fn load_any_report() -> (Option<Credentials>, Option<Error>) {
+        let Some(path) = auth_path() else { return (None, None) };
+        let _guard = match store(&path) {
+            Ok(guard) => guard,
+            Err(e) => return (None, Some(e)),
+        };
+        load_any_report_at(&path, vault())
+    }
+
+    #[cfg(test)]
     fn load_any_at(path: &Path, v: &Vault) -> Option<Credentials> {
+        load_any_report_at(path, v).0
+    }
+
+    fn load_any_report_at(path: &Path, v: &Vault) -> (Option<Credentials>, Option<Error>) {
         match selected_at(path, v) {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!("{e}");
-                read_accounts(path).ok()?.selected().map(Credentials::without_tokens)
-            }
+            Ok(c) => (c, None),
+            Err(e) => (read_accounts(path).ok().and_then(|accounts| accounts.selected().map(Credentials::without_tokens)), Some(e)),
         }
     }
 
@@ -2023,6 +2018,46 @@ mod native {
             assert!(remove_at(&path, &v, "oaiapp_other", "user-1").unwrap().is_none());
         }
 
+        /// A store a newer RustGIS saved is neither used nor written over, whatever is asked of it.
+        #[test]
+        fn a_store_from_a_newer_version_is_kept_as_it_is() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            let store = Arc::new(MemorySecrets::new());
+            let v = sharing(&store);
+            write_credentials(&path, &v, &synthetic(now() + 100_000)).unwrap();
+            let mut newer: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            newer["version"] = serde_json::json!(3);
+            newer["devices"] = serde_json::json!([{"id": "d1"}]);
+            let text = newer.to_string();
+            std::fs::write(&path, &text).unwrap();
+            let e = read_accounts(&path).err().unwrap();
+            assert!(e.to_string().contains("newer RustGIS (version 3; this one reads 2)"), "{e}");
+            assert!(read_credentials(&path, &v).is_err());
+            let (credentials, warning) = load_any_report_at(&path, &v);
+            assert!(credentials.is_none());
+            let warning = warning.unwrap().to_string();
+            assert!(warning.contains("newer RustGIS") && !warning.contains("synthetic"), "{warning}");
+            assert!(write_credentials(&path, &v, &synthetic(now() + 100_000)).is_err());
+            assert!(sign_out_at(&path, &v).is_err());
+            assert!(remove_at(&path, &v, "oaiapp_synthetic", "user-1").is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+            // A version that isn't a plain integer is unreadable, not newer-or-not.
+            for odd in [serde_json::json!("3"), serde_json::json!(3.0), serde_json::json!(true)] {
+                let mut record: Value = serde_json::from_str(&text).unwrap();
+                record["version"] = odd;
+                std::fs::write(&path, record.to_string()).unwrap();
+                assert!(read_accounts(&path).is_err());
+                let before = std::fs::read(&path).unwrap();
+                let (credentials, warning) = load_any_report_at(&path, &v);
+                assert!(credentials.is_none() && warning.unwrap().to_string().contains("version isn't a whole number"));
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+            }
+            let missing = dir.path().join("missing.json");
+            let (credentials, warning) = load_any_report_at(&missing, &v);
+            assert!(credentials.is_none() && warning.is_none());
+        }
+
         #[test]
         fn an_unreadable_keychain_signs_out_here_and_keeps_its_item_noted() {
             let dir = tempfile::tempdir().unwrap();
@@ -2307,7 +2342,7 @@ mod native {
             struct Trickle;
             impl Read for Trickle {
                 fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                    std::thread::sleep(Duration::from_millis(10));
+                    std::thread::sleep(Duration::from_millis(10)); // test-wait: simulate a trickling response body
                     if let Some(b) = buf.first_mut() {
                         *b = b'x';
                     }
@@ -2320,7 +2355,7 @@ mod native {
             assert!(start.elapsed() < Duration::from_secs(1));
             std::thread::scope(|scope| {
                 scope.spawn(|| {
-                    std::thread::sleep(Duration::from_millis(30));
+                    std::thread::sleep(Duration::from_millis(30)); // test-wait: cancel while the simulated request is running
                     *cancel.lock().unwrap() = true;
                 });
                 // The work outlasts the cancel however late the cancelling thread runs.
@@ -2328,7 +2363,7 @@ mod native {
                 let e = cancellable(&cancel, Instant::now() + Duration::from_secs(10), move || {
                     let end = Instant::now() + Duration::from_secs(5);
                     while !*flag.lock().unwrap() && Instant::now() < end {
-                        std::thread::sleep(Duration::from_millis(5));
+                        std::thread::sleep(Duration::from_millis(5)); // test-wait: legacy polling for cancellation in the fake request
                     }
                     Ok(())
                 })
@@ -2337,7 +2372,7 @@ mod native {
             });
             assert!(request_target(&mut socket, &cancel, Instant::now() + Duration::from_secs(10)).is_none());
             let e = cancellable(&Mutex::new(false), Instant::now() + Duration::from_millis(20), || {
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(100)); // test-wait: simulate a request exceeding its deadline
                 Ok(())
             })
             .unwrap_err();

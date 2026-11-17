@@ -35,6 +35,15 @@ fn model_import_refuses_unsupported_files_without_changing_session() {
         (json!({"version": 2, "steps": "unreadable future steps"}), "unsupported version"),
         (json!({"version": null, "graph": {"nodes": []}}), "unsupported version"),
         (json!({"version": "1", "steps": []}), "unsupported version"),
+        (
+            json!({"version": "1.0.0", "requires": ["futureLoops"], "graph": "unreadable future graph"}),
+            "can't read: futureLoops. Update RustGIS to import it",
+        ),
+        (json!({"version": 1, "requires": ["futureSteps", "futureSteps"], "steps": "unreadable"}), "can't read: futureSteps. Update"),
+        (
+            json!({"requires": "futureLoops", "steps": []}),
+            "other than names, so this RustGIS can't tell whether it reads it. It may be damaged, or from a newer RustGIS: update RustGIS to import it",
+        ),
         (json!({"graph": {"nodes": []}, "description": "Keep this"}), "file has unsupported fields"),
         (json!({"steps": [], "future": true}), "file has unsupported fields"),
         (json!({"graph": {"nodes": []}, "steps": [{"tool": "buffer", "params": {}}]}), "both a graph and steps"),
@@ -140,7 +149,11 @@ fn model_import_refuses_unsupported_files_without_changing_session() {
         {
             let error = s.run("model.import", &params).unwrap_err();
             assert!(error.contains(message), "{error}");
-            if message == "unsupported version" || message.starts_with("node ") || message.contains("unsupported fields") {
+            if message == "unsupported version"
+                || message.starts_with("node ")
+                || message.contains("unsupported fields")
+                || message.contains("can't read")
+            {
                 assert!(error.contains("Update RustGIS"), "{error}");
             }
             assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
@@ -152,7 +165,8 @@ fn model_import_refuses_unsupported_files_without_changing_session() {
     }
 }
 
-/// Actual graph and web-tool writers still round-trip, with or without their legacy version marker.
+/// Actual graph and web-tool writers still round-trip, with or without their legacy version marker,
+/// and with a list of required capabilities this version has.
 #[test]
 fn model_import_preserves_supported_and_legacy_files() {
     use base64::Engine;
@@ -190,10 +204,13 @@ fn model_import_preserves_supported_and_legacy_files() {
     {
         let file: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(file["version"], if index == 0 { json!("1.0.0") } else { json!(1) });
-        for legacy in [false, true] {
+        // As written, without the legacy version marker, and requiring nothing this version lacks.
+        for variant in ["current", "legacy", "requires"] {
             let mut file = file.clone();
-            if legacy {
-                file.as_object_mut().unwrap().remove("version");
+            match variant {
+                "legacy" => drop(file.as_object_mut().unwrap().remove("version")),
+                "requires" => file["requires"] = json!([]),
+                _ => {}
             }
             let text = file.to_string();
             let path = scratch.path(if index == 0 { "graph.model.json" } else { "steps.rgistool" });
@@ -270,17 +287,20 @@ fn model_import_preserves_supported_and_legacy_files() {
     }
 }
 
-/// Even a name emitted by the writer can exceed the import naming limit after disambiguation.
+/// A name past the import naming limit, as in a file written before the writer kept a
+/// told-apart name within it (#1923) or edited by hand, is changed on import and reported.
 #[test]
 fn model_import_reports_changed_names() {
     let mut original = Session::new(Project::new("Original"));
     for _ in 0..2 {
         original.run("model.new", &json!({"name": "N".repeat(200), "steps": [{"tool": "buffer", "params": {"input": "Cities"}}]})).unwrap();
     }
+    // The writer tells the second apart within the 200 characters.
     let name = original.project.models[1].name.clone();
-    assert!(name.chars().count() > 200);
+    assert_eq!((name.chars().count(), name.ends_with(" 2")), (200, true));
     let exported = original.run("model.export", &json!({"name": name})).unwrap();
     let mut file: Value = serde_json::from_str(exported["text"].as_str().unwrap()).unwrap();
+    file["name"] = json!(format!("{} 2", "N".repeat(200)));
     for name in [file["name"].clone(), json!(" Padded "), json!(17)] {
         file["name"] = name.clone();
         let mut loaded = Session::new(Project::new("Loaded"));
@@ -288,8 +308,44 @@ fn model_import_reports_changed_names() {
         assert_ne!(Some(loaded.project.models[0].name.as_str()), name.as_str());
         assert_eq!(loaded.notices.len(), 1);
         assert!(!loaded.notices[0].error && loaded.notices[0].text.contains("1 model name"));
+        // A name past 200 characters says how much was cut.
+        if name.as_str().is_some_and(|n| n.chars().count() > 200) {
+            assert!(loaded.notices[0].text.contains("cut from 202 to 200 characters"), "{:?}", loaded.notices);
+        }
         assert_eq!(serde_json::to_value(loaded.project.models[0].graph.as_ref().unwrap()).unwrap(), file["graph"]);
     }
+    // `model.new` called with `imported` itself (a script may) says the cut too.
+    let mut direct = Session::new(Project::new("Direct"));
+    for _ in 0..2 {
+        direct.notices.clear();
+        direct.run("model.new", &json!({"name": "N".repeat(200), "graph": file["graph"], "imported": true})).unwrap();
+    }
+    assert_eq!(direct.notices.len(), 1, "{:?}", direct.notices);
+    assert!(direct.notices[0].text.contains("cut to 198 characters"), "{:?}", direct.notices);
+    // A 200-character name imported twice: the second is told apart within the 200, and that
+    // is said once, by `model.new`, whose notice says how.
+    file["name"] = json!("N".repeat(200));
+    let mut loaded = Session::new(Project::new("Loaded"));
+    for _ in 0..2 {
+        loaded.notices.clear();
+        loaded.run("model.import", &json!({"text": file.to_string()})).unwrap();
+    }
+    let second = &loaded.project.models[1].name;
+    assert_eq!((second.chars().count(), second.ends_with(" 2")), (200, true));
+    assert_eq!(loaded.notices.len(), 1, "{:?}", loaded.notices);
+    assert!(loaded.notices[0].text.contains("cut to 198 characters"), "{:?}", loaded.notices);
+    // A 250-character name over a 200-character one: the import's cut to 200 is said too, beside
+    // `model.new`'s cut to fit " 3".
+    file["name"] = json!("N".repeat(250));
+    loaded.notices.clear();
+    loaded.run("model.import", &json!({"text": file.to_string()})).unwrap();
+    let texts: Vec<&str> = loaded.notices.iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(
+        texts.iter().any(|t| t.contains("cut to 198 characters"))
+            && texts.iter().any(|t| t.contains("1 model name was cut from 250 to 200 characters")),
+        "{texts:?}"
+    );
     file.as_object_mut().unwrap().remove("name");
     let mut loaded = Session::new(Project::new("Loaded"));
     loaded.run("model.import", &json!({"text": file.to_string()})).unwrap();

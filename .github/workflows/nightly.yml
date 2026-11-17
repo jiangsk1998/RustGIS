@@ -110,6 +110,22 @@ jobs:
         env:
           RUSTGIS_WORKFLOW_DATA: ${{ github.workspace }}/workflow-data
         run: cargo test --locked -p rustgis-engine --test workflows -- --ignored
+      # The property tests (docs/contributing.md › Property tests), on a new seed each night this
+      # job runs (one with new commits) and more cases than a pull request runs; a failure gives
+      # the seed to run again.
+      - name: Run the property tests on a new seed
+        if: ${{ !cancelled() }}
+        env:
+          PROPERTY_SEED: ${{ github.run_id }}
+          PROPERTY_CASES: "2000"
+        run: |
+          cargo test --locked -p rustgis-engine --test never_silent_roundtrip
+          PROPERTY_CASES=200 cargo test --locked -p rustgis-analysis --test parallel_serial
+          cargo test --locked -p rustgis-engine --test project_save_roundtrip
+          PROPERTY_CASES=200000 cargo test --locked -p rustgis-data --test reprojection_round_trip
+          PROPERTY_CASES=100000 cargo test --locked -p rustgis-geom --test geodesic_identities
+          cargo test --locked -p rustgis-data --test extent_query_properties
+          PROPERTY_CASES=20000 cargo test --locked -p rustgis-data --test date_properties
 
   report:
     name: Report
@@ -129,8 +145,8 @@ jobs:
         run: |
           set -euo pipefail
           title="Nightly build failed"
-          open="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" \
-            --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // \"\"")"
+          open="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
+            | jq -sr --arg t "$title" '[.[][] | select(.pull_request | not) | select(.title == $t)][0].number // ""')"
           if [ "$RESULT" = incomplete ]; then
             echo "The real-data tests didn't run (download failed): leaving the nightly issue as it is."
           elif [ "$RESULT" = success ]; then

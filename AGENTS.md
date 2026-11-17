@@ -24,6 +24,9 @@ Before picking work, read [ROADMAP.md](ROADMAP.md) (check Underway) and
 - A file or setting from a newer RustGIS is refused or kept unchanged, never saved again without
   what this version couldn't read; a reader checks the version it is given
   ([saved files](docs/maintaining.md#saved-files-and-settings)).
+- A change to what a project saves runs `cargo xtask schema` and commits
+  `schema/project.schema.json` with it; a change to how a project is read adds or updates a fixture
+  in `schema/fixtures/`.
 
 ## Never hold the window
 On the desktop, a command whose work grows with its input (features, cells, tiles, files,
@@ -36,37 +39,39 @@ is out of scope.
 - The work looks at Cancel between items of its long loops (`control::check`, `Pace`,
   `progress::check`) and counts its progress. Where progress can't be measured, a busy indicator
   without a count is fine; Cancel is not optional.
-- Work that splits into independent parts runs on several threads where practical: the same
-  output as one thread, bit for bit; one thread below a size threshold and in the browser; the
-  shared helpers (`parallel::for_each_row`, `try_map`, `try_map_on`); the thread count from
-  `rustgis_data::threads` (it follows the user's setting), never `available_parallelism` or a
-  fixed number; scratch memory within `memory::thread_scratch`; a thread the OS refuses costs
-  speed, not the run (`Builder::spawn_scoped`).
 - A command that must run on the UI thread says why in its doc comment.
-- `crates/engine/src/tests.rs::long_commands_stop_when_cancelled_while_they_run` cancels each
-  background command as its work starts and fails one that never looks; its lists must match the
-  background registries, so a new background command is added there. It also runs the long tools
-  (Buffer, Dissolve, Spatial Join, Clip, Erase, Intersect, Identity, Union, Symmetrical
-  Difference, Update, Split, Minimum Bounding Geometry, Kernel Density, Kriging); a new tool
-  whose work grows with its input is added to that list. Passing shows the work looks
-  at Cancel, not that it looks often: a long step without a check (one union, one read) is said in
-  its doc comment.
+- A new background raster command or export, or a tool whose work grows with its input, goes in
+  the lists in `crates/engine/src/tests.rs` (`cancel_rasters`, `cancel_exports`, `cancel_tools`);
+  `cancel_rasters` and `cancel_exports` must match the background registries. A read-ahead command
+  (`reads::prepare`, such as `service.layers`) has no list: add its call to
+  `long_commands_stop_when_cancelled_while_they_run` by hand.
+  `long_commands_stop_when_cancelled_while_they_run` fails one that never looks at Cancel;
+  `cancelling_at_each_check_leaves_nothing_behind` cancels each command of the three lists at its
+  first three checks and its last, and fails one that leaves the project, its undo steps or the
+  files changed, or can't run again (read-aheads and commands that read from the network are left
+  out). Passing shows the work looks, not that
+  it looks often: a long step without a check (one union, one read) is said in its doc comment.
+
+## Use the threads
+Work that splits into independent parts runs on several threads where practical:
+- the same output as one thread, bit for bit; one thread below a size threshold and in the browser;
+- in `analysis`, the shared helpers (`parallel::for_each_row`, `try_map`, `try_map_on`);
+  everywhere, the thread count from `rustgis_data::threads` (it follows the user's setting), never
+  `available_parallelism` or a fixed number, and scratch memory within `memory::thread_scratch`;
+- a thread the OS refuses costs speed, not the run (`Builder::spawn_scoped`).
 
 ## Architecture
 | Layer | Crate | Job |
 |---|---|---|
-| L0 | `geom` | coordinates, extents, Web Mercator, geodesic measurement, scale |
-| L1 | `data` | features, typed attributes, GeoJSON/CSV/Shapefile/KML/GPX I/O, GeoPackage/GeoParquet/FlatGeobuf/LiDAR (LAS/LAZ)/PostGIS/MySQL providers (`source`; PostGIS through the pure-Rust `postgres` client, MySQL and MariaDB through the pure-Rust `mysql` client, desktop only; GeoPackages in the browser through the pure-Rust `sqlite` reader; GDAL formats and DuckDB queries through their programs), SQL where clauses, rasters (GeoTIFF/ASCII grid, Zarr stores, EPSG reprojection) |
-| L2 | `map`, `analysis` | layers, symbology, labels, camera, basemaps, web tile layers; geoprocessing tools |
-| L2 | `tiles` | web map tiles: XYZ/TMS/WMS rasters, Mapbox Vector Tiles, PMTiles and MBTiles archives, a MapLibre style subset; the tile cache and background fetching (see `docs/user-guide/maps.md` › Basemaps) |
-| L2 | `keychain` | the system's secret store (macOS Keychain, Windows Credential Manager, Secret Service) behind `SecretStore`; the desktop app, the CLI's `--use-saved-secrets` and Python's `use_saved_secrets` |
-| L3 | `render` | tiny-skia map renderer, label placement, PNG export, font discovery |
-| L3 | `plugins` | plugins: sandboxed WebAssembly modules (`wasmi`) adding commands and tools; `.rgplugin` packages, the plugin registry (see `docs/plugins.md`) |
-| L3 | `geolibre` | the GeoLibre/Whitebox tool suite as geoprocessing tools (engine feature `geolibre`): run by the optional `geolibre` program natively, by geolibre-rust's WASI runner in the browser |
-| L4 | `engine` | `Session`, undo, command registry, sample project |
-| L5 | `assistant` | the AI Assistant: a chat agent (sans I/O: `provider` builds and reads OpenAI Chat Completions/Responses, Anthropic and Gemini requests, `chatgpt` signs in with ChatGPT to use the user's plan, `agent` loops, `tools` run commands; file, network and plugin commands wait for the user's approval) |
-| L6 | `ui-egui` | ribbon, panes, map view, attribute table, dialogs (swappable) |
-| apps | `rustgis`, `rustgis-cli`, `rustgis-web`, `rustgis-python` | desktop app, command line, browser (WebAssembly), the `rustgis` Python package (PyO3, built with maturin) |
+| L0 | `geom` | coordinates, extents, projections, geodesic measurement |
+| L1 | `data` | features and attributes, file formats, database providers (PostGIS and MySQL through pure-Rust clients, desktop only; GeoPackage in the browser through a pure-Rust `sqlite` reader), queries, rasters; GDAL and DuckDB through their programs |
+| L2 | `map`, `analysis`, `tiles`, `keychain` | layers and symbology; geoprocessing tools; web map tiles; the system's secret store |
+| L3 | `render`, `plugins`, `geolibre` | map rendering and export; WebAssembly plugins; the GeoLibre tool suite (its program natively, its WASI runner in the browser) |
+| L4 | `engine` | `Session`, undo, the command registry, the sample project |
+| L5 | `assistant` | the AI Assistant (sans I/O); file, network and plugin commands wait for approval |
+| L6 | `ui-egui` | ribbon, panes, map view, attribute table, dialogs |
+| L7 | `ui-touch` | the phone interface around `ui-egui`'s map view |
+| apps | `rustgis`, `rustgis-cli`, `rustgis-web`, `rustgis-python`, `rustgis-mobile` | desktop, command line, browser, Python package, Android and iOS |
 
 - **Everything is a command**: a `CommandSpec` in `crates/engine/src/cmd/*.rs`. UI-only
   commands (`ui.*`) live in `crates/ui-egui/src/lib.rs`. The ribbon, shortcuts, command search
@@ -80,11 +85,14 @@ is out of scope.
   [ribbon guidelines](docs/contributing.md#ribbon-guidelines): the tab's purpose, one button per
   destination, labels that say what happens, and what a ribbon pull request states.
 - **Never break wasm**: everything below `apps/` must build for `wasm32-unknown-unknown`
-  (CI runs `cargo build --target wasm32-unknown-unknown -p rustgis-web`; the Zstandard decoder in
-  `rustgis-data` is C, so this needs clang). Use `web_time`, not
-  `std::time`; file access goes through `Services` on the web. `rustgis-geolibre` builds for
-  both: natively it runs the `geolibre` program; in the browser the web app runs geolibre-rust's
-  WASI runner asynchronously (`external_start` → `Services::geolibre_run` → `gp.finish`).
+  (CI runs `cargo build --target wasm32-unknown-unknown -p rustgis-web` with warnings as errors;
+  the Zstandard decoder in `rustgis-data` is C, so this needs clang). Use `web_time`, not
+  `std::time`; file access goes through `Services` on the web. In the browser, GeoLibre tools run
+  asynchronously (`external_start` → `Services::geolibre_run` → `gp.finish`), never as a blocking
+  call. Code only the desktop calls is
+  dead code in the browser build and fails it: put it behind `#[cfg(not(target_arch = "wasm32"))]`
+  and check as CI does, with
+  `RUSTFLAGS='-D warnings' cargo build --locked --target wasm32-unknown-unknown -p rustgis-web`.
 - **Interface text is translatable**: wrap user-visible literals in `tl!("…")`, use
   `i18n::fmt("… {name} …", &[("name", …)])` instead of `format!` for messages, and pass labels to
   the ribbon widgets (they translate). Pull requests don't need to add the new strings to the
@@ -92,6 +100,19 @@ is out of scope.
   maintainer translates them before each release (format in `docs/i18n.md`). Command ids, data
   and the CLI are never translated.
 - **Layering** is enforced by `cargo xtask layers`: nothing below L6 depends on egui/eframe/rfd.
+- **The expression language has one vocabulary**: a new function, variable or keyword goes in
+  the catalogs in `crates/data/src/query.rs` (`Func::spec`, `VARS`, `Kw`), which the parser
+  reads, and in `docs/user-guide/expressions.md`; the `query` tests fail when the guide misses
+  a signature, unit, variable or keyword, or names a function that doesn't exist.
+
+## Reach every surface
+A change that works where you tried it is often missing elsewhere. Before calling it done, say in
+the pull request which of these it reaches and why the rest don't apply:
+- the desktop app, the browser (file access through `Services`), the command line, Python, the
+  phone (the touch interface, `ui-touch`);
+- the ribbon, shortcuts and command search; the Assistant and MCP (do their tool descriptions
+  show the new option?); plugins;
+- the way back: what you add can be undone, removed or reopened.
 
 ## Assets
 - No third-party vendor icons, images, styles, fonts, help text or code. Icons are drawn in
@@ -106,14 +127,19 @@ is out of scope.
 
 ## Quality gates
 `cargo xtask ci` (fmt, clippy -D warnings, tests, layers) before every commit.
+`cargo xtask test-hygiene` (also in CI) requires `// test-wait: reason` on timer waits in tests and
+`#[ignore = "reason"]` on ignored tests; prefer completion or progress signals.
+While you work, `cargo xtask changed` runs the same checks on only the packages your branch changes
+and those that depend on them (and `test-hygiene` on the whole workspace), or everything when a
+changed file such as `Cargo.lock` is outside every package and nothing includes it.
 A new dependency must have a licence `deny.toml` allows (CI runs `cargo deny check licenses`); after
 changing dependencies, run `cargo xtask notices` to refresh the `THIRD-PARTY-LICENSES.txt` files the
 packages ship (the release build fails on stale ones).
-Pull requests run CI on Linux; pushes to `main` add macOS and Windows (x64 and ARM64). Label a
-pull request `ci:windows`, `ci:macos` or `ci:full` to test there before merging (platform-specific
-code, paths, file dialogs). The release build of the apps runs nightly
-(`.github/workflows/nightly.yml`), with every platform's tests; a failure opens a
-`Nightly build failed` issue. `ci:full` also runs the release build on the pull request.
+Pull requests run CI on Linux (plus the Android and iOS builds when they touch
+`apps/rustgis-mobile`); pushes to `main` test every platform. When a pull request touches
+platform-specific code, paths or file dialogs, label it `ci:windows` or `ci:macos` to test there,
+or `ci:full` for every platform and the release build. Label-triggered runs start the tests
+immediately; label-gated build jobs in `ci.yml` start from the next push.
 
 ## Review comments
 - Fix in the pull request what a review finds wrong: bugs, crash paths, silent data loss, a broken
@@ -130,3 +156,10 @@ code, paths, file dialogs). The release build of the apps runs nightly
   For any visible change, include screenshots in the PR (before and after for changed UI, after
   only for new UI); see [attachment guidance](docs/contributing.md#documentation).
 - CLI: `rustgis-cli run --sample --cmd 'gp.run={"tool":"buffer","params":{"input":"Cities","distance":100}}' --cmd 'share.exportMap={"path":"out.png"}'`.
+
+## This file
+A rule here names a trap, not a map of the code: agents can read the code. A new rule earns its
+place when someone who knows the code would still get it wrong, it has happened more than once, and
+it says exactly what to do. A pull request that adds a check or a test list updates its line here;
+any other new rule goes under "Suggested AGENTS.md additions" in the pull request description, and a
+maintainer decides.

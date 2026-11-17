@@ -362,11 +362,13 @@ fn rename_box(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class, key: egui
         return;
     }
     if edit.lost_focus() {
+        // Left alone only when unchanged as typed. A name past the limit is sent as typed even when
+        // its cut is the class's own name: the command cuts it and says so (#2122).
         let name = label_class_name(&r.text);
-        if name == c.it.name {
+        if r.text.trim() == c.it.name {
             return;
         }
-        if run(app, "labels.class.rename", json!({"class": c.it.name, "name": name})).is_some() {
+        if run(app, "labels.class.rename", json!({"class": c.it.name, "name": r.text})).is_some() {
             // Default stays chosen by no name; another class goes by its new one.
             if c.name.is_some() {
                 choose(ui, app, l, Some(&name));
@@ -1284,7 +1286,6 @@ fn apply_color_drag(app: &mut RustGisApp, drag: ColorDrag) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use egui_kittest::kittest::{NodeT, Queryable};
     use rustgis_engine::map::Rgba;
@@ -1857,6 +1858,33 @@ mod tests {
         assert_eq!(clause(app).as_deref(), Some("pop_max > 5000000"), "undo brings the clause back");
     }
 
+    /// The SQL tab's clause takes the language's functions and variables from the same menus as
+    /// Select By Attributes and the Query tab.
+    #[test]
+    fn the_sql_tab_offers_the_functions_and_variables_menus() {
+        use egui::accesskit::Role;
+        use rustgis_engine::data::query::{VARS, functions};
+        let app = with_cities();
+        let mut h = harness(app);
+        h.run();
+        h.get_by_label("+ New expression").click();
+        h.run();
+        type_clause(&mut h, "name =");
+        // One that takes arguments, so it is added open.
+        let first = functions().find(|f| f.max > 0).unwrap();
+        h.get_by_role_and_label(Role::Button, "Functions ▾").click();
+        h.run();
+        h.get_by_role_and_label(Role::Button, first.signature).click();
+        h.run();
+        let var = VARS[0].names[0];
+        h.get_by_role_and_label(Role::Button, "Variables ▾").click();
+        h.run();
+        h.get_by_role_and_label(Role::Button, var).click();
+        h.run();
+        let text = h.get_by_role(Role::MultilineTextInput).value().unwrap_or_default();
+        assert_eq!(text, format!("name = {}({var} ", first.name));
+    }
+
     #[test]
     fn retained_area_clauses_do_not_claim_clean_features_are_unlabelled() {
         use rustgis_engine::data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value};
@@ -2358,6 +2386,69 @@ mod tests {
         assert_eq!(names(h.state()), ["big", "Default"]);
         assert!(shown(&h, "big"), "still chosen by its new name");
         assert_eq!(h.state().session.undo_depth(), steps + 1);
+    }
+
+    /// A name typed past 100 characters is cut to them, and the cut is said (#2122): the box sends
+    /// the name as typed, so the command sees how long it was.
+    #[test]
+    fn a_long_name_typed_in_the_pane_is_cut_and_said() {
+        let mut app = with_cities();
+        app.run("labels.class.add", json!({"name": "Big"})).unwrap();
+        let mut h = harness(app);
+        h.run();
+        pick_class(&mut h, "Default", "Big");
+        h.get_by_label("Rename").click();
+        h.run();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.key_press(egui::Key::Backspace);
+        h.run();
+        h.get_by_role(egui::accesskit::Role::TextInput).type_text(&"b".repeat(101));
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let kept = "b".repeat(100);
+        assert_eq!(names(h.state()), [kept.as_str(), "Default"]);
+        assert!(shown(&h, &kept), "still chosen by its new name");
+        let said: Vec<&str> =
+            h.state().session.notices.iter().filter(|n| n.text.starts_with("Label Classes:")).map(|n| n.text.as_str()).collect();
+        let want = format!(
+            "Label Classes: Cities: a label class's name takes at most 100 characters, so the name given (101) is cut to 100, kept as '{kept}'"
+        );
+        assert_eq!(said, [want.as_str()]);
+    }
+
+    /// A name typed past 100 characters whose cut is the class's own name is still sent, so the
+    /// cut is said (#2122), rather than the box closing silently.
+    #[test]
+    fn a_long_name_typed_in_the_pane_that_cuts_to_the_same_name_is_said() {
+        let kept = "b".repeat(100);
+        let mut h = harness(with_cities());
+        h.run();
+        // A class made and renamed through the pane: a 100-character name is wider than the
+        // chooser, which the test can't click.
+        h.get_by_label("New").click();
+        h.run();
+        let rename = |h: &mut egui_kittest::Harness<'static, RustGisApp>, text: &str| {
+            h.get_by_label("Rename").click();
+            h.run();
+            h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+            h.key_press(egui::Key::Backspace);
+            h.run();
+            h.get_by_role(egui::accesskit::Role::TextInput).type_text(text);
+            h.run();
+            h.key_press(egui::Key::Enter);
+            h.run();
+        };
+        rename(&mut h, &kept);
+        assert_eq!(names(h.state()), [kept.as_str(), "Default"]);
+        rename(&mut h, &"b".repeat(101));
+        assert_eq!(names(h.state()), [kept.as_str(), "Default"]);
+        let said: Vec<&str> =
+            h.state().session.notices.iter().filter(|n| n.text.starts_with("Label Classes:")).map(|n| n.text.as_str()).collect();
+        let want = format!(
+            "Label Classes: Cities: a label class's name takes at most 100 characters, so the name given (101) is cut to 100, kept as '{kept}'"
+        );
+        assert_eq!(said, [want.as_str()]);
     }
 
     /// A rename left open when the pane is hidden is gone when it shows again.

@@ -546,7 +546,6 @@ const MAX_RULES_READ: usize = MAX_CLASSES * 2;
 /// top. A rule under an else rule takes only what the else rule does (`else_of`, the sibling
 /// sets of the else rules above). Bounded in depth and number: the rules left out are counted in
 /// `left`.
-#[allow(clippy::too_many_arguments)]
 fn flatten<'a, 'i>(
     node: Node<'a, 'i>,
     filters: Vec<String>,

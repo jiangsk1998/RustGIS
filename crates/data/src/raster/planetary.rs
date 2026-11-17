@@ -350,8 +350,8 @@ mod tests {
             .chain(super::super::crs::esri_codes().filter_map(super::super::crs::esri_proj4));
         let mut n = 0;
         for def in defs {
-            let Ok(proj) = proj4rs::Proj::from_proj_string(def) else { continue };
-            let (a, _) = proj.ellipse_parameters();
+            let Some(params) = super::super::crs::def_params(def) else { continue };
+            let a = params.a;
             // Geocentric and vertical definitions have an ellipsoid too.
             assert!(!off_earth(a), "{def}: {a}");
             if let Some((a, _)) = proj4_axes(def) {

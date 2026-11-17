@@ -8,7 +8,7 @@ use std::io::Cursor;
 use calamine::{Data, ExcelDateTime, ExcelDateTimeType, Reader, Sheets, open_workbook_auto_from_rs};
 
 use crate::io::{Columns, CsvOptions, columns_of, read_rows};
-use crate::{DataError, Dataset, ReadReport, Result};
+use crate::{DataError, Dataset, Field, FieldType, ReadReport, Result};
 
 mod biff;
 
@@ -50,7 +50,15 @@ fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 pub fn read(bytes: &[u8], name: &str, sheet: Option<&str>, opts: &CsvOptions) -> Result<(Dataset, ReadReport)> {
     let g = grid(bytes, sheet)?;
     let title = if g.names.len() > 1 { format!("{name} {}", g.pick) } else { name.to_string() };
-    let (ds, mut report) = read_rows(&g.headers, &g.rows, 0, &title, opts)?;
+    let (ds, mut report) = read_rows(&g.headers, &g.rows, 0, &title, opts, Some((&g.dates, &g.phantom_dates)))?;
+    let rounded: usize = g.rounded_dates.iter().sum();
+    if rounded > 0 {
+        let fields: Vec<Field> = g.headers.iter().map(|h| Field::new(h, FieldType::Text)).collect();
+        report.messages.push(format!(
+            "{rounded} serial date values were rounded to the nearest microsecond, in {}",
+            crate::io::named_fields(&fields, &g.rounded_dates)
+        ));
+    }
     let others: Vec<&str> = g.names.iter().filter(|n| **n != g.pick).map(String::as_str).take(20).collect();
     if !others.is_empty() {
         report.messages.push(format!("the workbook has more sheets ({}): add one with \"layer\"", others.join(", ")));
@@ -59,10 +67,10 @@ pub fn read(bytes: &[u8], name: &str, sheet: Option<&str>, opts: &CsvOptions) ->
 }
 
 /// The columns of one sheet of a workbook (`sheet` as [`read`] takes it), and those its geometry
-/// is read from when none are given.
-pub fn columns(bytes: &[u8], sheet: Option<&str>) -> Result<Columns> {
+/// is read from when none are given, respecting the supplied coordinate system.
+pub fn columns(bytes: &[u8], sheet: Option<&str>, crs: Option<crate::raster::Crs>) -> Result<Columns> {
     let g = grid(bytes, sheet)?;
-    Ok(columns_of(&g.headers, &g.rows))
+    columns_of(&g.headers, &g.rows, crs)
 }
 
 /// A sheet as text: the workbook's sheets, the one picked, its column names and its rows.
@@ -71,6 +79,10 @@ struct Grid {
     pick: String,
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
+    dates: Vec<Option<FieldType>>,
+    rounded_dates: Vec<usize>,
+    /// Per column that isn't one of dates, the serial-60 cells read as empty.
+    phantom_dates: Vec<usize>,
 }
 
 fn grid(bytes: &[u8], sheet: Option<&str>) -> Result<Grid> {
@@ -79,6 +91,7 @@ fn grid(bytes: &[u8], sheet: Option<&str>) -> Result<Grid> {
     guarded(|| grid_unguarded(bytes, sheet))
 }
 
+/// Reads a bounded workbook grid, retaining date types from cells rather than guessing ISO text.
 fn grid_unguarded(bytes: &[u8], sheet: Option<&str>) -> Result<Grid> {
     let mut wb = open_workbook_auto_from_rs(Cursor::new(bytes)).map_err(|e| DataError::Format(format!("spreadsheet: {e}")))?;
     let names = wb.sheet_names();
@@ -96,7 +109,73 @@ fn grid_unguarded(bytes: &[u8], sheet: Option<&str>) -> Result<Grid> {
     if h.saturating_mul(w) > MAX_CELLS {
         return Err(DataError::Format(format!("sheet '{pick}' is too large ({h} × {w} cells)")));
     }
-    let mut rows = range.rows().map(|r| r.iter().map(cell).collect::<Vec<String>>());
+    let header_at = range.rows().position(|r| r.iter().any(|c| !cell(c).trim().is_empty())).unwrap_or(0);
+    let mut rounded_dates = vec![0usize; w];
+    for row in range.rows().skip(header_at + 1) {
+        crate::progress::check()?;
+        for (k, d) in row.iter().enumerate() {
+            if let Data::DateTime(dt) = d {
+                let serial = dt.as_f64() + if is_1904(dt) { DAYS_1900_TO_1904 } else { 0.0 };
+                let adjusted = serial + if (1.0..60.0).contains(&serial) { 1.0 } else { 0.0 };
+                if !dt.is_duration()
+                    && serial >= 0.0
+                    && serial.floor() != 60.0
+                    && crate::date::serial_datetime(adjusted, -25_569).is_some_and(|(_, rounded)| rounded)
+                    && let Some(n) = rounded_dates.get_mut(k)
+                {
+                    *n += 1;
+                }
+            }
+        }
+    }
+    let dates = (0..w)
+        .map(|i| {
+            let mut ty = Some(FieldType::Date);
+            let mut seen = false;
+            for row in range.rows().skip(header_at + 1) {
+                crate::progress::check()?;
+                let Some(d) = row.get(i) else { continue };
+                let text = cell(d);
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let temporal = matches!(d, Data::DateTime(t) if !t.is_duration()) || matches!(d, Data::DateTimeIso(_));
+                if !temporal {
+                    ty = None;
+                    break;
+                }
+                // A time without a day is kept as text. Invalid dates in an otherwise typed
+                // column become null and are counted after the rows are read.
+                if text.contains(':') && !text.contains(['T', 't']) {
+                    ty = None;
+                    break;
+                }
+                seen = true;
+                if text.contains(['T', 't']) {
+                    ty = Some(FieldType::DateTime);
+                }
+            }
+            Ok(if seen { ty } else { None })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // Serial 60 is the 1900 system's 1900-02-29, a day that never was. A column of dates reads it
+    // as one that isn't a date (null, and counted); in a column of other things it is read as
+    // empty and counted here, as it would not be text of a day.
+    let mut phantom_dates = vec![0usize; w];
+    let mut rows = range.rows().map(|r| {
+        r.iter()
+            .enumerate()
+            .map(|(k, d)| match (d, dates.get(k)) {
+                (Data::DateTime(t), Some(None)) if is_phantom_day(t) => {
+                    if let Some(n) = phantom_dates.get_mut(k) {
+                        *n += 1;
+                    }
+                    String::new()
+                }
+                _ => cell(d),
+            })
+            .collect::<Vec<String>>()
+    });
     // The first row with anything in it names the columns.
     let headers: Vec<String> = rows.by_ref().find(|r| r.iter().any(|c| !c.trim().is_empty())).unwrap_or_default();
     if headers.is_empty() {
@@ -111,7 +190,7 @@ fn grid_unguarded(bytes: &[u8], sheet: Option<&str>) -> Result<Grid> {
         .map(|(i, h)| if h.trim().is_empty() { column_letter(first_col + i) } else { h.trim().to_string() })
         .collect();
     let rows: Vec<Vec<String>> = rows.filter(|r| r.iter().any(|c| !c.trim().is_empty())).collect();
-    Ok(Grid { names, pick, headers, rows })
+    Ok(Grid { names, pick, headers, rows, dates, rounded_dates, phantom_dates })
 }
 
 /// A zipped workbook (`.xlsx`, `.ods`) that would inflate past [`crate::zip::MAX_TOTAL`] is
@@ -163,7 +242,7 @@ fn check_compound(bytes: &[u8]) -> Result<()> {
     let max_sector = body.len() / size;
     // The FAT's sectors: 109 listed in the header, more in a chain of DIFAT sectors whose last
     // entry links to the next (calamine takes the link off the end of the list it has gathered).
-    let mut difat = words(bytes.get(76..512).unwrap_or(&[]));
+    let mut difat = words(bytes.get(76..512).unwrap_or(&[]))?;
     let mut next = u32_at(68);
     let mut hops = 0usize;
     while next < RESERVED_SECTORS {
@@ -176,7 +255,7 @@ fn check_compound(bytes: &[u8]) -> Result<()> {
             // calamine would take the last FAT sector gathered for the next link.
             return damaged("a DIFAT sector is past the end of the file");
         }
-        difat.extend(words(more));
+        difat.extend(words(more)?);
         next = difat.pop().unwrap_or(END_OF_CHAIN);
     }
     let fat_sectors: Vec<u32> = difat.into_iter().filter(|id| *id < DIFAT_SECTOR).collect();
@@ -184,7 +263,15 @@ fn check_compound(bytes: &[u8]) -> Result<()> {
     if fat_sectors.len() > max_sector + 1 {
         return damaged("its allocation table is larger than the file");
     }
-    let fat: Vec<u32> = fat_sectors.iter().flat_map(|id| words(sector(*id))).collect();
+    let mut fat = Vec::new();
+    for id in fat_sectors {
+        // A FAT sector bypasses Sectors::read. calamine slices from this start even when
+        // EOF was reached before it, and panics instead of returning an error.
+        if (id as usize).saturating_mul(size) > body.len() {
+            return damaged("a FAT sector is past the end of the file");
+        }
+        fat.extend(words(sector(id))?);
+    }
     let main = Sectors { table: &fat, data_len: body.len(), size };
     // The directory, one 128-byte entry per stream; its chain starts in the header, and calamine
     // reads it to its end.
@@ -216,7 +303,7 @@ fn check_compound(bytes: &[u8]) -> Result<()> {
         let mini_len = root_sectors.iter().map(|id| sector(*id).len()).sum::<usize>().min(root_len);
         let table_len = mini_fat_len.saturating_mul(size);
         let mini_fat: Vec<u8> = main.read(u32_at(60), table_len)?.into_iter().flat_map(sector).copied().take(table_len).collect();
-        (words(&mini_fat), mini_len, root_sectors)
+        (words(&mini_fat)?, mini_len, root_sectors)
     } else {
         (Vec::new(), 0, Vec::new())
     };
@@ -301,10 +388,14 @@ impl Sectors<'_> {
     }
 }
 
-/// A sector's (or a table's) little-endian 32-bit words; a partial word at the end is dropped, as
-/// calamine drops it.
-fn words(b: &[u8]) -> Vec<u32> {
-    b.as_chunks::<4>().0.iter().map(|w| u32::from_le_bytes(*w)).collect()
+/// A sector's (or a table's) little-endian 32-bit words. calamine asserts that no partial
+/// word remains, so refuse a cut-short table before handing the file to it.
+fn words(b: &[u8]) -> Result<Vec<u32>> {
+    let (whole, tail) = b.as_chunks::<4>();
+    if !tail.is_empty() {
+        return damaged("an allocation table ends with a partial 32-bit word");
+    }
+    Ok(whole.iter().map(|w| u32::from_le_bytes(*w)).collect())
 }
 
 fn damaged<T>(what: &str) -> Result<T> {
@@ -353,7 +444,7 @@ fn check_size(wb: &mut Sheets<Cursor<&[u8]>>, sheet: &str) -> Result<()> {
 }
 
 /// A cell as text: whole numbers without a decimal point, dates as ISO 8601, times of day as
-/// `HH:MM:SS` and durations as `[h]:MM:SS`.
+/// ISO clock text with fractional seconds and durations as `[h]:MM:SS`.
 fn cell(d: &Data) -> String {
     match d {
         Data::Empty | Data::Error(_) => String::new(),
@@ -366,6 +457,11 @@ fn cell(d: &Data) -> String {
         Data::DateTime(dt) => excel_date(dt.as_f64() + if is_1904(dt) { DAYS_1900_TO_1904 } else { 0.0 }, true),
         Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
     }
+}
+
+/// Whether a date cell is serial 60, the 1900 system's 1900-02-29.
+fn is_phantom_day(dt: &ExcelDateTime) -> bool {
+    !dt.is_duration() && (dt.as_f64() + if is_1904(dt) { DAYS_1900_TO_1904 } else { 0.0 }).floor() == 60.0
 }
 
 /// Days from the 1900 date system's day 0 to the 1904 one's (workbooks made on old Macs).
@@ -391,41 +487,24 @@ fn duration(days: f64) -> String {
 }
 
 /// An Excel serial date (days since 1899-12-30) as `YYYY-MM-DD`, or `YYYY-MM-DDTHH:MM:SS` when it
-/// has a time of day; a time alone (a serial below 1) as `HH:MM:SS`.
+/// has a time of day; a time alone (a serial below 1) keeps fractional seconds as ISO text.
 fn excel_date(serial: f64, with_time: bool) -> String {
     if !serial.is_finite() || !(0.0..3_000_000.0).contains(&serial) {
         return serial.to_string();
     }
     if serial < 1.0 && with_time {
-        let secs = ((serial * 86_400.0).round() as i64).min(86_399);
-        return format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
+        return crate::date::serial_datetime(serial, 0)
+            .and_then(|(t, _)| t.to_string().split_once('T').map(|(_, clock)| clock.to_string()))
+            .unwrap_or_else(|| serial.to_string());
     }
-    let mut days = serial.floor() as i64;
-    let mut secs = ((serial - serial.floor()) * 86_400.0).round() as i64;
-    // A time that rounds up to midnight is the next day.
-    if secs >= 86_400 {
-        days += 1;
-        secs -= 86_400;
+    // Serial 60 is the workbook's fictitious 1900-02-29. Keep that invalid spelling so
+    // a typed read reports it instead of silently changing it to a real day.
+    if serial.floor() == 60.0 {
+        return "1900-02-29".into();
     }
-    // Excel counts a 29 February 1900 that never was: serials before it are a day early.
-    if days < 60 {
-        days += 1;
-    }
-    // Days from 1970-01-01, then the civil date (Howard Hinnant's algorithm).
-    let z = days - 25_569 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    if with_time && secs > 0 {
-        format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
-    } else {
-        format!("{y:04}-{m:02}-{d:02}")
-    }
+    let adjusted = serial + if serial < 60.0 { 1.0 } else { 0.0 };
+    let Some((t, _)) = crate::date::serial_datetime(adjusted, -25_569) else { return serial.to_string() };
+    if !with_time || t.is_date() { t.date().to_string() } else { t.to_string() }
 }
 
 /// A column's letter name: A, B, …, Z, AA, AB…
@@ -502,6 +581,7 @@ pub fn xlsx(sheets: &[(&str, &[&[&str]])]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Value;
 
     #[test]
     fn dates_and_letters() {
@@ -510,8 +590,9 @@ mod tests {
         assert_eq!(excel_date(1.0, false), "1900-01-01");
         assert_eq!(excel_date(59.0, false), "1900-02-28");
         assert_eq!(excel_date(61.0, false), "1900-03-01");
-        assert_eq!(excel_date(45_000.999_999_9, true), "2023-03-16", "rounds up to the next midnight");
+        assert_eq!(excel_date(45_000.999_999_9, true), "2023-03-15T23:59:59.991360", "fractional seconds are kept");
         assert_eq!(excel_date(0.5, true), "12:00:00", "a time of day alone");
+        assert_eq!(excel_date(0.500_001, true), "12:00:00.086400", "clock fractions are kept");
         assert_eq!(excel_date(0.0, true), "00:00:00");
         assert_eq!(duration(1.5), "36:00:00");
         assert_eq!(duration(-0.25), "-6:00:00");
@@ -527,6 +608,111 @@ mod tests {
         assert_eq!(column_letter(26), "AA");
         assert_eq!(column_letter(701), "ZZ");
         assert!(is_sheet_name("a.XLSX") && is_sheet_name("b.ods") && !is_sheet_name("c.csv"));
+    }
+
+    #[test]
+    fn workbook_date_cells_are_typed_but_date_looking_text_is_not() {
+        let book = xlsx(&[(
+            "Dates",
+            &[
+                &["day", "moment", "text", "mixed"],
+                &[
+                    r#"<c t="d"><v>2024-02-29</v></c>"#,
+                    r#"<c t="d"><v>2026-03-05T14:30:00.123456+02:00</v></c>"#,
+                    "2024-02-29",
+                    r#"<c t="d"><v>2024-02-29</v></c>"#,
+                ],
+                &[r#"<c t="d"><v>2026-02-30</v></c>"#, "", "2026-03-05", "other"],
+            ],
+        )]);
+        let (ds, report) = read(&book, "dates", None, &CsvOptions::default()).unwrap();
+        assert_eq!(
+            ds.fields.iter().map(|f| f.ty).collect::<Vec<_>>(),
+            [FieldType::Date, FieldType::DateTime, FieldType::Text, FieldType::Text]
+        );
+        assert_eq!(ds.value(0, 0).to_string(), "2024-02-29");
+        assert_eq!(ds.value(0, 1).to_string(), "2026-03-05T14:30:00.123456+02:00");
+        assert!(ds.value(1, 0).is_null());
+        assert!(report.unread_dates.unwrap().starts_with("1 value"));
+        assert_eq!(ds.value(0, 3), &Value::Text("2024-02-29".into()));
+    }
+
+    /// Native numeric date styles reach the public reader's rounding notice, including
+    /// time-only text. Exact half days stay silent; non-dyadic serials report the field/count.
+    #[test]
+    fn workbook_serial_dates_report_rounding_and_keep_clock_fractions() {
+        for (serial, rounded) in [("45000.5", false), ("45000.1", true), ("0.5", false), ("0.500001", false), ("0.123456789", true)] {
+            let cell = format!(r#"<c s="0"><v>{serial}</v></c>"#);
+            let book = xlsx(&[("Dates", &[&["moment"], &[&cell]])]);
+            let mut entries = crate::zip::read(&book).unwrap();
+            entries.push(("xl/styles.xml".into(), br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="1"><xf numFmtId="22"/></cellXfs></styleSheet>"#.to_vec()));
+            let (ds, report) = read(&crate::zip::write(&entries).unwrap(), "dates", None, &CsvOptions::default()).unwrap();
+            let notices: Vec<_> = report.messages.iter().filter(|n| n.contains("rounded to the nearest microsecond")).collect();
+            assert_eq!(notices.len(), usize::from(rounded), "{serial}: {report:?}");
+            if rounded {
+                assert!(notices[0].contains("1 serial date") && notices[0].contains("moment"));
+            }
+            if serial == "0.500001" {
+                assert_eq!(ds.fields[0].ty, FieldType::Text);
+                assert_eq!(ds.value(0, 0).to_string(), "12:00:00.086400");
+            }
+            if serial == "0.123456789" {
+                assert_eq!(ds.value(0, 0).to_string(), "02:57:46.666570");
+            }
+        }
+    }
+
+    /// Serial 60, Excel's 1900-02-29, is no day: in a column of dates it is empty and counted, and
+    /// so it is in a column of other things (not text of a day that never was). Other serials
+    /// there, and time-only cells, are as they were.
+    #[test]
+    fn the_phantom_leap_day_is_empty_and_counted_in_a_mixed_column() {
+        let book = |cells: [&str; 3]| {
+            let rows: Vec<String> =
+                cells.iter().map(|c| if *c == "x" { (*c).to_string() } else { format!(r#"<c s="0"><v>{c}</v></c>"#) }).collect();
+            let book = xlsx(&[("Dates", &[&["a"], &[&rows[0]], &[&rows[1]], &[&rows[2]]])]);
+            let mut entries = crate::zip::read(&book).unwrap();
+            entries.push(("xl/styles.xml".into(), br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="1"><xf numFmtId="14"/></cellXfs></styleSheet>"#.to_vec()));
+            read(&crate::zip::write(&entries).unwrap(), "dates", None, &CsvOptions::default()).unwrap()
+        };
+        // A column of dates: the cell is null and counted.
+        let (ds, report) = book(["45000", "60", "45002"]);
+        assert_eq!(ds.fields[0].ty, FieldType::Date);
+        assert!(ds.value(1, 0).is_null());
+        assert_eq!(report.unread_dates.as_deref(), Some("1 value isn't a date and was read as empty, in 'a'"));
+        // A mixed column (text among the dates) says the same, and keeps the rest as text.
+        let (ds, report) = book(["45000", "60", "x"]);
+        assert_eq!(ds.fields[0].ty, FieldType::Text);
+        // (A row left with nothing in it is skipped, as any empty row is.)
+        let seen: Vec<String> = (0..ds.features.len()).map(|r| ds.value(r, 0).to_string()).collect();
+        assert_eq!(seen, ["2023-03-15", "x"], "{seen:?}");
+        assert_eq!(report.unread_dates.as_deref(), Some("1 value isn't a date and was read as empty, in 'a'"));
+        // Without it, nothing is said.
+        let (_, report) = book(["45000", "61", "x"]);
+        assert_eq!(report.unread_dates, None);
+    }
+
+    /// Serial 60 in the WKT column: the cell is empty, so its row has no geometry, and that is said;
+    /// a WKT column without one says nothing of it.
+    #[test]
+    fn the_phantom_leap_day_in_a_wkt_column_is_said() {
+        let book = |second: &str| {
+            let book = xlsx(&[("Places", &[&["name", "wkt"], &["a", "POINT (1 2)"], &["b", second]])]);
+            let mut entries = crate::zip::read(&book).unwrap();
+            entries.push(("xl/styles.xml".into(), br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="1"><xf numFmtId="14"/></cellXfs></styleSheet>"#.to_vec()));
+            let opts = CsvOptions { wkt: Some("wkt".into()), ..CsvOptions::default() };
+            read(&crate::zip::write(&entries).unwrap(), "places", None, &opts).unwrap()
+        };
+        let (ds, report) = book(r#"<c s="0"><v>60</v></c>"#);
+        assert_eq!(ds.features.len(), 2);
+        assert_eq!(ds.features.iter().filter(|f| f.geometry.is_none()).count(), 1);
+        assert!(
+            report.messages.contains(&"1 value in 'wkt' isn't a date and was read as empty, so its row has no geometry".to_string()),
+            "{:?}",
+            report.messages
+        );
+        let (_, report) = book("POINT (3 4)");
+        assert!(!report.messages.iter().any(|m| m.contains("isn't a date")), "{:?}", report.messages);
     }
 
     #[test]
@@ -561,15 +747,31 @@ mod tests {
         assert_eq!(ds.fields[1].name, "B", "a column without a heading is named by its letter");
         assert!(read(&book, "book", Some("Missing"), &CsvOptions::default()).is_err());
         // The columns Add Delimited Text offers, found as the sheet is read.
-        let c = columns(&book, None).unwrap();
+        let c = columns(&book, None, None).unwrap();
         assert_eq!(c.names, ["name", "lon", "lat", "pop"]);
         assert_eq!((c.x.as_deref(), c.y.as_deref(), c.delimiter), (Some("lon"), Some("lat"), None));
-        let c = columns(&book, Some("utm")).unwrap();
+        let c = columns(&book, Some("utm"), None).unwrap();
         assert_eq!((c.x.as_deref(), c.y.as_deref()), (Some("easting"), Some("northing")));
-        assert_eq!(columns(&book, Some("Notes")).unwrap().names, ["text", "B"]);
+        assert_eq!(columns(&book, Some("Notes"), None).unwrap().names, ["text", "B"]);
         for cut in (0..book.len()).step_by(61) {
             let _ = read(&book[..cut], "t", None, &CsvOptions::default());
-            let _ = columns(&book[..cut], None);
+            let _ = columns(&book[..cut], None, None);
+        }
+    }
+
+    /// Spreadsheet defaults respect a projected CRS just as the delimited reader does.
+    #[test]
+    fn coordinate_columns_follow_crs() {
+        use crate::raster::Crs;
+        let book = xlsx(&[("Mixed", &[&["X", "Y", "Longitude", "Latitude"], &["1000", "2000", "3", "4"]])]);
+        for (crs, expected) in [
+            (None, ("Longitude", "Latitude")),
+            (Some(Crs::LonLat), ("Longitude", "Latitude")),
+            (Some(Crs::parse("+proj=latlong +datum=WGS84 +no_defs").unwrap()), ("Longitude", "Latitude")),
+            (Some(Crs::parse("EPSG:2263").unwrap()), ("X", "Y")),
+        ] {
+            let c = columns(&book, None, crs).unwrap();
+            assert_eq!((c.x.as_deref(), c.y.as_deref()), (Some(expected.0), Some(expected.1)));
         }
     }
 
@@ -626,7 +828,7 @@ mod tests {
             assert!(read(book, "t.xls", None, &CsvOptions::default()).is_err(), "book {i}");
             // Some damaged headers still list no sheets; none may panic.
             let _ = sheet_names(book);
-            assert!(columns(book, None).is_err(), "book {i}");
+            assert!(columns(book, None, None).is_err(), "book {i}");
         }
     }
 
@@ -718,7 +920,7 @@ mod tests {
         let refuses = |book: &[u8], kind: &str| {
             assert!(check_compound(book).is_err(), "{kind} reached the unchecked BIFF parser");
             assert!(sheet_names(book).is_err(), "{kind}: names");
-            assert!(columns(book, None).is_err(), "{kind}: columns");
+            assert!(columns(book, None, None).is_err(), "{kind}: columns");
             assert!(read(book, "bad.xls", None, &CsvOptions::default()).is_err(), "{kind}: read");
         };
         for kind in [0x002F, 0x0042, 0x0022, 0x0809, 0x0085, 0x0018, 0x0017] {
@@ -857,7 +1059,7 @@ mod tests {
         let damaged = |book: &[u8], what: &str| {
             let e = read(book, "t.xls", None, &CsvOptions::default()).unwrap_err().to_string();
             assert!(e.contains("damaged") && e.contains(what), "{what}: {e}");
-            assert!(columns(book, None).is_err() && sheet_names(book).is_err(), "{what}");
+            assert!(columns(book, None, None).is_err() && sheet_names(book).is_err(), "{what}");
         };
         // The tables are sound: the check passes it on, and calamine reads it (it has no sheets).
         let sound = small_book(&[FAT, END, END, END], 0, 64, &[END]);
@@ -909,6 +1111,80 @@ mod tests {
         damaged(&bom, "starts past");
         // A DIFAT chain whose next sector is past the end of the file.
         damaged(&ole2(9, 1, 0, 50, 1, &sectors(&[FAT, END], 0xFF)), "past the end");
+    }
+
+    #[test]
+    fn truncated_xls_allocation_tables_are_refused_before_calamine() {
+        const END: u32 = 0xFFFF_FFFE;
+        // Both sector sizes, each table calamine interprets as u32 words, and each partial
+        // word length. Generate the container rather than keeping opaque fuzz artifacts.
+        for shift in [9, 12] {
+            let size = 1usize << shift;
+            for table in ["FAT", "DIFAT", "mini FAT"] {
+                for tail in 1..=3 {
+                    let mut book = ole2(shift, 1, 1, END, 0, &[]);
+                    book.resize(size, 0);
+                    let mut fat = vec![0xFF; size];
+                    fat[..4].copy_from_slice(&0xFFFF_FFFDu32.to_le_bytes());
+                    fat[4..8].copy_from_slice(&END.to_le_bytes());
+                    fat[8..12].copy_from_slice(&END.to_le_bytes());
+                    book.extend(fat);
+                    let mut dir = vec![0; size];
+                    dir[116..120].copy_from_slice(&END.to_le_bytes());
+                    book.extend(dir);
+                    book.extend(END.to_le_bytes());
+                    book.extend(vec![0xFF; tail]);
+                    match table {
+                        "FAT" => book[80..84].copy_from_slice(&2u32.to_le_bytes()),
+                        "DIFAT" => book[68..72].copy_from_slice(&2u32.to_le_bytes()),
+                        _ => {
+                            book[60..64].copy_from_slice(&2u32.to_le_bytes());
+                            book[64..68].copy_from_slice(&1u32.to_le_bytes());
+                        }
+                    }
+                    let check = check_compound(&book).unwrap_err().to_string();
+                    assert!(check.contains("partial 32-bit word"), "{shift}/{table}/{tail}: {check}");
+                    for error in [
+                        sheet_names(&book).unwrap_err().to_string(),
+                        columns(&book, None, None).unwrap_err().to_string(),
+                        read(&book, "cut.xls", None, &CsvOptions::default()).unwrap_err().to_string(),
+                    ] {
+                        assert_eq!(error, check, "{shift}/{table}/{tail}: parser must never be reached");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn xls_fat_sectors_past_eof_are_refused_before_calamine() {
+        const END: u32 = 0xFFFF_FFFE;
+        // A 1541-byte container, as in #1952: after the 512-byte header there are two
+        // sectors and five bytes. FAT id 3 begins after those bytes, although id 0 is sound.
+        let mut body = sectors(&[0xFFFF_FFFD, END], 0xFF);
+        body.extend([0; 512]);
+        body.extend([0; 5]);
+        for id in [3u32, 0x7FFF_FFFF] {
+            let mut book = ole2(9, 1, 1, END, 0, &body);
+            book[80..84].copy_from_slice(&id.to_le_bytes());
+            let check = check_compound(&book).unwrap_err().to_string();
+            assert!(check.contains("a FAT sector is past the end"), "{check}");
+            assert_eq!(sheet_names(&book).unwrap_err().to_string(), check);
+            assert_eq!(columns(&book, None, None).unwrap_err().to_string(), check);
+            assert_eq!(read(&book, "cut.xls", None, &CsvOptions::default()).unwrap_err().to_string(), check);
+        }
+    }
+
+    #[test]
+    fn xls_unused_and_word_aligned_trailing_bytes_still_pass() {
+        const END: u32 = 0xFFFF_FFFE;
+        let mut book = small_book(&[0xFFFF_FFFD, END, END, END], 0, 64, &[END]);
+        // Extra file bytes don't matter unless read as an allocation table.
+        book.extend([0xFF; 3]);
+        assert!(check_compound(&book).is_ok());
+        // A table cut at a whole word is still safe for calamine's word conversion.
+        assert_eq!(words(&END.to_le_bytes()).unwrap(), [END]);
+        assert!(words(&[]).unwrap().is_empty());
     }
 
     #[test]

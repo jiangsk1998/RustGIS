@@ -1,7 +1,7 @@
 //! Deterministic OGC documents generated in memory by the data, engine and UI tests.
 //! `cargo test --workspace --locked` needs no downloaded fixtures or generation step.
 #![cfg(test)]
-#![allow(dead_code)]
+#![allow(dead_code, reason = "each test crate that includes it uses a part")]
 
 use serde_json::{Value, json};
 use std::sync::LazyLock;

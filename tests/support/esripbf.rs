@@ -2,7 +2,7 @@
 //! `FeatureCollection.proto` lays them out: for the reader's tests and for the services that
 //! answer in protocol buffer pages.
 #![cfg(test)]
-#![allow(dead_code)]
+#![allow(dead_code, reason = "each test crate that includes it uses a part")]
 
 /// The geometry type of a points layer (kept from the reader's own, which its tests see).
 const POINT: u64 = 0;

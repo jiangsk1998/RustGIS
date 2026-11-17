@@ -15,6 +15,10 @@ use crate::{CmdResult, Session};
 pub struct Wrote {
     pub(crate) answer: Value,
     pub(crate) notes: Vec<String>,
+    /// Drawing diagnostics available before the session finalizer, with their original severity.
+    pub(crate) diagnostics: Vec<(rustgis_data::diagnostics::Severity, String)>,
+    /// Source failures to report if delivery cannot update their live layers.
+    pub(crate) refused_notes: Vec<String>,
     /// A physical write completed, even if authority to deliver its result is later refused.
     pub(crate) written_path: Option<String>,
     /// What it does to the session once written, after its notes, and adds to its answer (a
@@ -23,6 +27,16 @@ pub struct Wrote {
     /// Authority retained for delivery from the native export worker.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) owner: Option<crate::policy::Continuation>,
+    /// The coordinate systems the worker thread used, as (definition, label), for the session to
+    /// say which needed a missing datum grid (`Session::say_grid_notes`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) crs_used: Vec<(String, String)>,
+}
+
+impl Wrote {
+    fn completion_notes(&self) -> Vec<String> {
+        self.notes.iter().chain(self.diagnostics.iter().map(|(_, text)| text)).chain(&self.refused_notes).cloned().collect()
+    }
 }
 
 /// What an export does to the session once its file is written, and adds to its answer; or the
@@ -38,11 +52,15 @@ type Start = fn(&Session, &Value) -> Result<Work, String>;
 /// The exports the app writes on another thread ([`export_start`]), each with what it is called
 /// (in its progress, and a cancelled run's error) and what it reads of the session.
 pub(crate) const IN_BACKGROUND: &[(&str, &str, Start)] = &[
+    ("data.convert", "Data Interop", super::workflows::convert_work),
     ("share.exportLayer", "Export Features", super::share::layer_work),
+    ("share.exportTable", "Export Table", super::share::table_work),
     ("share.exportRaster", "Export Raster", super::raster::export_work),
     ("share.exportMap", "Export Map", super::share::map_work),
+    ("map.exportOrbit", "Export Orbit", super::view::orbit_work),
     ("layout.export", "Export Layout", super::layout::export_work),
     ("report.export", "Export Report", super::report::export_work),
+    ("source.publish", "Publish to Source", super::publish::publish_work),
 ];
 
 /// `command` and what it is called, when the app writes its file on another thread (see
@@ -64,7 +82,8 @@ pub(crate) fn write_here(s: &mut Session, p: &Value, command: &str) -> CmdResult
         let work = start(s, p)?;
         written_under(name, &control, work)
     })?;
-    s.check_continuation(&owner).map_err(|why| completion_refused(wrote.written_path.as_deref(), why))?;
+    s.check_continuation(&owner)
+        .map_err(|why| completion_with_notes(command, wrote.written_path.as_deref(), &wrote.completion_notes(), why))?;
     said(s, wrote)
 }
 
@@ -74,6 +93,22 @@ pub(crate) fn completion_refused(written_path: Option<&str>, why: String) -> Str
         Some(path) => format!("Exported {path}; completion was refused: {why}"),
         None => why,
     }
+}
+
+/// A committed export's format notices remain part of its refusal diagnostic; its finalizer
+/// stays blocked, so reporting the write cannot update a revoked layer's record.
+fn completion_with_notes(command: &str, written_path: Option<&str>, notes: &[String], why: String) -> String {
+    let Some(path) = written_path else { return why };
+    let mut message = if command == "source.publish" {
+        format!("Published {path}; completion was refused: {why}; the layer's record wasn't updated; add the file again to compare it")
+    } else {
+        completion_refused(Some(path), why)
+    };
+    for note in notes {
+        message.push('\n');
+        message.push_str(note);
+    }
+    message
 }
 
 /// `work` under `control`, as [`rustgis_analysis::run_under`] runs it, except that a file once
@@ -89,21 +124,30 @@ fn written_under(name: &str, control: &std::sync::Arc<rustgis_analysis::control:
 
 /// Says what an export wrote, and gives its answer (or the failure its `then` says).
 fn said(s: &mut Session, wrote: Wrote) -> CmdResult {
-    let Wrote { mut answer, notes, then, .. } = wrote;
+    let Wrote { mut answer, notes, diagnostics, then, written_path, .. } = wrote;
+    let mark = s.notice_mark();
+    say(s, diagnostics);
+    if written_path.is_some() {
+        s.retain_written_notices(mark);
+    }
     for note in notes {
-        s.notify(note, false);
+        if written_path.is_some() {
+            s.notify_written(note, false);
+        } else {
+            s.notify(note, false);
+        }
     }
     if let Some(then) = then {
-        then(s, &mut answer)?;
+        rustgis_data::provenance::without(|| then(s, &mut answer))?;
     }
     Ok(answer)
 }
 
 /// Lands an export drawn on a copy of the map or project (Export Map, Export Layout): what
 /// drawing it said, with each notice's severity; the streamed layers whose source failed on the
-/// copy, marked on their live layers as drawing them there would have (or, where that layer is
-/// gone or opened afresh, said in one notice to be missing from the file); then that it was
-/// written to `path`, or why not. A cancelled one says only that it was cancelled.
+/// copy, reported for this export even when the screen already said them. Matching live layers
+/// keep the failure marked said so subsequent screen frames do not repeat it;
+/// then that it was written to `path`, or why not. A cancelled one says only that it was cancelled.
 pub(crate) fn drawn(
     maps: &[rustgis_map::Map],
     notices: Vec<(rustgis_data::diagnostics::Severity, String)>,
@@ -123,41 +167,66 @@ pub(crate) fn drawn(
             Some((l.instance_id(), l.name.clone(), src.error.clone()?, src.clone()))
         })
         .collect();
+    // Every output needs its own counted notice, independent of screen suppression.
+    use crate::notice_text::NoticeText;
+    let mut source_errors = Vec::new();
+    let mut linked = 0;
+    for (_, name, error, source) in &failed {
+        let path = source.linked_file();
+        linked += usize::from(path.is_some());
+        if source_errors.len() < 5 {
+            source_errors.push(match path {
+                Some(path) => NoticeText::format(
+                    "{name}: {path} ({error})",
+                    [("name", name.clone().into()), ("path", path.to_string().into()), ("error", error.clone().into())],
+                ),
+                None => NoticeText::format("{name}: {error}", [("name", name.clone().into()), ("error", error.clone().into())]),
+            });
+        }
+    }
+    let source_notice = NoticeText::source_errors(failed.len(), source_errors, linked)
+        .map(|message| NoticeText::format("{path}: {message}", [("path", path.clone().into()), ("message", message)]));
+    let refused_notes = source_notice.iter().map(NoticeText::english).collect();
     let written_path = written.is_ok().then(|| path.clone());
     let answer = written.as_ref().map_or(Value::Null, Value::clone);
     let then: Then = Box::new(move |s: &mut Session, _: &mut Value| {
-        say(s, notices);
-        let mut missing = Vec::new();
-        for (instance, name, error, copied) in failed {
+        for (instance, _, error, copied) in failed {
             let live = s.project.maps.iter_mut().flat_map(|m| m.layers.iter_mut()).find(|l| l.instance_id() == instance);
-            match live.and_then(|l| l.source.as_mut()) {
-                // The same open: its failure shows on the layer (it may already).
-                Some(src) if src.same_opening(&copied) => {
-                    src.error.get_or_insert(error);
+            if let Some(src) = live.and_then(|l| l.source.as_mut())
+                && src.same_opening(&copied)
+            {
+                src.error.get_or_insert(error);
+                // The export reports this failure below; the screen need not say it again.
+                if src.error == copied.error {
+                    let _ = src.error_unsaid();
                 }
-                _ => missing.push((name, error)),
             }
         }
-        // One notice for them all, with a count, naming the first.
-        if let Some((name, error)) = missing.first() {
-            let n = missing.len();
-            s.warn(if n == 1 {
-                format!("{path}: {name} isn't in the file, as its source couldn't be read: {error}")
-            } else {
-                format!("{path}: {n} layers aren't in the file, as their sources couldn't be read; the first, {name}: {error}")
-            });
+        let mark = s.notice_mark();
+        if let Some(message) = source_notice {
+            s.notify_text(message, true);
         }
+        if written.is_ok() {
+            s.retain_written_notices(mark);
+        }
+        // Background exports land without Session::run's display diagnostics. Source failures
+        // already reported above retain their screen markers, so this cannot duplicate them.
+        s.notice_landed_pixels();
         written?;
-        s.notify(format!("Exported {path}"), false);
+        s.notify_written(format!("Exported {path}"), false);
         Ok(())
     });
     Ok(Wrote {
         answer,
         notes: Vec::new(),
+        diagnostics: notices,
+        refused_notes,
         written_path,
         then: Some(then),
         #[cfg(not(target_arch = "wasm32"))]
         owner: None,
+        #[cfg(not(target_arch = "wasm32"))]
+        crs_used: Vec::new(),
     })
 }
 
@@ -216,6 +285,9 @@ pub struct Started {
     /// The project it started in, its name as the log keeps it and its `Session::opened`: the
     /// log's entry names that one, not one opened while it ran.
     pub(crate) project: (String, u64),
+    /// Shared with the worker so failed exports retain the reads preceding the error, too.
+    inputs: std::sync::Arc<std::sync::Mutex<Vec<rustgis_data::provenance::Fingerprint>>>,
+    capture_inputs: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -229,17 +301,22 @@ impl ExportRun {
     /// (see [`rustgis_analysis::control`]). A cancelled export leaves no file, or the one there
     /// before.
     pub fn run(self, control: &std::sync::Arc<rustgis_analysis::control::Control>) -> Result<Wrote, String> {
+        let inputs = self.started.capture_inputs.then(rustgis_data::provenance::Capture::start);
         let ExportRun { name, work, started } = self;
         let owner = started.owner;
         owner.check()?;
         let current = owner.clone();
         let still = std::sync::Arc::new(move || current.check().is_ok());
         // A bug in a writer must not take the app down.
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::render::rustgis_tiles::cache::with_still(still, || written_under(name, control, work))
         }))
         .unwrap_or_else(|_| Err(format!("{name} failed unexpectedly")))
-        .map(|w| Wrote { owner: Some(owner), ..w })
+        .map(|w| Wrote { owner: Some(owner), crs_used: rustgis_data::raster::crs::take_used(), ..w });
+        if let Some(inputs) = inputs {
+            started.inputs.lock().unwrap_or_else(|e| e.into_inner()).extend(inputs.inputs());
+        }
+        result
     }
 }
 
@@ -254,6 +331,7 @@ pub fn export_start(s: &mut Session, command: &str, p: &Value) -> Result<ExportR
 /// Prepares only a registered, admitted export and seals its initiating authority.
 pub(crate) fn export_start_raw(s: &mut Session, op: crate::policy::Authorized<crate::policy::CommandOp>) -> Result<ExportRun, String> {
     let crate::policy::CommandOp::Registered { spec, params } = op.op() else { return Err("not a registered export".into()) };
+    let inputs = s.log.on().then(rustgis_data::provenance::Capture::start);
     let (command, p) = (spec.id, params);
     let &(_, name, start) =
         IN_BACKGROUND.iter().find(|(c, ..)| *c == command).ok_or_else(|| format!("{command} doesn't run in the background"))?;
@@ -262,8 +340,20 @@ pub(crate) fn export_start_raw(s: &mut Session, op: crate::policy::Authorized<cr
     let current = owner.clone();
     let still = std::sync::Arc::new(move || current.check().is_ok());
     let project = (crate::project_log::kept_name(&s.title()), s.opened);
-    let started = Started { command, params: p.clone(), at: crate::project_log::now_ms(), start: web_time::Instant::now(), owner, project };
+    let started = Started {
+        command,
+        params: p.clone(),
+        at: crate::project_log::now_ms(),
+        start: web_time::Instant::now(),
+        owner,
+        project,
+        inputs: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        capture_inputs: s.log.on(),
+    };
     let work = crate::render::rustgis_tiles::cache::with_still(still, || start(s, p))?;
+    if let Some(inputs) = inputs {
+        *started.inputs.lock().unwrap_or_else(|e| e.into_inner()) = inputs.inputs();
+    }
     Ok(ExportRun { name, started, work })
 }
 
@@ -272,7 +362,9 @@ pub(crate) fn export_start_raw(s: &mut Session, op: crate::policy::Authorized<cr
 /// its answer: the troubleshooting history files what it says (its failure too) under that
 /// command, and the session's log has its entry, as when it runs here.
 pub fn export_land(s: &mut Session, started: Started, done: Result<Wrote, String>) -> CmdResult {
-    let Started { command, params, at, start, owner, project } = started;
+    let _inputs = s.log.on().then(rustgis_data::provenance::Capture::start);
+    rustgis_data::provenance::record(started.inputs.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned());
+    let Started { command, params, at, start, owner, project, .. } = started;
     let before = s.diagnostic_source.replace(command);
     let mark = s.notice_mark();
     let landed: CmdResult = (|| {
@@ -283,9 +375,16 @@ pub fn export_land(s: &mut Session, started: Started, done: Result<Wrote, String
             }
         }
         let written_path = done.as_ref().ok().and_then(|wrote| wrote.written_path.clone());
+        if let Ok(wrote) = &done {
+            s.crs_used_elsewhere.extend(wrote.crs_used.iter().cloned());
+        }
+        let notes = done.as_ref().ok().map(Wrote::completion_notes).unwrap_or_default();
         s.finish_export(&owner, |s| done.and_then(|wrote| said(s, wrote)))
-            .map_err(|why| completion_refused(written_path.as_deref(), why))?
+            .map_err(|why| completion_with_notes(command, written_path.as_deref(), &notes, why))?
     })();
+    // The coordinate systems its worker used that needed a missing datum grid, as the command
+    // run here says them after it.
+    s.say_grid_notes();
     // Its failure said once, under the command, as `Session::run` says one.
     if let Err(e) = &landed {
         let text = Session::redacted(e);
@@ -297,13 +396,12 @@ pub fn export_land(s: &mut Session, started: Started, done: Result<Wrote, String
     if s.log.on() && crate::project_log::is_logged(s, command, &params) {
         let (kept, partial) = crate::project_log::kept_and_partial(&params);
         // The project it started in, not one opened while it ran.
-        s.log.push(crate::project_log::entry(project, command, kept, partial, &landed, at, start.elapsed()));
+        s.log_entry(crate::project_log::entry(project, command, kept, partial, &landed, at, start.elapsed()), false);
     }
     landed
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use rustgis_analysis::control::Control;
@@ -317,11 +415,15 @@ mod tests {
             late.cancel();
             Ok(Wrote {
                 answer: serde_json::json!({"path": "x"}),
+                diagnostics: Vec::new(),
+                refused_notes: Vec::new(),
                 notes: vec!["Exported x".into()],
                 written_path: Some("x".into()),
                 then: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 owner: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                crs_used: Vec::new(),
             })
         });
         let wrote = written_under("Export Raster", &control, work).unwrap();

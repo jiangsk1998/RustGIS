@@ -12,7 +12,7 @@ arrays; paste them over `NORTH_FIRST` and `UNKNOWN`, and update the versions in 
 The rule: a code is north first when the first axis EPSG gives it is a northing or a latitude
 (a southing-first one is unknown, below) and its PROJ string doesn't already put a north or
 south axis first (`+axis=n..` or `+axis=s..`:
-proj4rs applies `+axis`, so its coordinates come out in EPSG's order). Unknown: the codes this
+terrio-crs applies `+axis`, so its coordinates come out in EPSG's order). Unknown: the codes this
 PROJ database lacks, and those EPSG writes southing first that a PROJ string without `+axis`
 gives as easting and northing (a swap gives the pairing but not the signs).
 """

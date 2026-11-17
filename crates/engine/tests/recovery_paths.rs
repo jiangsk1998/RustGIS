@@ -2,7 +2,7 @@
 //! folder, then reopened, gives a recovery copy whose linked files still resolve when the copy is
 //! opened from the app's recovery folder.
 #[path = "portable_projects/common.rs"]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "shared with the portable project tests, which use the rest")]
 mod common;
 
 use common::{Fixture, add_stream, sample_file, session};

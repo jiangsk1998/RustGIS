@@ -643,6 +643,31 @@ fn permission_policy_export_worker_keeps_its_initiating_owner() {
     let a = export_start(&mut s, "share.exportLayer", &params("owner-a.geojson")).unwrap();
     let b = export_start(&mut s, "share.exportLayer", &params("owner-b.geojson")).unwrap();
     assert!(export_land(&mut s, b.started(), a.run(&Control::new())).unwrap_err().contains("another run"));
+    // A committed publish still reports its format changes when its owner is revoked before delivery.
+    let shp = path("published.shp");
+    s.run("share.exportLayer", &json!({"layer":"Cities", "path":shp})).unwrap();
+    let id = s.run("layer.addData", &json!({"path":shp, "name":"published"})).unwrap()["layer"].as_u64().unwrap() as u32;
+    let long_name = "x".repeat(200);
+    s.run("edit.setValue", &json!({"layer":id,"row":0,"field":"name","value":long_name})).unwrap();
+    let synced = s.map().layer(id).unwrap().synced.clone();
+    live.0.store(true, Ordering::SeqCst);
+    let scope = Scope::agent(AgentAccess::Allow, false, "publish-owner", None, live.clone());
+    let run = s.with_scope(scope, |s| export_start(s, "source.publish", &json!({"layer":id}))).unwrap().unwrap();
+    let started = run.started();
+    let wrote = run.run(&Control::new());
+    let notes = wrote.as_ref().unwrap().notes.clone();
+    assert!(!notes.is_empty(), "the widened text column has a notice");
+    live.0.store(false, Ordering::SeqCst);
+    let mark = s.notice_mark();
+    let error = export_land(&mut s, started, wrote).unwrap_err();
+    assert!(error.contains("Published ") && error.contains("record wasn't updated"), "{error}");
+    for note in notes {
+        assert!(s.notices_since(mark).iter().any(|n| n.text.contains(&note)), "missing {note}: {error}");
+    }
+    assert_eq!(s.map().layer(id).unwrap().synced, synced, "the revoked finalizer must not update the layer");
+    let (disk, _) = rustgis_data::io::read_path(&shp).unwrap();
+    let name = disk.field_index("name").unwrap();
+    assert_eq!(disk.features.first().unwrap().attrs[name], rustgis_data::Value::Text(long_name));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1054,6 +1079,9 @@ fn permission_policy_download_refinements_rollback_and_abandonment() {
     assert_eq!(s.map().layer_by_name("Frozen").unwrap().dataset.features.len(), 1);
     assert!(s.complete_download(id, &json!({"id":id})).is_err());
     assert!(s.run("layer.addUrl", &json!({"url":"https://example.invalid/project.json","geolibreProject":true})).is_err());
+    // Nor how an ArcGIS service draws a layer, which only the app reads (#2080).
+    let drawing = json!({"url":"https://example.invalid/MapServer/0/query","service":true,"drawingInfo":{"renderer":{"type":"simple"}}});
+    assert!(s.request_url(&drawing).unwrap_err().contains("drawingInfo is internal"));
     for i in 0..32 {
         let failed = format!("layer.addUrl {{\"url\":\"https://example.invalid/rollback-{i}.csv\"}}\nmissing.command {{}}");
         assert!(s.run("script.run", &json!({"script":failed})).is_err());
@@ -1516,7 +1544,7 @@ fn permission_policy_plugin_tools_follow_the_callers_control_while_running() {
         });
         let start = Instant::now();
         while !ready.is_file() && !worker.is_finished() && start.elapsed() < Duration::from_secs(10) {
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(5)); // test-wait: legacy polling for the plugin readiness file
         }
         let entered = ready.is_file();
         control.cancel();
@@ -2003,6 +2031,27 @@ fn permission_policy_ignored_rename_does_not_promote_another_task() {
     assert_eq!(s.item_content("task", "Foreign").unwrap(), foreign);
     assert!(!s.item_trusted("task", "Foreign"), "an ignored field must not promote unchanged imported code");
     assert!(s.item_trusted("task", "Authored"), "the actual user-edited task retains its content record");
+}
+
+/// A rename past the name's limit is refused when it runs (#1817), so strict review files no
+/// spelling for it: a later step naming the first 200 characters finds no layer, and is refused,
+/// rather than approved against a rename that won't happen. At the limit, the spelling is filed.
+#[test]
+fn permission_policy_rename_past_the_limit_files_no_spelling() {
+    let s = world();
+    let (scope, _) = assistant(3506);
+    let script = |name: &str, step: &str| {
+        let rename = json!({"layer": "Cities", "name": name});
+        let hide = json!({"layer": step, "visible": false});
+        Call::command("script.run", json!({"script": format!("layer.rename {rename}\nlayer.visibility {hide}")}))
+    };
+    let long = "é".repeat(201);
+    let prefix: String = long.chars().take(200).collect();
+    assert!(
+        matches!(s.review(&scope, &script(&long, &prefix)), Outcome::Refused(e) if e.contains("no layer")),
+        "the cut spelling names nothing"
+    );
+    assert!(matches!(s.review(&scope, &script(&prefix, &prefix)), Outcome::NeedsApproval(_)), "a name at the limit is filed");
 }
 
 /// Strict consent refuses a name collision instead of guessing which layer execution will select.

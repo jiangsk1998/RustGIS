@@ -48,6 +48,30 @@ fn read(path: &str) -> Option<Vec<u8>> {
 /// export.
 pub const SEMIBOLD_WEIGHT: f32 = 600.0;
 
+/// Whether bold text in the interface fonts has no heavier face to be drawn in: the semibold face
+/// is the regular one, with no weight axis to draw it heavier (the built-in Ubuntu Light, which the
+/// browser always has, or a system font found without its bold file). Bold text is then thickened
+/// by hand ([`bold_thickening`]), as italic is slanted where there is no italic face. Both
+/// renderers ask here, so bold text is as heavy on screen as in an export.
+pub fn bold_is_synthetic() -> bool {
+    static S: OnceLock<bool> = OnceLock::new();
+    *S.get_or_init(|| {
+        let f = ui_fonts();
+        synthetic_bold(&f.regular, &f.semibold)
+    })
+}
+
+fn synthetic_bold(regular: &[u8], semibold: &[u8]) -> bool {
+    use ab_glyph::VariableFont;
+    regular == semibold && ab_glyph::FontRef::try_from_slice(semibold).is_ok_and(|f| !f.variations().iter().any(|a| &a.tag == b"wght"))
+}
+
+/// How far (pixels, at a text size of `px` pixels) bold text thickened by hand is drawn a second
+/// time to the right of itself: a thirtieth of its size, about the stem a bold face adds.
+pub fn bold_thickening(px: f32) -> f32 {
+    if px.is_finite() && px > 0.0 { (px / 30.0).clamp(0.25, 3.0) } else { 0.0 }
+}
+
 /// The interface fonts, discovered once.
 pub fn ui_fonts() -> &'static UiFonts {
     static F: OnceLock<UiFonts> = OnceLock::new();
@@ -221,6 +245,8 @@ pub fn serif_available() -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CjkRegion {
     SimplifiedChinese,
+    /// Taiwan's standard glyph forms (Traditional Chinese).
+    TraditionalChinese,
     Japanese,
     Korean,
 }
@@ -231,18 +257,23 @@ fn cjk_candidates(region: CjkRegion) -> &'static [(&'static str, u32)] {
     match region {
         CjkRegion::SimplifiedChinese => &[
             ("C:\\Windows\\Fonts\\msyh.ttc", 0),
-            ("/System/Library/Fonts/PingFang.ttc", 0),
-            ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
             ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 2),
             ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2),
             ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 2),
             ("/usr/share/fonts/noto-cjk/NotoSansSC-Regular.otf", 0),
             ("/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc", 0),
         ],
+        // PingFang TC has no fixed place in its collection: see `cjk_named_candidates`.
+        CjkRegion::TraditionalChinese => &[
+            ("C:\\Windows\\Fonts\\msjh.ttc", 0),
+            ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 3),
+            ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 3),
+            ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 3),
+            ("/usr/share/fonts/noto-cjk/NotoSansTC-Regular.otf", 0),
+        ],
         CjkRegion::Japanese => &[
             ("C:\\Windows\\Fonts\\YuGothR.ttc", 0),
             ("C:\\Windows\\Fonts\\meiryo.ttc", 0),
-            ("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", 0),
             ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
             ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
             ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 0),
@@ -250,7 +281,6 @@ fn cjk_candidates(region: CjkRegion) -> &'static [(&'static str, u32)] {
         ],
         CjkRegion::Korean => &[
             ("C:\\Windows\\Fonts\\malgun.ttf", 0),
-            ("/System/Library/Fonts/AppleSDGothicNeo.ttc", 0),
             ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 1),
             ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 1),
             ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 1),
@@ -259,26 +289,174 @@ fn cjk_candidates(region: CjkRegion) -> &'static [(&'static str, u32)] {
     }
 }
 
+/// Where Apple systems keep their fonts: macOS in the top folder, iOS and iPadOS in subfolders
+/// (#2153). The same collection can sit in a different one from one release to the next, so each
+/// Apple face is looked for in all of them.
+const APPLE_FONT_DIRS: &[&str] = &[
+    "/System/Library/Fonts",
+    "/System/Library/Fonts/Core",
+    "/System/Library/Fonts/CoreAddition",
+    "/System/Library/Fonts/CoreUI",
+    "/System/Library/Fonts/LanguageSupport",
+    "/System/Library/Fonts/UnicodeSupport",
+    "/System/Library/Fonts/AppFonts",
+];
+
+/// Apple's CJK collections for `region`, by file name: (file, face index). macOS and iOS name some
+/// of them differently (Hiragino Kaku Gothic, PingFang).
+fn apple_cjk_files(region: CjkRegion) -> &'static [(&'static str, u32)] {
+    match region {
+        CjkRegion::SimplifiedChinese => &[("PingFang.ttc", 0), ("PingFangUI.ttc", 0), ("Hiragino Sans GB.ttc", 0)],
+        // PingFang TC has no fixed place in its collection: see `apple_cjk_named_files`.
+        CjkRegion::TraditionalChinese => &[],
+        CjkRegion::Japanese => &[("ヒラギノ角ゴシック W3.ttc", 0), ("HiraginoKakuGothic.ttc", 0)],
+        CjkRegion::Korean => &[("AppleSDGothicNeo.ttc", 0)],
+    }
+}
+
+/// Apple's CJK collections whose face is found by family name, not by index: (file, family).
+fn apple_cjk_named_files(region: CjkRegion) -> &'static [(&'static str, &'static str)] {
+    match region {
+        CjkRegion::TraditionalChinese => &[("PingFang.ttc", "PingFang TC"), ("PingFangUI.ttc", "PingFang TC")],
+        _ => &[],
+    }
+}
+
+/// `file` in each of the Apple font folders, in order.
+fn in_apple_dirs<T: Copy>(files: &[(&str, T)]) -> impl Iterator<Item = (String, T)> {
+    APPLE_FONT_DIRS.iter().flat_map(move |dir| files.iter().map(move |(file, x)| (format!("{dir}/{file}"), *x)))
+}
+
+/// Every installed CJK font candidate for `region`, in order of preference: (path, face index).
+/// Windows first, then Apple's (macOS, iOS), then Linux's.
+fn cjk_paths(region: CjkRegion) -> Vec<(String, u32)> {
+    let listed = cjk_candidates(region);
+    let (windows, rest) = listed.split_at(listed.iter().take_while(|(p, _)| p.starts_with("C:\\")).count());
+    windows
+        .iter()
+        .map(|(p, i)| (p.to_string(), *i))
+        .chain(in_apple_dirs(apple_cjk_files(region)))
+        .chain(rest.iter().map(|(p, i)| (p.to_string(), *i)))
+        .collect()
+}
+
+/// Installed CJK collections whose face is found by family name, not by index: (path, family).
+fn cjk_named_candidates(region: CjkRegion) -> Vec<(String, &'static str)> {
+    in_apple_dirs(apple_cjk_named_files(region)).collect()
+}
+
+/// A CJK font file's bytes. CJK collections are large; accept up to 128 MiB.
+fn read_cjk(path: &str) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > 128 << 20 {
+        return None;
+    }
+    std::fs::read(path).ok()
+}
+
+/// The regular face of `family` in a font file or collection: the face whose family name is
+/// `family` and whose style is Regular. Other weights name themselves differently
+/// ("PingFang TC Medium").
+fn regular_face(bytes: &[u8], family: &str) -> Option<u32> {
+    use ttf_parser::name_id::{FAMILY, SUBFAMILY};
+    let faces = ttf_parser::fonts_in_collection(bytes).unwrap_or(1).min(256);
+    (0..faces).find(|&i| {
+        ttf_parser::Face::parse(bytes, i).is_ok_and(|face| {
+            let named = |id: u16, want: &str| face.names().into_iter().any(|n| n.name_id == id && n.to_string().as_deref() == Some(want));
+            named(FAMILY, family) && named(SUBFAMILY, "Regular")
+        })
+    })
+}
+
 /// An installed CJK font for `region` (bytes and face index), found once. `None` on the web or
-/// when nothing suitable is installed.
+/// when nothing suitable is installed. Traditional Chinese falls back to the Simplified face,
+/// which has the Traditional characters in mainland China's glyph forms.
 pub fn cjk_font(region: CjkRegion) -> Option<&'static (Vec<u8>, u32)> {
-    static FOUND: [OnceLock<Option<(Vec<u8>, u32)>>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    static FOUND: [OnceLock<Option<(Vec<u8>, u32)>>; 4] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
     let slot = match region {
         CjkRegion::SimplifiedChinese => &FOUND[0],
         CjkRegion::Japanese => &FOUND[1],
         CjkRegion::Korean => &FOUND[2],
+        CjkRegion::TraditionalChinese => &FOUND[3],
     };
-    slot.get_or_init(|| {
-        cjk_candidates(region).iter().find_map(|(path, index)| {
-            let meta = std::fs::metadata(path).ok()?;
-            // CJK collections are large; accept up to 128 MiB.
-            if meta.len() > 128 << 20 {
-                return None;
-            }
-            std::fs::read(path).ok().filter(|b| valid_font(b, *index)).map(|b| (b, *index))
+    let found = slot.get_or_init(|| {
+        let indexed =
+            cjk_paths(region).iter().find_map(|(path, index)| read_cjk(path).filter(|b| draws_cjk(b, *index, region)).map(|b| (b, *index)));
+        indexed.or_else(|| {
+            cjk_named_candidates(region).iter().find_map(|(path, family)| {
+                let bytes = read_cjk(path)?;
+                let index = regular_face(&bytes, family).filter(|i| draws_cjk(&bytes, *i, region))?;
+                Some((bytes, index))
+            })
         })
+    });
+    match (found, region) {
+        (None, CjkRegion::TraditionalChinese) => cjk_font(CjkRegion::SimplifiedChinese),
+        (found, _) => found.as_ref(),
+    }
+}
+
+/// Whether face `index` of `bytes` draws an outline for a character of `region`'s script. A face
+/// that parses but whose outlines the parser can't read (iOS's PingFangUI keeps them in an `hvgl`
+/// table) would draw blanks and hide the candidates after it.
+fn draws_cjk(bytes: &[u8], index: u32, region: CjkRegion) -> bool {
+    use ab_glyph::Font;
+    let c = match region {
+        CjkRegion::SimplifiedChinese => '\u{4E2D}',  // 中
+        CjkRegion::TraditionalChinese => '\u{9AD4}', // 體
+        CjkRegion::Japanese => '\u{3042}',           // あ
+        CjkRegion::Korean => '\u{D55C}',             // 한
+    };
+    ab_glyph::FontRef::try_from_slice_and_index(bytes, index).is_ok_and(|f| {
+        let id = f.glyph_id(c);
+        id.0 != 0 && f.outline(id).is_some()
     })
-    .as_ref()
+}
+
+/// The CJK faces the web app downloaded for its interface or its labels, by region: the web app
+/// has no installed fonts, so without these the renderer (exported images, PDFs and the layout
+/// view) would leave CJK text out. Each region's face is kept once and never freed.
+static DOWNLOADED_CJK: [OnceLock<(Vec<u8>, u32)>; 4] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
+
+/// How many faces have been handed over at run time ([`add_downloaded_cjk_font`]): cached text
+/// widths measured before one arrived are stale.
+static FONTS_ADDED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn downloaded_slot(region: CjkRegion) -> &'static OnceLock<(Vec<u8>, u32)> {
+    match region {
+        CjkRegion::SimplifiedChinese => &DOWNLOADED_CJK[0],
+        CjkRegion::Japanese => &DOWNLOADED_CJK[1],
+        CjkRegion::Korean => &DOWNLOADED_CJK[2],
+        CjkRegion::TraditionalChinese => &DOWNLOADED_CJK[3],
+    }
+}
+
+/// Hands the renderer a CJK face the web app downloaded (face 0 of `bytes`), for the text it
+/// draws where no font is installed. The face is kept for good, and the kept bytes are returned
+/// so the interface can share them instead of holding a second copy of a font several megabytes
+/// in size. The bytes come back unkept when they aren't a usable font or the region has a face
+/// already.
+pub fn add_downloaded_cjk_font(region: CjkRegion, bytes: Vec<u8>) -> Result<&'static [u8], Vec<u8>> {
+    if !valid_font(&bytes, 0) {
+        return Err(bytes);
+    }
+    let mut offered = Some(bytes);
+    let kept = downloaded_slot(region).get_or_init(|| (offered.take().unwrap_or_default(), 0));
+    if let Some(bytes) = offered {
+        return Err(bytes);
+    }
+    FONTS_ADDED.fetch_add(1, std::sync::atomic::Ordering::Release);
+    Ok(&kept.0)
+}
+
+/// The CJK face downloaded for `region`, if one has been handed over.
+pub fn downloaded_cjk_font(region: CjkRegion) -> Option<&'static (Vec<u8>, u32)> {
+    downloaded_slot(region).get()
+}
+
+/// How many faces have been handed over at run time: a key part for cached text widths.
+pub fn fonts_added() -> u32 {
+    FONTS_ADDED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Whether `bytes` hold a font with face `index` that the font parser accepts. Fonts handed to the
@@ -291,6 +469,7 @@ pub fn valid_font(bytes: &[u8], index: u32) -> bool {
 pub fn cjk_font_url(region: CjkRegion) -> &'static str {
     match region {
         CjkRegion::SimplifiedChinese => "https://assets.rustgis.app/fonts/NotoSansSC-Regular.otf",
+        CjkRegion::TraditionalChinese => "https://assets.rustgis.app/fonts/NotoSansTC-Regular.otf",
         CjkRegion::Japanese => "https://assets.rustgis.app/fonts/NotoSansJP-Regular.otf",
         CjkRegion::Korean => "https://assets.rustgis.app/fonts/NotoSansKR-Regular.otf",
     }
@@ -434,6 +613,21 @@ pub fn script_font_url(script: ScriptFont) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use super::{bold_thickening, synthetic_bold};
+
+    /// Bold is thickened by hand only where the bold face is the regular one, with no weight axis
+    /// (the built-in face, which the browser has): not where there is a bold file.
+    #[test]
+    fn bold_is_thickened_only_without_a_heavier_face() {
+        let ubuntu = epaint_default_fonts::UBUNTU_LIGHT;
+        assert!(synthetic_bold(ubuntu, ubuntu), "one face for both");
+        assert!(!synthetic_bold(ubuntu, epaint_default_fonts::HACK_REGULAR), "a bold file of its own");
+        assert!(!synthetic_bold(&[], &[]), "not a font");
+        assert_eq!(bold_thickening(30.0), 1.0);
+        assert_eq!((bold_thickening(1.0), bold_thickening(1000.0)), (0.25, 3.0), "kept visible, and within reason");
+        assert_eq!((bold_thickening(f32::NAN), bold_thickening(-4.0)), (0.0, 0.0));
+    }
+
     #[test]
     fn bengali_coverage_requires_bengali_and_latin_glyphs() {
         assert!(!super::covers_bengali(epaint_default_fonts::UBUNTU_LIGHT));
@@ -446,6 +640,60 @@ mod tests {
         assert!(!super::covers_lao(epaint_default_fonts::UBUNTU_LIGHT, 0));
         assert!(!super::covers_lao(b"not a font", 0));
         assert_eq!(super::script_font_url(super::ScriptFont::Lao), None);
+    }
+
+    /// A face is found by its family and Regular style, not by its place in a collection
+    /// (PingFang TC on macOS); nothing is found in a file without that family.
+    #[test]
+    fn regular_face_is_found_by_family_name() {
+        assert_eq!(super::regular_face(epaint_default_fonts::HACK_REGULAR, "Hack"), Some(0));
+        assert_eq!(super::regular_face(epaint_default_fonts::HACK_REGULAR, "PingFang TC"), None);
+        assert_eq!(super::regular_face(b"not a font", "Hack"), None);
+    }
+
+    /// Every CJK region names an Apple face in macOS's font folder and in iOS's (#2153: Korean
+    /// labels drew as boxes on iOS, whose fonts sit in subfolders), and a Windows one; Windows
+    /// faces are still tried first.
+    #[test]
+    fn every_cjk_region_names_a_face_on_each_platform() {
+        use super::{CjkRegion, cjk_named_candidates, cjk_paths};
+        for region in [CjkRegion::SimplifiedChinese, CjkRegion::TraditionalChinese, CjkRegion::Japanese, CjkRegion::Korean] {
+            let paths: Vec<String> =
+                cjk_paths(region).into_iter().map(|(p, _)| p).chain(cjk_named_candidates(region).into_iter().map(|(p, _)| p)).collect();
+            let in_dir = |dir: &str| paths.iter().any(|p| p.rsplit_once('/').is_some_and(|(d, _)| d == dir));
+            assert!(in_dir("/System/Library/Fonts"), "{region:?}: no macOS face");
+            assert!(in_dir("/System/Library/Fonts/Core"), "{region:?}: no iOS face");
+            assert!(paths.first().is_some_and(|p| p.starts_with("C:\\")), "{region:?}: Windows first");
+        }
+        let korean = cjk_paths(CjkRegion::Korean);
+        assert!(korean.iter().any(|(p, i)| p == "/System/Library/Fonts/Core/AppleSDGothicNeo.ttc" && *i == 0));
+        let japanese = cjk_paths(CjkRegion::Japanese);
+        assert!(japanese.iter().any(|(p, _)| p == "/System/Library/Fonts/Core/HiraginoKakuGothic.ttc"));
+    }
+
+    /// A CJK candidate is taken only when it outlines its region's script: not a face without
+    /// the characters, nor junk.
+    #[test]
+    fn a_cjk_face_must_draw_its_script() {
+        use super::{CjkRegion, draws_cjk};
+        for region in [CjkRegion::SimplifiedChinese, CjkRegion::TraditionalChinese, CjkRegion::Japanese, CjkRegion::Korean] {
+            assert!(!draws_cjk(epaint_default_fonts::HACK_REGULAR, 0, region), "{region:?}");
+            assert!(!draws_cjk(b"not a font", 0, region), "{region:?}");
+        }
+        // Noto Sans CJK draws them all, where it is installed.
+        for (p, i) in super::cjk_paths(CjkRegion::Korean).iter().filter(|(p, _)| p.ends_with("NotoSansCJK-Regular.ttc")) {
+            if let Ok(b) = std::fs::read(p) {
+                assert!(draws_cjk(&b, *i, CjkRegion::Korean), "{p}");
+            }
+        }
+    }
+
+    /// Traditional Chinese has a web face of its own, not the Simplified one.
+    #[test]
+    fn traditional_chinese_has_its_own_web_face() {
+        use super::{CjkRegion, cjk_font_url};
+        assert!(cjk_font_url(CjkRegion::TraditionalChinese).ends_with("/NotoSansTC-Regular.otf"));
+        assert_ne!(cjk_font_url(CjkRegion::TraditionalChinese), cjk_font_url(CjkRegion::SimplifiedChinese));
     }
 
     /// A variable Noto Serif (one file for every weight, its italic beside it) is found in a

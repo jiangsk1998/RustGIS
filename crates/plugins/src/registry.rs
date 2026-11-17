@@ -134,10 +134,16 @@ impl Entry {
         crate::manifest::translate(&self.i18n, lang, s)
     }
 
-    /// Whether the plugin has a package for this platform. Without one it is listed, not
-    /// installed: its packages are for other platforms.
+    /// Whether the plugin can be installed here: it has a package for this platform, and this
+    /// RustGIS is as new as it needs (see [`Entry::needs_rustgis`]). Otherwise it is listed, not
+    /// downloaded, installed or offered as an update.
     pub fn available(&self) -> bool {
-        !self.package.is_empty()
+        !self.package.is_empty() && self.needs_rustgis().is_none()
+    }
+
+    /// The RustGIS this release needs (its `minRustgisVersion`), when that is newer than this one.
+    pub fn needs_rustgis(&self) -> Option<&str> {
+        (!crate::manifest::rustgis_meets(&self.min_rustgis_version)).then_some(self.min_rustgis_version.as_str())
     }
 
     /// The platforms the plugin has a package for, by the names shown for them (`Windows`,
@@ -146,8 +152,12 @@ impl Entry {
         PLATFORMS.iter().filter(|(key, _)| self.packages.contains_key(*key)).map(|(_, name)| *name).collect()
     }
 
-    /// Why the plugin can't be installed here, for one with packages for other platforms only.
+    /// Why the plugin can't be installed here: it needs a newer RustGIS, or its packages are for
+    /// other platforms.
     pub fn unavailable(&self) -> String {
+        if let Some(min) = self.needs_rustgis() {
+            return format!("{} needs RustGIS {min} or newer (this is {})", self.name, crate::manifest::RUSTGIS_VERSION);
+        }
         let (here, has) = (this_platform_name(), self.platforms());
         if has.is_empty() {
             return format!("{} has no package for {here}", self.name);
@@ -223,9 +233,8 @@ pub fn parse(text: &str, url: &str) -> Result<Vec<Entry>, String> {
     parse_for(text, url, this_platform())
 }
 
-/// [`parse`], with a notice when packages by platform were skipped: one that doesn't check out
-/// (no address, a bad SHA-256, an address that isn't allowed) costs its platform the plugin, so
-/// it is said, with how many and which. None for a registry read whole.
+/// [`parse`], with counted notices for skipped entries, invalid platform packages and entries
+/// beyond the inspection limit. Names are samples when only some skipped ids can be read.
 pub fn parse_with_notice(text: &str, url: &str) -> Result<(Vec<Entry>, Option<String>), String> {
     parse_noting(text, url, this_platform())
 }
@@ -252,9 +261,25 @@ pub fn parse_noting(text: &str, url: &str, platform: Option<&str>) -> Result<(Ve
     let mut seen = std::collections::HashSet::new();
     // The packages by platform that were skipped: how many, and the first few by name.
     let (mut skipped, mut which) = (0usize, Vec::new());
+    let omitted = list.len().saturating_sub(MAX_ENTRIES);
+    // The plugins skipped whole and the first few readable ids, in input order.
+    let (mut dropped, mut dropped_ids) = (0usize, Vec::new());
+    let mut drop_entry = |id: &str| {
+        dropped += 1;
+        if valid_id(id, false) && dropped_ids.len() < 5 {
+            dropped_ids.push(id.to_string());
+        }
+    };
     for v in list.into_iter().take(MAX_ENTRIES) {
-        let Ok(mut e) = serde_json::from_value::<Entry>(v) else { continue };
-        if !valid_id(&e.id, false) || version_parts(&e.version).is_none() || e.name.trim().is_empty() {
+        let Ok(mut e) = serde_json::from_value::<Entry>(v) else {
+            drop_entry("");
+            continue;
+        };
+        // A `minRustgisVersion` that isn't a version is a package no RustGIS installs (its manifest
+        // is refused), so it isn't listed to be downloaded and refused.
+        let min_unreadable = !e.min_rustgis_version.is_empty() && version_parts(&e.min_rustgis_version).is_none();
+        if !valid_id(&e.id, false) || version_parts(&e.version).is_none() || min_unreadable || e.name.trim().is_empty() {
+            drop_entry(&e.id);
             continue;
         }
         // The entry named a package for this platform: its own package then isn't this
@@ -280,17 +305,29 @@ pub fn parse_noting(text: &str, url: &str, platform: Option<&str>) -> Result<(Ve
             }
             good
         });
+        let shared_given = !e.package.is_empty() || !e.sha256.is_empty() || e.size > 0;
         let whole = !e.package.trim().is_empty() && is_sha256(&e.sha256);
         e.package = resolve(url, &e.package);
         let whole = whole && allowed_url(&e.package);
+        if shared_given && !whole && !e.packages.is_empty() {
+            skipped += 1;
+            if which.len() < 5 {
+                which.push(format!("{} (shared)", e.id));
+            }
+        }
         match platform.and_then(|key| e.packages.get(key)) {
             Some(own) => (e.package, e.sha256, e.size) = (own.package.clone(), own.sha256.clone(), own.size),
             None if whole && !named => {}
             // Packages for other platforms only: listed, with nothing to download here.
             None if !e.packages.is_empty() => (e.package, e.sha256, e.size) = (String::new(), String::new(), 0),
-            None => continue,
+            None => {
+                drop_entry(&e.id);
+                continue;
+            }
         }
+        // A second entry for an id is skipped (the first is listed), and said.
         if !seen.insert(e.id.clone()) {
+            drop_entry(&e.id);
             continue;
         }
         if !e.homepage.starts_with("https://") && !e.homepage.starts_with("http://") {
@@ -317,14 +354,31 @@ pub fn parse_noting(text: &str, url: &str, platform: Option<&str>) -> Result<(Ve
         out.push(e);
     }
     out.sort_by_key(|e| e.name.to_lowercase());
-    let notice = (skipped > 0).then(|| {
+    let mut notices = Vec::new();
+    if omitted > 0 {
+        let entries = if omitted == 1 { "entry" } else { "entries" };
+        let were = if omitted == 1 { "was" } else { "were" };
+        notices.push(format!("{omitted} plugin registry {entries} past the first {MAX_ENTRIES} {were} not inspected"));
+    }
+    if dropped > 0 {
+        let names = if dropped_ids.is_empty() {
+            String::new()
+        } else {
+            let more = if dropped > dropped_ids.len() { ", …" } else { "" };
+            format!(": {}{more}", dropped_ids.join(", "))
+        };
+        notices.push(format!(
+            "{dropped} plugin(s) in the plugin registry were skipped (an unreadable entry, id, version or minRustgisVersion, no package that checks out, or an id listed twice){names}"
+        ));
+    }
+    if skipped > 0 {
         let more = if skipped > which.len() { ", …" } else { "" };
-        format!(
+        notices.push(format!(
             "{skipped} package(s) for a platform in the plugin registry were skipped (no address, a bad SHA-256 or an address that isn't allowed): {}{more}",
             which.join(", ")
-        )
-    });
-    Ok((out, notice))
+        ));
+    }
+    Ok((out, (!notices.is_empty()).then(|| notices.join("; "))))
 }
 
 /// The blocklist published beside a registry.

@@ -206,8 +206,9 @@ pub struct Conn {
     config: Config,
     password: Option<String>,
     server: Server,
-    /// Whether `PREFERRED` connected unencrypted, the server offering no TLS.
-    plain: bool,
+    /// Whether the connection isn't encrypted (`DISABLED`, or `PREFERRED` when the server offered
+    /// no TLS).
+    plain: std::sync::atomic::AtomicBool,
     client: Mutex<Option<mysql::Conn>>,
 }
 
@@ -246,19 +247,44 @@ fn broken(e: &mysql::Error) -> bool {
 }
 
 impl Conn {
+    fn is_plain(&self) -> bool {
+        self.plain.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn has_open_client(&self) -> bool {
+        match self.client.try_lock() {
+            Ok(guard) => guard.is_some(),
+            // A connection actively running a query holds `client`; treat it as open rather than
+            // blocking the global `live()` pool lock.
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().is_some(),
+        }
+    }
+
+    fn reconnect_cfg(&self) -> Config {
+        let mut cfg = self.config.clone();
+        if !self.is_plain() && cfg.tls == Tls::Prefer {
+            cfg.tls = Tls::Require;
+        }
+        cfg
+    }
+
     /// Runs `f` with the client, connecting again when the connection dropped: a drop shows only
     /// when it is used, so `f` runs once more on a new one.
     fn with<T>(&self, mut f: impl FnMut(&mut mysql::Conn) -> std::result::Result<T, mysql::Error>) -> Result<T> {
         let mut guard = self.client.lock().unwrap_or_else(|e| e.into_inner());
         for attempt in 0..2 {
             if guard.is_none() {
-                let ((client, _), plain) = open_client(&self.config, self.password.as_deref())?;
-                // A connection that was encrypted isn't continued in the clear.
-                if plain && !self.plain {
+                // Reconnect an encrypted `Prefer` session as `Require` so the driver never falls
+                // back to sending the password or session statements in cleartext.
+                let cfg = self.reconnect_cfg();
+                let ((client, _), plain) = open_client(&cfg, self.password.as_deref())?;
+                if plain && !self.is_plain() {
                     return Err(DataError::Format(
                         "the server no longer offers TLS: connect again with Home › Add › Add Data › Database… to accept that".into(),
                     ));
                 }
+                self.plain.store(plain, std::sync::atomic::Ordering::Release);
                 *guard = Some(client);
             }
             let client = guard.as_mut().ok_or_else(|| DataError::Format("not connected".into()))?;
@@ -308,10 +334,8 @@ fn connect_client(config: &Config, password: Option<&str>) -> Result<((mysql::Co
         Tls::Prefer => vec![Some(unchecked), None],
         Tls::Require => vec![Some(unchecked)],
         Tls::Verified { ca, identity } => {
-            if let Some(file) = ca
-                && !file.is_file()
-            {
-                return Err(DataError::Format(format!("ssl-ca {}: no such file", file.display())));
+            if let Some(file) = ca {
+                super::read_ca_roots("ssl-ca", file, super::CaDer::Fallback)?;
             }
             let ssl = mysql::SslOpts::default().with_danger_skip_domain_validation(!identity);
             vec![Some(match ca {
@@ -335,6 +359,22 @@ fn connect_client(config: &Config, password: Option<&str>) -> Result<((mysql::Co
     Err(last.map(err).unwrap_or_else(|| DataError::Format("not connected".into())))
 }
 
+/// What opening a table notes when the connection isn't encrypted or doesn't check the server's
+/// certificate.
+fn tls_note(tls: &Tls, plain: bool) -> Option<&'static str> {
+    match tls {
+        Tls::Disable => Some("the connection isn't encrypted (ssl-mode=DISABLED)"),
+        Tls::Prefer if plain => Some("the connection isn't encrypted: the server offers no TLS (ssl-mode=REQUIRED refuses such a server)"),
+        Tls::Prefer | Tls::Require => Some("the server's certificate isn't checked (ssl-mode=VERIFY_IDENTITY checks it)"),
+        Tls::Verified { identity: true, .. } => None,
+        Tls::Verified { identity: false, .. } => {
+            Some("the server's host name isn't checked against its certificate (ssl-mode=VERIFY_IDENTITY checks it)")
+        }
+    }
+}
+
+/// Sets up a new connection's session: read only, `TIMESTAMP` values in UTC, and a statement
+/// timeout where the server has one; with which server it is.
 fn session(mut c: mysql::Conn) -> Result<(mysql::Conn, Server)> {
     let version: Option<String> = c.query_first("SELECT VERSION()").map_err(err)?;
     let server = Server::from_version(version.as_deref().unwrap_or(""));
@@ -344,6 +384,9 @@ fn session(mut c: mysql::Conn) -> Result<(mysql::Conn, Server)> {
         format!("SET SESSION max_execution_time = {}", STATEMENT_TIMEOUT * 1000)
     };
     c.query_drop("SET SESSION TRANSACTION READ ONLY").map_err(err)?;
+    // `TIMESTAMP` values in UTC, so they read as instants whatever the server's zone. Unlike the
+    // timeout, required: without it they'd be read in the server's zone and labelled UTC.
+    c.query_drop("SET SESSION time_zone = '+00:00'").map_err(err)?;
     // MySQL 5.7 and older MariaDB have neither: their statements end with the read timeout.
     let _ = c.query_drop(timeout);
     Ok((c, server))
@@ -358,6 +401,31 @@ fn live() -> &'static Mutex<Vec<Live>> {
     L.get_or_init(Default::default)
 }
 
+fn find_live(live: &mut Vec<Live>, address: &str, password: &Option<String>) -> Option<Arc<Conn>> {
+    live.retain(|(_, _, w)| w.strong_count() > 0);
+    live.iter().filter(|(a, p, _)| a == address && p == password).find_map(|(_, _, w)| w.upgrade().filter(|c| c.has_open_client()))
+}
+
+fn finish_live(live: &mut Vec<Live>, address: &str, password: Option<String>, conn: Arc<Conn>) -> Arc<Conn> {
+    let want_plain = conn.is_plain();
+    live.retain(|(_, _, w)| w.strong_count() > 0);
+    if let Some(c) = live
+        .iter()
+        .filter(|(a, p, _)| a == address && *p == password)
+        .find_map(|(_, _, w)| w.upgrade().filter(|c| c.has_open_client() && c.is_plain() == want_plain))
+    {
+        return c;
+    }
+    live.retain(|(a, p, w)| {
+        if a != address || *p != password {
+            return true;
+        }
+        w.upgrade().is_some_and(|c| c.has_open_client() && c.is_plain() == want_plain)
+    });
+    live.push((address.to_string(), password, Arc::downgrade(&conn)));
+    conn
+}
+
 /// Connects to a database (`address`: a `mysql://` or `mariadb://` address as
 /// [`super::duckdb::Database::Mysql`] holds it, without its password), or shares a connection
 /// already open to it.
@@ -369,22 +437,20 @@ pub fn connect(address: &str, ask: bool) -> Result<Arc<Conn>> {
     let config = config(address)?;
     let password =
         super::duckdb::remembered_password(address).or_else(|| if ask { super::duckdb::ambient_password("mysql") } else { None });
-    let find = |live: &mut Vec<Live>| {
-        live.retain(|(_, _, w)| w.strong_count() > 0);
-        live.iter().find(|(a, p, _)| a == address && *p == password).and_then(|(_, _, w)| w.upgrade())
-    };
-    if let Some(c) = find(&mut live().lock().unwrap_or_else(|e| e.into_inner())) {
+    if let Some(c) = find_live(&mut live().lock().unwrap_or_else(|e| e.into_inner()), address, &password) {
         return Ok(c);
     }
     // Connecting can take as long as the timeout: other connections don't wait for it.
     let ((client, server), plain) = open_client(&config, password.as_deref())?;
+    let conn = Arc::new(Conn {
+        config,
+        password: password.clone(),
+        server,
+        plain: std::sync::atomic::AtomicBool::new(plain),
+        client: Mutex::new(Some(client)),
+    });
     let mut live = live().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(c) = find(&mut live) {
-        return Ok(c);
-    }
-    let conn = Arc::new(Conn { config, password: password.clone(), server, plain, client: Mutex::new(Some(client)) });
-    live.push((address.to_string(), password, Arc::downgrade(&conn)));
-    Ok(conn)
+    Ok(finish_live(&mut live, address, password, conn))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -637,6 +703,11 @@ fn field_cast(data_type: &str, column_type: &str, col: &str) -> Option<(FieldTyp
         "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "year" => (FieldType::Integer, col.to_string()),
         "bit" => (FieldType::Integer, format!("CAST({col} AS UNSIGNED)")),
         "float" | "double" | "real" | "decimal" | "numeric" => (FieldType::Double, col.to_string()),
+        // As ISO text, which a date field parses: a `DATETIME` is a wall-clock time, a
+        // `TIMESTAMP` an instant, given in UTC (the session's zone).
+        "date" => (FieldType::Date, format!("CAST({col} AS CHAR)")),
+        "datetime" => (FieldType::DateTime, format!("CAST({col} AS CHAR)")),
+        "timestamp" => (FieldType::DateTime, format!("CONCAT(CAST({col} AS CHAR), 'Z')")),
         _ => (FieldType::Text, format!("CAST({col} AS CHAR)")),
     })
 }
@@ -693,8 +764,8 @@ impl MysqlSource {
                 ),
             }
         }
-        if conn.plain {
-            notes.push("the connection isn't encrypted: the server offers no TLS (ssl-mode=REQUIRED refuses such a server)".into());
+        if let Some(note) = tls_note(&conn.config.tls, conn.is_plain()) {
+            notes.push(note.into());
         }
         let reproject = Reproject::from_epsg(Some(srid), &mut notes);
         let wkb = format!("ST_AsBinary({g}{})", server.axis_option());
@@ -862,22 +933,10 @@ impl MysqlSource {
         w
     }
 
-    /// A request's extent in the column's coordinates, as a polygon's text; `None` when it holds
-    /// the whole table, or can't be converted (the read then filters nothing on the server).
-    fn native_window(&self, req: &Request) -> Option<String> {
-        let e = req.extent?;
-        // The extent of a large table is a sample's, which can miss rows at its edges: a view
-        // holding it but not them reads the whole table's sample and keeps those in view, fewer
-        // than it could. Filtering every whole-table view instead costs far more (MySQL's
-        // geographic test runs on every row).
-        let all = self.info.extent;
-        if !all.is_empty() && e.min_x <= all.min_x && e.min_y <= all.min_y && e.max_x >= all.max_x && e.max_y >= all.max_y {
-            return None;
-        }
-        box_text(&self.reproject.extent_from_lonlat(&e), self.reproject.is_lonlat())
-    }
-
-    fn row_feature(&self, r: &mysql::Row) -> Option<Feature> {
+    /// A row read as a feature: the id, the geometry and the fields, in the order of the select.
+    /// `None` without an id or a geometry RustGIS reads. A value of a date field that isn't a date
+    /// RustGIS holds is null, counted in `unread` ([`Batch::unread_dates`]).
+    fn row_feature(&self, r: &mysql::Row, unread: &mut Vec<usize>) -> Option<Feature> {
         let id = id_of(at(r, 0))?;
         let geometry = match at(r, 1) {
             mysql::Value::Bytes(b) => wkb::decode(b),
@@ -889,16 +948,15 @@ impl MysqlSource {
             .fields
             .iter()
             .enumerate()
-            .map(|(i, f)| {
-                let v = at(r, i + 2);
+            .map(|(k, f)| {
+                let v = at(r, k + 2);
                 match f.ty {
                     // An unsigned value past `i64::MAX` as a number still, if inexact.
                     FieldType::Integer => int_of(v).map(Value::Int).or_else(|| float_of(v).map(Value::Float)),
                     FieldType::Double => float_of(v).map(Value::Float),
                     FieldType::Boolean => int_of(v).map(|i| Value::Bool(i != 0)),
                     FieldType::Text => text_of(v).map(Value::Text),
-                    // This reader gives no date fields yet: their values come as text.
-                    FieldType::Date | FieldType::DateTime => text_of(v).map(Value::Text),
+                    FieldType::Date | FieldType::DateTime => Some(super::server_date(text_of(v).as_deref(), f.ty, unread, k)),
                     // The length OCTET_LENGTH selected for a binary column.
                     FieldType::Image => int_of(v).and_then(|n| u64::try_from(n).ok()).map(|n| Value::Image(crate::ImageValue::sized(n))),
                 }
@@ -946,6 +1004,18 @@ impl MysqlSource {
     }
 }
 
+/// A request's native query polygon, or no predicate for an intentional whole-table read.
+/// Refuse a box the projection cannot bound before considering the whole-table shortcut.
+fn native_window(req: &Request, all: Extent, reproject: &Reproject) -> Result<Option<String>> {
+    let Some(e) = req.extent else { return Ok(None) };
+    let native = reproject.database_extent(&e)?;
+    // The table extent can be sampled; retain the existing shortcut for a view containing it.
+    if !all.is_empty() && e.min_x <= all.min_x && e.min_y <= all.min_y && e.max_x >= all.max_x && e.max_y >= all.max_y {
+        return Ok(None);
+    }
+    Ok(box_text(&native, reproject.is_lonlat()))
+}
+
 /// A box in a column's coordinates as a polygon's text, only finite numbers (it goes into the SQL
 /// as a literal; `lonlat`: geographic, held in range and kept from MySQL's geodesic edges);
 /// `None` for an empty or unbounded one.
@@ -980,7 +1050,7 @@ fn box_text(n: &Extent, lonlat: bool) -> Option<String> {
 
 impl MysqlSource {
     /// Reads what a request asks for, each statement timing out after `timeout` seconds when
-    /// given (else the session's).
+    /// given (else the session's). Refuses unbounded views before sampling on the server.
     fn read_within(&self, req: &Request, timeout: Option<u64>) -> Result<Batch> {
         let timed = |sql: String| match timeout {
             Some(secs) => self.conn.server.timed(&sql, secs),
@@ -988,9 +1058,6 @@ impl MysqlSource {
         };
         let limit = clamp_limit(req.limit);
         let mut out = Batch::default();
-        if limit == 0 {
-            return Ok(out);
-        }
         // A geographic table has nothing past ±180°/±90° (a view panned off the world).
         if self.reproject.is_lonlat()
             && let Some(e) = req.extent
@@ -998,7 +1065,10 @@ impl MysqlSource {
         {
             return Ok(out);
         }
-        let window = self.native_window(req);
+        let window = native_window(req, self.info.extent, &self.reproject)?;
+        if limit == 0 {
+            return Ok(out);
+        }
         let filter = self.filter(window.as_deref());
         let from = self.table.sql_from();
         let cols: Vec<String> = self.select.iter().enumerate().map(|(i, e)| format!("{e} AS c{i}")).collect();
@@ -1045,7 +1115,9 @@ impl MysqlSource {
         let step = stride(matched, limit);
         out.matched = matched;
         for r in &rows {
-            let Some(f) = self.row_feature(r) else {
+            // Dates that aren't ones are counted in the rows kept.
+            let mut unread = Vec::new();
+            let Some(f) = self.row_feature(r, &mut unread) else {
                 out.skipped += 1;
                 continue;
             };
@@ -1055,6 +1127,7 @@ impl MysqlSource {
             if !in_request(g, req) {
                 continue;
             }
+            super::add_unread_dates(&mut out.unread_dates, &unread);
             out.features.push(f);
         }
         out.complete = step <= 1 && (rows.len() as u64) >= out.matched;
@@ -1116,6 +1189,102 @@ mod tests {
     }
 
     #[test]
+    fn tls_notes_and_ca_certificates() {
+        assert_eq!(tls_note(&Tls::Disable, true), Some("the connection isn't encrypted (ssl-mode=DISABLED)"));
+        assert_eq!(
+            tls_note(&Tls::Prefer, true),
+            Some("the connection isn't encrypted: the server offers no TLS (ssl-mode=REQUIRED refuses such a server)")
+        );
+        assert_eq!(tls_note(&Tls::Prefer, false), Some("the server's certificate isn't checked (ssl-mode=VERIFY_IDENTITY checks it)"));
+        assert_eq!(tls_note(&Tls::Require, false), Some("the server's certificate isn't checked (ssl-mode=VERIFY_IDENTITY checks it)"));
+        assert_eq!(tls_note(&Tls::Verified { ca: None, identity: true }, false), None);
+        assert_eq!(
+            tls_note(&Tls::Verified { ca: None, identity: false }, false),
+            Some("the server's host name isn't checked against its certificate (ssl-mode=VERIFY_IDENTITY checks it)")
+        );
+
+        let base_cfg = config("mysql://me@db.example:3306/gis?ssl-mode=PREFERRED").unwrap();
+        assert_eq!(base_cfg.tls, Tls::Prefer);
+        let dropped_tls = Arc::new(Conn {
+            config: base_cfg.clone(),
+            password: None,
+            server: Server::from_version("8.4.11"),
+            plain: std::sync::atomic::AtomicBool::new(false),
+            client: Mutex::new(None),
+        });
+        assert!(!dropped_tls.has_open_client());
+        assert_eq!(dropped_tls.reconnect_cfg().tls, Tls::Require);
+        let dropped_plain = Arc::new(Conn {
+            config: base_cfg,
+            password: None,
+            server: Server::from_version("8.4.11"),
+            plain: std::sync::atomic::AtomicBool::new(true),
+            client: Mutex::new(None),
+        });
+        assert_eq!(dropped_plain.reconnect_cfg().tls, Tls::Prefer);
+
+        let addr = "mysql://me@db.example:3306/gis";
+        let pw = None;
+        let mut pool: Vec<Live> = vec![(addr.to_string(), pw.clone(), Arc::downgrade(&dropped_tls))];
+        assert!(find_live(&mut pool, addr, &pw).is_none());
+        let replaced = finish_live(&mut pool, addr, pw.clone(), dropped_plain.clone());
+        assert!(Arc::ptr_eq(&replaced, &dropped_plain));
+        assert_eq!(pool.len(), 1);
+
+        let ready = std::sync::Barrier::new(2);
+        let done = std::sync::Barrier::new(2);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let _held = dropped_plain.client.lock().unwrap();
+                ready.wait();
+                done.wait();
+            });
+            ready.wait();
+            assert!(dropped_plain.has_open_client());
+            let found = find_live(&mut pool, addr, &pw).expect("busy connection treated as open");
+            assert!(Arc::ptr_eq(&found, &dropped_plain));
+            done.wait();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let bad_cfg = |p: &std::path::Path| {
+            let mut c = config("mysql://me@127.0.0.1:1/gis?ssl-mode=VERIFY_IDENTITY").unwrap();
+            c.tls = Tls::Verified { ca: Some(p.to_path_buf()), identity: true };
+            c.connect_timeout = Duration::from_millis(50);
+            c
+        };
+        assert!(connect_client(&bad_cfg(&dir.path().join("missing.pem")), None).is_err());
+        assert!(connect_client(&bad_cfg(dir.path()), None).is_err());
+
+        let huge = dir.path().join("huge.pem");
+        std::fs::write(&huge, vec![b'A'; (super::super::MAX_CA_BYTES as usize) + 1]).unwrap();
+        let err = connect_client(&bad_cfg(&huge), None).unwrap_err().to_string();
+        assert!(err.contains("larger than 1 MB"), "{err}");
+
+        let (der, pem) = super::super::tests::synthetic_ca_cert();
+        let pem_path = dir.path().join("ca.pem");
+        std::fs::write(&pem_path, &pem).unwrap();
+        let der_path = dir.path().join("ca.crt");
+        std::fs::write(&der_path, &der).unwrap();
+        for valid in [&pem_path, &der_path] {
+            assert!(super::super::read_ca_roots("ssl-ca", valid, super::super::CaDer::Fallback).is_ok());
+            let err = connect_client(&bad_cfg(valid), None).unwrap_err().to_string();
+            assert!(!err.contains("no certificates") && !err.contains("invalid certificate"), "{err}");
+        }
+
+        let marker = concat!("SENTINEL_MYSQL_CA_", "LINE_9921");
+        for (name, body) in [
+            ("broken.pem", format!("-----BEGIN CERTIFICATE-----\n{marker}\n-----END CERTIFICATE-----\n")),
+            ("plain.crt", format!("{marker}\nnot a certificate\n")),
+        ] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            let err = connect_client(&bad_cfg(&p), None).unwrap_err().to_string();
+            assert!(!err.contains(marker), "error leaked file contents: {err}");
+        }
+    }
+
+    #[test]
     fn servers_and_their_sql() {
         let my = Server::from_version("8.4.11");
         let maria = Server::from_version("11.8.9-MariaDB-ubu2404");
@@ -1153,7 +1322,10 @@ mod tests {
         assert_eq!(field_cast("tinyint", "tinyint(1)", "`b`"), Some((FieldType::Boolean, "`b`".into())));
         assert_eq!(field_cast("bigint", "bigint unsigned", "`n`"), Some((FieldType::Integer, "`n`".into())));
         assert_eq!(field_cast("decimal", "decimal(10,2)", "`d`"), Some((FieldType::Double, "`d`".into())));
-        assert_eq!(field_cast("date", "date", "`d`"), Some((FieldType::Text, "CAST(`d` AS CHAR)".into())));
+        assert_eq!(field_cast("date", "date", "`d`"), Some((FieldType::Date, "CAST(`d` AS CHAR)".into())));
+        assert_eq!(field_cast("datetime", "datetime(6)", "`t`"), Some((FieldType::DateTime, "CAST(`t` AS CHAR)".into())));
+        assert_eq!(field_cast("timestamp", "timestamp", "`t`"), Some((FieldType::DateTime, "CONCAT(CAST(`t` AS CHAR), 'Z')".into())));
+        assert_eq!(field_cast("time", "time", "`t`"), Some((FieldType::Text, "CAST(`t` AS CHAR)".into())));
         assert_eq!(field_cast("longblob", "longblob", "`b`"), Some((FieldType::Image, "OCTET_LENGTH(`b`)".into())));
         assert_eq!(field_cast("point", "point", "`p`"), None);
     }
@@ -1172,6 +1344,17 @@ mod tests {
         assert_eq!(float_of(&V::Bytes(b"nan".to_vec())), None);
         assert_eq!(text_of(&V::NULL), None);
         assert_eq!(text_of(&V::Bytes(vec![0xff, b'a'])).as_deref(), Some("\u{fffd}a"));
+    }
+
+    #[test]
+    fn refused_database_view_is_not_a_whole_table_sample() {
+        let r = Reproject::from_crs(crate::raster::Crs::from_epsg(32617).unwrap(), &mut Vec::new());
+        let req = Request { extent: Some(Extent::new(-120.0, -30.0, 10.0, 30.0)), limit: 10 };
+        let all = Extent::new(-84.0, 0.0, -78.0, 25.0);
+        assert!(native_window(&req, all, &r).unwrap_err().to_string().contains("can't be bounded"));
+        let clean = Request { extent: Some(Extent::new(-84.0, 30.0, -78.0, 40.0)), limit: 10 };
+        assert!(native_window(&clean, Extent::EMPTY, &r).unwrap().is_some());
+        assert!(native_window(&Request::all(), all, &r).unwrap().is_none());
     }
 
     #[test]
@@ -1202,7 +1385,7 @@ mod tests {
     /// Reads every table of a live database: `RUSTGIS_TEST_MYSQL="mysql://user:password@host/db"
     /// cargo test -p rustgis-data -- --ignored mysql_live --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "needs a live MySQL or MariaDB database in RUSTGIS_TEST_MYSQL"]
     fn mysql_live() {
         let Ok(address) = std::env::var("RUSTGIS_TEST_MYSQL") else { return };
         let super::super::duckdb::Database::Mysql(address) = super::super::duckdb::Database::parse(&address) else {

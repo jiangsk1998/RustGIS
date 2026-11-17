@@ -469,7 +469,7 @@ pub fn read_token_file(path: &std::path::Path) -> Result<String, String> {
 pub(crate) fn private_dir() -> Result<PathBuf, String> {
     let dir = token_dir();
     // Only Unix sets a mode on the builder; elsewhere it stays as created.
-    #[cfg_attr(not(unix), allow(unused_mut))]
+    #[cfg_attr(not(unix), expect(unused_mut, reason = "only Unix sets a mode on the builder"))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
@@ -1649,7 +1649,6 @@ impl Revocation for GrantLive {
 mod archive_tests;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     /// Only prompt requests read the skill folders (on the app's thread); a batch with one does.
     #[test]
@@ -1832,7 +1831,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while relay.poll(s) == 0 {
             assert!(std::time::Instant::now() < deadline, "the relay never handed the request to the app");
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(5)); // test-wait: legacy polling for relay dispatch
         }
     }
 
@@ -1841,7 +1840,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !cond() {
             assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(5)); // test-wait: legacy polling for the supplied relay condition
         }
     }
 
@@ -2191,7 +2190,7 @@ mod tests {
         let mut s = sample();
         let layers = s.map().layers.len();
         // Idle before the request: the request wakes the app, which runs it.
-        std::thread::sleep(Duration::from_millis(2000));
+        std::thread::sleep(Duration::from_millis(2000)); // test-wait: let the relay become idle before checking its busy response
         let mut client = TcpStream::connect(("127.0.0.1", relay.port())).unwrap();
         attach(&mut client, &relay, false);
         writeln!(client, "{}", add_sample_call(1)).unwrap();
@@ -2328,7 +2327,7 @@ mod tests {
         });
         assert_eq!(relay.screen_request(), Some(ScreenRequest { wait: Duration::from_secs(2), overlays: true }));
         // The next request waits its turn.
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(50)); // test-wait: legacy delay before checking the next screenshot request waits
         assert_eq!(relay.poll(&mut s), 0);
         assert_eq!(s.map().layers.len(), layers, "nothing runs while the screen is captured");
         let png = rustgis_engine::cmd::share::map_png(&mut s, Some(80.0), Some(50.0), None).unwrap();
@@ -2601,7 +2600,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while lock(&relay.owner.shared.requests).is_empty() {
             assert!(std::time::Instant::now() < deadline, "the request was never queued");
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(5)); // test-wait: legacy polling for the queued request
         }
         drop(grant);
         assert_eq!(relay.poll(&mut s), 0, "a request queued before its grant was revoked ran");
@@ -2645,9 +2644,9 @@ mod tests {
         while grant.pending().is_empty() {
             assert!(std::time::Instant::now() < deadline, "the request never asked for approval");
             relay.poll(&mut s);
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(10)); // test-wait: legacy polling for the approval request
         }
-        std::thread::sleep(Duration::from_millis(1500));
+        std::thread::sleep(Duration::from_millis(1500)); // test-wait: cross the approval keepalive interval while permission is held
         relay.poll(&mut s);
         let pending = grant.pending();
         assert_eq!(pending.len(), 1, "the approval expired with the app's reply wait");
@@ -2886,7 +2885,7 @@ mod tests {
                 if writer.write_all(b" ").and_then(|()| writer.flush()).is_err() {
                     return;
                 }
-                std::thread::sleep(Duration::from_millis(250));
+                std::thread::sleep(Duration::from_millis(250)); // test-wait: trickle a handshake past its deadline
             }
         });
         let started = Instant::now();

@@ -244,8 +244,12 @@ fn uninstall(_: &mut Session, p: &Value) -> CmdResult {
     #[cfg(not(target_arch = "wasm32"))]
     rustgis_plugins::store::uninstall(id)?;
     #[cfg(target_arch = "wasm32")]
-    if !rustgis_plugins::unload(id) {
-        return Err(format!("no plugin '{id}'"));
+    {
+        if rustgis_plugins::get(id).is_none() {
+            return Err(format!("no plugin '{id}'"));
+        }
+        rustgis_plugins::settings::remove(id)?;
+        rustgis_plugins::unload(id);
     }
     Ok(json!({"uninstalled": id}))
 }
@@ -294,7 +298,9 @@ fn fetch_registry(s: &mut Session, url: &str) -> Result<Vec<rustgis_plugins::reg
 /// A registry entry with what's installed, for the Plugin Manager and the command line.
 pub fn entry_status(e: &rustgis_plugins::registry::Entry) -> Value {
     let installed = rustgis_plugins::get(&e.id).map(|p| p.manifest.version.clone());
-    let update = installed.as_deref().is_some_and(|v| rustgis_plugins::manifest::version_cmp(&e.version, v).is_gt());
+    // Not offered when it can't be installed here (a newer RustGIS needed, or no package for this
+    // platform).
+    let update = e.available() && installed.as_deref().is_some_and(|v| rustgis_plugins::manifest::version_cmp(&e.version, v).is_gt());
     let mut v = serde_json::to_value(e).unwrap_or(Value::Null);
     if let Some(o) = v.as_object_mut() {
         o.insert("installed".into(), json!(installed));
@@ -303,9 +309,12 @@ pub fn entry_status(e: &rustgis_plugins::registry::Entry) -> Value {
         // Said for every plugin (the registry leaves it out for WebAssembly ones): a process
         // plugin isn't sandboxed.
         o.insert("runtime".into(), json!(e.runtime));
-        // Whether it has a package for this platform (one listed with packages for other
-        // platforms has none to install here).
+        // Whether it can be installed here, and if not, why: it needs a newer RustGIS, or its
+        // packages are for other platforms.
         o.insert("available".into(), json!(e.available()));
+        if !e.available() {
+            o.insert("unavailable".into(), json!(e.unavailable()));
+        }
     }
     v
 }
@@ -314,6 +323,8 @@ pub fn entry_status(e: &rustgis_plugins::registry::Entry) -> Value {
 /// [`fetch_registry`]).
 fn browse(s: &mut Session, p: &Value) -> CmdResult {
     let url = ps(p, "url").map(str::trim).filter(|s| !s.is_empty()).unwrap_or(rustgis_plugins::registry::DEFAULT_URL);
+    // Not fetched where nothing in it could be installed.
+    rustgis_plugins::may_install()?;
     #[cfg(not(target_arch = "wasm32"))]
     {
         Ok(Value::Array(fetch_registry(s, url)?.iter().map(entry_status).collect()))
@@ -362,11 +373,13 @@ pub fn install_checked(e: &rustgis_plugins::registry::Entry, bytes: &[u8]) -> Re
 fn install_from_registry(s: &mut Session, p: &Value) -> CmdResult {
     let id = ps(p, "id").ok_or("id is required")?;
     let url = ps(p, "url").map(str::trim).filter(|s| !s.is_empty()).unwrap_or(rustgis_plugins::registry::DEFAULT_URL);
+    rustgis_plugins::may_install()?;
     #[cfg(not(target_arch = "wasm32"))]
     {
         let entries = fetch_registry(s, url)?;
         let e = entries.iter().find(|e| e.id == id).ok_or_else(|| format!("the registry has no plugin '{id}'"))?;
-        // Not downloaded only to be refused: its packages are for other platforms.
+        // Not downloaded only to be refused: it needs a newer RustGIS, or its packages are for
+        // other platforms.
         if !e.available() {
             return Err(e.unavailable());
         }
@@ -439,6 +452,7 @@ fn layers_of(s: &Session) -> Value {
                     "geometry": format!("{:?}", l.dataset.geometry_type), "features": l.dataset.features.len(),
                     "selected": l.selection.len(), "active": Some(l.id) == active,
                     "extent": super::project::bbox(l.extent()), "transparency": l.transparency,
+                    "crs": layer_crs(l).map(crs_name),
                     "group": s.map().group_of(l.id).map(|g| g.name.as_str()),
                     "fields": l.dataset.fields.iter().map(|f| json!({"name": f.name, "type": format!("{:?}", f.ty)})).collect::<Vec<_>>(),
                 })
@@ -446,6 +460,81 @@ fn layers_of(s: &Session) -> Value {
             .collect(),
     )
 }
+
+/// The coordinate system a layer's own coordinates are in (what `share.exportLayer` keeps when it
+/// is not given a `crs`): a vector layer's dataset system, longitude/latitude when it has none;
+/// a raster's, once read (`None` before that).
+fn layer_crs(l: &rustgis_map::Layer) -> Option<rustgis_data::raster::Crs> {
+    use rustgis_data::raster::Crs;
+    match &l.raster {
+        Some(r) => r.data.as_ref().map(|d| d.crs),
+        None => Some(l.dataset.crs.unwrap_or(Crs::LonLat)),
+    }
+}
+
+/// A system as `host.layers` names it: `EPSG:<code>`, else its WKT, else its PROJ definition, so a
+/// layer whose system is known is never given the `null` of a raster not yet read.
+fn crs_name(crs: rustgis_data::raster::Crs) -> String {
+    if crs.epsg() > 0 { format!("EPSG:{}", crs.epsg()) } else { rustgis_data::raster::wkt::to_wkt(crs).unwrap_or_else(|| crs.code()) }
+}
+
+/// The map's flat coordinate system, for `"crs": "map"`: Web Mercator for the globe too (as a
+/// pick's map coordinates), or the projection's EPSG system. A projection with no EPSG code is
+/// refused before anything is registered: a plugin can set a `local:lon,lat` view per point, and
+/// each would otherwise add a system to the process-wide table. Not for another body's map.
+fn map_crs(m: &rustgis_map::Map) -> Result<rustgis_data::raster::Crs, String> {
+    use rustgis_data::raster::Crs;
+    if !m.body().is_earth() {
+        return Err(format!("the map of {} has no coordinate system a plugin can be given", m.body().name));
+    }
+    match &m.projection {
+        rustgis_map::Projection::Globe | rustgis_map::Projection::WebMercator => Ok(Crs::WebMercator),
+        rustgis_map::Projection::Custom(code) => {
+            let (_, label) = rustgis_map::projection::lookup(code)?;
+            let epsg = label
+                .strip_prefix("EPSG:")
+                .and_then(|n| n.parse::<u32>().ok())
+                .or_else(|| rustgis_data::raster::crs::vn2000_epsg(&label).map(u32::from))
+                .and_then(Crs::from_epsg);
+            epsg.ok_or_else(|| format!("{label} has no EPSG code, so GeoJSON can't name it; use an EPSG code"))
+        }
+    }
+}
+
+/// The system `host.features` was asked for with `crs`: `None` for WGS 84 (absent, or named so),
+/// `"layer"` the layer's own, `"map"` the map's, else an EPSG code (`"EPSG:32637"` or `32637`).
+/// Never WKT or a PROJ string: reading one registers a system in the process-wide table, which
+/// any plugin (the request needs no permission) could fill, and the answer names an EPSG code
+/// anyway. Every refusal starts with `crs:`.
+fn asked_crs(m: &rustgis_map::Map, l: &rustgis_map::Layer, p: &Value) -> Result<Option<rustgis_data::raster::Crs>, String> {
+    use rustgis_data::raster::Crs;
+    let text = match p.get("crs") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(t)) => t.trim(),
+        Some(_) => return Err("crs: must be text: \"layer\", \"map\" or an EPSG code such as \"EPSG:32637\"".into()),
+    };
+    let crs = match text.to_ascii_lowercase().as_str() {
+        "" => return Ok(None),
+        "layer" => layer_crs(l).ok_or_else(|| format!("crs: {}'s coordinate system isn't known yet", l.name))?,
+        "map" => map_crs(m).map_err(|e| format!("crs: {e}"))?,
+        _ => {
+            let digits = text.get(..5).filter(|p| p.eq_ignore_ascii_case("epsg:")).map_or(text, |_| text.get(5..).unwrap_or("").trim());
+            match digits.parse::<u32>() {
+                Ok(code) if digits.chars().all(|c| c.is_ascii_digit()) => {
+                    Crs::from_epsg(code).ok_or_else(|| format!("crs: unknown coordinate system EPSG:{code}"))?
+                }
+                _ => {
+                    let shown: String = text.chars().take(40).collect();
+                    return Err(format!("crs: '{shown}' isn't \"layer\", \"map\" or an EPSG code such as \"EPSG:32637\""));
+                }
+            }
+        }
+    };
+    Ok((crs != Crs::LonLat).then_some(crs))
+}
+
+/// How many features `host.features` reprojects between looks at Cancel.
+const CANCEL_EVERY: usize = 512;
 
 /// Answers a running plugin's requests.
 struct Bridge<'a> {
@@ -479,13 +568,24 @@ impl Bridge<'_> {
     }
 
     /// A layer's features as GeoJSON: all of them, or its selection (`"selected": true`), at
-    /// most `limit`.
+    /// most `limit`. In longitude/latitude, or in `crs` (`"layer"`, `"map"` or a coordinate
+    /// system) when given, with a GeoJSON `crs` member naming it, as `host.addLayer` reads.
+    /// Features that can't be placed in it are refused, not dropped.
+    ///
+    /// Runs on the calling thread, like every host request: a request answers in one piece
+    /// (there is nothing to hand a background run's result back to). On the desktop a plugin
+    /// command runs on the window's thread with no progress probe or Cancel, and a host request
+    /// already running runs to its end: the plugin's run-time cap does not bound this work.
+    /// Large layers can therefore hold the window; there is no feature or vertex size cap.
+    /// The loop checks a run's Cancel ([`rustgis_data::progress`]) every [`CANCEL_EVERY`] features
+    /// only when the caller carries a progress probe; on the window thread that check is a no-op.
     fn features(&self, p: &Value) -> CmdResult {
         let id = self.s.layer_id(p)?;
         let l = self.s.map().layer(id).ok_or("no such layer")?;
         if l.is_raster() {
             return Err(format!("{} is a raster layer", l.name));
         }
+        let target = asked_crs(self.s.map(), l, p)?;
         let limit = uint(p, "limit").and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::MAX);
         let rows: Vec<usize> = if b(p, "selected") == Some(true) { l.selection.clone() } else { (0..l.dataset.features.len()).collect() };
         let ds = rustgis_data::Dataset {
@@ -494,12 +594,62 @@ impl Bridge<'_> {
             fields: l.dataset.fields.clone(),
             features: rows.iter().take(limit).filter_map(|&i| l.dataset.features.get(i).cloned()).collect(),
             source: None,
-            crs: None,
+            crs: l.dataset.crs,
             crs_incomplete: false,
             zm_dropped: false,
             windowed: false,
         };
+        let mut ds = ds;
+        let mut member = None;
+        if let Some(crs) = target {
+            // Only a system `host.addLayer` can read back is named, so a round trip works.
+            if crs.epsg() == 0 {
+                return Err(format!("crs: {} has no EPSG code, so GeoJSON can't name it; use an EPSG code", crs.label()));
+            }
+            if crs.is_geocentric() {
+                return Err(format!(
+                    "crs: {} is geocentric; a response holds two coordinates per point, so it can't carry this system",
+                    crs.label()
+                ));
+            }
+            if let Some(e) = rustgis_data::export_error(&ds, crs) {
+                return Err(format!("crs: {e}"));
+            }
+            let t = crs.transformer().map_err(|e| format!("crs: {e}"))?;
+            let (mut failed, mut first) = (0usize, None);
+            // Web Mercator clamps a latitude past its limit, which would move the point unsaid.
+            let mercator = crs == rustgis_data::raster::Crs::WebMercator;
+            for (n, f) in ds.features.iter_mut().enumerate() {
+                if n % CANCEL_EVERY == 0 {
+                    rustgis_data::progress::check().map_err(|_| "crs: cancelled".to_string())?;
+                }
+                let Some(g) = f.geometry.take() else { continue };
+                let mut ok = true;
+                if mercator {
+                    g.for_each_coord(|c| ok &= c.y.abs() <= rustgis_geom::MAX_LAT || !c.y.is_finite());
+                }
+                let g = if ok { g.map_coords(&|c| t.from_lonlat(c).unwrap_or(crate::geom::Coord::new(f64::NAN, f64::NAN))) } else { g };
+                g.for_each_coord(|c| ok &= c.is_finite());
+                if !ok {
+                    failed += 1;
+                    first.get_or_insert(f.id);
+                }
+                f.geometry = Some(g);
+            }
+            if failed > 0 {
+                return Err(format!(
+                    "crs: {failed} feature(s) of {} can't be placed in {} (the first is feature {}); nothing was returned",
+                    l.name,
+                    crs.label(),
+                    first.unwrap_or_default()
+                ));
+            }
+            member = Some(json!({"type": "name", "properties": {"name": format!("EPSG:{}", crs.epsg())}}));
+        }
         let mut gj = rustgis_data::io::to_geojson(&ds);
+        if let (Some(m), Some(o)) = (member, gj.as_object_mut()) {
+            o.insert("crs".into(), m);
+        }
         // The row of each feature, for selecting or editing it afterwards.
         if let Some(fs) = gj.get_mut("features").and_then(Value::as_array_mut) {
             for (f, row) in fs.iter_mut().zip(rows.iter()) {
@@ -538,14 +688,14 @@ impl Bridge<'_> {
         {
             return Err(format!("plugins can't use a saved web-service connection's login ('{id}')"));
         }
-        let spec = self.s.registry.get(id).ok_or_else(|| format!("unknown command '{id}'"))?;
-        let (enabled, label, mutates) = (spec.enabled, spec.label, spec.mutates);
+        let spec = *self.s.registry.get(id).ok_or_else(|| format!("unknown command '{id}'"))?;
+        let (label, mutates) = (spec.label, spec.mutates);
         let named = params.get("layer").and_then(|_| self.s.layer_id(params).ok());
         let active = self.s.active_layer;
         if named.is_some() {
             self.s.active_layer = named;
         }
-        let blocked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| enabled(self.s))).unwrap_or(Some("unavailable"));
+        let blocked = self.s.check_conditions(&spec, params).0.unwrap_or(Some("unavailable"));
         self.s.active_layer = active;
         if let Some(why) = blocked {
             return Err(format!("{label}: {why}"));
@@ -636,7 +786,7 @@ impl Session {
     /// Runs a plugin command (`plugin:<plugin>/<command>`) as one undoable step.
     pub(crate) fn run_plugin(&mut self, op: crate::policy::Authorized<crate::policy::CommandOp>) -> CmdResult {
         let crate::policy::CommandOp::Plugin { cmd, pin, params } = op.op() else { return Err("not a plugin command".into()) };
-        #[allow(unused_mut)]
+        #[cfg_attr(target_arch = "wasm32", expect(unused_mut, reason = "only the desktop caps the timeout"))]
         let mut cmd = cmd.clone();
         // On the desktop a command runs on the window's own thread, which draws nothing and can't
         // be cancelled until the command answers: a `timeout` longer than the usual two minutes
@@ -861,6 +1011,7 @@ struct Between<'a> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Host for Between<'_> {
+    /// Keeps separately logged requests isolated, while reads retain the polling command's capture.
     fn call(&mut self, op: &str, params: &Value) -> Result<Value, String> {
         let plugin = self.plugin.clone();
         let bridge = |s: &mut Session| {
@@ -878,34 +1029,44 @@ impl Host for Between<'_> {
         let reads = Bridge::reads_only(op);
         let mutates =
             plugin.manifest.has(Permission::Edit) && (op == "host.addLayer" || self.s.registry.get(op).is_some_and(|c| c.mutates));
+        // Reads remain part of the polling command; only requests with their own entries are isolated.
+        if reads {
+            return self
+                .s
+                .as_session_plugin(plugin.clone(), |s| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bridge(s).0))
+                        .unwrap_or_else(|_| Err(format!("'{op}' failed unexpectedly")))
+                })
+                .and_then(|r| r);
+        }
         // With the plugin's authority, exactly as during one of its commands.
-        self.s
-            .as_session_plugin(plugin.clone(), |s| {
-                if reads {
-                    return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bridge(s).0))
-                        .unwrap_or_else(|_| Err(format!("'{op}' failed unexpectedly")));
-                }
-                let (at, start) = (crate::project_log::now_ms(), web_time::Instant::now());
-                let res = s.guarded(leak(&plugin.manifest.name), mutates, |s| {
-                    let (res, changed, requested) = bridge(s);
-                    // Only left downloads for the app (they add their layers when they land): no step.
-                    s.request_only = res.is_ok() && requested && !changed;
-                    // The answer goes to the program, which says what it makes of a refusal.
-                    s.quiet_failure = res.is_err();
+        // Earlier queued requests have their own entries, separate from the command polling them.
+        rustgis_data::provenance::without(|| {
+            self.s
+                .as_session_plugin(plugin.clone(), |s| {
+                    let _inputs = s.log.on().then(rustgis_data::provenance::Capture::start);
+                    let (at, start) = (crate::project_log::now_ms(), web_time::Instant::now());
+                    let res = s.guarded(leak(&plugin.manifest.name), mutates, |s| {
+                        let (res, changed, requested) = bridge(s);
+                        // Only left downloads for the app (they add their layers when they land): no step.
+                        s.request_only = res.is_ok() && requested && !changed;
+                        // The answer goes to the program, which says what it makes of a refusal.
+                        s.quiet_failure = res.is_err();
+                        res
+                    });
+                    // No command of its own carries it into the session log: it goes in by itself, as
+                    // a command run would.
+                    if s.log.on() && (op == "host.addLayer" || crate::project_log::is_logged(s, op, params)) {
+                        let (kept, partial) = crate::project_log::kept_and_partial(params);
+                        let project = (crate::project_log::kept_name(&s.title()), s.opened);
+                        let mut e = crate::project_log::entry(project, op, kept, partial, &res, at, start.elapsed());
+                        e.plugin = Some(plugin.manifest.id.clone());
+                        s.log_entry(e, false);
+                    }
                     res
-                });
-                // No command of its own carries it into the session log: it goes in by itself, as
-                // a command run would.
-                if s.log.on() && (op == "host.addLayer" || crate::project_log::is_logged(s, op, params)) {
-                    let (kept, partial) = crate::project_log::kept_and_partial(params);
-                    let project = (crate::project_log::kept_name(&s.title()), s.opened);
-                    let mut e = crate::project_log::entry(project, op, kept, partial, &res, at, start.elapsed());
-                    e.plugin = Some(plugin.manifest.id.clone());
-                    s.log.push(e);
-                }
-                res
-            })
-            .and_then(|r| r)
+                })
+                .and_then(|r| r)
+        })
     }
 
     fn log(&mut self, text: &str) {
@@ -915,7 +1076,7 @@ impl Host for Between<'_> {
 
 /// What session plugins were last told of the map, to tell them what changes.
 #[derive(Debug, Default)]
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "session plugins run on the desktop only"))]
 pub(crate) struct Watch {
     /// Each running program's, by plugin id.
     seen: Vec<(String, Seen)>,
@@ -937,7 +1098,6 @@ const RESTYLE_EVERY: web_time::Duration = web_time::Duration::from_secs(1);
 
 /// Fingerprints of what a session plugin hears about.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct Seen {
     view: u64,
     /// Their list and order, which is active, names, visibility, opacity, symbology, fields and

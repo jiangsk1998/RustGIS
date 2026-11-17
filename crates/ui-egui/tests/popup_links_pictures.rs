@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 /// The tile cache has one fetcher for the process: these tests take turns with it.
 static TURN: Mutex<()> = Mutex::new(());
 
-struct Turn(#[allow(dead_code)] MutexGuard<'static, ()>);
+struct Turn(#[expect(dead_code, reason = "held for the turn, never read")] MutexGuard<'static, ()>);
 
 impl Drop for Turn {
     fn drop(&mut self) {

@@ -381,7 +381,6 @@ pub(crate) fn fetch(url: &str, landing: Landing) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

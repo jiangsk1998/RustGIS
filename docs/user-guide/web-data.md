@@ -28,7 +28,7 @@ them, and the network permission when a plugin does. `ui.dialog` opens a panel o
 | Overture Maps… | Buildings, places, transportation and more | [Overture Maps](#overture-maps) |
 | Planet Open Data… | Planet's disaster imagery | [Planet Open Data](#planet-open-data) |
 | Portolan… | Open data catalogs published with Portolan | [Portolan](#portolan) |
-| Satellite Embeddings… | AlphaEarth, Earth Index and Tessera embeddings | [Satellite embeddings](#satellite-embeddings) |
+| Satellite Embeddings… | AlphaEarth, Earth Index, Tessera and OlmoEarth embeddings | [Satellite embeddings](#satellite-embeddings) |
 | Search Open Data… | data.gov, CKAN, Socrata and ArcGIS Hub datasets | [Open-data portals](#open-data-portals) |
 | Sentinel-2 Explorer… | Recent, clear Sentinel-2 scenes | [Sentinel-2 Explorer](#sentinel-2-explorer) |
 | Source Cooperative… | Files on Source Cooperative | [Source Cooperative](#source-cooperative) |
@@ -43,8 +43,17 @@ Data added by its address, from a web server or an S3 bucket, is described in
 ## STAC catalogs
 
 **Home › Add › Web Data › STAC Search…** searches a [STAC](https://stacspec.org) API for imagery and
-other assets: by collection, dates, the most cloud cover and (by default) where the map is. The
-default API is Element 84's [Earth Search](https://earth-search.aws.element84.com/v1);
+other assets: by collection, dates, the most cloud cover and (by default) where the map is, in the
+order you pick under **Sort by** (the API's own, newest first, oldest first or least cloud first;
+an API whose items come back visibly not in that order is reported, and so is a page whose order
+can't be checked, such as dates in mixed time zones). **Dates** starts unticked (the Sentinel-2
+service ticks it, for its last 90 days) and **Most cloud cover (%)** starts ticked: tick or untick
+either to put that filter in or leave it out of the search while keeping what you typed. A
+ticked box left blank puts nothing in the search (any date, any cloud cover); a cloud limit that
+is not a number from 0 to 100 is refused with a message, not dropped. In an API search, a
+collection without `eo:cloud_cover` finds nothing with a limit set; a static catalog keeps an item
+that doesn't say how cloudy it is. A static catalog is walked
+in its own order, so it has no sort. The default API is Element 84's [Earth Search](https://earth-search.aws.element84.com/v1);
 Microsoft's [Planetary Computer](https://planetarycomputer.microsoft.com/api/stac/v1) is offered
 beside it, and other APIs with GET item search work. **Collections** lists what the API offers,
 and **Find Items** shows up to 50 items as cards
@@ -243,8 +252,9 @@ The entries, all public and read in place:
 | [ARCO-ERA5](https://cloud.google.com/storage/docs/public-datasets/era5) (Google Cloud, ECMWF) | hourly air temperature at 2 m, total precipitation and top-layer soil moisture (0.25°, from 1940), as a Zarr store the desktop reads |
 
 Only cubes RustGIS reads today are listed. Collections whose files sit behind signed addresses
-(Planetary Computer), need a sign-in (Copernicus Data Space, NASA Earthdata) or charge the reader
-(Landsat Collection 2 on Earth Search) are left out. Digital Earth Australia's catalog sits behind
+(Planetary Computer), need a sign-in (NASA Earthdata) or charge the reader
+(Landsat Collection 2 on Earth Search) are left out. Copernicus Data Space's files are added one
+by one after a sign-in (see [Copernicus Data Space](#copernicus-data-space)). Digital Earth Australia's catalog sits behind
 a firewall that may ask a program making many requests in a row for a browser check for a while;
 its searches then fail until it lets them through again.
 
@@ -540,6 +550,32 @@ rustgis-cli run --sample --cmd 'earthdata.login={"token":"…"}' --cmd 'layer.ad
 rustgis-cli run --sample --use-saved-secrets --cmd 'layer.addUrl={"url":"https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/HLSL30.020/…/….B04.tif"}'
 ```
 
+### Copernicus Data Space
+
+The [Copernicus Data Space Ecosystem](https://dataspace.copernicus.eu) (CDSE) publishes the
+Copernicus Land Monitoring Service's global products (NDVI, LAI, Burnt Area, Water Bodies, Land
+Cover 100 m and 10 m, Tree Cover Density…) and the Sentinel-1 and Sentinel-2 mosaics as COGs. Its
+[STAC catalog](https://stac.dataspace.copernicus.eu/v1) is open, but its files need a sign-in with
+a free CDSE account. `copernicus.login` signs in with the account's username and password (and
+`"totp"`, the one-time code, for an account with two-factor authentication). The password is sent
+once, to CDSE's sign-in server (`identity.dataspace.copernicus.eu`), and never kept. The token it
+gives is kept until RustGIS closes, never in the project, and renewed before it expires; once it
+can't be renewed any more (after a long pause), the sign-in ends and `copernicus.status` says so.
+The token is sent only over HTTPS to CDSE's data servers (`download.dataspace.copernicus.eu` and
+`zipper.dataspace.copernicus.eu`), never to the sign-in server, and a redirect away from them goes
+without it.
+
+A collection's items list each band as an asset whose `alternate.https` address is on the data
+server: add it with `layer.addUrl` (`"cog": true`, since the address ends in `$value`, and `"bbox"`
+for a window) and it is read in place, as any COG. A plugin does the same and never sees the token. `copernicus.status` reports the sign-in (as whom, when the token
+expires, until when it is renewed); `copernicus.logout` forgets it and empties the download cache.
+Signing in is for the desktop app and the command line; it isn't remembered between runs (a
+password typed in a command line stays in the shell's history).
+
+```sh
+rustgis-cli run --cmd 'copernicus.login={"username":"you@example.org","password":"…"}' --cmd 'layer.addUrl={"url":"https://download.dataspace.copernicus.eu/odata/v1/Products(…)/Nodes(…)/Nodes(….tif)/$value","cog":true,"bbox":[-43.0,-20.84,-42.75,-20.65]}'
+```
+
 ## Open-data portals
 
 **Home › Add › Web Data › Search Open Data…** (`portal.search`) finds datasets by text in an open-data
@@ -738,6 +774,7 @@ their footprints drawn as a layer.
 | **AlphaEarth Foundations** (Google's Satellite Embedding; 64 values a 10 m pixel, 2017–2025) | Finds the year's UTM tiles where the map is in the dataset's GeoParquet index on [Source Cooperative](https://source.coop/tge-labs/aef), read in place (its bounding boxes, then the rows that meet the map). **Add** shows a tile as a cloud-optimised GeoTIFF read in place: three bands (**Bands**, from 1; A01, A16 and A09 by default) as red, green and blue, dequantised (`sign(v)·(v/127.5)²`) and stretched over ±**Stretch** (0.3). Only the three bands shown are read, a band at a time. **Apply to layers** shows other bands or another stretch on the tiles already added. With **All years, on the time slider**, the search finds each tile's file of every year (2017–2025, matched by place, since each year's files have names of their own) and **Add years** shows them as one tile layer that follows the time slider, a year a step (turned on over the years when it is off); a year a tile has no file for shows nothing, and is said. |
 | **Earth Index** (Earth Genome; 384 values every ~320 m, 2024) | Names the Sentinel-2 (MGRS) tiles where the map is and keeps those with a file. **Add points** reads the file's points in the view in place (every point's position, then the vectors of those in view: zoom to a few kilometres) and colours them by their vectors' first three principal components (64 colours); **Keep value** keeps one of each vector's values as the points' `value` field. |
 | **Tessera** (Cambridge; 128 values a 10 m pixel, 2017–2025) | **Add view** reads three bands (1, 2 and 3 by default) of the view from Tessera's [Zarr store](https://data.source.coop/tessera/tessera/zarr/v1.1-dclimate) in place (the shard's index, then the chunks the view needs: at most about 6 km a side, its centre when the view is larger), as a 32-bit raster in UTM. |
+| **OlmoEarth v1.3** (Ai2; 128 values a 10 m pixel, 2017–2025; the first 64 are a whole embedding on their own) | **Add view** reads three bands (1, 2 and 3 by default) of the view from OlmoEarth's [Zarr store](https://source.coop/olmoearth/olmoearth-v1-3-embeddings) in place, as for Tessera: the shard's index, then the chunks the view needs, of only the bands shown (a chunk holds 64 bands, so three of the first 64 read half the data): at most about 5 km a side, its centre when the view is larger. Values are dequantised (`sign(q)·(q/127.5)²`). Its licence, the OlmoEarth Artifact License, asks to cite Ai2 and forbids military, surveillance, policing and extractive uses (such as mining, drilling or deforestation), terms that go with what is made from it; `embeddings.add` returns them as `"license"`. |
 | **Clay**, **Major TOM**, **Copernicus-Embed** | Listed with links to their data and papers; RustGIS doesn't read them. |
 
 AlphaEarth's tiles are tile layers that keep their look in their address
@@ -754,6 +791,32 @@ most 32 tile layers on a map):
 rustgis-cli run --cmd 'map.zoomToExtent={"extent":[-122.55,37.7,-122.3,37.85]}' --cmd 'embeddings.search={"dataset":"alphaearth","year":2024}' --cmd 'embeddings.add={"dataset":"alphaearth","url":"https://data.source.coop/tge-labs/aef/v1/annual/2024/10N/xcyo46pot2fg6a61t-0000008192-0000000000.tiff"}' --cmd 'share.exportMap={"path":"aef.png"}'
 rustgis-cli run --cmd 'map.zoomToExtent={"extent":[-42.91,-20.78,-42.85,-20.735]}' --cmd 'embeddings.addCube={"dataset":"alphaearth"}' --cmd 'time.goTo={"date":"2017"}' --cmd 'share.exportMap={"path":"aef_2017.png"}' --cmd 'time.goTo={"date":"2025"}' --cmd 'share.exportMap={"path":"aef_2025.png"}'
 rustgis-cli run --cmd 'map.zoomToExtent={"extent":[-83.96,35.94,-83.9,35.98]}' --cmd 'embeddings.add={"dataset":"tessera","year":2024}' --cmd 'share.exportMap={"path":"tessera.png"}'
+rustgis-cli run --cmd 'map.zoomToExtent={"extent":[-42.91,-20.78,-42.85,-20.735]}' --cmd 'embeddings.add={"dataset":"olmoearth","year":2025}' --cmd 'share.exportMap={"path":"olmoearth.png"}'
+```
+
+AlphaEarth's 64 values have no meaning one by one, so a picture of three of them only shows where
+places differ. What they are for is comparing places and years, which two commands do over the map's
+extent (or `"bbox"`), reading one AlphaEarth tile's window by range, all 64 bands (at most about
+1000 × 1000 cells, 10 × 10 km; `"cellSize"` reads an overview for a larger area). Each makes a
+32-bit raster in the tile's UTM coordinate system; a cell with no embedding (AlphaEarth's −128) has
+no value.
+
+- `embeddings.similarity` (`"point"`: [longitude, latitude], or `"points"`: up to 1000 of them,
+  averaged; `"year"`, 2024 by default): each cell's cosine similarity to the reference's embedding,
+  from −1 to 1. 1 is a place like the reference. Reference points outside the area read, or on no
+  data, are left out and said.
+- `embeddings.change` (`"from"`, 2017 by default, and `"to"`, 2025): how far each cell's embedding
+  moved between the two years, 1 − their cosine, from 0 (unchanged) to 2.
+
+The vectors are dequantised (`sign(v)·(v/127.5)²`) and scaled to unit length first. When the area
+meets several tiles, the one nearest its centre with the years asked for is read, and the others
+are said: keep the area within one tile. They run on the desktop and the command line (in the web
+app, not yet), and there is no button for them yet. Each adds its raster as a layer: `share.exportRaster`
+saves its values as a GeoTIFF, and `share.exportMap` a PNG preview of the map:
+
+```sh
+rustgis-cli run --cmd 'embeddings.similarity={"dataset":"alphaearth","year":2024,"point":[-42.88,-20.75],"bbox":[-42.91,-20.78,-42.85,-20.735]}' --cmd 'share.exportRaster={"layer":"AlphaEarth 2024 similarity","path":"aef_similarity.tif"}' --cmd 'share.exportMap={"path":"aef_similarity.png"}'
+rustgis-cli run --cmd 'embeddings.change={"dataset":"alphaearth","from":2017,"to":2025,"bbox":[-42.91,-20.78,-42.85,-20.735]}' --cmd 'share.exportRaster={"layer":"AlphaEarth change 2017–2025","path":"aef_change.tif"}' --cmd 'share.exportMap={"path":"aef_change.png"}'
 ```
 
 These reach the network: the AI Assistant asks first and plugins need the network permission.

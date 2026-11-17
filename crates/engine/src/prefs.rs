@@ -12,6 +12,10 @@ pub const FILE: &str = "prefs.json";
 
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(test)]
+#[path = "tests/released_files.rs"]
+mod released_files;
+
 /// Reads the desktop preferences. A missing file is normal; unreadable or malformed files
 /// return an error without including any preference values in the diagnostic.
 pub fn read() -> Result<Map<String, Value>, String> {
@@ -235,14 +239,13 @@ pub fn opt_in(
 /// connections.
 pub fn use_saved_secrets(s: &mut crate::Session, prefs: &Map<String, Value>, store: Arc<dyn SecretStore>) {
     if let Some(text) = prefs.get(crate::connections::PREF).and_then(Value::as_str) {
-        s.connections = crate::connections::Connections::from_json(text);
+        s.load_connections(text);
     }
     s.database_logins.set_store(Some(store));
     s.database_logins.prefer_environment_passwords();
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

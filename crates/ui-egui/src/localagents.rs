@@ -82,16 +82,7 @@ fn owns_child(child: &mut Child) -> bool {
 fn stamp() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (days, rest) = ((secs / 86_400) as i64, secs % 86_400);
-    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
+    let (year, month, day) = rustgis_engine::data::date::civil_from_days(days);
     format!("{year:04}-{month:02}-{day:02}-{:02}{:02}{:02}", rest / 3600, rest / 60 % 60, rest % 60)
 }
 
@@ -504,7 +495,7 @@ mod tests {
                             &mut out,
                             update(json!({"sessionUpdate":"tool_call","toolCallId":"blocked","title":"Blocked","status":"in_progress"})),
                         );
-                        std::thread::sleep(Duration::from_secs(30));
+                        std::thread::sleep(Duration::from_secs(30)); // test-wait: simulate an agent that blocks instead of consuming stdin
                         continue;
                     }
                     if task.contains("HANG") {
@@ -555,7 +546,7 @@ mod tests {
             if done {
                 return all;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(20)); // test-wait: legacy polling for agent events
         }
         all
     }
@@ -587,7 +578,7 @@ mod tests {
                     return title;
                 }
                 assert!(Instant::now() < deadline, "fake ACP barrier timed out: {prefix}");
-                std::thread::sleep(Duration::from_millis(5));
+                std::thread::sleep(Duration::from_millis(5)); // test-wait: legacy polling for the fake agent barrier
             }
         }
         /// Inject a provider reply through Agent's normal delegation queue, with no HTTP.
@@ -761,7 +752,7 @@ mod tests {
         assert_eq!(report(&until_done(&run)), Some(("Declined.".into(), false)));
         // Its relay token is its own, revoked with it; Stop ends a task that never would.
         assert!(run.follow_up("HANG", false));
-        std::thread::sleep(Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(300)); // test-wait: legacy delay before stopping the hung agent
         let pid = run.pid;
         let grant_file = run._grant.token_file().to_path_buf();
         assert!(grant_file.exists());
@@ -771,7 +762,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         while alive(pid) {
             assert!(Instant::now() < deadline, "the agent's process outlived Stop");
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(50)); // test-wait: legacy polling for agent process exit
         }
         relay.stop();
         let _ = std::fs::remove_dir_all(&work);
@@ -848,7 +839,7 @@ mod tests {
                 break;
             }
             assert!(Instant::now() < deadline, "fake agent never blocked");
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(20)); // test-wait: legacy polling for the blocked-stdin marker
         }
         // Fill the writer pipe and its bounded queue while the fake agent refuses reads.
         for _ in 0..16 {
@@ -868,7 +859,7 @@ mod tests {
         let until = Instant::now() + Duration::from_secs(5);
         while child.lock().unwrap().as_mut().unwrap().try_wait().unwrap().is_none() {
             assert!(Instant::now() < until, "agent survived Stop");
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(20)); // test-wait: legacy polling for the stopped child to exit
         }
         relay.stop();
         let _ = std::fs::remove_dir_all(work);
@@ -899,7 +890,7 @@ mod tests {
                 break;
             }
             assert!(Instant::now() < until);
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(20)); // test-wait: legacy polling for the descendant marker
         }
         let descendant: u32 = std::fs::read_to_string(work.join("descendant.pid")).unwrap().trim().parse().unwrap();
         assert!(alive(descendant));
@@ -908,7 +899,7 @@ mod tests {
         let until = Instant::now() + Duration::from_secs(5);
         while alive(descendant) {
             assert!(Instant::now() < until, "descendant survived Stop");
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(20)); // test-wait: legacy polling for descendant process exit
         }
         relay.stop();
         let _ = std::fs::remove_dir_all(base);

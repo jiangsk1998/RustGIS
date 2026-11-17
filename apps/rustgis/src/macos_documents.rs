@@ -10,7 +10,7 @@
 //! Native reference resolution is synchronous (without UI or mounting); project/data reads
 //! happen later through the existing user-interface path, with its normal progress and Cancel.
 //! https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ScriptableCocoaApplications/SApps_handle_AEs/SAppsHandleAEs.html
-#![allow(unsafe_code)]
+#![expect(unsafe_code, reason = "the Apple event handler is an Objective-C class (#1706)")]
 
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -180,7 +180,6 @@ fn file_url(descriptor: &NSAppleEventDescriptor) -> Option<Retained<NSURL>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use objc2::ClassType;

@@ -13,6 +13,8 @@
 //!   ([`pca_colors`]).
 //! - Tessera (Cambridge): 128 values a 10 m pixel, in a Zarr store of UTM zones read in place
 //!   (see [`tessera`]).
+//! - OlmoEarth v1.3 (Ai2): 128 values a 10 m pixel, in a Zarr store laid out like Tessera's
+//!   (see [`olmoearth`]).
 //!
 //! Nothing here waits on the network: searches and reads take a callback (the app's, off the
 //! frame), with blocking forms for the command line.
@@ -26,6 +28,7 @@ use serde_json::{Value as Json, json};
 
 use crate::cog::Look;
 
+pub mod olmoearth;
 pub mod tessera;
 
 /// What a dataset in the catalog is and what RustGIS does with it.
@@ -54,7 +57,7 @@ pub struct EmbeddingDataset {
 }
 
 /// The datasets, in the order they are listed.
-pub const DATASETS: [EmbeddingDataset; 6] = [
+pub const DATASETS: [EmbeddingDataset; 7] = [
     EmbeddingDataset {
         id: "alphaearth",
         name: "AlphaEarth Foundations (Google Satellite Embedding)",
@@ -83,6 +86,21 @@ pub const DATASETS: [EmbeddingDataset; 6] = [
         license: "",
         data_url: "https://registry.opendata.aws/tessera/",
         paper_url: "https://arxiv.org/abs/2506.20380",
+        search: true,
+    },
+    EmbeddingDataset {
+        id: "olmoearth",
+        name: "OlmoEarth v1.3",
+        provider: "Ai2",
+        model: "OlmoEarth-v1.3-Base",
+        kind: "pixel",
+        resolution: "10 m",
+        dimensions: 128,
+        years: Some((2017, 2025)),
+        coverage: "Global (UTM zones)",
+        license: olmoearth::LICENSE,
+        data_url: "https://source.coop/olmoearth/olmoearth-v1-3-embeddings",
+        paper_url: "https://allenai.org/blog/olmoearth-v1-3",
         search: true,
     },
     EmbeddingDataset {
@@ -260,15 +278,7 @@ fn year_of(t: i64) -> i32 {
         _ => t,
     };
     let days = ms.div_euclid(86_400_000);
-    // Howard Hinnant's civil_from_days.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
+    let (y, _, _) = rustgis_data::date::civil_from_days(days);
     i32::try_from(y).unwrap_or(0)
 }
 
@@ -424,14 +434,7 @@ pub fn aef_series(fields: &[Field], batch: &Batch, (first, last): (i32, i32), bb
 
 /// The first moment of a year, in milliseconds since 1970 (UTC): a time slider's step for it.
 pub fn year_start_ms(year: i32) -> f64 {
-    // Howard Hinnant's days_from_civil for 1 January, which it counts as month 11 of the year
-    // before (March is its month 1).
-    let y = i64::from(year) - 1;
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * 10 + 2) / 5;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
+    let days = rustgis_data::date::days_from_civil(i64::from(year), 1, 1);
     days as f64 * 86_400_000.0
 }
 
@@ -849,8 +852,8 @@ mod tests {
 
     #[test]
     fn catalog() {
-        assert_eq!(DATASETS.len(), 6);
-        assert_eq!(DATASETS.iter().filter(|d| d.search).count(), 3);
+        assert_eq!(DATASETS.len(), 7);
+        assert_eq!(DATASETS.iter().filter(|d| d.search).count(), 4);
         assert_eq!(dataset("alphaearth").map(|d| d.dimensions), Some(64));
         assert!(dataset("nope").is_none());
         assert_eq!(dataset("earth-index").unwrap().to_json()["years"], json!([2024]));
@@ -922,6 +925,7 @@ mod tests {
             complete: true,
             skipped: 0,
             unread_dates: Vec::new(),
+            rounded_dates: Vec::new(),
         };
         let t = aef_tiles(&fields, &batch, 2021, [-123.0, 40.0, -122.0, 41.0]);
         assert_eq!(t.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["near", "far"]);
@@ -985,6 +989,7 @@ mod tests {
             complete: false,
             skipped: 0,
             unread_dates: Vec::new(),
+            rounded_dates: Vec::new(),
         };
         let f = aef_series(&fields, &batch, (2017, 2025), [-43.0, -20.9, -42.9, -20.8]);
         assert_eq!((f.series.len(), f.duplicates, f.dropped, f.complete), (2, 1, 0, false));

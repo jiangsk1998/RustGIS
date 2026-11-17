@@ -202,6 +202,24 @@ pub fn slope(r: &Raster, b: usize, zf: f64) -> Result<Vec<f32>, String> {
     terrain(r, d, zf, |gx, gy| gx.hypot(gy).atan().to_degrees())
 }
 
+/// Slope as percent rise: 100 times the gradient magnitude, equivalent to 100 × tan(angle in radians).
+/// Uses the same Horn gradient, Z factor and no-data handling as [`slope`], without rounding
+/// through degree output first. Refuses output beyond Float32's range with a cell count.
+pub fn slope_percent(r: &Raster, b: usize, zf: f64) -> Result<Vec<f32>, String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let d = band(r, b)?;
+    let overflow = AtomicUsize::new(0);
+    let pixels = terrain(r, d, zf, |gx, gy| {
+        let value = 100.0 * gx.hypot(gy);
+        if !value.is_finite() || value > f64::from(f32::MAX) {
+            overflow.fetch_add(1, Ordering::Relaxed);
+        }
+        value
+    })?;
+    let n = overflow.load(Ordering::Relaxed);
+    if n > 0 { Err(format!("{n} percent slope cells exceed the Float32 range")) } else { Ok(pixels) }
+}
+
 /// Aspect: the compass direction the slope faces, in degrees (flat cells are -1).
 pub fn aspect(r: &Raster, b: usize) -> Result<Vec<f32>, String> {
     let d = band(r, b)?;
@@ -266,12 +284,20 @@ fn band_math_on(threads: Option<usize>, r: &Raster, expr: &str) -> Result<Vec<f3
     Ok(out)
 }
 
+/// A remap's cells, and its ranges whose low end isn't below the high end, which match nothing.
+pub struct Remap {
+    pub cells: Vec<f32>,
+    pub empty: Vec<(f64, f64)>,
+}
+
 /// Remaps value ranges `[lo, hi)` to new values; other values become no-data unless `keep`.
-pub fn remap(r: &Raster, b: usize, ranges: &[(f64, f64, f64)], keep: bool) -> Result<Vec<f32>, String> {
+/// A range whose low end isn't below its high end matches nothing (saved scripts and models
+/// rely on what a range matches); it is listed in [`Remap::empty`] for [`empty_ranges_note`].
+pub fn remap(r: &Raster, b: usize, ranges: &[(f64, f64, f64)], keep: bool) -> Result<Remap, String> {
     let d = band(r, b)?;
     let n = r.width as usize * r.height as usize;
     // A lookup in the ranges: about a unit a cell.
-    per_index(
+    let cells = per_index(
         n,
         r.width as usize,
         1,
@@ -285,7 +311,51 @@ pub fn remap(r: &Raster, b: usize, ranges: &[(f64, f64, f64)], keep: bool) -> Re
                 None => NODATA,
             }
         },
-    )
+    )?;
+    let empty = ranges.iter().filter(|(lo, hi, _)| lo >= hi).map(|(lo, hi, _)| (*lo, *hi)).collect();
+    Ok(Remap { cells, empty })
+}
+
+/// The one notice for remap ranges that match nothing, each with the raster it was given for,
+/// or none when there are none. Where a range has equal whole ends (a class code), it shows the
+/// range that picks that value.
+pub fn empty_ranges_note(empty: &[(String, f64, f64)]) -> Option<String> {
+    let mut by_raster: Vec<(&str, Vec<String>)> = Vec::new();
+    for (name, lo, hi) in empty {
+        let range = format!("[{lo}, {hi}]");
+        match by_raster.iter_mut().find(|(n, _)| n == name) {
+            Some((_, ranges)) => ranges.push(range),
+            None => by_raster.push((name, vec![range])),
+        }
+    }
+    let listed: Vec<String> = by_raster.iter().map(|(name, ranges)| format!("{} in {name}", ranges.join(", "))).collect();
+    let what = match empty.len() {
+        0 => return None,
+        1 => "1 remap range matches".to_string(),
+        n => format!("{n} remap ranges match"),
+    };
+    // Past 2^53 a Double has no whole number between `lo` and `lo + 1`.
+    let pick = empty
+        .iter()
+        .find(|(_, lo, hi)| lo == hi && lo.fract() == 0.0 && lo.abs() < 9_007_199_254_740_992.0)
+        .map(|(_, lo, _)| format!(", so [{lo}, {}] picks {lo}", lo + 1.0))
+        .unwrap_or_default();
+    Some(format!(
+        "{what} nothing ({}): a range takes values from its low end up to, but not including, its high end{pick}",
+        listed.join("; ")
+    ))
+}
+
+/// Whether `cells`, rows of `width`, hold a cell with a value; looks at Cancel row by row, so a
+/// large result with none still stops.
+pub fn has_values(cells: &[f32], width: usize) -> Result<bool, String> {
+    for row in cells.chunks(width.max(1)) {
+        crate::control::check()?;
+        if row.iter().any(|v| v.is_finite() && *v != NODATA) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// `band`'s values resampled (nearest neighbour) onto `target`'s grid, through longitude/latitude.
@@ -707,7 +777,6 @@ pub fn idw(
 }
 
 /// [`idw`] on `threads` threads, or as many as its work calls for.
-#[allow(clippy::too_many_arguments)]
 fn idw_on(
     threads: Option<usize>,
     points: &[(Coord, f64)],
@@ -2027,7 +2096,7 @@ mod tests {
         let ranges = [(0.0, 50.0, 1.0), (50.0, 100.0, 2.0)];
         let passes = |r: &Raster| -> Vec<Result<usize, String>> {
             vec![
-                remap(r, 0, &ranges, false).map(|v| v.len()),
+                remap(r, 0, &ranges, false).map(|v| v.cells.len()),
                 weighted_overlay(&[(r.bands[0].data.clone(), 1.0)]).map(|v| v.len()),
                 classify_min_distance(r, &[0, 1], &means).map(|v| v.len()),
                 class_means(r, &[0, 1], &polygons).map(|c| c.len()),
@@ -2588,7 +2657,7 @@ mod tests {
         let m = band_math(&r, "(b1 - b2) / (b1 + b2 + 1) * 2").unwrap_or_default();
         assert!((m[20 + 3] - ((30.0 - 1.0) / 32.0 * 2.0)).abs() < 1e-5);
         assert!(band_math(&r, "b3 + 1").is_err() && band_math(&r, "(b1").is_err() && band_math(&r, "b1 $ 2").is_err());
-        let rm = remap(&r, 0, &[(0.0, 100.0, 1.0), (100.0, 1000.0, 2.0)], false).unwrap_or_default();
+        let rm = remap(&r, 0, &[(0.0, 100.0, 1.0), (100.0, 1000.0, 2.0)], false).unwrap().cells;
         assert_eq!((rm[5], rm[15]), (1.0, 2.0));
         let o = weighted_overlay(&[(rm.clone(), 3.0), (vec![1.0; 400], 1.0)]).unwrap_or_default();
         assert!((o[15] - 1.75).abs() < 1e-6);

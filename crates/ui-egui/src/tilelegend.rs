@@ -167,7 +167,6 @@ fn note(ui: &mut Ui, text: &str, why: Option<&str>, t: &Tokens) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use egui_kittest::kittest::Queryable;
     use serde_json::json;

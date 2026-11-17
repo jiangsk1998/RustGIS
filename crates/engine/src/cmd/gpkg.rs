@@ -108,6 +108,9 @@ fn add_layer(s: &mut Session, p: &Value) -> CmdResult {
         if let Some(note) = rustgis_data::source::unread_dates_note(&info.fields, &editable.unread_dates) {
             s.notify(format!("{name}: {note}; saving leaves them as they are unless they're edited"), false);
         }
+        if let Some(note) = rustgis_data::source::rounded_dates_note(&info.fields, &editable.rounded_dates) {
+            s.notify(format!("{name}: {note}"), false);
+        }
         if !editable.writable {
             s.notify(format!("{name}: the file is read-only, so edits can't be saved to it"), false);
         }
@@ -183,6 +186,8 @@ pub(crate) fn editing(s: &Session, path: &std::path::Path, table: &str) -> Vec<S
         .collect()
 }
 
+/// `gpkg.saveEdits`: writes the layer's pending inserts, updates and deletes to its table in one
+/// transaction, then says what the table didn't keep (dates in UTC or to the millisecond, fields without a column).
 fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
@@ -246,6 +251,9 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
         };
         let saved = saved_rows.changes;
         let utc_dates = saved_rows.utc_dates;
+        let fine_dates = saved_rows.fine_dates;
+        let rounded_dates = saved_rows.rounded_dates;
+        let unread_dates = saved_rows.unread_dates;
         let mut stored: std::collections::HashMap<_, _> = saved_rows.features.into_iter().map(|f| (f.id, f)).collect();
         let versions = saved.versions.iter().copied().collect();
         if let Some(l) = s.map_mut().layer_mut(id) {
@@ -295,6 +303,7 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
         s.saved_over.retain(rustgis_map::source::Versions::held_elsewhere);
         s.saved_over.push(edit.versions);
         reset_sources(s, path, table, false);
+        let written = s.notice_mark();
         s.notify(
             format!(
                 "{name}: saved to {table} in {}: {} new, {} changed, {} deleted",
@@ -308,9 +317,19 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
         if !saved.skipped_fields.is_empty() {
             s.notify(format!("{name}: {table} has no column for {}, so it wasn't saved", saved.skipped_fields.join(", ")), false);
         }
-        if let Some(note) = rustgis_data::io::utc_dates_note(&fields, &utc_dates, &format!("{name}: {table}")) {
+        if let Some(note) = rustgis_data::io::fine_dates_note(&fields, &fine_dates, &super::saved_target(&name, table)) {
             s.notify(note, false);
         }
+        if let Some(note) = rustgis_data::source::unread_dates_note(&fields, &unread_dates) {
+            s.notify(format!("{}: {note}, when read back after the save", super::saved_target(&name, table)), false);
+        }
+        if let Some(note) = rustgis_data::source::rounded_dates_note(&fields, &rounded_dates) {
+            s.notify(format!("{}: {note}, when read back after the save", super::saved_target(&name, table)), false);
+        }
+        if let Some(note) = rustgis_data::io::utc_dates_note(&fields, &utc_dates, &super::saved_target(&name, table)) {
+            s.notify(note, false);
+        }
+        s.retain_written_notices(written);
         Ok(json!({"saved": true, "inserted": saved.inserted.len(), "updated": saved.updated, "deleted": saved.deleted,
             "unchanged": saved.unchanged, "keys": saved.inserted.iter().map(|(_, k)| k.cast_signed()).collect::<Vec<_>>(), "skippedFields": saved.skipped_fields}))
     }
@@ -365,6 +384,9 @@ pub(super) fn read_candidate(name: &str, edit: &rustgis_map::source::GpkgEdit) -
     }
     if let Some(note) = rustgis_data::source::unread_dates_note(&info.fields, &editable.unread_dates) {
         notes.push(format!("{note}; saving leaves them as they are unless they're edited"));
+    }
+    if let Some(note) = rustgis_data::source::rounded_dates_note(&info.fields, &editable.rounded_dates) {
+        notes.push(note);
     }
     if !editable.writable {
         notes.push("the file is read-only, so edits can't be saved to it".into());

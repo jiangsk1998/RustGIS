@@ -675,7 +675,6 @@ impl TrendRun {
     /// One piece's slices read into a block, cell by date: the piece's first slice (its grid), the
     /// block, and its cells. Dates are read [`TimeCube::readers`] at a time; `too_long` checks the
     /// run's length on the first slice when the cube didn't know its size.
-    #[allow(clippy::type_complexity)]
     fn read_piece(
         &self,
         piece: usize,
@@ -730,7 +729,6 @@ impl TrendRun {
     /// Each cell's trend in `block` (cells × dates), worked out on as many threads as there are
     /// cores: its four outputs a cell. `first` is the block's first cell among all of the run's,
     /// so progress is counted over the whole grid.
-    #[allow(clippy::too_many_arguments)]
     fn work_out(
         &self,
         block: &[f32],
@@ -1004,7 +1002,10 @@ pub fn trend_start(s: &mut Session, p: &Value) -> Result<TrendRun, String> {
     let day = |i: usize| rustgis_data::time::format(cube.dates().get(i).copied().unwrap_or(f64::NAN), "YYYY-MM-DD");
     let (a, z) = (steps.first().copied().unwrap_or(0), steps.last().copied().unwrap_or(0));
     let label = format!("{} {}–{}", cube.label(), day(a), day(z));
-    let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map_or(label, |n| n.chars().take(200).collect());
+    let name = match ps(p, "name").map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => super::within("name", "the outputs' name", n, 200)?,
+        None => label,
+    };
     Ok(TrendRun { cube, steps, test, alpha, min_valid, per, name, max_pairs: MAX_PAIRS })
 }
 
@@ -1853,7 +1854,8 @@ pub fn reduce_start(s: &mut Session, p: &Value) -> Result<ReduceRun, String> {
     } else {
         format!(" (months {})", months.iter().map(u32::to_string).collect::<Vec<_>>().join(","))
     };
-    let given = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(|n| n.chars().take(200).collect::<String>());
+    let given =
+        ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(|n| super::within("name", "the outputs' name", n, 200)).transpose()?;
     let base = format!("{} {}", cube.label(), stat.code());
     let groups = found
         .iter()
@@ -1962,7 +1964,6 @@ mod tests {
     /// end is never told.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    #[allow(clippy::panic)]
     fn a_long_run_that_panics_says_why() {
         fn tell(_: &str, share: f64) {
             assert!(share < 1.0, "a run that panicked is told as done");
@@ -2017,7 +2018,7 @@ mod tests {
             }
             fn slice(&self, i: usize) -> Result<Option<(Arc<Raster>, usize)>, String> {
                 // The early dates the slowest, so readers that place as they read finish them last.
-                std::thread::sleep(std::time::Duration::from_millis(((12 - i.min(12)) * 3) as u64));
+                std::thread::sleep(std::time::Duration::from_millis(((12 - i.min(12)) * 3) as u64)); // test-wait: finish early cube dates last to exercise result ordering
                 let gt = GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: 1.0, pixel_height: -1.0 };
                 let r = Raster::new("s", 1, 1, vec![vec![i as f32]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32")
                     .map_err(|e| e.to_string())?;

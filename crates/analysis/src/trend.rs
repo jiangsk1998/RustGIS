@@ -598,8 +598,7 @@ mod tests {
     /// `yue_wang_modification_test(lag=1)`, `seasonal_test(period=12)`), with numpy's seeded noise:
     /// Sen's slope and intercept, S, Var(S), Z and p agree.
     #[test]
-    // The series are seeded noise: a value near π/6 is a coincidence.
-    #[allow(clippy::type_complexity, clippy::approx_constant)]
+    #[expect(clippy::approx_constant, reason = "the series are seeded noise: a value near π/6 is a coincidence")]
     fn as_pymannkendall_gives() {
         let cases: &[(&str, &[f64], f64, f64, [f64; 4], [f64; 4], [f64; 4])] = &[
             (

@@ -1,6 +1,10 @@
 //! Publish tab: export the map as PNG or GeoTIFF and layers as GeoJSON, CSV, FlatGeobuf, GeoPackage,
 //! GeoParquet, Shapefile, KML/KMZ or GPX.
 
+mod table;
+
+pub(super) use table::table_work;
+
 use std::path::Path;
 
 use rustgis_data::io::{GpkgMode, GpkgTable, GpkgWritten};
@@ -31,53 +35,9 @@ pub fn commands() -> Vec<C> {
             .view()
             .when(need_layer)
             .params(r#"{"layer"?, "path": "*.geojson|*.csv|*.fgb|*.gpkg|*.parquet|*.shp|*.zip|*.kml|*.kmz|*.gpx", "crs"?: "EPSG:… (or WKT) for a GeoPackage, Shapefile or FlatGeobuf (default: the system the layer was read in, else EPSG:4326)", "mode"?: "newFile (default: refuses an existing file) | addTable | replaceTable, for a GeoPackage", "tableName"?: "the GeoPackage table (default: the layer's name)"}"#),
-        C::new("share.exportTable", "Export Table", "Publish › Output", |s, p| {
-            let owner = s.continuation()?;
-            owner.check()?;
-            let _progress = rustgis_analysis::control::install_progress(None);
-            let path = ps(p, "path").ok_or("path is required")?;
-            let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-            let gpkg = gpkg_table(p, &ext)?;
-            let t = s.project.tables.get(s.table_index(p)?).ok_or("no such table")?;
-            let default = t.dataset.name.clone();
-            let null_numbers = rustgis_data::export::numbers_written_as_null(&t.dataset.features, &t.dataset.fields, &ext);
-            // Tables may retain geometry and its import losses, just as feature layers do: what is
-            // written lacks the Z or M values dropped when it was read and its image fields (their
-            // images stay in the source); a Shapefile also cuts field names and values to dBase's.
-            let notes = rustgis_data::export_notes([(&t.dataset, t.dataset.extent())], path, Crs::LonLat);
-            let mut dbf_notes = Vec::new();
-            if matches!(ext.as_str(), "shp" | "zip") {
-                dbf_notes.extend(rustgis_data::io::shapefile_names_note(&t.dataset.fields, path));
-                dbf_notes.extend(rustgis_data::io::shapefile_values_notes(&t.dataset, path));
-                dbf_notes.extend(rustgis_data::io::shapefile_geometry_notes(&t.dataset, path, Crs::LonLat));
-            }
-            if matches!(ext.as_str(), "parquet" | "geoparquet") {
-                dbf_notes.extend(rustgis_data::source::parquet::values_note(&t.dataset, path));
-            }
-            if ext == "gpkg" {
-                dbf_notes.extend(rustgis_data::io::geopackage_names_note(&t.dataset.fields, path));
-            }
-            dbf_notes.extend(rustgis_data::io::dates_as_text_note(&t.dataset.fields, path));
-            dbf_notes.extend(gpkg_dates_note(&t.dataset, &ext, path));
-            // CSV holds a point a row, GPX a name for each feature and no areas.
-            let name_field = rustgis_data::io::name_field(&t.dataset);
-            dbf_notes.extend(rustgis_data::io::export_losses_notes(&t.dataset, &ext, name_field, path));
-            let (left_out, table) =
-                rustgis_data::io::write_path_to(&t.dataset, Path::new(path), Crs::LonLat, &gpkg).map_err(|e| e.to_string())?;
-            s.check_continuation(&owner).map_err(|why| super::exports::completion_refused(Some(path), why))?;
-            if let Some(note) = rustgis_data::io::left_out_note(path, &ext, left_out) {
-                s.notify(note, false);
-            }
-            for note in notes.into_iter().chain(dbf_notes) {
-                s.notify(note, false);
-            }
-            notify_null_numbers(s, path, null_numbers);
-            let mut out = json!({"path": path});
-            report_table(s, path, &gpkg, &default, table, &mut out);
-            Ok(out)
-        }).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
+        C::new("share.exportTable", "Export Table", "Publish › Output", |s, p| super::exports::write_here(s, p, "share.exportTable")).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
         .params(
-            r#"{"table": name|id (a standalone table), "path": "*.geojson|*.csv|*.fgb|*.gpkg|*.parquet|*.shp|*.zip|*.kml|*.kmz|*.gpx", "mode"?: "newFile (default: refuses an existing file) | addTable | replaceTable, for a GeoPackage", "tableName"?: "the GeoPackage table (default: the table's name)"}"#,
+            r#"{"table": name|id (a standalone table), "path": "*.geojson|*.csv|*.fgb|*.gpkg|*.parquet|*.shp|*.zip|*.kml|*.kmz|*.gpx", "mode"?: "newFile (default: refuses an existing file) | addTable | replaceTable, for a GeoPackage", "tableName"?: "the GeoPackage table (default: the table's name)", "sort"?: [{"field": name, "descending"?: false}], "limit"?: "nonnegative integer: keep the first N rows after sorting"}"#,
         )
         .view(),
     ]
@@ -104,12 +64,9 @@ pub fn gpkg_table(p: &Value, ext: &str) -> Result<GpkgTable, String> {
     Ok(GpkgTable { mode, name })
 }
 
-/// Puts the table a GeoPackage export wrote, and whether it replaced one, in its result `out`;
-/// an export into an existing GeoPackage also says so, what went with a replaced table, and
-/// which views and triggers elsewhere name it. Layers read in place from a replaced table read
-/// it again.
-fn report_table(s: &mut Session, path: &str, gpkg: &GpkgTable, default: &str, table: Option<GpkgWritten>, out: &mut Value) {
-    let Some(table) = table else { return };
+/// File-only GeoPackage diagnostics, available even if delivery cannot refresh live layers.
+fn table_write_notes(path: &str, gpkg: &GpkgTable, default: &str, table: &GpkgWritten) -> Vec<String> {
+    let mut notes = Vec::new();
     // A new file's table is said only when it isn't the name asked for, or by default the
     // layer's (a reserved name is prefixed, control characters and edge spaces dropped); one
     // added to or replaced in a file is always named below.
@@ -126,11 +83,9 @@ fn report_table(s: &mut Session, path: &str, gpkg: &GpkgTable, default: &str, ta
                 table.table
             )
         };
-        s.notify(note, false);
+        notes.push(note);
     }
     if gpkg.mode != GpkgMode::NewFile {
-        let (reread, failed) =
-            if table.replaced { super::gpkg::reset_sources(s, Path::new(path), &table.table, true) } else { (0, Vec::new()) };
         let note = if table.replaced {
             format!(
                 "{path}: replaced its table {}, dropping the old table's indexes, triggers, column descriptions, metadata links and extension records",
@@ -139,7 +94,29 @@ fn report_table(s: &mut Session, path: &str, gpkg: &GpkgTable, default: &str, ta
         } else {
             format!("{path}: added the table {}", table.table)
         };
-        s.notify(note, false);
+        notes.push(note);
+        if !table.dependents.is_empty() {
+            let n = table.dependents.len();
+            notes.push(format!(
+                "{path}: {n} view{} or trigger{} naming {} may no longer work if a column it uses is gone: {}",
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "" } else { "s" },
+                table.table,
+                table.dependents.join(", ")
+            ));
+        }
+    }
+    notes
+}
+
+fn report_table(s: &mut Session, path: &str, gpkg: &GpkgTable, default: &str, table: Option<GpkgWritten>, out: &mut Value) {
+    let Some(table) = table else { return };
+    for note in table_write_notes(path, gpkg, default, &table) {
+        s.notify_written(note, false);
+    }
+    if gpkg.mode != GpkgMode::NewFile {
+        let (reread, failed) =
+            if table.replaced { super::gpkg::reset_sources(s, Path::new(path), &table.table, true) } else { (0, Vec::new()) };
         if reread > 0 {
             let layers = if reread == 1 { "layer reads" } else { "layers read" };
             s.notify(format!("{path}: {reread} {layers} {} in place, now the new table", table.table), false);
@@ -164,19 +141,6 @@ fn report_table(s: &mut Session, path: &str, gpkg: &GpkgTable, default: &str, ta
                 failed.join(", ")
             );
             s.notify(note, true);
-        }
-        if !table.dependents.is_empty() {
-            let n = table.dependents.len();
-            s.notify(
-                format!(
-                    "{path}: {n} view{} or trigger{} naming {} may no longer work if a column it uses is gone: {}",
-                    if n == 1 { "" } else { "s" },
-                    if n == 1 { "" } else { "s" },
-                    table.table,
-                    table.dependents.join(", ")
-                ),
-                false,
-            );
         }
     }
     out["table"] = json!(table.table);
@@ -217,6 +181,14 @@ pub fn map_png(s: &mut Session, width: Option<f64>, height: Option<f64>, dpi: Op
     saying_shadows(s, "The map image", |s| png_of(s.map_mut(), view_size, width, height, dpi))
 }
 
+/// [`map_png`] for a caller that draws several frames inside one [`saying_shadows`], which says
+/// what they all said of their cast shadows once. Only the desktop's animation exports draw so.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn map_png_unsaid(s: &mut Session, width: Option<f64>, height: Option<f64>, dpi: Option<f64>) -> Result<Vec<u8>, String> {
+    let view_size = s.view_size;
+    png_of(s.map_mut(), view_size, width, height, dpi)
+}
+
 /// Runs `draw`, which draws maps or pages for `s` (an image, an export, a shared item), and says
 /// as warnings about `what` what its frames said of their cast shadows once it drew (see
 /// [`shadow_warnings`]). Whatever the engine draws for someone goes through it, or through
@@ -239,14 +211,14 @@ pub(crate) fn shadow_warnings(what: &str, said: &rustgis_render::ShadowsSaid) ->
     let mut out: Vec<String> = said.notices.iter().map(|e| format!("{what}: {e}")).collect();
     if said.to_come {
         out.push(format!(
-            "{what}: made without the cast shadows still being worked out, as the window doesn't wait for them: once the map shows them, draw or export it again"
+            "{what}: made without the cast shadows or sky visibility still being worked out, as the window doesn't wait for them: once the map shows them, draw or export it again"
         ));
     }
     out
 }
 
 /// Renders `map` at its camera in a view of `(vw, vh)` points (or a requested size) to PNG bytes.
-fn png_of(
+pub(super) fn png_of(
     map: &mut rustgis_map::Map,
     view_size: (f64, f64),
     width: Option<f64>,
@@ -645,8 +617,11 @@ pub(crate) fn layer_work(s: &Session, p: &Value) -> Result<Work, String> {
     let ext = Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let gpkg = gpkg_table(p, &ext)?;
     let compatibility = ps(p, "crs").and_then(|text| asked.and_then(|crs| rustgis_data::raster::wkt::typed_crs_note(text, crs)));
+    let (boxes, map) = (s.constructions.clone(), s.map().instance_id());
     Ok(Box::new(move || {
+        let note = boxes.export_notes(map, &l)?;
         let mut wrote = write_layer(&l, &path, asked, gpkg)?;
+        wrote.notes.extend(note);
         if let Some(note) = compatibility {
             wrote.notes.insert(0, format!("crs: {note}"));
         }
@@ -654,15 +629,47 @@ pub(crate) fn layer_work(s: &Session, p: &Value) -> Result<Work, String> {
     }))
 }
 
+/// What a whole read of layer `layer` for the export to `file` did to its dates: values read as
+/// empty because they weren't dates, and date-times rounded to the microsecond
+/// ([`rustgis_map::Unreadable`]). Every export of a layer read in place says them, the browser's
+/// download too.
+pub fn read_date_notes(file: &str, layer: &str, lost: &rustgis_map::Unreadable) -> Vec<String> {
+    let empty = lost.dates.iter().map(|n| format!("{file}: {layer}: {n}, so they're empty in the export"));
+    empty.chain(lost.rounded.iter().map(|n| format!("{file}: {layer}: {n} when read for the export"))).collect()
+}
+
+/// The complete diagnostics from a whole read made for an export, including metadata losses
+/// discovered by a temporary source opening that the live layer never received.
+pub fn read_notes(file: &str, layer: &str, lost: &rustgis_map::Unreadable) -> Vec<String> {
+    read_date_notes(file, layer, lost).into_iter().chain(lost.messages.iter().map(|n| format!("{file}: {n}"))).collect()
+}
+
+/// A counted source Z/M diagnostic replaces only the equivalent generic export warning.
+/// Resident/older layers and custom providers without that diagnostic keep their warning.
+pub fn coalesce_read_zm(notes: &mut Vec<String>, file: &str, ds: &rustgis_data::Dataset, lost: &rustgis_map::Unreadable) {
+    if lost.zm_noted
+        && let Some(generic) = rustgis_data::zm_export_note([ds], file)
+    {
+        notes.retain(|note| note != &generic);
+    }
+}
+
 /// What a GeoPackage export of `ds` says of its dates: date-times written in UTC, and text in
-/// date fields that isn't a date. Nothing for another format, or when there was none.
+/// date fields that isn't a date, and rounded to the millisecond; for a FlatGeobuf, its date fields with no values. Nothing for
+/// another format, or when there was none.
 pub fn gpkg_dates_note(ds: &rustgis_data::Dataset, ext: &str, path: &str) -> Vec<String> {
-    use rustgis_data::io::{offset_dates, text_in_dates, text_in_dates_note, utc_dates_note};
+    use rustgis_data::io::{fine_dates, fine_dates_note, offset_dates, text_in_dates, text_in_dates_note, utc_dates_note};
+    if ext == "fgb" {
+        return rustgis_data::io::fgb_empty_dates_note(&ds.fields, &rustgis_data::io::written_values(ds.features.iter(), &ds.fields), path)
+            .into_iter()
+            .collect();
+    }
     if ext != "gpkg" {
         return Vec::new();
     }
     let utc = utc_dates_note(&ds.fields, &offset_dates(ds.features.iter(), &ds.fields), path);
-    utc.into_iter().chain(text_in_dates_note(&ds.fields, &text_in_dates(ds.features.iter(), &ds.fields), path)).collect()
+    let fine = fine_dates_note(&ds.fields, &fine_dates(ds.features.iter(), &ds.fields), path);
+    utc.into_iter().chain(fine).chain(text_in_dates_note(&ds.fields, &text_in_dates(ds.features.iter(), &ds.fields), path)).collect()
 }
 
 /// Writes layer `l` to `path`, in `asked` or the system the format defaults to; a GeoPackage's
@@ -702,7 +709,16 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
                 .map(|n| format!("{path}: {}: {n}, so they're empty in the export", layer.name))
                 .into_iter()
                 .collect();
+            dates.extend(
+                rustgis_data::source::rounded_dates_note(&layer.fields, &e.rounded_dates)
+                    .map(|n| format!("{path}: {}: {n} when read for the export", layer.name)),
+            );
             dates.extend(rustgis_data::io::utc_dates_note(&layer.fields, &e.utc_dates, path));
+            dates.extend(rustgis_data::io::fine_dates_note(&layer.fields, &e.fine_dates, path));
+            if ext == "fgb" {
+                dates.extend(rustgis_data::io::fgb_empty_dates_note(&layer.fields, &e.written_values, path));
+            }
+            dates.extend(e.date_messages.iter().map(|n| format!("{path}: {n}")));
             (e.written, e.left_out, e.skipped, table, unfit, e.null_numbers, moved, e.csv, dates)
         }
         None => {
@@ -710,8 +726,7 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
             let unfit = if parquet { rustgis_data::source::parquet::values_note(ds, path) } else { None };
             let null_numbers = rustgis_data::export::numbers_written_as_null(&ds.features, &ds.fields, &ext);
             let csv = if ext == "csv" { rustgis_data::io::CsvLosses::of(&ds.features, ds.geometry_type) } else { Default::default() };
-            let mut dates: Vec<String> =
-                unreadable.dates.iter().map(|n| format!("{path}: {}: {n}, so they're empty in the export", ds.name)).collect();
+            let mut dates = read_notes(path, &ds.name, &unreadable);
             dates.extend(gpkg_dates_note(ds, &ext, path));
             (ds.features.len().saturating_sub(left_out), left_out, unread, table, unfit, null_numbers, None, csv, dates)
         }
@@ -722,6 +737,10 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
     // raster layer's extent is its raster's, which the file doesn't hold.
     let extent = if chunks.is_some() { l.extent() } else { ds.extent() };
     let mut notes = rustgis_data::export_notes([(ds, extent)], path, crs);
+    coalesce_read_zm(&mut notes, path, ds, &unreadable);
+    if asked.is_none() {
+        notes.extend(rustgis_data::io::default_export_note(ds, path));
+    }
     notes.extend(moved);
     // A Shapefile (`.shp`, or zipped to `.zip`) cuts field names to dBase's.
     let shapefile = matches!(ext.as_str(), "shp" | "zip");
@@ -764,6 +783,10 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
     let written_path = Some(path.to_string());
     let path = path.to_string();
     let default = ds.name.clone();
+    let mut refused_notes = table.as_ref().map(|t| table_write_notes(&path, &gpkg, &default, t)).unwrap_or_default();
+    if let Some(note) = null_numbers_note(&path, null_numbers) {
+        refused_notes.push(note.english());
+    }
     let then: Option<super::exports::Then> = if table.is_some() || null_numbers > 0 {
         Some(Box::new(move |s: &mut Session, out: &mut Value| {
             notify_null_numbers(s, &path, null_numbers);
@@ -777,26 +800,35 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
     };
     Ok(Wrote {
         answer,
+        diagnostics: Vec::new(),
+        refused_notes,
         notes: said,
         written_path,
         then,
         #[cfg(not(target_arch = "wasm32"))]
         owner: None,
+        #[cfg(not(target_arch = "wasm32"))]
+        crs_used: Vec::new(),
     })
 }
 
 /// Reports numeric loss after the file has been written, keeping the output path literal in
 /// translated interface text. A clean export emits no loss notice.
-fn notify_null_numbers(s: &mut Session, path: &str, count: usize) {
-    if count > 0 {
-        s.notify_text(
-            crate::notice_text::NoticeText::format(
-                "{path}: {count} attribute value(s) that aren't finite numbers (NaN or infinity) were written as null",
-                [("path", path.to_string().into()), ("count", count.to_string().into())],
-            ),
-            false,
-        );
+pub(crate) fn notify_null_numbers(s: &mut Session, path: &str, count: usize) {
+    if let Some(note) = null_numbers_note(path, count) {
+        let mark = s.notice_mark();
+        s.notify_text(note, false);
+        s.retain_written_notices(mark);
     }
+}
+
+pub(crate) fn null_numbers_note(path: &str, count: usize) -> Option<crate::notice_text::NoticeText> {
+    (count > 0).then(|| {
+        crate::notice_text::NoticeText::format(
+            "{path}: {count} attribute value(s) that aren't finite numbers (NaN or infinity) were written as null",
+            [("path", path.to_string().into()), ("count", count.to_string().into())],
+        )
+    })
 }
 
 /// Whether `a` and `b` are the same existing file.

@@ -9,7 +9,7 @@
 //! is bounded, and a malformed placemark is skipped and counted.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use roxmltree::{Node, ParsingOptions};
 use rustgis_geom::Coord;
@@ -78,6 +78,8 @@ pub fn read(file_name: &str, bytes: &[u8]) -> Result<Vec<Layer>> {
         maps: HashMap::new(),
         inline: HashMap::new(),
         dropped_keys: 0,
+        duplicate_entries: 0,
+        duplicate_placemarks: 0,
         rows: Vec::new(),
         keys: Vec::new(),
         skipped: 0,
@@ -186,6 +188,8 @@ struct Reader {
     keys: Vec<String>,
     /// Extended data entries past the column cap.
     dropped_keys: usize,
+    duplicate_entries: usize,
+    duplicate_placemarks: usize,
     skipped: usize,
 }
 
@@ -427,6 +431,8 @@ impl Reader {
             geometry(&g, &mut parts, 0);
         }
         let mut data = Vec::new();
+        let mut seen = HashSet::new();
+        let mut duplicates = 0usize;
         if let Some(ext) = child(pm, "ExtendedData") {
             for d in ext.descendants().filter(|d| d.is_element()) {
                 let pair = match local(&d) {
@@ -435,6 +441,13 @@ impl Reader {
                     _ => None,
                 };
                 if let Some((k, v)) = pair.filter(|(k, _)| !k.trim().is_empty()) {
+                    // The attribute reader uses the first entry for a key. Count and discard
+                    // later entries here, including duplicates across Data and SimpleData and
+                    // names past the column cap.
+                    if !seen.insert(k.clone()) {
+                        duplicates += 1;
+                        continue;
+                    }
                     if !self.keys.contains(&k) {
                         // At most MAX_KEYS columns of extended data; the rest are dropped.
                         if self.keys.len() >= MAX_KEYS {
@@ -479,6 +492,9 @@ impl Reader {
         }
         if !any {
             self.skipped += 1;
+        } else if duplicates > 0 {
+            self.duplicate_entries += duplicates;
+            self.duplicate_placemarks += 1;
         }
     }
 
@@ -492,9 +508,36 @@ impl Reader {
             Field::new("folder", FieldType::Text),
             Field::new("style", FieldType::Text),
         ];
-        // Extended data keys that don't clash with those.
-        let keys: Vec<String> = self.keys.iter().filter(|k| !fields.iter().any(|f| f.name.eq_ignore_ascii_case(k))).cloned().collect();
-        fields.extend(keys.iter().map(|k| Field::new(k.clone(), FieldType::Text)));
+        // Each extended data key's column, as (key, column name). A key named like one of those,
+        // ignoring case, is left out when it only repeats that column (an exported name field
+        // does), else kept under a free name.
+        let mut taken: Vec<Field> =
+            fields.iter().cloned().chain(self.keys.iter().map(|k| Field::new(k.clone(), FieldType::Text))).collect();
+        let mut keys: Vec<(String, String)> = Vec::new();
+        let mut renamed: Vec<(String, String)> = Vec::new();
+        for k in &self.keys {
+            let Some(i) = fields.iter().position(|f| f.name.eq_ignore_ascii_case(k)) else {
+                keys.push((k.clone(), k.clone()));
+                continue;
+            };
+            let repeats = |r: &Row| {
+                let fixed = match i {
+                    0 => r.name.as_deref(),
+                    1 => r.description.as_deref(),
+                    2 => Some(r.folder.as_str()),
+                    _ => r.style.as_deref(),
+                };
+                r.data.iter().find(|(dk, _)| dk == k).is_none_or(|(_, v)| v == fixed.unwrap_or_default())
+            };
+            if self.rows.iter().all(repeats) {
+                continue;
+            }
+            let column = crate::io::free_column_name(&taken, k);
+            taken.push(Field::new(column.clone(), FieldType::Text));
+            renamed.push((k.clone(), column.clone()));
+            keys.push((k.clone(), column));
+        }
+        fields.extend(keys.iter().map(|(_, c)| Field::new(c.clone(), FieldType::Text)));
         let mut out = Vec::new();
         for (i, (kind, label)) in present.iter().enumerate() {
             let title = if present.len() == 1 { name.to_string() } else { format!("{name} {label}") };
@@ -509,7 +552,8 @@ impl Reader {
                     r.style.clone().map(Value::Text).unwrap_or_default(),
                 ];
                 attrs.extend(
-                    keys.iter().map(|k| r.data.iter().find(|(dk, _)| dk == k).map(|(_, v)| Value::Text(v.clone())).unwrap_or_default()),
+                    keys.iter()
+                        .map(|(k, _)| r.data.iter().find(|(dk, _)| dk == k).map(|(_, v)| Value::Text(v.clone())).unwrap_or_default()),
                 );
                 if let Some(s) = &r.style
                     && !used.contains(s)
@@ -528,8 +572,31 @@ impl Reader {
                 if self.skipped > 0 {
                     report.messages.push(format!("{name}: {} placemarks without a geometry RustGIS draws were skipped", self.skipped));
                 }
+                if self.duplicate_entries > 0 {
+                    report.messages.push(format!(
+                        "{name}: {} repeated ExtendedData entries in {} placemarks were left out",
+                        self.duplicate_entries, self.duplicate_placemarks
+                    ));
+                }
                 if self.dropped_keys > 0 {
                     report.messages.push(format!("{name}: extended data past {MAX_KEYS} distinct names was left out"));
+                }
+                if !renamed.is_empty() {
+                    let listed: Vec<String> = renamed
+                        .iter()
+                        .take(5)
+                        .map(|(k, c)| format!("'{}' → '{}'", crate::io::dbf_notice_name(k), crate::io::dbf_notice_name(c)))
+                        .collect();
+                    let more = if renamed.len() > 5 { format!(" and {} more", renamed.len() - 5) } else { String::new() };
+                    let count = if renamed.len() == 1 {
+                        "1 extended data name was".to_string()
+                    } else {
+                        format!("{} extended data names were", renamed.len())
+                    };
+                    report.messages.push(format!(
+                        "{name}: {count} renamed, as RustGIS gives every placemark a name, description, folder and style column: {}{more}",
+                        listed.join(", ")
+                    ));
                 }
             }
             if zm_rows > 0 {
@@ -572,6 +639,76 @@ mod tests {
 </Document></kml>"##;
 
     #[test]
+    fn duplicate_extended_data_is_counted_once_per_document() {
+        let xml = r#"<kml><Document>
+<Placemark><ExtendedData><Data name="n"><value>0</value></Data><Data name="n"><value>5</value></Data>
+<SchemaData><SimpleData name="n">9</SimpleData><SimpleData name="kind">first</SimpleData>
+<SimpleData name="kind">later</SimpleData></SchemaData></ExtendedData>
+<MultiGeometry><Point><coordinates>1,2</coordinates></Point><LineString><coordinates>1,2 2,3</coordinates></LineString></MultiGeometry></Placemark>
+<Placemark><ExtendedData><Data name="n"><value>7</value></Data><Data name="n"><value>8</value></Data></ExtendedData>
+<Point><coordinates>3,4</coordinates></Point></Placemark>
+</Document></kml>"#;
+        let layers = read("duplicates.kml", xml.as_bytes()).unwrap();
+        assert_eq!(layers.len(), 2);
+        let messages: Vec<_> = layers.iter().flat_map(|l| &l.report.messages).collect();
+        assert_eq!(messages, ["duplicates: 4 repeated ExtendedData entries in 2 placemarks were left out"]);
+        for layer in &layers {
+            let ds = &layer.dataset;
+            assert_eq!(ds.value(0, ds.field_index("n").unwrap()), &Value::Int(0));
+            assert_eq!(ds.value(0, ds.field_index("kind").unwrap()), &Value::Text("first".into()));
+        }
+        assert_eq!(layers[0].dataset.value(1, layers[0].dataset.field_index("n").unwrap()), &Value::Int(7));
+    }
+
+    #[test]
+    fn repeated_names_past_the_column_cap_are_counted() {
+        let mut first = String::from("<Placemark><ExtendedData>");
+        for i in 0..MAX_KEYS {
+            first.push_str(&format!("<Data name=\"k{i}\"><value>1</value></Data>"));
+        }
+        first.push_str("</ExtendedData><Point><coordinates>1,2</coordinates></Point></Placemark>");
+        let over = |extra: &str| {
+            format!(
+                "<kml><Document>{first}<Placemark><ExtendedData>{extra}</ExtendedData>\
+                 <Point><coordinates>3,4</coordinates></Point></Placemark></Document></kml>"
+            )
+        };
+        let twice = over("<Data name=\"extra\"><value>1</value></Data><Data name=\"extra\"><value>2</value></Data>");
+        let layers = read("cap.kml", twice.as_bytes()).unwrap();
+        let messages: Vec<_> = layers.iter().flat_map(|l| &l.report.messages).collect();
+        assert!(messages.iter().any(|m| m.contains("1 repeated ExtendedData entries in 1 placemarks")), "{messages:?}");
+        assert!(messages.iter().any(|m| m.contains("distinct names")), "the cap is still said: {messages:?}");
+        assert_eq!(layers[0].dataset.fields.len() - layers[0].dataset.field_index("k0").unwrap(), MAX_KEYS);
+        // Once past the cap is the cap only, not a repeat.
+        let once = over("<Data name=\"extra\"><value>1</value></Data>");
+        let layers = read("cap.kml", once.as_bytes()).unwrap();
+        let messages: Vec<_> = layers.iter().flat_map(|l| &l.report.messages).collect();
+        assert!(!messages.iter().any(|m| m.contains("repeated")), "{messages:?}");
+        assert!(messages.iter().any(|m| m.contains("distinct names")), "{messages:?}");
+    }
+
+    #[test]
+    fn distinct_extended_data_keys_across_placemarks_are_clean() {
+        let xml = r#"<kml><Document><Placemark><ExtendedData><Data name="n"><value>0</value></Data>
+<SchemaData><SimpleData name="kind">cafe</SimpleData></SchemaData></ExtendedData><Point><coordinates>1,2</coordinates></Point></Placemark>
+<Placemark><ExtendedData><Data name="n"><value>5</value></Data></ExtendedData><Point><coordinates>3,4</coordinates></Point></Placemark>
+</Document></kml>"#;
+        let layers = read("clean.kml", xml.as_bytes()).unwrap();
+        assert!(layers.iter().all(|l| l.report.messages.is_empty()));
+        assert_eq!(layers[0].dataset.features.len(), 2);
+    }
+
+    #[test]
+    fn digits_a_number_cannot_hold_stay_text() {
+        let doc = r#"<kml><Document><Placemark><ExtendedData><Data name="id"><value>12345678901234567891</value></Data>
+            </ExtendedData><Point><coordinates>1,2</coordinates></Point></Placemark></Document></kml>"#;
+        let layers = read("ids.kml", doc.as_bytes()).unwrap();
+        let ds = &layers[0].dataset;
+        let id = ds.field_index("id").unwrap();
+        assert_eq!(ds.value(0, id), &Value::Text("12345678901234567891".into()));
+    }
+
+    #[test]
     fn reads_placemarks_folders_data_and_styles() {
         let layers = read("trip.kml", DOC.as_bytes()).unwrap();
         let names: Vec<&str> = layers.iter().map(|l| l.dataset.name.as_str()).collect();
@@ -612,6 +749,32 @@ mod tests {
         let style = polys.dataset.value(0, polys.dataset.field_index("style").unwrap()).to_string();
         assert_eq!(style, "#inline-1");
         assert_eq!(polys.styles[0].1.fill, Some([0, 170, 0, 255]));
+    }
+
+    #[test]
+    fn extended_data_named_like_a_fixed_column_is_kept_under_a_free_name() {
+        // `name` becomes the placemark's name and, like every field, extended data too; `NAME`
+        // clashes with the name column ignoring case but holds something else.
+        let mut ds =
+            Dataset::new("t", GeometryType::Point, vec![Field::new("name", FieldType::Double), Field::new("NAME", FieldType::Integer)]);
+        ds.push_next(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Float(0.0), Value::Int(1)]);
+        let kml = crate::interop::to_kml(&ds, crate::io::name_field(&ds)).unwrap();
+        let layers = read("t.kml", kml.as_bytes()).unwrap();
+        let (back, report) = (&layers[0].dataset, &layers[0].report);
+        let names: Vec<&str> = back.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["name", "description", "folder", "style", "NAME_1"], "the copy of the name isn't a column of its own");
+        assert_eq!(back.value(0, 0), &Value::Text("0".into()));
+        assert_eq!(back.value(0, 4), &Value::Int(1));
+        assert_eq!(
+            report.messages,
+            [
+                "t: 1 extended data name was renamed, as RustGIS gives every placemark a name, description, folder and style column: 'NAME' → 'NAME_1'"
+            ]
+        );
+
+        // Without a clash, nothing is said.
+        let layers = read("trip.kml", DOC.as_bytes()).unwrap();
+        assert!(layers[0].report.messages.iter().all(|m| !m.contains("renamed")), "{:?}", layers[0].report.messages);
     }
 
     #[test]

@@ -229,19 +229,25 @@ impl Calls {
         Calls { plugin: plugin.to_string(), ..Calls::default() }
     }
 
-    /// Runs `host.fetch {url}` for a plugin that may.
+    /// Runs `host.fetch {url, json?}` for a plugin that may. `json: false` leaves `json` out of
+    /// the answer (a plugin that only passes `text` on doesn't parse it in its fuel); the cache
+    /// keeps the whole answer, so a later call without it still gets `json`.
     pub(super) fn fetch(&mut self, p: &Value) -> CmdResult {
         let url = checked(p.get("url").and_then(Value::as_str).ok_or("url is required")?)?;
+        let with_json = match p.get("json") {
+            None => true,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err("json must be true or false".into()),
+        };
         if self.count >= MAX_PER_CALL {
             return Err(format!("a plugin call may fetch at most {MAX_PER_CALL} documents"));
         }
         self.count += 1;
         let key = key(&self.plugin, &url);
         let kept = cache().get(&key);
-        if let Some(answer) = kept {
-            return answer;
-        }
-        if !waits() {
+        let answer = if let Some(answer) = kept {
+            answer
+        } else if !waits() {
             if !self.pending.contains(&key) {
                 if self.pending.len() >= MAX_PENDING {
                     return Err(format!("a plugin call may wait for at most {MAX_PENDING} documents at once"));
@@ -250,8 +256,15 @@ impl Calls {
                 start(&key, &url);
             }
             return Ok(json!({"pending": true, "url": url}));
-        }
-        self.blocking(&key, &url)
+        } else {
+            self.blocking(&key, &url)
+        };
+        answer.map(|mut a| {
+            if !with_json && let Some(o) = a.as_object_mut() {
+                o.remove("json");
+            }
+            a
+        })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -457,7 +470,7 @@ fn asked_by(asked: &Value, params: &Value) -> bool {
     // (a link's data, once zoomed to), so it isn't compared.
     let passed_on = |k: &str, v: &Value| match k {
         "name" | "layer" | "crs" | "connection" => v.as_str().is_some_and(|s| !s.trim().is_empty()),
-        "x" | "y" | "wkt" | "delimiter" | "paperSpace" | "stream" | "as" => !v.is_null(),
+        "x" | "y" | "wkt" | "delimiter" | "paperSpace" | "blocks" | "stream" | "as" => !v.is_null(),
         "service" | "coverage" | "anonymous" => v == &json!(true),
         "bounds" => v.is_array(),
         _ => false,
@@ -1285,6 +1298,44 @@ mod tests {
         assert!(taken[0].params()["url"].as_str().unwrap().contains("hunter3"), "the actual request remains exact");
         cache().in_flight.retain(|(k, _)| k != &cache_key);
         rustgis_plugins::unload("eng-keys-real");
+    }
+
+    /// A plugin's service download is added with the `drawingInfo` the app read from the ArcGIS
+    /// layer's description, drawn as it says; the same key on a download that isn't a service's
+    /// is a changed request, refused (#2080).
+    #[test]
+    fn a_plugins_service_download_is_added_with_its_drawing_info() {
+        let mut s = Session::new(crate::project::Project::default());
+        let command = load_test_plugin("eng-drawing-info");
+        let answer = br#"{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"A": 1},
+            "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]}}]}"#;
+        let drawing = json!({"renderer": {"type": "simple", "symbol": {"type": "esriSFS", "color": [0, 92, 230, 255]}}});
+        for (url, service) in
+            [("https://x.org/arcgis/rest/services/Z/FeatureServer/0/query?f=geojson", true), ("https://x.org/zones.geojson", false)]
+        {
+            let mut asked = json!({"url": url, "name": if service { "Zones" } else { "Plain" }});
+            if service {
+                asked["service"] = json!(true);
+            }
+            ask(&mut s, &command, asked).unwrap();
+            let taken = s.take_url_requests();
+            let id = s.download_started_for(&taken[0]).unwrap();
+            assert!(s.download_landed(id, answer.to_vec()));
+            let mut p = taken[0].params().clone();
+            p["id"] = json!(id);
+            p["drawingInfo"] = drawing.clone();
+            let r = s.complete_download(id, &p);
+            if service {
+                r.unwrap();
+            } else {
+                assert!(r.unwrap_err().contains("parameters changed"));
+            }
+        }
+        let zones = s.map().layer_by_name("Zones").unwrap();
+        let rustgis_map::Renderer::Single(sym) = zones.renderer else { panic!("{:?}", zones.renderer) };
+        assert_eq!(sym.fill, rustgis_map::Rgba::rgb(0, 92, 230));
+        assert!(s.map().layer_by_name("Plain").is_none());
+        rustgis_plugins::unload("eng-drawing-info");
     }
 
     /// Refusal requires a real claim and cannot consume a different caller's bytes by number.

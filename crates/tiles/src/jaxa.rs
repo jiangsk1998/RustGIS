@@ -579,7 +579,6 @@ fn note_read(collection: &str, failed: bool, took: std::time::Duration) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

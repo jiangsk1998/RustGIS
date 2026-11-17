@@ -482,7 +482,6 @@ pub fn text_key(action: Action) -> Option<KeyboardShortcut> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use rustgis_engine::{Project, Session};

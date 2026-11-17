@@ -66,7 +66,6 @@ fn marks(sym: &Symbol, strokes: &[LineStroke]) -> Vec<Mark> {
 
 /// Draws a point of symbol `sym` at (`x`, `y`) device pixels: `strokes`' marks, else its marker,
 /// turned `turn` degrees clockwise about the point; with `halo`, a selection halo round each.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw(pm: &mut Canvas, x: f32, y: f32, sym: &Symbol, strokes: &[LineStroke], turn: f32, halo: Option<Rgba>, ppp: f32) {
     if !(x.is_finite() && y.is_finite()) {
         return;

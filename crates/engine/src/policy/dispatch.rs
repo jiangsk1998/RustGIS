@@ -109,7 +109,7 @@ impl Session {
         }
         self.capture_read(command, params)
     }
-    /// Admits exactly one standalone archive command before dispatch, retaining its original
+    /// Admits one standalone archive or column-statistics command before dispatch, retaining its original
     /// scope and one-use approval through the worker and landing. Composite/handler capture
     /// remains forbidden, including when an approval cursor is already active.
     pub fn start_scoped_archive_read(
@@ -122,10 +122,10 @@ impl Session {
             return Err("background reads can only start before handler dispatch".into());
         }
         let CallKind::Command { id, params } = &call.kind else {
-            return Err("only a standalone archive command can prepare a scoped read".into());
+            return Err("only standalone archive or column-statistics commands can prepare a scoped read".into());
         };
-        if !matches!(id.as_str(), "map.reloadTiles" | "map.repairTiles") {
-            return Err("only a standalone archive command can prepare a scoped read".into());
+        if !matches!(id.as_str(), "map.reloadTiles" | "map.repairTiles" | "table.statistics") {
+            return Err("only standalone archive or column-statistics commands can prepare a scoped read".into());
         }
         let capture = |s: &mut Session| s.capture_read(id, params);
         match permit {
@@ -145,6 +145,7 @@ impl Session {
             "layer.addData"
                 | "layer.loadAll"
                 | "layer.reloadData"
+                | "layer.repairSource"
                 | "labels.convert"
                 | "model.run"
                 | "script.run"
@@ -154,11 +155,17 @@ impl Session {
                 | "service.layers"
                 | "service.add"
                 | "source.syncState"
-        ) {
-            return Err("only Add Data, Load All, Reload Data, Convert To Annotation, models, scripts, tile archives, service reads, topology and Source File State prepare background work".into());
+                | "table.statistics"
+        ) && crate::cmd::edit::table_edit_in_background(command).is_none()
+        {
+            return Err("only Add Data, Load All, Repair/Reload Data, Convert To Annotation, models, scripts, tile archives, service reads, topology, Source File State and Column Statistics prepare background work".into());
         }
         let mut params = params.as_object().cloned().ok_or("read parameters must be an object")?;
-        if matches!(command, "layer.loadAll" | "layer.reloadData" | "labels.convert" | "source.syncState") {
+        if matches!(
+            command,
+            "layer.loadAll" | "layer.reloadData" | "layer.repairSource" | "labels.convert" | "source.syncState" | "table.statistics"
+        ) || (command == "edit.convertField" && params.get("table").is_none_or(Value::is_null))
+        {
             let id = self.layer_id(&Value::Object(params.clone()))?;
             params.insert("layer".into(), json!(id));
         }
@@ -185,7 +192,7 @@ impl Session {
     }
     /// Lands only the original read invocation; no result can be claimed by another command.
     pub(crate) fn finish_read(&mut self, read: crate::cmd::reads::Read) -> CmdResult {
-        let crate::cmd::reads::Read { op, owner, source, ready } = read;
+        let crate::cmd::reads::Read { op, owner, source, ready, inputs } = read;
         let (command, params) = match op.op() {
             CommandOp::Registered { spec, params } => (spec.id, params.clone()),
             _ => return Err("not a registered read command".into()),
@@ -193,6 +200,7 @@ impl Session {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.with_deferred_downloads(|s| {
                 s.command_epilogue(command, &params, |s| {
+                    rustgis_data::provenance::record(inputs);
                     s.check_delivery(&owner)?;
                     if let Some(source) = &source {
                         let layer = s.map().layer(s.layer_id(&params)?).ok_or("no such layer")?;
@@ -210,7 +218,7 @@ impl Session {
                         if result.is_ok()
                             && let Some(source) = crate::sources::added_by(command, &params)
                         {
-                            s.sources.note(source);
+                            s.note_source(source);
                         }
                         result
                     })?
@@ -223,7 +231,7 @@ impl Session {
             Err(panic) => std::panic::resume_unwind(panic),
         }
     }
-    /// Preserves ordinary command conditions for the admitted read's explicit layer selector.
+    /// Preserves ordinary command conditions for the admitted read's layer or table selector.
     fn check_read_command(&mut self, op: &Authorized<CommandOp>) -> Result<(), String> {
         let CommandOp::Registered { spec, params } = op.op() else { return Err("not a registered read command".into()) };
         let named = self.layer_id(params).ok();
@@ -231,12 +239,12 @@ impl Session {
         if named.is_some() {
             self.active_layer = named;
         }
-        let blocked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (spec.enabled)(self))).unwrap_or(Some("unavailable"));
+        let (blocked, table) = self.check_conditions(spec, params);
         self.active_layer = active;
-        if let Some(why) = blocked {
+        if let Some(why) = blocked.unwrap_or(Some("unavailable")) {
             return Err(format!("{}: {why}", spec.label));
         }
-        if let Some(why) = self.streamed_edit(spec.id, spec.mutates, spec.label, named.or(active)) {
+        if let Some(why) = self.streamed_edit(spec.id, spec.mutates, spec.label, if table.is_some() { None } else { named.or(active) }) {
             return Err(why);
         }
         Ok(())
@@ -304,6 +312,14 @@ impl Session {
     /// Only the native user scope may record executable-content provenance.
     pub(crate) fn policy_user(&self) -> bool {
         self.policy.scopes.last().is_none_or(|s| matches!(s.kind, Kind::User))
+    }
+    /// Whether the active scope may exercise reserved connection/account authority.
+    pub(crate) fn policy_allows_reserved(&self) -> bool {
+        match &self.scope().kind {
+            Kind::User | Kind::Agent { access: super::AgentAccess::Full, .. } => true,
+            Kind::Assistant => self.policy.nodes.last().is_some_and(|n| n.effects.contains(super::Effect::Reserved)),
+            Kind::Peer | Kind::Agent { .. } | Kind::Item { .. } | Kind::Plugin { .. } => false,
+        }
     }
     /// Inherits the current named scope; absence is the documented trusted native convention.
     fn scope(&self) -> Scope {
@@ -702,8 +718,12 @@ impl Session {
         // command of an extension that is off, as `Session::run` does: the one asked for, and
         // the one a completion finishes.
         if let Some(why) = self.extensions().blocks(id) {
-            // A completion's raster is let go, as `finish_raster` does.
-            if let Some(run) = params.get("ran").and_then(Value::as_u64) {
+            // Only its own completion may release the raster, as `finish_raster` does.
+            if let Some(run) = params.get("ran").and_then(Value::as_u64)
+                && let Some(c) = self.raster_results.iter().find(|(n, _)| *n == run).and_then(|(_, m)| m.continuation.as_ref())
+                && c.node.id() == id
+                && self.check_delivery_owner(c).is_ok()
+            {
                 self.raster_results.retain(|(n, _)| *n != run);
             }
             return Err(why);

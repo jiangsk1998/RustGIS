@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(windows)]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "the build script uses only the icon")]
 #[path = "../../crates/render/src/logo.rs"]
 mod logo;
 

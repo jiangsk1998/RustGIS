@@ -277,6 +277,44 @@ pub fn help_job(id: Option<&str>, text: &str, palette: Palette, font: &FontId) -
     job
 }
 
+/// An expression, or a function's signature (`round(x[, places])`), for the help of an
+/// expression box's suggestions (#1240), in the Script's colours: a function's name as an id, a
+/// keyword as a key, `'text'` and numbers as values, punctuation and operators dimmed.
+pub fn expr_job(text: &str, palette: Palette, font: &FontId) -> LayoutJob {
+    use rustgis_engine::data::query::Kw;
+    let word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '@');
+    let mut job = LayoutJob::default();
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        // How far, from the start of `rest`, the characters `keep` holds go.
+        let run = |keep: &dyn Fn(char) -> bool| rest.char_indices().find(|(_, c)| !keep(*c)).map_or(rest.len(), |(i, _)| i);
+        let (n, color) = if c == '\'' || c == '"' {
+            // To its closing quote, or the end.
+            let n = rest.get(1..).and_then(|r| r.find(c)).map_or(rest.len(), |i| i + 2);
+            (n, if c == '\'' { palette.string } else { palette.text })
+        } else if c.is_ascii_digit() {
+            (run(&|c| c.is_ascii_digit() || c == '.'), palette.number)
+        } else if word(c) {
+            let n = run(&word);
+            let name = rest.get(..n).unwrap_or_default();
+            let color = if rest.get(n..).is_some_and(|r| r.starts_with('(')) {
+                palette.id
+            } else if Kw::ALL.iter().any(|k| k.word().eq_ignore_ascii_case(name)) {
+                palette.key
+            } else {
+                palette.text
+            };
+            (n, color)
+        } else {
+            (c.len_utf8(), if c.is_whitespace() { palette.text } else { palette.dim })
+        };
+        let (part, after) = rest.split_at_checked(n).unwrap_or((rest, ""));
+        job.append(part, 0.0, TextFormat { font_id: font.clone(), color, ..Default::default() });
+        rest = after;
+    }
+    job
+}
+
 /// `s` of `text` appended to `job` in its colour.
 fn append(job: &mut LayoutJob, text: &str, s: &Span, palette: Palette, font: &FontId) {
     let color = match s.kind {

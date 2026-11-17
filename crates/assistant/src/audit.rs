@@ -42,7 +42,6 @@ pub fn record(dir: &Path, source: &str, request: &str, reply: Option<&str>, took
     let path = file_for(dir, secs);
     let new_day = !path.exists();
     // The log says what agents did with the user's files and addresses: this user's alone.
-    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut folder = std::fs::DirBuilder::new();
     folder.recursive(true);
     #[cfg(unix)]

@@ -8,7 +8,7 @@ use rustgis_geom::Coord;
 
 /// How far inside the edge the pieces of a cut geometry are kept, in degrees (about 0.1 mm on the
 /// ground), so each projects onto its own side of the map even when the projection normalises
-/// longitudes (a datum shift goes through geocentric coordinates): well past proj4rs' 1e-12 rad
+/// longitudes (a datum shift goes through geocentric coordinates): well past a projection's 1e-12 rad
 /// tolerance at ±180°, and small enough that only features narrower than it flatten against the
 /// edge. Geometry that needs no cut is left exactly as it is instead, so it stays unchanged for
 /// hit-testing and snapping as much as for drawing: a point or line on the edge itself is drawn
