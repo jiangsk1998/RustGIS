@@ -64,6 +64,7 @@ impl Field {
 /// large table of photos stays small. A thumbnail read so far is kept as a `data:` address; it
 /// is what a project saves, so the table shows pictures without reaching the source again.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ImageValue {
     /// `image/jpeg`, `image/png`, …; empty until the image was read.
     #[serde(default)]

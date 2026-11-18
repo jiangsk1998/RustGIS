@@ -190,6 +190,11 @@
           "type": "string"
         },
         {
+          "const": "Image",
+          "description": "An image attribute: the original bytes stay in the data source (see\n[`ImageValue`]); the attribute table shows a thumbnail and the viewer reads it when asked.",
+          "type": "string"
+        },
+        {
           "const": "Date",
           "description": "A calendar day.",
           "type": "string"
@@ -392,6 +397,47 @@
         "messages",
         "millis"
       ],
+      "type": "object"
+    },
+    "ImageValue": {
+      "description": "An image attribute's metadata. The original bytes aren't kept here: they stay in the data\nsource and are read when the thumbnail or the viewer asks for them, so a project holding a\nlarge table of photos stays small. A thumbnail read so far is kept as a `data:` address; it\nis what a project saves, so the table shows pictures without reaching the source again.",
+      "properties": {
+        "byte_len": {
+          "default": 0,
+          "description": "The original image's byte count (0 when the source only knows its size).",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "height": {
+          "default": 0,
+          "format": "uint32",
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mime": {
+          "default": "",
+          "description": "`image/jpeg`, `image/png`, …; empty until the image was read.",
+          "type": "string"
+        },
+        "thumbnail": {
+          "description": "A thumbnail as `data:image/jpeg;base64,…`, once one was made.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "width": {
+          "default": 0,
+          "description": "Pixel width and height; 0 until the image was read.",
+          "format": "uint32",
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
       "type": "object"
     },
     "Job": {
@@ -887,6 +933,18 @@
           },
           "required": [
             "DateTime"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Image": {
+              "$ref": "#/$defs/ImageValue"
+            }
+          },
+          "required": [
+            "Image"
           ],
           "type": "object"
         }

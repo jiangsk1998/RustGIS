@@ -602,7 +602,7 @@ fn a_mixed_layer_added_to_a_geopackage_keeps_every_kind() {
             let (e, _) = write_chunks_to(&Runs::new(&mixed, 4), &layer, &path, Crs::LonLat, &add, 1).unwrap();
             assert_eq!((e.left_out, e.written), (0, 301));
         } else {
-            assert_eq!(crate::io::write_path_to(&mixed, &path, Crs::LonLat, &add).unwrap().0, 0);
+            assert_eq!(crate::io::write_path_to(&mixed, &path, Crs::LonLat, &add, None).unwrap().0, 0);
         }
         let c = rusqlite::Connection::open(&path).unwrap();
         let kind = |t: &str| {

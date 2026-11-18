@@ -3894,7 +3894,7 @@ fn geopackage_export_adds_and_replaces_tables_and_keeps_the_others() {
         permits.push(Some(Geometry::Point(Coord::new(10.0 + i as f64, 20.0))), vec![Value::Int(i)]);
     }
     let to = |mode, name: Option<&str>| GpkgTable { mode, name: name.map(String::from) };
-    let written = write_path_to(&permits, &path, Crs::LonLat, &to(GpkgMode::AddTable, None)).unwrap();
+    let written = write_path_to(&permits, &path, Crs::LonLat, &to(GpkgMode::AddTable, None), None).unwrap();
     assert_eq!(written, (0, Some(GpkgWritten { table: "permits".into(), replaced: false, dependents: vec![] })));
     rusqlite::Connection::open(&path).unwrap().execute_batch("INSERT INTO gpkg_ogr_contents VALUES ('permits', 3)").unwrap();
     assert_eq!(gpkg_tables(&path), ["owners", "parcels", "permits"]);
@@ -3917,7 +3917,7 @@ fn geopackage_export_adds_and_replaces_tables_and_keeps_the_others() {
             rusqlite::Connection::open(&path).unwrap().execute_batch("CREATE INDEX owners_idx ON owners (name)").unwrap();
             before_index = std::fs::read(&path).unwrap();
         }
-        let e = write_path_to(&permits, &path, Crs::LonLat, &to(GpkgMode::AddTable, name)).unwrap_err().to_string();
+        let e = write_path_to(&permits, &path, Crs::LonLat, &to(GpkgMode::AddTable, name), None).unwrap_err().to_string();
         assert!(e.contains("already has"), "{name:?}: {e}");
     }
     assert_eq!(std::fs::read(&path).unwrap(), before_index, "the index refusal changed nothing");
@@ -3928,7 +3928,7 @@ fn geopackage_export_adds_and_replaces_tables_and_keeps_the_others() {
     rusqlite::Connection::open(&path).unwrap().execute_batch("CREATE VIEW recent_permits AS SELECT * FROM permits").unwrap();
     let mut fewer = permits.clone();
     fewer.features.truncate(1);
-    let replaced = write_path_to(&fewer, &path, Crs::WebMercator, &to(GpkgMode::ReplaceTable, None)).unwrap();
+    let replaced = write_path_to(&fewer, &path, Crs::WebMercator, &to(GpkgMode::ReplaceTable, None), None).unwrap();
     assert_eq!(replaced.1, Some(GpkgWritten { table: "permits".into(), replaced: true, dependents: vec!["recent_permits".into()] }));
     assert_eq!(gpkg_tables(&path), ["owners", "parcels", "permits"]);
     let s = open_path(&path, Some("permits")).unwrap();
@@ -3946,14 +3946,14 @@ fn geopackage_export_adds_and_replaces_tables_and_keeps_the_others() {
     assert_eq!(c.query_row("SELECT name FROM owners", [], |r| r.get::<_, String>(0)).unwrap(), "Shelby");
     drop(c);
     // A second table in that system reuses its entry.
-    let more = write_path_to(&fewer, &path, Crs::WebMercator, &to(GpkgMode::AddTable, Some("permits_2027"))).unwrap();
+    let more = write_path_to(&fewer, &path, Crs::WebMercator, &to(GpkgMode::AddTable, Some("permits_2027")), None).unwrap();
     assert_eq!(more.1, Some(GpkgWritten { table: "permits_2027".into(), replaced: false, dependents: vec![] }));
     // Its spatial index triggers mention `permits` within their own table's name, but don't use
     // it, so replacing `permits` again names only the view.
-    let again = write_path_to(&fewer, &path, Crs::WebMercator, &to(GpkgMode::ReplaceTable, Some("permits"))).unwrap();
+    let again = write_path_to(&fewer, &path, Crs::WebMercator, &to(GpkgMode::ReplaceTable, Some("permits")), None).unwrap();
     assert_eq!(again.1, Some(GpkgWritten { table: "permits".into(), replaced: true, dependents: vec!["recent_permits".into()] }));
     // Replacing a table not there (a misspelt name) is refused rather than adding one.
-    let e = write_path_to(&fewer, &path, Crs::LonLat, &to(GpkgMode::ReplaceTable, Some("permit"))).unwrap_err().to_string();
+    let e = write_path_to(&fewer, &path, Crs::LonLat, &to(GpkgMode::ReplaceTable, Some("permit")), None).unwrap_err().to_string();
     assert!(e.contains("no table permit to replace"), "{e}");
     let c = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(c.query_row("SELECT count(*) FROM gpkg_spatial_ref_sys WHERE srs_id = 3857", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
@@ -3967,7 +3967,7 @@ fn geopackage_export_adds_and_replaces_tables_and_keeps_the_others() {
     owners.push(None, vec![Value::Text("Memphis".into())]);
     owners.push(None, vec![Value::Text("Germantown".into())]);
     drop(c);
-    write_path_to(&owners, &path, Crs::from_epsg(32616).unwrap(), &to(GpkgMode::ReplaceTable, None)).unwrap();
+    write_path_to(&owners, &path, Crs::from_epsg(32616).unwrap(), &to(GpkgMode::ReplaceTable, None), None).unwrap();
     assert_eq!(systems(), before_systems);
     let c = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(c.query_row("SELECT count(*) FROM owners", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
@@ -3987,10 +3987,10 @@ fn geopackage_export_into_a_file_refuses_what_it_cannot_replace() {
     let mut ds = Dataset::new("permits", GeometryType::Point, vec![]);
     ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![]);
     // No file: nothing to replace in, but a table can be added to a new GeoPackage.
-    assert!(write_path_to(&ds, &path, Crs::LonLat, &replace("permits")).unwrap_err().to_string().contains("no GeoPackage there"));
+    assert!(write_path_to(&ds, &path, Crs::LonLat, &replace("permits"), None).unwrap_err().to_string().contains("no GeoPackage there"));
     assert!(!path.exists());
     let add = GpkgTable { mode: GpkgMode::AddTable, name: None };
-    assert!(write_path_to(&ds, &path, Crs::LonLat, &add).unwrap().1.is_some_and(|t| !t.replaced));
+    assert!(write_path_to(&ds, &path, Crs::LonLat, &add, None).unwrap().1.is_some_and(|t| !t.replaced));
     rusqlite::Connection::open(&path)
         .unwrap()
         .execute_batch(
@@ -4001,7 +4001,7 @@ fn geopackage_export_into_a_file_refuses_what_it_cannot_replace() {
         .unwrap();
     let before = std::fs::read(&path).unwrap();
     for name in ["ortho", "recent", "scratch"] {
-        let e = write_path_to(&ds, &path, Crs::LonLat, &replace(name)).unwrap_err().to_string();
+        let e = write_path_to(&ds, &path, Crs::LonLat, &replace(name), None).unwrap_err().to_string();
         assert!(e.contains("doesn't replace"), "{name}: {e}");
         assert_eq!(std::fs::read(&path).unwrap(), before, "{name}");
     }
@@ -4015,7 +4015,7 @@ fn geopackage_export_into_a_file_refuses_what_it_cannot_replace() {
              INSERT INTO gpkgext_relations VALUES (1, 'permits', 'fid', 'owners', 'id', 'attributes', 'permits_owners');",
         )
         .unwrap();
-    let e = write_path_to(&ds, &path, Crs::LonLat, &replace("permits")).unwrap_err().to_string();
+    let e = write_path_to(&ds, &path, Crs::LonLat, &replace("permits"), None).unwrap_err().to_string();
     assert!(e.contains("related-tables relation"), "{e}");
     // Nor is a table others refer to by foreign key: their rows would be deleted with it.
     rusqlite::Connection::open(&path)
@@ -4026,7 +4026,7 @@ fn geopackage_export_into_a_file_refuses_what_it_cannot_replace() {
              INSERT INTO inspections VALUES (1, 1);",
         )
         .unwrap();
-    let e = write_path_to(&ds, &path, Crs::LonLat, &replace("permits")).unwrap_err().to_string();
+    let e = write_path_to(&ds, &path, Crs::LonLat, &replace("permits"), None).unwrap_err().to_string();
     assert!(e.contains("inspections refer to permits"), "{e}");
     let kept: i64 = rusqlite::Connection::open(&path).unwrap().query_row("SELECT count(*) FROM inspections", [], |r| r.get(0)).unwrap();
     assert_eq!(kept, 1);
@@ -4039,12 +4039,12 @@ fn geopackage_export_into_a_file_refuses_what_it_cannot_replace() {
              INSERT INTO notes VALUES ('permits');",
         )
         .unwrap();
-    write_path_to(&ds, &path, Crs::LonLat, &replace("permits")).unwrap();
+    write_path_to(&ds, &path, Crs::LonLat, &replace("permits"), None).unwrap();
     let notes: i64 = rusqlite::Connection::open(&path).unwrap().query_row("SELECT count(*) FROM notes", [], |r| r.get(0)).unwrap();
     assert_eq!(notes, 1);
     // An ordinary table named as the spatial index is kept, and the replace refused.
     let squatted = workspace.path().join("squatted.gpkg");
-    write_path_to(&ds, &squatted, Crs::LonLat, &GpkgTable { mode: GpkgMode::AddTable, name: Some("sites".into()) }).unwrap();
+    write_path_to(&ds, &squatted, Crs::LonLat, &GpkgTable { mode: GpkgMode::AddTable, name: Some("sites".into()) }, None).unwrap();
     rusqlite::Connection::open(&squatted)
         .unwrap()
         .execute_batch(
@@ -4052,7 +4052,7 @@ fn geopackage_export_into_a_file_refuses_what_it_cannot_replace() {
         )
         .unwrap();
     let before = std::fs::read(&squatted).unwrap();
-    let e = write_path_to(&ds, &squatted, Crs::LonLat, &replace("sites")).unwrap_err().to_string();
+    let e = write_path_to(&ds, &squatted, Crs::LonLat, &replace("sites"), None).unwrap_err().to_string();
     assert!(e.contains("rtree_sites_geom"), "{e}");
     assert_eq!(std::fs::read(&squatted).unwrap(), before, "the failed replace changed nothing");
     let kept: String =
@@ -4062,27 +4062,27 @@ fn geopackage_export_into_a_file_refuses_what_it_cannot_replace() {
     // `rtree_i32` table of that name isn't.
     for (module, replaced) in [("\n  \"rtree\" (", true), ("[rtree](", true), ("rtree_i32(", false)] {
         let file = workspace.path().join(format!("index-{}.gpkg", module.len()));
-        write_path_to(&ds, &file, Crs::LonLat, &GpkgTable { mode: GpkgMode::AddTable, name: Some("sites".into()) }).unwrap();
+        write_path_to(&ds, &file, Crs::LonLat, &GpkgTable { mode: GpkgMode::AddTable, name: Some("sites".into()) }, None).unwrap();
         rusqlite::Connection::open(&file)
             .unwrap()
             .execute_batch(&format!(
                 "DROP TABLE rtree_sites_geom; CREATE VIRTUAL TABLE rtree_sites_geom USING {module}id, minx, maxx, miny, maxy);"
             ))
             .unwrap();
-        assert_eq!(write_path_to(&ds, &file, Crs::LonLat, &replace("sites")).is_ok(), replaced, "{module:?}");
+        assert_eq!(write_path_to(&ds, &file, Crs::LonLat, &replace("sites"), None).is_ok(), replaced, "{module:?}");
     }
     let other = workspace.path().join("other.gpkg");
     std::fs::copy(&path, &other).unwrap();
     rusqlite::Connection::open(&other).unwrap().execute_batch("PRAGMA application_id = 1297105496").unwrap();
     let add = GpkgTable { mode: GpkgMode::AddTable, name: Some("more".into()) };
-    assert!(write_path_to(&ds, &other, Crs::LonLat, &add).unwrap_err().to_string().contains("application id"));
+    assert!(write_path_to(&ds, &other, Crs::LonLat, &add, None).unwrap_err().to_string().contains("application id"));
     let plain = workspace.path().join("plain.gpkg");
     rusqlite::Connection::open(&plain).unwrap().execute_batch("CREATE TABLE t (x)").unwrap();
-    let e = write_path_to(&ds, &plain, Crs::LonLat, &replace("permits")).unwrap_err().to_string();
+    let e = write_path_to(&ds, &plain, Crs::LonLat, &replace("permits"), None).unwrap_err().to_string();
     assert!(e.contains("not a GeoPackage"), "{e}");
     let text = workspace.path().join("text.gpkg");
     std::fs::write(&text, b"not a database").unwrap();
-    assert!(write_path_to(&ds, &text, Crs::LonLat, &replace("permits")).is_err());
+    assert!(write_path_to(&ds, &text, Crs::LonLat, &replace("permits"), None).is_err());
     assert_eq!(std::fs::read(&text).unwrap(), b"not a database");
 }
 

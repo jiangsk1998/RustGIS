@@ -23890,6 +23890,63 @@ fn exporting_features_refuses_to_replace_an_existing_geopackage() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A Shapefile export's `encoding` writes the `.dbf`'s bytes, its header's language driver and
+/// its `.cpg` in that encoding — the three together that ArcGIS in a Chinese locale reads — and
+/// the file reads back; Export Table takes it too, and it is refused for another format and for
+/// an encoding a `.dbf` can't be written in. A character the encoding has no bytes for is said.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_shapefile_export_encoding_is_written_said_and_refused_where_it_cant_apply() {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-shp-encoding-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = Session::new(Project::default());
+    let add = |s: &mut Session, name: &str, text: &str| {
+        let mut ds = Dataset::new(name, GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![V::Text(text.into())]);
+        s.map_mut().add_dataset(ds);
+    };
+    add(&mut s, "towns", "北京");
+    add(&mut s, "names", "北京😀");
+    let mark = s.notice_mark();
+    s.run("share.exportLayer", &json!({"layer": "towns", "path": dir.join("towns.shp"), "encoding": "936"})).unwrap();
+    let dbf = std::fs::read(dir.join("towns.dbf")).unwrap();
+    let at = usize::from(u16::from_le_bytes([dbf[8], dbf[9]])) + 1;
+    assert_eq!(dbf[29], 0x7A, "the .dbf header's language driver");
+    assert_eq!(&dbf[at..at + 4], b"\xb1\xb1\xbe\xa9", "GBK bytes, not UTF-8's six");
+    assert_eq!(std::fs::read(dir.join("towns.cpg")).unwrap(), b"936");
+    let (back, report) = rustgis_data::io::read_path(&dir.join("towns.shp")).unwrap();
+    assert_eq!(back.value(0, 0), &V::Text("北京".into()));
+    assert!(report.messages.is_empty(), "{:?}", report.messages);
+    // A character GBK has no bytes for is written as its numeric character reference, and said.
+    s.run("share.exportLayer", &json!({"layer": "names", "path": dir.join("names.shp"), "encoding": "GBK"})).unwrap();
+    let dbf = std::fs::read(dir.join("names.dbf")).unwrap();
+    let at = usize::from(u16::from_le_bytes([dbf[8], dbf[9]])) + 1;
+    assert_eq!(&dbf[at..at + 13], b"\xb1\xb1\xbe\xa9&#128512;");
+    assert!(
+        s.notices_since(mark)
+            .iter()
+            .any(|n| n.text.contains("1 character was written as numeric character references") && n.text.contains("GBK")),
+        "{:?}",
+        s.notices_since(mark)
+    );
+    // An Export Table of a standalone table that keeps geometry writes the same encoding.
+    let mut rows = Dataset::new("rows", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+    rows.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![V::Text("北京".into())]);
+    s.project.tables.push(crate::project::Table::new(9001, rows));
+    s.run("share.exportTable", &json!({"table": 9001, "path": dir.join("rows.shp"), "encoding": "936"})).unwrap();
+    let dbf = std::fs::read(dir.join("rows.dbf")).unwrap();
+    assert_eq!(dbf[29], 0x7A, "the .dbf header's language driver");
+    assert_eq!(std::fs::read(dir.join("rows.cpg")).unwrap(), b"936");
+    // Only a Shapefile takes an encoding, and only one a `.dbf` can be written in.
+    let error = s.run("share.exportLayer", &json!({"layer": "towns", "path": dir.join("towns.geojson"), "encoding": "936"})).unwrap_err();
+    assert!(error.to_string().contains("encoding is for a Shapefile"), "{error}");
+    let error = s.run("share.exportLayer", &json!({"layer": "towns", "path": dir.join("dos.shp"), "encoding": "437"})).unwrap_err();
+    assert!(error.to_string().contains("encoding '437'"), "{error}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A new GeoPackage whose asked-for table name is reserved says what the table is called
 /// instead; one written under the name asked for says nothing of it.
 #[test]

@@ -7,6 +7,7 @@ const MAX_CPG_BYTES: usize = 1024;
 
 /// Keep the selection thread-safe; dbase's dynamic decoder is created per read because it
 /// is `Send` but not `Sync`, whereas feature sources can be shared between readers.
+#[derive(Clone, Debug)]
 pub(crate) enum DbfEncoding {
     Standard(&'static rs::Encoding),
     Oem(CodePageMark),
@@ -63,7 +64,7 @@ impl DbfEncoding {
         encoding.is_ascii_compatible().then_some(Self::Standard(encoding))
     }
 
-    fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
         let upper = name.to_ascii_uppercase();
         if let Some(suffix) = upper.strip_prefix("8859") {
             return Self::from_label(&format!("iso-8859-{}", suffix.strip_prefix('-').unwrap_or(suffix)));
@@ -78,6 +79,135 @@ impl DbfEncoding {
             Ok(number) => Self::from_number(number),
             Err(_) => Self::from_label(&upper),
         }
+    }
+
+    /// The code page this encoding is, as a language driver ID or `.cpg` names it when a `.dbf`
+    /// is written in it: `None` for one only a `.cpg` label can say (GB18030, Big5-HKSCS) or a
+    /// mark that stands for none.
+    fn code_page(&self) -> Option<u16> {
+        Some(match self {
+            // `from_number`'s statics by their canonical names, so a label that resolves to a
+            // neighboring charmap ("big5-hkscs", another ISO 8859) names no page here.
+            Self::Standard(encoding) => match encoding.name() {
+                "IBM866" => 866,
+                "windows-874" => 874,
+                "Shift_JIS" => 932,
+                "GBK" => 936,
+                "EUC-KR" => 949,
+                "Big5" => 950,
+                "macintosh" => 10000,
+                "x-mac-cyrillic" => 10007,
+                "UTF-8" => 65001,
+                "windows-1250" => 1250,
+                "windows-1251" => 1251,
+                "windows-1252" => 1252,
+                "windows-1253" => 1253,
+                "windows-1254" => 1254,
+                "windows-1255" => 1255,
+                "windows-1256" => 1256,
+                "windows-1257" => 1257,
+                _ => return None,
+            },
+            // Only the DOS pages `from_number` routes here are ever held; the rest of dbase's
+            // marks are named so a new one fails to compile rather than silently name nothing.
+            Self::Oem(mark) => match mark {
+                CodePageMark::CP437 => 437,
+                CodePageMark::CP850 => 850,
+                CodePageMark::CP852 => 852,
+                CodePageMark::CP861 => 861,
+                CodePageMark::CP865 => 865,
+                CodePageMark::CP866 => 866,
+                CodePageMark::CP874 => 874,
+                CodePageMark::CP932 => 932,
+                CodePageMark::CP936 => 936,
+                CodePageMark::CP949 => 949,
+                CodePageMark::CP950 => 950,
+                CodePageMark::CP1250 => 1250,
+                CodePageMark::CP1251 => 1251,
+                CodePageMark::CP1252 => 1252,
+                CodePageMark::CP1253 => 1253,
+                CodePageMark::CP1254 => 1254,
+                CodePageMark::CP1255 => 1255,
+                CodePageMark::CP1256 => 1256,
+                CodePageMark::CP620 => 620,
+                CodePageMark::CP737 => 737,
+                CodePageMark::CP857 => 857,
+                CodePageMark::CP895 => 895,
+                CodePageMark::Utf8 => 65001,
+                CodePageMark::Undefined | CodePageMark::Invalid => return None,
+            },
+            Self::Utf8 => 65001,
+        })
+    }
+
+    /// The language driver ID a `.dbf` written in this encoding carries in its header, or `None`
+    /// for one that no ID names (GB18030, the ISO 8859 pages, windows-1258), which only a `.cpg`
+    /// label can say, and for the DOS pages, which [`for_writing`] refuses.
+    pub(crate) fn write_ldid(&self) -> Option<u8> {
+        match self {
+            Self::Oem(_) => None,
+            // UTF-8's ID, as dbase writes it of its own accord ([`UnicodeLossy`]).
+            Self::Utf8 => Some(0xF0),
+            Self::Standard(_) => self.code_page().and_then(code_page_ldid),
+        }
+    }
+
+    /// The `.cpg` label that names this encoding when a `.dbf` is written in it: a code page
+    /// number ("936"), which ArcGIS, GDAL and RustGIS all read, or the encoding's own name for
+    /// one no number names ("GB18030").
+    pub(crate) fn write_cpg(&self) -> String {
+        match (self.code_page(), self) {
+            (Some(65001), _) => "UTF-8".into(),
+            (Some(page), _) => page.to_string(),
+            (None, Self::Standard(encoding)) => encoding.name().to_string(),
+            (None, _) => "UTF-8".into(),
+        }
+    }
+
+    /// Whether `c` has bytes in this encoding: a character that doesn't is written as a numeric
+    /// character reference (`&#128512;`) and counted (see `shapefile_values_notes`). Always true
+    /// for UTF-8, and never asked of the DOS pages, which no `.dbf` is written in.
+    pub(crate) fn can_encode(&self, c: char) -> bool {
+        match self {
+            Self::Utf8 => true,
+            Self::Standard(encoding) => {
+                // One character, and room for the longest numeric character reference its
+                // encoder writes for one it can't hold (&#1114111;).
+                let mut bytes = [0u8; 16];
+                let mut encoder = encoding.new_encoder();
+                let (_, _, _, had_errors) = encoder.encode_from_utf8(c.encode_utf8(&mut [0u8; 4]), &mut bytes, true);
+                !had_errors
+            }
+            Self::Oem(_) => true,
+        }
+    }
+
+    /// The encoding's name as a notice says it ("GBK", "UTF-8").
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Standard(encoding) => encoding.name().to_string(),
+            Self::Utf8 => "UTF-8".into(),
+            Self::Oem(_) => "its code page".into(),
+        }
+    }
+
+    /// The encoding `name` names, as a `.cpg` file writes it ("GBK", "936", "UTF-8"), for a
+    /// `.dbf` to be written in: refused when it can't be written — the DOS pages dbase's OEM
+    /// adapter decodes encode strictly, failing the whole file on a character they reject, and
+    /// `x-user-defined` has no code page mark, which dbase's header sync panics for want of.
+    pub(crate) fn for_writing(name: &str) -> Result<Self, String> {
+        let parsed = Self::from_name(name).ok_or("not an encoding RustGIS knows")?;
+        match parsed {
+            Self::Oem(_) => Err("a DOS code page, which a .dbf can't be written in".into()),
+            Self::Standard(_) if !parsed.writable() => Err("x-user-defined, which a .dbf can't be written in".into()),
+            writable => Ok(writable),
+        }
+    }
+
+    /// Whether a `.dbf` can be written in this encoding at all: `x-user-defined` is the one
+    /// encoding a name resolves to that has no code page for dbase's header to name.
+    pub(crate) fn writable(&self) -> bool {
+        !matches!(self, Self::Standard(encoding) if std::ptr::eq(*encoding, rs::X_USER_DEFINED))
     }
 }
 
@@ -116,6 +246,33 @@ fn ldid_code_page(ldid: u8) -> Option<u16> {
         0xCB => 1253,
         0xCC => 1257,
         0xF0 => 65001,
+        _ => return None,
+    })
+}
+
+/// The language driver ID a `.dbf` written in code page `page` carries: dbase's own choice where
+/// several IDs name one page (936 → 0x7A, 932 → 0x13, as its writer table has it), `None` for a
+/// page no ID names (1258, GB18030), which only a `.cpg` label can say. Only the pages
+/// [`DbfEncoding::code_page`] names for a writable encoding are asked for.
+fn code_page_ldid(page: u16) -> Option<u8> {
+    Some(match page {
+        866 => 0x65,
+        874 => 0x7C,
+        932 => 0x13,
+        936 => 0x7A,
+        949 => 0x79,
+        950 => 0x78,
+        10000 => 0x04,
+        10007 => 0x96,
+        1250 => 0xC8,
+        1251 => 0xC9,
+        1252 => 0x03,
+        1253 => 0xCB,
+        1254 => 0xCA,
+        1255 => 0x7D,
+        1256 => 0x7E,
+        1257 => 0xCC,
+        65001 => 0xF0,
         _ => return None,
     })
 }
@@ -478,5 +635,54 @@ mod tests {
         let mut notes = Vec::new();
         encoding(None, 0xFF, &mut notes);
         assert_eq!(notes, ["Shapefile: unsupported .dbf code page 0xFF; using UTF-8"]);
+    }
+
+    /// Every code page a writable encoding names has a language driver that names it back, so a
+    /// `.dbf` written in it carries both; windows-1258 has no driver, only its `.cpg` label.
+    #[test]
+    fn every_writable_code_page_has_a_language_driver_that_names_it_back() {
+        for page in [866, 874, 932, 936, 949, 950, 10000, 10007, 65001].into_iter().chain(1250..=1257) {
+            let encoding = DbfEncoding::from_number(page).unwrap();
+            assert_eq!(encoding.code_page(), Some(page), "code page {page}");
+            let ldid = encoding.write_ldid().unwrap();
+            assert_eq!(ldid_code_page(ldid), Some(page), "LDID 0x{ldid:02X}");
+        }
+        let no_driver = DbfEncoding::from_number(1258).unwrap();
+        assert_eq!(no_driver.code_page(), None);
+        assert_eq!(no_driver.write_ldid(), None);
+        assert_eq!(no_driver.write_cpg(), "windows-1258");
+    }
+
+    /// What a `.dbf` written in an encoding says it is: its language driver, its `.cpg` label,
+    /// and the characters it holds.
+    #[test]
+    fn a_written_dbf_says_its_encoding_consistently() {
+        let gbk = DbfEncoding::from_name("GBK").unwrap();
+        assert_eq!((gbk.write_ldid(), gbk.write_cpg().as_str()), (Some(0x7A), "936"));
+        assert_eq!(DbfEncoding::from_name("936").unwrap().write_cpg(), "936");
+        assert!(gbk.can_encode('中'));
+        assert!(!gbk.can_encode('😀'));
+        let utf8 = DbfEncoding::from_name("UTF-8").unwrap();
+        assert_eq!((utf8.write_ldid(), utf8.write_cpg().as_str()), (Some(0xF0), "UTF-8"));
+        assert!(utf8.can_encode('😀'));
+        let gb18030 = DbfEncoding::from_name("GB18030").unwrap();
+        // WHATWG's canonical name for it is lower case, which every `.cpg` reader matches
+        // without regard to case.
+        assert_eq!((gb18030.write_ldid(), gb18030.write_cpg().as_str()), (None, "gb18030"));
+        assert_eq!(gb18030.label(), "gb18030");
+    }
+
+    /// An encoding asked for by name is refused when a `.dbf` can't be written in it: the DOS
+    /// pages, x-user-defined, and a name RustGIS doesn't know.
+    #[test]
+    fn an_encoding_for_writing_is_refused_when_a_dbf_cant_be_written_in_it() {
+        assert!(DbfEncoding::for_writing("GBK").is_ok());
+        assert!(DbfEncoding::for_writing("936").is_ok());
+        assert!(DbfEncoding::for_writing("UTF-8").is_ok());
+        assert_eq!(DbfEncoding::for_writing("437").unwrap_err(), "a DOS code page, which a .dbf can't be written in");
+        assert_eq!(DbfEncoding::for_writing("x-user-defined").unwrap_err(), "x-user-defined, which a .dbf can't be written in");
+        assert_eq!(DbfEncoding::for_writing("nonsense").unwrap_err(), "not an encoding RustGIS knows");
+        assert!(!DbfEncoding::from_name("x-user-defined").unwrap().writable());
+        assert!(DbfEncoding::from_name("GBK").unwrap().writable());
     }
 }

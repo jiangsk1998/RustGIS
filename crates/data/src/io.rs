@@ -424,7 +424,7 @@ fn without_geometry(ds: &Dataset) -> usize {
 /// format couldn't hold. A Shapefile (`shp` or `zip`) comes as a zip of its files, named after the
 /// dataset. GeoPackage needs a file ([`write_path`]).
 pub fn write_bytes(ds: &Dataset, ext: &str) -> Result<(Vec<u8>, usize)> {
-    write_bytes_in(ds, ext, Crs::LonLat)
+    write_bytes_in(ds, ext, Crs::LonLat, None)
 }
 
 /// The formats that can be written in a coordinate system other than WGS 84 longitude/latitude
@@ -543,8 +543,9 @@ pub(crate) fn check_projected(ext: &str, crs: Crs) -> Result<()> {
 }
 
 /// As [`write_bytes`], in the coordinate system `crs`: a GeoPackage, Shapefile or FlatGeobuf (see
-/// [`PROJECTED_FORMATS`]) says it; any other format is written only in longitude/latitude.
-pub fn write_bytes_in(ds: &Dataset, ext: &str, crs: Crs) -> Result<(Vec<u8>, usize)> {
+/// [`PROJECTED_FORMATS`]) says it; any other format is written only in longitude/latitude. A
+/// Shapefile's `.dbf` is written in `encoding` when one is given ([`ShapefileEncoding`]).
+pub fn write_bytes_in(ds: &Dataset, ext: &str, crs: Crs, encoding: Option<&ShapefileEncoding>) -> Result<(Vec<u8>, usize)> {
     let ext = ext.to_ascii_lowercase();
     // An export leaves image fields out: the images stay in the source (see `export_notes`).
     let clean = ds.without_image_fields();
@@ -554,13 +555,14 @@ pub fn write_bytes_in(ds: &Dataset, ext: &str, crs: Crs) -> Result<(Vec<u8>, usi
             return Err(DataError::Unsupported(format!(".{ext} in {} (it holds longitude/latitude only)", crs.label())));
         }
         check_projected(&ext, crs)?;
-        return projected_bytes(&project(ds, crs)?, &ext, crs);
+        return projected_bytes(&project(ds, crs)?, &ext, crs, encoding);
     }
-    projected_bytes(ds, &ext, crs)
+    projected_bytes(ds, &ext, crs, encoding)
 }
 
-/// [`write_bytes_in`] for a dataset already in `crs`'s coordinates.
-fn projected_bytes(ds: &Dataset, ext: &str, crs: Crs) -> Result<(Vec<u8>, usize)> {
+/// [`write_bytes_in`] for a dataset already in `crs`'s coordinates, a Shapefile's `.dbf` written
+/// in `encoding` when one is given.
+fn projected_bytes(ds: &Dataset, ext: &str, crs: Crs, encoding: Option<&ShapefileEncoding>) -> Result<(Vec<u8>, usize)> {
     crate::progress::begin(ds.features.len());
     Ok(match ext {
         "geojson" | "json" => {
@@ -578,7 +580,7 @@ fn projected_bytes(ds: &Dataset, ext: &str, crs: Crs) -> Result<(Vec<u8>, usize)
         }
         "gpx" => (crate::interop::to_gpx(ds, name_field(ds))?.into_bytes(), gpx_left_out(ds)),
         "shp" | "zip" => {
-            let (parts, left_out) = shapefile_parts_in(ds, crs)?;
+            let (parts, left_out) = shapefile_parts_encoded(ds, crs, encoding)?;
             let base: String = ds.name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | ' ') { c } else { '_' }).collect();
             let base = if base.trim().is_empty() { "layer".to_string() } else { base };
             let entries: Vec<(String, Vec<u8>)> = parts.into_iter().map(|(e, b)| (format!("{base}.{e}"), b)).collect();
@@ -629,12 +631,34 @@ pub struct GpkgWritten {
 /// As [`write_path`], in the coordinate system `crs` (a GeoPackage, Shapefile or FlatGeobuf; see
 /// [`write_bytes_in`]).
 pub fn write_path_in(ds: &Dataset, path: &Path, crs: Crs) -> Result<usize> {
-    write_path_to(ds, path, crs, &GpkgTable::default()).map(|(left_out, _)| left_out)
+    write_path_to(ds, path, crs, &GpkgTable::default(), None).map(|(left_out, _)| left_out)
 }
 
-/// As [`write_path_in`], a GeoPackage's table placed as `gpkg` says (other formats ignore it):
-/// also returns the table written.
-pub fn write_path_to(ds: &Dataset, path: &Path, crs: Crs, gpkg: &GpkgTable) -> Result<(usize, Option<GpkgWritten>)> {
+/// The text encoding a Shapefile's `.dbf` is written in, chosen for an export: `parse` resolves
+/// a name or code page number as a `.cpg` file names it ("GBK", "936", "UTF-8"), and refuses an
+/// encoding a `.dbf` can't be written in, so a bad name is refused before the export starts. The
+/// `.dbf`'s bytes, its header's language driver and its `.cpg` file all say the encoding;
+/// without one, a Shapefile is written in UTF-8, as it always was.
+#[derive(Clone, Debug)]
+pub struct ShapefileEncoding(crate::dbf::DbfEncoding);
+
+impl ShapefileEncoding {
+    /// The encoding `name` names, if a `.dbf` can be written in it.
+    pub fn parse(name: &str) -> std::result::Result<Self, String> {
+        let name = name.trim();
+        crate::dbf::DbfEncoding::for_writing(name).map(Self).map_err(|why| format!("encoding '{name}': {why}"))
+    }
+}
+
+/// As [`write_path_in`], a GeoPackage's table placed as `gpkg` says (other formats ignore it),
+/// a Shapefile's `.dbf` written in `encoding` when one is given: also returns the table written.
+pub fn write_path_to(
+    ds: &Dataset,
+    path: &Path,
+    crs: Crs,
+    gpkg: &GpkgTable,
+    encoding: Option<&ShapefileEncoding>,
+) -> Result<(usize, Option<GpkgWritten>)> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let projected;
     let ds = if crs == Crs::LonLat || !PROJECTED_FORMATS.contains(&ext.as_str()) {
@@ -665,7 +689,7 @@ pub fn write_path_to(ds: &Dataset, path: &Path, crs: Crs, gpkg: &GpkgTable) -> R
         }
         "shp" => {
             crate::progress::begin(ds.features.len());
-            let (parts, left_out) = shapefile_parts_in(ds, crs)?;
+            let (parts, left_out) = shapefile_parts_encoded(ds, crs, encoding)?;
             let parts: Vec<(std::path::PathBuf, Vec<u8>)> = parts.into_iter().map(|(e, bytes)| (shapefile_part(path, e), bytes)).collect();
             place_shapefile(path, &stage_shapefile(&parts)?)?;
             Ok((left_out, None))
@@ -674,7 +698,7 @@ pub fn write_path_to(ds: &Dataset, path: &Path, crs: Crs, gpkg: &GpkgTable) -> R
             Err(DataError::Unsupported(format!(".{ext} in {} (it holds longitude/latitude only)", crs.label())))
         }
         _ => {
-            let (bytes, left_out) = projected_bytes(ds, &ext, crs)?;
+            let (bytes, left_out) = projected_bytes(ds, &ext, crs, encoding)?;
             write_atomic(path, &bytes)?;
             Ok((left_out, None))
         }
@@ -3549,12 +3573,20 @@ struct DbfLosses {
     text: usize,
     empty: usize,
     rounded: usize,
+    unencodable: usize,
 }
 
-/// Counts text cut to 254 bytes, non-null values left empty, and numbers rounded to the field's
-/// precision, in rows whose geometry is written. Each kind has one notice naming the affected
-/// source fields (first five, bounded and flattened); a clean dataset gives none.
-pub fn shapefile_values_notes(ds: &Dataset, target: &str) -> Vec<String> {
+/// Counts text cut to 254 bytes, non-null values left empty, numbers rounded to the field's
+/// precision, and characters written as numeric character references because `encoding` has no
+/// bytes for them, in rows whose geometry is written. Each kind has one notice naming the
+/// affected source fields (first five, bounded and flattened); a clean dataset gives none.
+pub fn shapefile_values_notes(ds: &Dataset, target: &str, encoding: Option<&ShapefileEncoding>) -> Vec<String> {
+    let encoding = encoding.map_or(crate::dbf::DbfEncoding::Utf8, |ShapefileEncoding(encoding)| encoding.clone());
+    let encoder = encoding.decoder();
+    let encoded_len = |text: &str| {
+        use shapefile::dbase::encoding::Encoding;
+        encoder.encode(text).map_or(text.len(), |b| b.len())
+    };
     let decimals: Vec<_> =
         ds.fields.iter().enumerate().map(|(k, f)| if f.ty == FieldType::Double { dbf_decimals(ds, k) } else { 0 }).collect();
     let mut counts = vec![DbfLosses::default(); ds.fields.len()];
@@ -3567,7 +3599,13 @@ pub fn shapefile_values_notes(ds: &Dataset, target: &str) -> Vec<String> {
             let Some(loss) = counts.get_mut(k) else { continue };
             match field.ty {
                 // A date-time field is written as its text too, so text held in one is cut the same way.
-                FieldType::Text | FieldType::DateTime if value.to_string().len() > 254 => loss.text += 1,
+                FieldType::Text | FieldType::DateTime => {
+                    let text = value.to_string();
+                    if encoded_len(&text) > 254 {
+                        loss.text += 1;
+                    }
+                    loss.unencodable += text.chars().filter(|c| !encoding.can_encode(*c)).count();
+                }
                 FieldType::Date if !value.asks_null() && dbf_date(value).is_none() => loss.empty += 1,
                 FieldType::Integer | FieldType::Double => {
                     let d = decimals.get(k).copied().unwrap_or(0);
@@ -3614,6 +3652,14 @@ pub fn shapefile_values_notes(ds: &Dataset, target: &str) -> Vec<String> {
     if rounded > 0 {
         let what = if rounded == 1 { "1 number was".into() } else { format!("{rounded} numbers were") };
         notes.push(format!("{target}: {what} rounded to fit dBase field precision, in {fields}"));
+    }
+    let (references, fields) = selected(|n| n.unencodable);
+    if references > 0 {
+        let what = if references == 1 { "1 character was".into() } else { format!("{references} characters were") };
+        notes.push(format!(
+            "{target}: {what} written as numeric character references (&#128512;), which {} has no bytes for, in {fields}",
+            encoding.label()
+        ));
     }
     notes
 }
@@ -3998,6 +4044,19 @@ pub fn shapefile_parts_in(ds: &Dataset, crs: Crs) -> Result<(Vec<(&'static str, 
     shapefile_parts_styled(ds, crs, None).map(|(parts, left_out, _)| (parts, left_out))
 }
 
+/// As [`shapefile_parts_in`], the `.dbf` written in `encoding` when one is given: its bytes, its
+/// header's language driver and its `.cpg` file all say that encoding, and its columns are as
+/// wide as the values they hold in it.
+fn shapefile_parts_encoded(ds: &Dataset, crs: Crs, encoding: Option<&ShapefileEncoding>) -> Result<(Vec<(&'static str, Vec<u8>)>, usize)> {
+    match encoding {
+        None => shapefile_parts_in(ds, crs),
+        Some(ShapefileEncoding(encoding)) => {
+            let style = DbfStyle { encoding: encoding.clone(), ldid: encoding.write_ldid().unwrap_or(0), columns: Vec::new() };
+            shapefile_parts_styled(ds, crs, Some(&style)).map(|(parts, left_out, _)| (parts, left_out))
+        }
+    }
+}
+
 /// What a Shapefile written over the one a layer was read from keeps of that file's `.dbf`
 /// (#1385): its code page (the encoding its text is written in, and the language driver byte
 /// its header names), and each column's width, decimals and type (`F` stays `F`) where the
@@ -4017,8 +4076,11 @@ struct Spec {
 }
 
 /// The column field `k` of `ds` is written to as a new file has it: numbers in 18 digits
-/// (integers) or 24 characters with as many decimals as fit, text as wide as its longest value.
-fn new_column(ds: &Dataset, k: usize) -> Spec {
+/// (integers) or 24 characters with as many decimals as fit, text as wide as its longest value
+/// in `encoding`'s bytes (a character that encoding writes as a numeric character reference
+/// counts its reference's bytes).
+fn new_column(ds: &Dataset, k: usize, encoding: &crate::dbf::DbfEncoding) -> Spec {
+    use shapefile::dbase::encoding::Encoding;
     let Some(f) = ds.fields.get(k) else { return Spec { ty: b'C', len: 1, decimals: 0 } };
     match f.ty {
         // 18 digits: GDAL reads a wider field as a real number.
@@ -4028,7 +4090,17 @@ fn new_column(ds: &Dataset, k: usize) -> Spec {
         FieldType::Date => Spec { ty: b'D', len: 8, decimals: 0 },
         // A `.dbf` has no date-time field that other programs read, so they're ISO text.
         FieldType::Text | FieldType::DateTime => {
-            let longest = ds.features.iter().filter_map(|r| r.attrs.get(k)).map(|v| v.to_string().len()).max().unwrap_or(0);
+            let encoder = encoding.decoder();
+            let longest = ds
+                .features
+                .iter()
+                .filter_map(|r| r.attrs.get(k))
+                .map(|v| {
+                    let text = v.to_string();
+                    encoder.encode(&text).map_or(text.len(), |b| b.len())
+                })
+                .max()
+                .unwrap_or(0);
             Spec { ty: b'C', len: u8::try_from(longest.clamp(1, 254)).unwrap_or(254), decimals: 0 }
         }
         // dBase has no binary field: the column is skipped (see `shapefile_parts_styled`).
@@ -4051,7 +4123,7 @@ impl std::fmt::Display for Spec {
 /// as wide as the file's, and, when a column of that name changes kind or can't
 /// hold the values, what changed (`'ACRES' N(10,2) to N(24,9)`).
 fn kept_column(ds: &Dataset, k: usize, name: &str, style: &DbfStyle) -> (Spec, Option<String>) {
-    let new = new_column(ds, k);
+    let new = new_column(ds, k, &style.encoding);
     let (Some(field), Some(was)) = (ds.fields.get(k), style.columns.iter().find(|c| c.name == name.as_bytes())) else {
         return (new, None);
     };
@@ -4104,6 +4176,16 @@ pub(crate) fn shapefile_parts_styled(
 ) -> Result<(Vec<(&'static str, Vec<u8>)>, usize, Vec<String>)> {
     use shapefile::dbase::{FieldName, FieldValue, Record, TableWriterBuilder};
     use std::io::Cursor;
+    // The one encoding a name resolves to that dbase's header sync panics on for want of a code
+    // page: an error, never a crash, from whatever route it took here (a hostile `.cpg`).
+    if let Some(style) = style
+        && !style.encoding.writable()
+    {
+        return Err(DataError::Unsupported("x-user-defined .dbf text can't be written".into()));
+    }
+    // The encoding the `.dbf` text is written in: the style's, or UTF-8 for a file with none.
+    let utf8 = crate::dbf::DbfEncoding::Utf8;
+    let target = style.map_or(&utf8, |s| &s.encoding);
     let fmt = |e: shapefile::Error| DataError::Format(format!("Shapefile: {e}"));
     let names = dbf_names(&ds.fields);
     let dbf_name = |n: &str| FieldName::try_from(n).map_err(|e| DataError::Format(format!("Shapefile: field {n}: {e}")));
@@ -4122,7 +4204,7 @@ pub(crate) fn shapefile_parts_styled(
                 widened.extend(changed);
                 spec
             }
-            None => new_column(ds, k),
+            None => new_column(ds, k, target),
         };
         // dBase has no binary field: images are left out (an export filters them out first). Its
         // spec still keeps `specs` indexed by the field, so the record's fields line up.
@@ -4147,10 +4229,9 @@ pub(crate) fn shapefile_parts_styled(
             let value = match f.ty {
                 FieldType::Integer | FieldType::Double => FieldValue::Numeric(dbf_number(v, f.ty, decimals, width)),
                 FieldType::Boolean => FieldValue::Logical(dbf_boolean(v)),
-                FieldType::Text | FieldType::DateTime => FieldValue::Character((!v.is_null()).then(|| match style {
-                    Some(style) => cut_encoded(&v.to_string(), 254, &style.encoding).to_string(),
-                    None => cut(&v.to_string(), 254).to_string(),
-                })),
+                FieldType::Text | FieldType::DateTime => {
+                    FieldValue::Character((!v.is_null()).then(|| cut_encoded(&v.to_string(), 254, target).to_string()))
+                }
                 // Left out with the field itself.
                 FieldType::Image => continue,
                 FieldType::Date => FieldValue::Date(dbf_date(v).and_then(|d| {
@@ -4249,7 +4330,9 @@ pub(crate) fn shapefile_parts_styled(
     }
     let mut parts = vec![("shp", shp.into_inner()), ("shx", shx.into_inner()), ("dbf", dbf)];
     parts.extend(prj.map(|p| ("prj", p.into_bytes())));
-    parts.push(("cpg", b"UTF-8".to_vec()));
+    // The `.cpg` names the encoding the `.dbf` was written in, as its header's language driver
+    // does when one names it: a code page number ArcGIS, GDAL and RustGIS all read.
+    parts.push(("cpg", target.write_cpg().into_bytes()));
     Ok((parts, left_out, widened))
 }
 
@@ -5226,7 +5309,7 @@ mod tests {
                 );
             }
             // As many as the Shapefile written holds at 85.05°.
-            let (zip, _) = write_bytes_in(ds, "shp", Crs::WebMercator).unwrap();
+            let (zip, _) = write_bytes_in(ds, "shp", Crs::WebMercator, None).unwrap();
             let mut at_edge = 0;
             for (back, _) in read_zip(&format!("{name}.zip"), &zip).unwrap() {
                 for g in back.features.iter().filter_map(|f| f.geometry.as_ref()) {
@@ -6617,15 +6700,15 @@ mod tests {
             } else {
                 assert_eq!(back.features[0].attrs[0], Value::Null, "{name}");
             }
-            let notes = shapefile_values_notes(&ds, "cells.zip");
+            let notes = shapefile_values_notes(&ds, "cells.zip", None);
             let kind = if rounded { "rounded" } else { "left empty" };
             if !notes.iter().any(|n| n.contains(kind) && n.contains("1 ") && n.contains("value")) {
                 missing.push(name);
             }
             ds.features[0].attrs = vec![Value::Null];
-            assert!(shapefile_values_notes(&ds, "cells.zip").is_empty(), "null: {name}");
+            assert!(shapefile_values_notes(&ds, "cells.zip", None).is_empty(), "null: {name}");
             ds.features[0].attrs = vec![if ty == FieldType::Boolean { Value::Bool(false) } else { Value::Int(0) }];
-            assert!(shapefile_values_notes(&ds, "cells.zip").is_empty(), "clean: {name}");
+            assert!(shapefile_values_notes(&ds, "cells.zip", None).is_empty(), "clean: {name}");
         }
         assert!(missing.is_empty(), "losses without notices: {missing:?}");
     }
@@ -6651,7 +6734,7 @@ mod tests {
         let mut ds = Dataset::new("d", GeometryType::Point, fields);
         ds.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::Text("x".repeat(300)), Value::Text("soon".into())]);
         assert_eq!(
-            shapefile_values_notes(&ds, "a.shp"),
+            shapefile_values_notes(&ds, "a.shp", None),
             [
                 "a.shp: 1 text value was cut to at most 254 bytes, in 'ts'",
                 "a.shp: 1 value couldn't be written to its dBase field and was left empty, in 'issued'"
@@ -6671,7 +6754,7 @@ mod tests {
         midnight.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::Text("2026-01-01T00:00:00".into()), Value::Null]);
         let (bytes, _) = write_bytes(&midnight, "zip").unwrap();
         assert_eq!(read_bytes("m.zip", &bytes).unwrap().0.features[0].attrs[0], Value::parse("2026-01-01", FieldType::Date));
-        assert!(shapefile_values_notes(&midnight, "m.shp").is_empty());
+        assert!(shapefile_values_notes(&midnight, "m.shp", None).is_empty());
         for (i, day) in ["2026-03-05", "1999-12-31", "2000-01-01", "0001-01-01", ""].into_iter().enumerate() {
             let at = Value::parse("2026-03-05T14:30:00+02:00", FieldType::DateTime);
             ds.push(Some(Geometry::Point(Coord::new(i as f64, 1.0))), vec![Value::parse(day, FieldType::Date), at]);

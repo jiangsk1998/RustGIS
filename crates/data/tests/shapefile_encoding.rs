@@ -1,4 +1,6 @@
-//! Shapefile text is decoded at the same public boundaries used by desktop and browser imports.
+//! Shapefile text is decoded at the same public boundaries used by desktop and browser imports,
+//! and an export's encoding is written to the `.dbf`'s bytes, its header's language driver and
+//! its `.cpg` alike.
 
 use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value, io};
 
@@ -566,5 +568,94 @@ fn esri_57_remains_windows_1252_rather_than_iso_8859_1() {
 fn malformed_multibyte_fields_replace_bytes_without_dropping_records() {
     for (ldid, text) in [(0x13, b"X\x82".as_slice()), (0x4D, b"X\x81"), (0x4E, b"X\x81"), (0x4F, b"X\xa4"), (0xF0, b"X\xff")] {
         check_ldid_readers(ldid, text, "X�", None, &[]);
+    }
+}
+
+/// One point with a single text field holding `text`, as an export writes out.
+fn exported(text: &str) -> Dataset {
+    let mut ds = Dataset::new("places", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+    ds.push(Some(Geometry::Point(rustgis_data::Coord::new(1.0, 2.0))), vec![Value::Text(text.into())]);
+    ds
+}
+
+/// Writes `ds` to a loose Shapefile in `encoding`, returning its directory, `.dbf` bytes and
+/// `.cpg` bytes. Byte 29 of the `.dbf` is its language driver; byte 16 of a field descriptor
+/// (the first starts at 32) is its width; a record's text starts one byte past its deletion flag.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_out(ds: &Dataset, encoding: Option<&io::ShapefileEncoding>) -> (tempfile::TempDir, Vec<u8>, Vec<u8>) {
+    let dir = tempfile::tempdir().unwrap();
+    io::write_path_to(ds, &dir.path().join("places.shp"), rustgis_data::raster::Crs::LonLat, &io::GpkgTable::default(), encoding).unwrap();
+    let dbf = std::fs::read(dir.path().join("places.dbf")).unwrap();
+    let cpg = std::fs::read(dir.path().join("places.cpg")).unwrap();
+    (dir, dbf, cpg)
+}
+
+/// Where a `.dbf`'s first record's first field starts.
+fn first_value(dbf: &[u8]) -> usize {
+    usize::from(u16::from_le_bytes([dbf[8], dbf[9]])) + 1
+}
+
+/// The encoding an export names is written into the `.dbf`'s bytes, its header's language driver
+/// and its `.cpg` together — the three a reader can consult — and the text column is as wide as
+/// its longest value in that encoding's bytes, not UTF-8's. It reads back unchanged.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_gbk_export_says_its_encoding_consistently_and_reads_back() {
+    let encoding = io::ShapefileEncoding::parse("936").unwrap();
+    let (dir, dbf, cpg) = write_out(&exported("中文"), Some(&encoding));
+    assert_eq!(dbf[29], 0x7A, "the .dbf header's language driver");
+    let at = first_value(&dbf);
+    assert_eq!(&dbf[at..at + 4], b"\xd6\xd0\xce\xc4", "GBK bytes, not UTF-8's six");
+    assert_eq!(dbf[32 + 16], 4, "the text column's width in GBK bytes");
+    assert_eq!(cpg, b"936", "the .cpg names the code page");
+    let (back, report) = io::read_path(&dir.path().join("places.shp")).unwrap();
+    assert_eq!(back.value(0, 0), &Value::Text("中文".into()));
+    assert!(report.messages.is_empty(), "{:?}", report.messages);
+    assert!(io::shapefile_values_notes(&exported("中文"), "places.shp", Some(&encoding)).is_empty());
+}
+
+/// Without an encoding asked for, a Shapefile is written in UTF-8 as it always was: UTF-8 bytes,
+/// the UTF-8 language driver and a `.cpg` saying UTF-8.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_shapefile_written_without_an_encoding_is_utf8_as_it_always_was() {
+    let (dir, dbf, cpg) = write_out(&exported("中文"), None);
+    assert_eq!(dbf[29], 0xF0, "the .dbf header's language driver");
+    let at = first_value(&dbf);
+    assert_eq!(&dbf[at..at + 6], "中文".as_bytes(), "UTF-8 bytes");
+    assert_eq!(dbf[32 + 16], 6, "the text column's width in UTF-8 bytes");
+    assert_eq!(cpg, b"UTF-8");
+    let (back, report) = io::read_path(&dir.path().join("places.shp")).unwrap();
+    assert_eq!(back.value(0, 0), &Value::Text("中文".into()));
+    assert!(report.messages.is_empty(), "{:?}", report.messages);
+}
+
+/// A character the encoding has no bytes for is written as its numeric character reference, not
+/// silently replaced, and counted in one notice naming the encoding and the fields.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn characters_an_export_encoding_has_no_bytes_for_are_escaped_and_counted() {
+    let encoding = io::ShapefileEncoding::parse("GBK").unwrap();
+    let (_, dbf, _) = write_out(&exported("中文😀"), Some(&encoding));
+    let at = first_value(&dbf);
+    assert_eq!(&dbf[at..at + 13], b"\xd6\xd0\xce\xc4&#128512;", "the emoji as its numeric character reference");
+    assert_eq!(
+        io::shapefile_values_notes(&exported("中文😀"), "places.shp", Some(&encoding)),
+        vec![
+            "places.shp: 1 character was written as numeric character references (&#128512;), which GBK has no bytes for, in 'name'"
+                .to_string()
+        ]
+    );
+}
+
+/// An encoding a `.dbf` can't be written in is refused: the DOS pages, which encode strictly and
+/// would fail the whole file, and names nothing resolves to. A name is trimmed, as a `.cpg`'s
+/// content is.
+#[test]
+fn an_encoding_a_dbf_cannot_be_written_in_is_refused() {
+    assert!(io::ShapefileEncoding::parse(" 936 ").is_ok());
+    assert!(io::ShapefileEncoding::parse("gb18030").is_ok());
+    for refused in ["437", "850", "x-user-defined", "not-an-encoding"] {
+        assert!(io::ShapefileEncoding::parse(refused).is_err(), "{refused}");
     }
 }

@@ -4668,6 +4668,7 @@ impl RustGisApp {
                 // FlatGeobuf, which the data crate refuses in the browser.
                 let ext = p.get("format").and_then(Value::as_str).unwrap_or("geojson").to_ascii_lowercase();
                 rustgis_engine::cmd::share::gpkg_table(p, &ext)?;
+                let encoding = rustgis_engine::cmd::share::shapefile_encoding(p, &ext)?;
                 // A streamed layer exports its whole source, not the features read for the view.
                 let (whole, lost) = if l.is_streamed() {
                     let (ds, lost) = l.load_all_counted()?;
@@ -4679,7 +4680,7 @@ impl RustGisApp {
                 let ds = whole.as_ref().unwrap_or(&l.dataset);
                 use rustgis_engine::data::io;
                 let crs = io::default_export_crs(ds, &ext);
-                let written = io::write_bytes_in(ds, &ext, crs).map_err(|e| e.to_string());
+                let written = io::write_bytes_in(ds, &ext, crs, encoding.as_ref()).map_err(|e| e.to_string());
                 let (bytes, left_out) = match written {
                     Ok(w) => w,
                     Err(e) => {
@@ -4696,7 +4697,7 @@ impl RustGisApp {
                 let mut dbf_notes = Vec::new();
                 if ext == "zip" {
                     dbf_notes.extend(io::shapefile_names_note(&ds.fields, &name));
-                    dbf_notes.extend(io::shapefile_values_notes(ds, &name));
+                    dbf_notes.extend(io::shapefile_values_notes(ds, &name, encoding.as_ref()));
                     dbf_notes.extend(io::shapefile_geometry_notes(ds, &name, crs));
                 }
                 if matches!(ext.as_str(), "parquet" | "geoparquet") {
@@ -4817,7 +4818,7 @@ impl RustGisApp {
                 let gpkg = rustgis_engine::cmd::share::gpkg_table(p, &ext)?;
                 let id = self.export_target(p)?;
                 let with_table = |mut args: Value| {
-                    for key in ["mode", "tableName"] {
+                    for key in ["mode", "tableName", "encoding"] {
                         if let Some(v) = p.get(key) {
                             args[key] = v.clone();
                         }

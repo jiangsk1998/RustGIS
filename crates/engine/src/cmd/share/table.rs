@@ -152,6 +152,7 @@ pub(in crate::cmd) fn table_work(s: &Session, p: &Value) -> Result<Work, String>
     let path = ps(p, "path").ok_or("path is required")?.to_string();
     let ext = Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let gpkg = super::gpkg_table(p, &ext)?;
+    let encoding = super::shapefile_encoding(p, &ext)?;
     let mut ds = s.project.tables.get(s.table_index(p)?).ok_or("no such table")?.dataset.clone();
     let (sort, limit) = options(&ds, p)?;
     Ok(Box::new(move || {
@@ -161,7 +162,7 @@ pub(in crate::cmd) fn table_work(s: &Session, p: &Value) -> Result<Work, String>
         let mut notes = rustgis_data::export_notes([(&ds, ds.extent())], &path, rustgis_data::raster::Crs::LonLat);
         if matches!(ext.as_str(), "shp" | "zip") {
             notes.extend(rustgis_data::io::shapefile_names_note(&ds.fields, &path));
-            notes.extend(rustgis_data::io::shapefile_values_notes(&ds, &path));
+            notes.extend(rustgis_data::io::shapefile_values_notes(&ds, &path, encoding.as_ref()));
             notes.extend(rustgis_data::io::shapefile_geometry_notes(&ds, &path, rustgis_data::raster::Crs::LonLat));
         }
         if matches!(ext.as_str(), "parquet" | "geoparquet") {
@@ -175,7 +176,8 @@ pub(in crate::cmd) fn table_work(s: &Session, p: &Value) -> Result<Work, String>
         let name_field = rustgis_data::io::name_field(&ds);
         notes.extend(rustgis_data::io::export_losses_notes(&ds, &ext, name_field, &path));
         let (left_out, table) =
-            rustgis_data::io::write_path_to(&ds, Path::new(&path), rustgis_data::raster::Crs::LonLat, &gpkg).map_err(|e| e.to_string())?;
+            rustgis_data::io::write_path_to(&ds, Path::new(&path), rustgis_data::raster::Crs::LonLat, &gpkg, encoding.as_ref())
+                .map_err(|e| e.to_string())?;
         if let Some(note) = rustgis_data::io::left_out_note(&path, &ext, left_out) {
             notes.insert(0, note);
         }

@@ -5,6 +5,20 @@ header). Without a usable `.cpg`, the following inventory describes RustGIS's LD
 All numbers in the marker column are hexadecimal. These are language-driver identifiers,
 not the numeric code-page labels accepted in a `.cpg`.
 
+## Writing
+
+`share.exportLayer` and `share.exportTable` take an `encoding` parameter for a Shapefile
+(`.shp` or `.zip`): an encoding name or code page number as a `.cpg` names it, such as
+`GBK`, `936` or `UTF-8` (the default). The `.dbf`'s bytes, its header's language driver and
+its `.cpg` file all say that encoding, and text columns are as wide as their longest value
+in its bytes. An encoding a `.dbf` can't be written in is refused: the DOS pages dbase's
+own adapter decodes (437, 850, 852, 861, 865), whose strict encoder would fail the whole
+file on a character they reject, and `x-user-defined`. Pages 866 and 874 are written
+through `encoding_rs`, like every other name. A character the encoding has no bytes for
+is written as its numeric character reference (`&#128512;`) and counted in one notice
+naming the encoding and the fields. Without the parameter, a Shapefile is written in
+UTF-8 as it always was.
+
 ## Decoded markers
 
 | Code page | LDID markers |

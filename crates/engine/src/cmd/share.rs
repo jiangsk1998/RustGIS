@@ -34,10 +34,10 @@ pub fn commands() -> Vec<C> {
         C::new("share.exportLayer", "Export Features", "Publish › Output", |s, p| super::exports::write_here(s, p, "share.exportLayer")).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
             .when(need_layer)
-            .params(r#"{"layer"?, "path": "*.geojson|*.csv|*.fgb|*.gpkg|*.parquet|*.shp|*.zip|*.kml|*.kmz|*.gpx", "crs"?: "EPSG:… (or WKT) for a GeoPackage, Shapefile or FlatGeobuf (default: the system the layer was read in, else EPSG:4326)", "mode"?: "newFile (default: refuses an existing file) | addTable | replaceTable, for a GeoPackage", "tableName"?: "the GeoPackage table (default: the layer's name)"}"#),
+            .params(r#"{"layer"?, "path": "*.geojson|*.csv|*.fgb|*.gpkg|*.parquet|*.shp|*.zip|*.kml|*.kmz|*.gpx", "crs"?: "EPSG:… (or WKT) for a GeoPackage, Shapefile or FlatGeobuf (default: the system the layer was read in, else EPSG:4326)", "encoding"?: "the .dbf text encoding for a Shapefile (.shp or .zip): an encoding name or code page, e.g. GBK or 936 (default UTF-8)", "mode"?: "newFile (default: refuses an existing file) | addTable | replaceTable, for a GeoPackage", "tableName"?: "the GeoPackage table (default: the layer's name)"}"#),
         C::new("share.exportTable", "Export Table", "Publish › Output", |s, p| super::exports::write_here(s, p, "share.exportTable")).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
         .params(
-            r#"{"table": name|id (a standalone table), "path": "*.geojson|*.csv|*.fgb|*.gpkg|*.parquet|*.shp|*.zip|*.kml|*.kmz|*.gpx", "mode"?: "newFile (default: refuses an existing file) | addTable | replaceTable, for a GeoPackage", "tableName"?: "the GeoPackage table (default: the table's name)", "sort"?: [{"field": name, "descending"?: false}], "limit"?: "nonnegative integer: keep the first N rows after sorting"}"#,
+            r#"{"table": name|id (a standalone table), "path": "*.geojson|*.csv|*.fgb|*.gpkg|*.parquet|*.shp|*.zip|*.kml|*.kmz|*.gpx", "encoding"?: "the .dbf text encoding for a Shapefile (.shp or .zip): an encoding name or code page, e.g. GBK or 936 (default UTF-8)", "mode"?: "newFile (default: refuses an existing file) | addTable | replaceTable, for a GeoPackage", "tableName"?: "the GeoPackage table (default: the table's name)", "sort"?: [{"field": name, "descending"?: false}], "limit"?: "nonnegative integer: keep the first N rows after sorting"}"#,
         )
         .view(),
     ]
@@ -62,6 +62,26 @@ pub fn gpkg_table(p: &Value, ext: &str) -> Result<GpkgTable, String> {
         return Err("mode and tableName are for a GeoPackage (.gpkg) export".into());
     }
     Ok(GpkgTable { mode, name })
+}
+
+/// A Shapefile export's `.dbf` text encoding, from `encoding`, which only a Shapefile (extension
+/// `ext`) takes; the front end checks a request with it before asking for a file.
+pub fn shapefile_encoding(p: &Value, ext: &str) -> Result<Option<rustgis_data::io::ShapefileEncoding>, String> {
+    // Not a string is refused, not taken for the default.
+    let asked = match p.get("encoding") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.trim()),
+        Some(_) => return Err("encoding must be a string".into()),
+    };
+    let encoding = match asked.filter(|e| !e.is_empty()) {
+        None => None,
+        // Resolved now, so a name a `.dbf` can't be written in is refused before the export starts.
+        Some(name) => Some(rustgis_data::io::ShapefileEncoding::parse(name)?),
+    };
+    if !matches!(ext, "shp" | "zip") && encoding.is_some() {
+        return Err("encoding is for a Shapefile (.shp or .zip) export".into());
+    }
+    Ok(encoding)
 }
 
 /// File-only GeoPackage diagnostics, available even if delivery cannot refresh live layers.
@@ -616,11 +636,12 @@ pub(crate) fn layer_work(s: &Session, p: &Value) -> Result<Work, String> {
     // Checked now, so a bad table option is refused before the export starts.
     let ext = Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let gpkg = gpkg_table(p, &ext)?;
+    let encoding = shapefile_encoding(p, &ext)?;
     let compatibility = ps(p, "crs").and_then(|text| asked.and_then(|crs| rustgis_data::raster::wkt::typed_crs_note(text, crs)));
     let (boxes, map) = (s.constructions.clone(), s.map().instance_id());
     Ok(Box::new(move || {
         let note = boxes.export_notes(map, &l)?;
-        let mut wrote = write_layer(&l, &path, asked, gpkg)?;
+        let mut wrote = write_layer(&l, &path, asked, gpkg, encoding.as_ref())?;
         wrote.notes.extend(note);
         if let Some(note) = compatibility {
             wrote.notes.insert(0, format!("crs: {note}"));
@@ -673,8 +694,14 @@ pub fn gpkg_dates_note(ds: &rustgis_data::Dataset, ext: &str, path: &str) -> Vec
 }
 
 /// Writes layer `l` to `path`, in `asked` or the system the format defaults to; a GeoPackage's
-/// table goes where `gpkg` says.
-fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: GpkgTable) -> Result<Wrote, String> {
+/// table goes where `gpkg` says, a Shapefile's `.dbf` text where `encoding` says.
+fn write_layer(
+    l: &rustgis_map::Layer,
+    path: &str,
+    asked: Option<Crs>,
+    gpkg: GpkgTable,
+    encoding: Option<&rustgis_data::io::ShapefileEncoding>,
+) -> Result<Wrote, String> {
     let ext = Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     // A layer read in place from the GeoPackage it goes into is read whole first: SQLite can't
     // write a file while the same export is reading it.
@@ -722,7 +749,8 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
             (e.written, e.left_out, e.skipped, table, unfit, e.null_numbers, moved, e.csv, dates)
         }
         None => {
-            let (left_out, table) = rustgis_data::io::write_path_to(ds, Path::new(&path), crs, &gpkg).map_err(|e| e.to_string())?;
+            let (left_out, table) =
+                rustgis_data::io::write_path_to(ds, Path::new(&path), crs, &gpkg, encoding).map_err(|e| e.to_string())?;
             let unfit = if parquet { rustgis_data::source::parquet::values_note(ds, path) } else { None };
             let null_numbers = rustgis_data::export::numbers_written_as_null(&ds.features, &ds.fields, &ext);
             let csv = if ext == "csv" { rustgis_data::io::CsvLosses::of(&ds.features, ds.geometry_type) } else { Default::default() };
@@ -747,7 +775,7 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
     let mut dbf_notes = Vec::new();
     if shapefile {
         dbf_notes.extend(rustgis_data::io::shapefile_names_note(&ds.fields, path));
-        dbf_notes.extend(rustgis_data::io::shapefile_values_notes(ds, path));
+        dbf_notes.extend(rustgis_data::io::shapefile_values_notes(ds, path, encoding));
         dbf_notes.extend(rustgis_data::io::shapefile_geometry_notes(ds, path, crs));
     }
     if ext == "gpkg" {
