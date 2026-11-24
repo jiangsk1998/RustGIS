@@ -547,7 +547,7 @@ impl Session {
     /// Retire a session after an unanswered negotiation. A timed-out request can still
     /// change the agent's mode later, so this session must never receive another task.
     pub fn poll(&mut self) -> Vec<Event> {
-        if !self.asked_mode.as_ref().is_some_and(|a| a.started.elapsed() >= web_time::Duration::from_secs(60)) {
+        if self.asked_mode.as_ref().is_none_or(|a| a.started.elapsed() < web_time::Duration::from_secs(60)) {
             return Vec::new();
         }
         self.mode = None;

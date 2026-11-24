@@ -2154,7 +2154,7 @@ impl Reading {
                 }
             } else if local(&p) == "appearance" {
                 self.said.appearances += 1;
-            } else if !(is_gml(&p) && local(&p) == "boundedBy") && !local(&p).starts_with("lod") {
+            } else if (local(&p) != "boundedBy" || !is_gml(&p)) && !local(&p).starts_with("lod") {
                 // Its extent (`gml:boundedBy`) is where it lies, and an empty geometry property
                 // holds nothing: neither is a property of its own.
                 own = true;

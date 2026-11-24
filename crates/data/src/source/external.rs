@@ -65,7 +65,7 @@ pub(crate) fn reload_workspace(cache: &Path) -> std::io::Result<std::sync::Arc<R
             let age = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
             // The creator installs owner.lock before locking it. A collector must not claim
             // that unlocked file during installation; an unknown age is not safe to reclaim.
-            if !age.is_some_and(|age| age >= std::time::Duration::from_secs(60)) {
+            if age.is_none_or(|age| age < std::time::Duration::from_secs(60)) {
                 continue;
             }
             let lock_path = path.join("owner.lock");

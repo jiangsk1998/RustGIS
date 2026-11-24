@@ -117,8 +117,8 @@ pub(crate) fn check(stream: &[u8], max_cells: usize) -> Result<()> {
             0x000a => break,
             0x0809 => {
                 let version = word(r.data, 0)?;
-                biff8 = !matches!(version, 0x0002 | 0x0007 | 0x0200 | 0x0300 | 0x0400 | 0x0500)
-                    && !(version == 0 && word(r.data, 2).unwrap_or(0) == 0x1000);
+                biff8 = !(matches!(version, 0x0002 | 0x0007 | 0x0200 | 0x0300 | 0x0400 | 0x0500)
+                    || version == 0 && word(r.data, 2).unwrap_or(0) == 0x1000);
             }
             0x002f => {
                 word(r.data, 0)?;

@@ -2593,7 +2593,7 @@ pub fn frame_plain_under(
     under: (f64, f64, f64, f64),
     cells: u32,
 ) -> bool {
-    if !map.tiles.is_empty() || !(w_mm > 0.0 && h_mm > 0.0) {
+    if !(map.tiles.is_empty() && w_mm > 0.0 && h_mm > 0.0) {
         return false;
     }
     let (w, h) = (w_mm * PT_PER_MM, h_mm * PT_PER_MM);

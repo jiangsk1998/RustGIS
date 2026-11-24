@@ -508,7 +508,7 @@ pub fn lists_no_arrays(docs: &[(String, Vec<u8>)]) -> bool {
         Some(z) => {
             z.get("node_type").and_then(Value::as_str) == Some("group") && !z.get("consolidated_metadata").is_some_and(Value::is_object)
         }
-        None => doc(".zgroup").is_some() && doc(".zarray").is_none() && !doc(".zmetadata").is_some_and(|m| m.get("metadata").is_some()),
+        None => doc(".zgroup").is_some() && doc(".zarray").is_none() && doc(".zmetadata").is_none_or(|m| m.get("metadata").is_none()),
     }
 }
 

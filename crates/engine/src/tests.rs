@@ -30080,7 +30080,7 @@ fn permission_review_zarr_worker_rechecks_captured_still_before_a_local_read() {
         if raster.time_zarr.as_ref().unwrap().shown != Some(1) || value != if revoked { None } else { Some(108.0) } {
             failures.push(format!("{tag}: completed read applied {value:?}"));
         }
-        if crate::cmd::zarr::kept_slice(&key).is_some() != !revoke_before {
+        if crate::cmd::zarr::kept_slice(&key).is_some() == revoke_before {
             failures.push(format!("{tag}: invalid cache publication"));
         }
         let errors = s.notices_since(mark).iter().filter(|notice| notice.error).count();

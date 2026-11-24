@@ -602,7 +602,7 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
     // The entry is replaced in an order that never leaves it naming a missing file: the new state
     // first, then the key that vouches for it.
     let _ = std::fs::remove_file(&keyfile);
-    if !any && !(fresh && family.or(kind).is_some()) {
+    if !(any || fresh && family.or(kind).is_some()) {
         // An empty family is remembered, so the file isn't converted again for it.
         std::fs::write(&empty, b"")?;
         let _ = std::fs::remove_file(&out);

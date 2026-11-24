@@ -1220,11 +1220,11 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 draped = app.map.drape.prepare(ui.ctx(), app.session.map_mut(), drape_key, tiles, w, h, ppp, time);
             } else if tilted {
                 tilt_draped = app.map.tilt_drape.prepare(ui.ctx(), app.session.map_mut(), drape_key, tiles, w, h, ppp, time);
-            } else if app.map.preview_attempt != Some(key)
-                && !reprojects
+            } else if !(app.map.preview_attempt == Some(key)
+                || reprojects
                 // The last frame, shifted, stands in while the worker draws; if it couldn't, a preview.
-                && !(flat_settle && app.map.tilt_settle.busy())
-                && !(keep_frame && app.map.tilt_settle.busy())
+                || flat_settle && app.map.tilt_settle.busy()
+                || keep_frame && app.map.tilt_settle.busy())
             {
                 // A kept frame waits for the exact one; if that couldn't be drawn, a preview.
                 // A small preview shows a visibility change immediately. The exact frame is
