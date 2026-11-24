@@ -1330,6 +1330,50 @@ fn sync_state_said(app: &mut RustGisApp, landed: Landed) {
     app.session.notify(text, false);
 }
 
+/// The file an export writes: `ext` is added unless the name already ends in it (a dot in the
+/// name, as in "U.S. Cities", isn't taken for one). A Shapefile's name is one for its `.shp`,
+/// `.shx`, `.dbf`, `.prj` and `.cpg`, so a trailing one of those is replaced rather than added:
+/// a layer called or typed as "Cities.cpg" writes "Cities.shp" and its parts, not "Cities.cpg.shp".
+fn export_file_path(path: String, ext: &str) -> String {
+    let mut path = path;
+    if ext == "shp" {
+        loop {
+            let p = std::path::Path::new(&path);
+            let Some(typed) = p.extension().and_then(|e| e.to_str()) else { break };
+            if !["shp", "shx", "dbf", "prj", "cpg"].iter().any(|e| typed.eq_ignore_ascii_case(e)) {
+                break;
+            }
+            let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            path = p.with_file_name(stem).display().to_string();
+        }
+    }
+    let typed = std::path::Path::new(&path).extension().is_some_and(|e| e.eq_ignore_ascii_case(ext));
+    if typed { path } else { format!("{path}.{ext}") }
+}
+
+#[cfg(test)]
+mod export_file_path_tests {
+    use super::export_file_path;
+
+    /// A Shapefile's five files share one name: a trailing `.cpg` or `.shp` in it is replaced,
+    /// not stacked, and other formats keep adding their extension.
+    #[test]
+    fn a_shapefile_export_never_doubles_a_suffix() {
+        for (name, want) in [
+            ("Cities", "Cities.shp"),
+            ("Cities.shp", "Cities.shp"),
+            ("Cities.CPG", "Cities.shp"),
+            ("成果_透传.cpg", "成果_透传.shp"),
+            ("成果_透传.cpg.shp", "成果_透传.shp"),
+            ("U.S. Cities", "U.S. Cities.shp"),
+        ] {
+            assert_eq!(export_file_path(name.to_string(), "shp"), want, "{name}");
+        }
+        assert_eq!(export_file_path("U.S. Cities".to_string(), "geojson"), "U.S. Cities.geojson");
+        assert_eq!(export_file_path("Cities.shp".to_string(), "geojson"), "Cities.shp.geojson");
+    }
+}
+
 impl RustGisApp {
     /// The layer to export: `layer` (an id or name, as commands take it; the dialog's is checked
     /// against its `instance`, so a reused id isn't taken for it), else the active layer.
@@ -4696,7 +4740,7 @@ impl RustGisApp {
                 rustgis_engine::cmd::share::coalesce_read_zm(&mut notes, &name, ds, &lost);
                 let mut dbf_notes = Vec::new();
                 if ext == "zip" {
-                    dbf_notes.extend(io::shapefile_names_note(&ds.fields, &name));
+                    dbf_notes.extend(io::shapefile_names_note(&ds.fields, encoding.as_ref(), &name));
                     dbf_notes.extend(io::shapefile_values_notes(ds, &name, encoding.as_ref()));
                     dbf_notes.extend(io::shapefile_geometry_notes(ds, &name, crs));
                 }
@@ -4835,12 +4879,9 @@ impl RustGisApp {
                     }
                     return Ok(Value::Null);
                 }
-                let name = self.session.map().layer(id).map(|l| format!("{}.{ext}", l.name)).unwrap_or_default();
+                let name = self.session.map().layer(id).map(|l| export_file_path(l.name.clone(), &ext)).unwrap_or_default();
                 if let Some(path) = dialogs::pick_save(&name, &[ext.as_str()], label) {
-                    // The format chosen decides: its extension is added unless it was typed (a dot
-                    // in the name, as in "U.S. Cities", isn't taken for one).
-                    let typed = std::path::Path::new(&path).extension().is_some_and(|e| e.eq_ignore_ascii_case(&ext));
-                    let path = if typed { path } else { format!("{path}.{ext}") };
+                    let path = export_file_path(path, &ext);
                     // Written on a thread of its own, with progress and Cancel in the status bar.
                     let args = with_table(json!({"layer": id, "path": path}));
                     #[cfg(not(target_arch = "wasm32"))]

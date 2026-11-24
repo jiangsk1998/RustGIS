@@ -280,7 +280,7 @@ pub fn shapefile(ds: &Dataset, path: &Path, synced: &Synced) -> Result<Published
     }
 
     // 3. The layer, written, reads back as the layer.
-    if let Some(note) = crate::io::shapefile_names_note(&ds.fields, &name) {
+    if let Some(note) = crate::io::shapefile_names_note_styled(&ds.fields, &style, &name) {
         return Err(refused(path, note));
     }
     crate::progress::begin(ds.features.len());
@@ -310,9 +310,9 @@ pub fn shapefile(ds: &Dataset, path: &Path, synced: &Synced) -> Result<Published
     }
 
     // The file's columns no field of the layer has now (deleted or renamed): left out, and said.
-    let kept_names = crate::io::shapefile_column_names(&ds.fields);
-    let gone: Vec<String> =
-        table.columns.iter().filter(|c| !kept_names.iter().any(|n| n.as_bytes() == c.name.as_slice())).map(column).collect();
+    let kept_names = crate::io::shapefile_column_names(&ds.fields, &style.encoding);
+    let kept: Vec<Vec<u8>> = kept_names.iter().map(|n| crate::io::encoded_name(n, &style.encoding)).collect();
+    let gone: Vec<String> = table.columns.iter().filter(|c| !kept.iter().any(|n| n == &c.name)).map(column).collect();
     if !gone.is_empty() {
         let shown: Vec<&str> = gone.iter().take(5).map(String::as_str).collect();
         let more = if gone.len() > 5 { format!(" and {} more", gone.len() - 5) } else { String::new() };
@@ -1463,10 +1463,10 @@ mod tests {
         assert!(same_shapes(&before, &std::fs::read(&path).unwrap(), 0.0).is_none());
     }
 
-    /// The writer uses UTF-8 name bytes even with a legacy code page: a rewrite is refused
-    /// before the differing name or width can reach the source.
+    /// The writer writes a name as the file's code page holds it, so a legacy `Señor` column in
+    /// 1252 keeps its bytes and the rewrite goes through.
     #[test]
-    fn a_legacy_non_ascii_column_name_refuses_the_rewrite_without_changing_the_file() {
+    fn a_legacy_non_ascii_column_name_is_written_in_the_files_code_page() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("parcels.shp");
         written(&parcels(), &path);
@@ -1480,10 +1480,13 @@ mod tests {
         let mut rows: Vec<_> = ds.features.iter().cloned().collect();
         rows[0].attrs[0] = Value::Text("Smyth".into());
         ds.features = rows.into();
-        let e = shapefile(&ds, &path, &sync).err().unwrap().to_string();
-        assert!(e.contains("its columns would change") && e.contains("nothing was written"), "{e}");
-        assert_eq!(std::fs::read(path.with_extension("dbf")).unwrap(), bytes);
-        assert!(sync.files.changed(&path).unwrap().is_empty());
+        let published = shapefile(&ds, &path, &sync).unwrap();
+        assert_eq!(published.read.fields[0].name, "Señor");
+        let after = std::fs::read(path.with_extension("dbf")).unwrap();
+        assert_eq!(&after[32..37], b"Se\xf1or", "the column's name bytes changed");
+        let (back, _) = crate::io::read_path(&path).unwrap();
+        assert_eq!(back.fields[0].name, "Señor");
+        assert_eq!(back.features.iter().next().unwrap().attrs[0], Value::Text("Smyth".into()));
     }
 
     /// A widened column is said; a layer in another system gets a `.prj` for it, said too.

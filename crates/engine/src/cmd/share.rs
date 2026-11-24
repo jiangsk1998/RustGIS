@@ -774,7 +774,7 @@ fn write_layer(
     let shapefile = matches!(ext.as_str(), "shp" | "zip");
     let mut dbf_notes = Vec::new();
     if shapefile {
-        dbf_notes.extend(rustgis_data::io::shapefile_names_note(&ds.fields, path));
+        dbf_notes.extend(rustgis_data::io::shapefile_names_note(&ds.fields, encoding, path));
         dbf_notes.extend(rustgis_data::io::shapefile_values_notes(ds, path, encoding));
         dbf_notes.extend(rustgis_data::io::shapefile_geometry_notes(ds, path, crs));
     }

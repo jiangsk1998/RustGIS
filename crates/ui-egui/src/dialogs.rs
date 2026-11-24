@@ -53,6 +53,9 @@ pub struct Dialogs {
     pub mode: &'static str,
     /// Export Features' GeoPackage destination: one of [`GPKG_MODES`]' codes (empty: a new file).
     pub gpkg_mode: &'static str,
+    /// Export Features' Shapefile `.dbf` encoding: a name a `.cpg` takes, one of
+    /// [`SHAPEFILE_ENCODINGS`] (empty: not picked, so [`default_encoding`] decides).
+    pub encoding: &'static str,
     /// The layer Export Features was opened on (its id and instance), exported whatever is
     /// selected while the dialog stays open.
     pub export_layer: Option<(u32, u64)>,
@@ -278,6 +281,7 @@ impl Dialogs {
             "exportLayer" => {
                 self.mode = "geojson";
                 self.gpkg_mode = "newFile";
+                self.encoding = "";
                 self.export_layer = active.map(|l| (l.id, l.instance_id()));
                 // The GeoPackage table's name.
                 self.text = active.map(|l| l.name.clone()).unwrap_or_default();
@@ -853,6 +857,29 @@ pub const EXPORT_FORMATS: &[(&str, &str)] = &[
 pub const GPKG_MODES: &[(&str, &str)] =
     &[("newFile", "A new GeoPackage"), ("addTable", "A new table in a GeoPackage"), ("replaceTable", "A table replaced in a GeoPackage")];
 
+/// The Shapefile `.dbf` text encodings Export Features offers: (the name a `.cpg` takes, label
+/// shown). The names go to `share.exportLayer` as its `encoding`.
+pub const SHAPEFILE_ENCODINGS: &[(&str, &str)] = &[
+    ("UTF-8", "UTF-8"),
+    ("GBK", "GBK (936, Simplified Chinese)"),
+    ("GB18030", "GB18030 (Simplified Chinese)"),
+    ("Big5", "Big5 (950, Traditional Chinese)"),
+    ("Shift_JIS", "Shift-JIS (932, Japanese)"),
+    ("EUC-KR", "EUC-KR (949, Korean)"),
+    ("Windows-1252", "Windows-1252 (Western European)"),
+];
+
+/// The encoding Export Features writes when none was picked: the interface language's legacy code
+/// page, which ArcMap 10.x reads (it takes a UTF-8 `.dbf` for the system's code page, showing
+/// mojibake), and UTF-8 elsewhere, which QGIS and ArcGIS Pro read as well.
+fn default_encoding(language: &str) -> &'static str {
+    match language {
+        "zh" => "GBK",
+        "zh-tw" => "Big5",
+        _ => "UTF-8",
+    }
+}
+
 /// The formats Export Features offers: all of [`EXPORT_FORMATS`] on the desktop. The web app
 /// leaves out GeoPackage, written with SQLite, and FlatGeobuf, whose writer needs a temporary
 /// file; the browser has neither.
@@ -881,6 +908,24 @@ fn export_layer(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             .response
             .labelled_by(input_label.id);
         ui.end_row();
+        // A Shapefile's .dbf text encoding: ArcMap 10.x reads UTF-8 bytes as the system's code
+        // page, so Chinese text needs GBK (or Big5) there.
+        if app.dialogs.mode == "shp" {
+            let encoding = if app.dialogs.encoding.is_empty() { default_encoding(app.chosen_lang().code()) } else { app.dialogs.encoding };
+            let encoding_label = ui.label(tl!("Text encoding"));
+            let shown = SHAPEFILE_ENCODINGS.iter().find(|(name, _)| *name == encoding).map_or(encoding, |(_, label)| *label);
+            egui::ComboBox::from_id_salt("export_shp_encoding")
+                .selected_text(tl!(shown))
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    for (name, label) in SHAPEFILE_ENCODINGS {
+                        ui.selectable_value(&mut app.dialogs.encoding, *name, tl!(*label));
+                    }
+                })
+                .response
+                .labelled_by(encoding_label.id);
+            ui.end_row();
+        }
         // A GeoPackage can take the layer as one more table (desktop only: the browser offers none).
         if app.dialogs.mode == "gpkg" && !web {
             let into_label = ui.label(tl!("Into"));
@@ -906,6 +951,15 @@ fn export_layer(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
     if app.dialogs.mode == "shp" && web {
         ui.label(egui::RichText::new(tl!("The Shapefile's files download as one zip.")).small().weak());
     }
+    if app.dialogs.mode == "shp" {
+        ui.label(
+            egui::RichText::new(tl!(
+                "ArcMap 10.x reads UTF-8 text as the system's code page: choose GBK (936) or Big5 (950) for Chinese. QGIS and ArcGIS Pro read UTF-8 too."
+            ))
+            .small()
+            .weak(),
+        );
+    }
     let into_existing = app.dialogs.mode == "gpkg" && !web && !matches!(app.dialogs.gpkg_mode, "" | "newFile");
     if into_existing {
         ui.label(egui::RichText::new(tl!("Pick the GeoPackage next. Its other tables are kept.")).small().weak());
@@ -919,6 +973,10 @@ fn export_layer(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         if into_existing {
             p["mode"] = json!(app.dialogs.gpkg_mode);
             p["tableName"] = json!(app.dialogs.text);
+        }
+        if app.dialogs.mode == "shp" {
+            let encoding = if app.dialogs.encoding.is_empty() { default_encoding(app.chosen_lang().code()) } else { app.dialogs.encoding };
+            p["encoding"] = json!(encoding);
         }
         app.run("ui.exportLayer", p).map(|_| ())
     })
@@ -3393,6 +3451,36 @@ mod tests {
         }
         let web: Vec<&str> = export_formats(true).map(|(_, e)| *e).collect();
         assert_eq!(web, ["geojson", "parquet", "shp", "csv", "kml", "kmz", "gpx"]);
+    }
+
+    /// Export Features offers a Shapefile's text encoding, defaulting to the interface language's
+    /// legacy code page (GBK for Chinese), which ArcMap 10.x reads where it shows UTF-8 as
+    /// mojibake; UTF-8 stays the choice for other languages.
+    #[test]
+    fn a_shapefile_export_offers_the_encoding_arcmap_needs() {
+        use egui_kittest::kittest::Queryable;
+        assert_eq!(default_encoding("zh"), "GBK");
+        assert_eq!(default_encoding("zh-tw"), "Big5");
+        assert_eq!(default_encoding("en"), "UTF-8");
+        let mut app = RustGisApp::with_sample();
+        app.session.active_layer = app.session.map().layers.first().map(|l| l.id);
+        app.run("ui.dialog", json!({"name": "exportLayer"})).unwrap();
+        app.dialogs.mode = "shp";
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1400.0, 900.0)).with_max_steps(64).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(4);
+        assert_eq!(h.query_all_by_label("Text encoding").count(), 1);
+        h.get_by_label("Text encoding").click();
+        h.run_steps(4);
+        for option in ["UTF-8", "GBK (936, Simplified Chinese)", "Big5 (950, Traditional Chinese)"] {
+            assert!(h.query_all_by_label(option).count() > 0, "{option}");
+        }
     }
 
     /// The Rename… dialog shows why a name over 200 characters isn't taken and stays open with

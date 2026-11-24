@@ -19,6 +19,11 @@ is written as its numeric character reference (`&#128512;`) and counted in one n
 naming the encoding and the fields. Without the parameter, a Shapefile is written in
 UTF-8 as it always was.
 
+Export Features offers the same choice as **Text encoding** for a Shapefile. It starts at
+GBK for a Simplified Chinese interface and Big5 for a Traditional Chinese one, and at
+UTF-8 otherwise: ArcMap 10.x reads a UTF-8 `.dbf` as the system's code page and shows
+Chinese text as mojibake, while QGIS and ArcGIS Pro read both.
+
 ## Decoded markers
 
 | Code page | LDID markers |

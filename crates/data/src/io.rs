@@ -2391,17 +2391,18 @@ fn unguard(cell: &str) -> std::borrow::Cow<'_, str> {
 
 const FORMULA_START: [char; 6] = ['=', '+', '-', '@', '\t', '\r'];
 
+/// A number kept bare in a cell: it parses, is finite, fits in Double precision without loss,
+/// has no leading zero, and has at most 15 significant digits (to avoid truncation in spreadsheets).
+fn bare_number(t: &str) -> bool {
+    let Ok(f) = t.parse::<f64>() else { return false };
+    f.is_finite() && double_holds(t) && !has_leading_zero(t) && !is_long_number(t)
+}
+
 /// A cell's text; text that a spreadsheet would run as a formula is prefixed with `'`.
-/// Valid numbers whose digits fit in Double precision without loss, without leading zeros,
-/// and with at most 15 significant digits (to avoid truncation in spreadsheets) are exported bare.
+/// Numbers [`bare_number`] keeps are exported bare.
 fn csv_cell(v: &Value) -> String {
     match v {
-        Value::Text(t)
-            if t.starts_with(FORMULA_START)
-                && !(t.parse::<f64>().is_ok_and(|f| f.is_finite()) && double_holds(t) && !has_leading_zero(t) && !is_long_number(t)) =>
-        {
-            format!("'{t}")
-        }
+        Value::Text(t) if t.starts_with(FORMULA_START) && !bare_number(t) => format!("'{t}"),
         other => other.to_file_text(),
     }
 }
@@ -3292,14 +3293,23 @@ pub(crate) fn cut(s: &str, max: usize) -> &str {
     s.get(..end).unwrap_or("")
 }
 
-/// What an export to a Shapefile says when field names don't fit dBase's (at most 10 bytes,
-/// unique without regard to case), or `None` when every name is kept: one notice, counting the
-/// fields renamed and naming the first few as `'old' → 'new'`. `target` names what was written.
+/// What an export to a Shapefile says when field names don't fit dBase's (at most 10 bytes in
+/// the `.dbf`'s encoding, unique without regard to case), or `None` when every name is kept: one
+/// notice, counting the fields renamed and naming the first few as `'old' → 'new'`. `encoding`
+/// is the one the `.dbf` is written in, `None` for UTF-8. `target` names what was written.
 /// Line breaks, other control characters and the characters that reorder text (bidirectional
 /// marks, embeddings, overrides and isolates) in a name or in `target` show as spaces, and a
 /// long name only its first 40 bytes.
-pub fn shapefile_names_note(fields: &[Field], target: &str) -> Option<String> {
-    names_note(fields, dbf_names(fields), target, "a Shapefile (10 bytes at most, unique ignoring case)")
+pub fn shapefile_names_note(fields: &[Field], encoding: Option<&ShapefileEncoding>, target: &str) -> Option<String> {
+    let utf8 = crate::dbf::DbfEncoding::Utf8;
+    let encoding = encoding.map_or(&utf8, |e| &e.0);
+    names_note(fields, dbf_names(fields, encoding), target, "a Shapefile (10 bytes at most, unique ignoring case)")
+}
+
+/// [`shapefile_names_note`] for the `style` a published file was read with.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn shapefile_names_note_styled(fields: &[Field], style: &DbfStyle, target: &str) -> Option<String> {
+    names_note(fields, dbf_names(fields, &style.encoding), target, "a Shapefile (10 bytes at most, unique ignoring case)")
 }
 
 /// The column each field gets in a GeoPackage: its name, unless an earlier field's column or the
@@ -3667,15 +3677,17 @@ pub fn shapefile_values_notes(ds: &Dataset, target: &str, encoding: Option<&Shap
 /// The names of the `.dbf` columns a Shapefile written from `fields` has, in order
 /// ([`dbf_names`]).
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn shapefile_column_names(fields: &[Field]) -> Vec<String> {
-    dbf_names(fields)
+pub(crate) fn shapefile_column_names(fields: &[Field], encoding: &crate::dbf::DbfEncoding) -> Vec<String> {
+    dbf_names(fields, encoding)
 }
 
-/// dBase field names (at most 10 bytes, unique without regard to case) for the fields.
-fn dbf_names(fields: &[Field]) -> Vec<String> {
+/// dBase field names (at most 10 bytes in `encoding`, unique without regard to case) for the
+/// fields: the names the `.dbf` header holds, as its encoding's bytes, whatever dbase itself
+/// writes while it works.
+fn dbf_names(fields: &[Field], encoding: &crate::dbf::DbfEncoding) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(fields.len());
     for f in fields {
-        let base = cut(f.name.trim(), 10);
+        let base = cut_encoded(f.name.trim(), 10, encoding);
         let base = if base.is_empty() { "FIELD" } else { base };
         let taken = |n: &str, out: &[String]| out.iter().any(|o| o.eq_ignore_ascii_case(n));
         let name = if !taken(base, &out) {
@@ -3684,7 +3696,7 @@ fn dbf_names(fields: &[Field]) -> Vec<String> {
             (1..100_000)
                 .map(|i| {
                     let tag = format!("_{i}");
-                    format!("{}{tag}", cut(base, 10 - tag.len()))
+                    format!("{}{tag}", cut_encoded(base, 10 - tag.len(), encoding))
                 })
                 .find(|n| !taken(n, &out))
                 .unwrap_or_else(|| base.to_string())
@@ -3692,6 +3704,15 @@ fn dbf_names(fields: &[Field]) -> Vec<String> {
         out.push(name);
     }
     out
+}
+
+/// The bytes `name` holds in `encoding`: itself, when its encoding can't be made.
+pub(crate) fn encoded_name(name: &str, encoding: &crate::dbf::DbfEncoding) -> Vec<u8> {
+    use shapefile::dbase::encoding::Encoding;
+    match encoding.decoder().encode(name) {
+        Ok(b) => b.as_ref().to_vec(),
+        Err(_) => name.as_bytes().to_vec(),
+    }
 }
 
 /// Decimals of the `.dbf` field for Double field `k`: as many as fit dBase's 24 characters beside
@@ -4124,7 +4145,9 @@ impl std::fmt::Display for Spec {
 /// hold the values, what changed (`'ACRES' N(10,2) to N(24,9)`).
 fn kept_column(ds: &Dataset, k: usize, name: &str, style: &DbfStyle) -> (Spec, Option<String>) {
     let new = new_column(ds, k, &style.encoding);
-    let (Some(field), Some(was)) = (ds.fields.get(k), style.columns.iter().find(|c| c.name == name.as_bytes())) else {
+    // The name as the file's code page holds it, which is what its column's header names.
+    let name = encoded_name(name, &style.encoding);
+    let (Some(field), Some(was)) = (ds.fields.get(k), style.columns.iter().find(|c| c.name == name)) else {
         return (new, None);
     };
     let values = || ds.features.iter().filter_map(|r| r.attrs.get(k)).filter(|v| !v.is_null());
@@ -4187,7 +4210,25 @@ pub(crate) fn shapefile_parts_styled(
     let utf8 = crate::dbf::DbfEncoding::Utf8;
     let target = style.map_or(&utf8, |s| &s.encoding);
     let fmt = |e: shapefile::Error| DataError::Format(format!("Shapefile: {e}"));
-    let names = dbf_names(&ds.fields);
+    let names = dbf_names(&ds.fields, target);
+    // dbase writes the name it is given as its UTF-8 bytes and takes none longer than 11 of
+    // them, but the `.dbf` holds each name as its bytes in `target`: it gets a stand-in name it
+    // accepts, and the header below ends up holding the name as the file's encoding has it.
+    // A name dbase takes stands in for itself.
+    let standins: Vec<String> = names.iter().filter(|n| n.len() <= 11).cloned().collect();
+    let keys: Vec<String> = names
+        .iter()
+        .enumerate()
+        .map(|(k, n)| {
+            if n.len() <= 11 {
+                return n.clone();
+            }
+            (1..)
+                .map(|i| format!("_{k}{}", if i == 1 { String::new() } else { i.to_string() }))
+                .find(|p| !standins.iter().any(|s| s.eq_ignore_ascii_case(p)))
+                .unwrap_or_else(|| format!("_{k}"))
+        })
+        .collect();
     let dbf_name = |n: &str| FieldName::try_from(n).map_err(|e| DataError::Format(format!("Shapefile: field {n}: {e}")));
     let mut table = match style {
         Some(style) => TableWriterBuilder::with_encoding(style.encoding.decoder()),
@@ -4209,13 +4250,14 @@ pub(crate) fn shapefile_parts_styled(
         // dBase has no binary field: images are left out (an export filters them out first). Its
         // spec still keeps `specs` indexed by the field, so the record's fields line up.
         if ds.fields.get(k).is_none_or(|f| f.ty != FieldType::Image) {
+            let key = keys.get(k).map(String::as_str).unwrap_or(n);
             table = match spec.ty {
                 // A float column is written as a numeric one (both hold the number as text) and
                 // marked `F` again below: `dbase` writes an `F` column's number as an `f32`.
-                b'N' | b'F' => table.add_numeric_field(dbf_name(n)?, spec.len, spec.decimals),
-                b'L' => table.add_logical_field(dbf_name(n)?),
-                b'D' => table.add_date_field(dbf_name(n)?),
-                _ => table.add_character_field(dbf_name(n)?, spec.len),
+                b'N' | b'F' => table.add_numeric_field(dbf_name(key)?, spec.len, spec.decimals),
+                b'L' => table.add_logical_field(dbf_name(key)?),
+                b'D' => table.add_date_field(dbf_name(key)?),
+                _ => table.add_character_field(dbf_name(key)?, spec.len),
             };
         }
         specs.push(spec);
@@ -4239,7 +4281,7 @@ pub(crate) fn shapefile_parts_styled(
                     shapefile::dbase::Date::new(u32::try_from(d).ok()?, u32::try_from(m).ok()?, u32::try_from(y).ok()?).ok()
                 })),
             };
-            rec.insert(n.clone(), value);
+            rec.insert(keys.get(k).cloned().unwrap_or_else(|| n.clone()), value);
         }
         rec
     };
@@ -4325,6 +4367,16 @@ pub(crate) fn shapefile_parts_styled(
                 && let Some(b) = dbf.get_mut(32 + k * 32 + 11)
             {
                 *b = b'F';
+            }
+        }
+        // Each field's name as its bytes in the file's code page, over what `dbase` wrote of
+        // its stand-in's UTF-8: the header's names and its values are read in one encoding.
+        for (k, n) in names.iter().enumerate() {
+            let bytes = encoded_name(n, target);
+            if let Some(slot) = dbf.get_mut(32 + k * 32..32 + k * 32 + 11) {
+                slot.fill(0);
+                let end = bytes.len().min(slot.len());
+                slot[..end].copy_from_slice(&bytes[..end]);
             }
         }
     }
@@ -4439,6 +4491,29 @@ mod tests {
         }
         assert_eq!(left_out_note("out", "shp", 0), None);
         assert_eq!(left_out_note("out", "gpkg", 0), None);
+    }
+
+    /// A `.dbf`'s column names are written as its code page holds them, not as UTF-8 bytes: a
+    /// GBK export of Chinese field names names its columns in GBK, and reads back as itself.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_shapefile_writes_column_names_in_its_code_page() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut ds = Dataset::new("layer", GeometryType::Point, vec![Field::new("判读方式", FieldType::Text)]);
+        ds.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::Text("航空影像".into())]);
+        let gbk = ShapefileEncoding::parse("GBK")?;
+        let style = DbfStyle { encoding: gbk.0.clone(), ldid: gbk.0.write_ldid().unwrap_or(0), columns: Vec::new() };
+        let (parts, _, _) = shapefile_parts_styled(&ds, Crs::LonLat, Some(&style))?;
+        let dbf = &parts.iter().find(|(e, _)| *e == "dbf").ok_or("no .dbf")?.1;
+        let gbk_bytes: Vec<u8> = encoding_rs::GBK.encode("判读方式").0.into();
+        let slot: Vec<u8> = dbf.get(32..43).ok_or("no column")?.to_vec();
+        assert_eq!(slot[..gbk_bytes.len()], gbk_bytes, "the column's name bytes aren't GBK");
+        assert!(slot[gbk_bytes.len()..].iter().all(|&b| b == 0), "the name's bytes run past the slot");
+        use shapefile::dbase::Encoding;
+        let name =
+            crate::dbf::DbfEncoding::Standard(encoding_rs::GBK).decoder().decode(&slot).map_err(|e| DataError::Format(format!("{e}")))?;
+        assert_eq!(name.trim_end_matches('\0'), "判读方式");
+        assert!(parts.iter().any(|(e, b)| *e == "cpg" && b == b"936"), "the .cpg doesn't name the code page");
+        Ok(())
     }
 
     /// A Shapefile export leaves out vertices with a missing or infinite coordinate, and the line
@@ -6812,7 +6887,7 @@ mod tests {
         };
         // Names that fit, ten bytes included: no notice, and the file keeps them.
         let fits = layer(&["id", "population", "Ab_9"]);
-        assert_eq!(shapefile_names_note(&fits.fields, "out.zip"), None);
+        assert_eq!(shapefile_names_note(&fits.fields, None, "out.zip"), None);
         assert_eq!(written(&fits), ["id", "population", "Ab_9"]);
         // Cut to ten bytes, made unique ignoring case, at a character boundary (é is two bytes):
         // each change as the file has it.
@@ -6820,7 +6895,7 @@ mod tests {
         let back = written(&long);
         assert_eq!(back, ["population", "POPULATI_1", "kept", "ééééé"], "premise: the writer's names");
         assert_eq!(
-            shapefile_names_note(&long.fields, "out.zip").as_deref(),
+            shapefile_names_note(&long.fields, None, "out.zip").as_deref(),
             Some(
                 "out.zip: 3 field names were changed to fit a Shapefile (10 bytes at most, unique ignoring case): \
                  'population_2020' → 'population', 'POPULATION_2021' → 'POPULATI_1', 'éééééé' → 'ééééé'"
@@ -6828,40 +6903,40 @@ mod tests {
         );
         // One: singular. A name of spaces is written FIELD, and padding is trimmed.
         assert_eq!(
-            shapefile_names_note(&layer(&["  "]).fields, "a.shp").as_deref(),
+            shapefile_names_note(&layer(&["  "]).fields, None, "a.shp").as_deref(),
             Some("a.shp: 1 field name was changed to fit a Shapefile (10 bytes at most, unique ignoring case): '  ' → 'FIELD'")
         );
-        assert!(shapefile_names_note(&layer(&[" id"]).fields, "a.shp").is_some_and(|n| n.ends_with("' id' → 'id'")));
+        assert!(shapefile_names_note(&layer(&[" id"]).fields, None, "a.shp").is_some_and(|n| n.ends_with("' id' → 'id'")));
         // Past five, the rest are counted; a very long name shows its start.
         let many: Vec<String> = (0..8).map(|i| format!("measurement_{i}")).collect();
-        let note = shapefile_names_note(&layer(&many.iter().map(String::as_str).collect::<Vec<_>>()).fields, "m.shp").unwrap();
+        let note = shapefile_names_note(&layer(&many.iter().map(String::as_str).collect::<Vec<_>>()).fields, None, "m.shp").unwrap();
         assert!(note.starts_with("m.shp: 8 field names were changed"), "{note}");
         assert!(note.ends_with("'measurement_4' → 'measurem_4' and 3 more"), "{note}");
         // Line breaks and other control characters in a name show as spaces: one line.
-        let note = shapefile_names_note(&layer(&["a\nb\r\tc\u{2028}d\u{2029}e_long_name"]).fields, "c.shp").unwrap();
+        let note = shapefile_names_note(&layer(&["a\nb\r\tc\u{2028}d\u{2029}e_long_name"]).fields, None, "c.shp").unwrap();
         assert!(!note.contains(['\n', '\r', '\t', '\u{2028}', '\u{2029}']), "{note:?}");
         // U+2028 is three bytes: the ten-byte name ends at d.
         assert!(note.ends_with("'a b  c d e_long_name' → 'a b  c d'"), "{note:?}");
         // So does the target, a path or layer name given by the user or read from a file.
-        let note = shapefile_names_note(&layer(&["population_2020"]).fields, "out\nput\r\u{2029}.shp").unwrap();
+        let note = shapefile_names_note(&layer(&["population_2020"]).fields, None, "out\nput\r\u{2029}.shp").unwrap();
         assert!(note.starts_with("out put  .shp: 1 field name"), "{note:?}");
         // Characters that reorder text (a right-to-left override, isolates, direction marks) show
         // as spaces too, so the notice reads 'old' → 'new' in that order; a zero-width joiner
         // stays, as emoji sequences use it.
         // The override and the isolate are three bytes each: the ten-byte name ends at d.
         let bidi = "a\u{202E}bc\u{2066}d\u{2069}e\u{200E}f\u{200F}g\u{061C}h_longer";
-        let note = shapefile_names_note(&layer(&[bidi]).fields, "r\u{202E}tl.shp").unwrap();
+        let note = shapefile_names_note(&layer(&[bidi]).fields, None, "r\u{202E}tl.shp").unwrap();
         assert!(!note.contains(['\u{202E}', '\u{2066}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{061C}']), "{note:?}");
         assert!(note.starts_with("r tl.shp: ") && note.ends_with("'a bc d e f g h_longer' → 'a bc d'"), "{note:?}");
         let joined = "a\u{200D}b_long_name";
-        assert!(shapefile_names_note(&layer(&[joined]).fields, "j.shp").unwrap().contains(&format!("'{joined}' →")));
+        assert!(shapefile_names_note(&layer(&[joined]).fields, None, "j.shp").unwrap().contains(&format!("'{joined}' →")));
         // Exactly 40 bytes is shown whole; past that, cut at a character boundary.
         let forty = format!("{}_long", "y".repeat(35));
-        assert!(shapefile_names_note(&layer(&[&forty]).fields, "f.shp").unwrap().contains(&format!("'{forty}' →")));
+        assert!(shapefile_names_note(&layer(&[&forty]).fields, None, "f.shp").unwrap().contains(&format!("'{forty}' →")));
         let wide = format!("{}é_long", "z".repeat(39));
-        assert!(shapefile_names_note(&layer(&[&wide]).fields, "w.shp").unwrap().contains(&format!("'{}…' →", "z".repeat(39))));
+        assert!(shapefile_names_note(&layer(&[&wide]).fields, None, "w.shp").unwrap().contains(&format!("'{}…' →", "z".repeat(39))));
         let huge = "x".repeat(5000);
-        let note = shapefile_names_note(&layer(&[&huge]).fields, "h.shp").unwrap();
+        let note = shapefile_names_note(&layer(&[&huge]).fields, None, "h.shp").unwrap();
         assert!(note.len() < 200 && note.contains(&format!("'{}…' → 'xxxxxxxxxx'", "x".repeat(40))), "{note}");
     }
 
